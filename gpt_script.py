@@ -39,7 +39,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # API 키 설정
-    openai.api_key = "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" 
+    openai.api_key = "" 
 
     prompt = sys.argv[1]
     output_file = sys.argv[2]
