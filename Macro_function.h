@@ -82,15 +82,20 @@ using namespace Eigen;
 
 #define BAUDRATE                            57600 
 
-#define DEVICENAME                          "/dev/ttyUSB0"  //sudo chmod a+rw /dev/ttyUSB0      //ls /dev/ttyUSB*
+#define DEVICENAME                          "/dev/ttyUSB0"  //sudo chmod a+rw /dev/ttyUSB0      //ls /dev/ttyUSB*   //pkill -f push_to_talk_app.py
 #define AUDIO_DEVICE                        "hw:1"
 
 //DXL initial goal position
-#define DEFAULT_PITCH                       1500
-#define DEFAULT_ROLL_R                      1100
-#define DEFAULT_ROLL_L                      2300
-#define DEFAULT_YAW                         3300
-#define DEFAULT_MOUTH                       2000
+#define DEFAULT_PITCH                       300
+#define DEFAULT_ROLL_R                      2650
+#define DEFAULT_ROLL_L                      1100
+#define DEFAULT_YAW                         2200
+#define DEFAULT_MOUTH                       1000
+// extern int DEFAULT_PITCH;
+// extern int DEFAULT_ROLL_R;
+// extern int DEFAULT_ROLL_L;
+// extern int DEFAULT_YAW;
+// extern int DEFAULT_MOUTH;
 
 //robot parameter
 #define PULLY_DIAMETER                      50 

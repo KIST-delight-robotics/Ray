@@ -392,7 +392,7 @@ std::vector<int> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double mou
 
   dxl_goal_position_pitch_double = DEFAULT_PITCH - pitch_diff;
 
-  double delta_mouth = (float)mouth_f * ROBOT_MOUTH_TUNE; // 250
+  double delta_mouth = (float)mouth_f * ROBOT_MOUTH_TUNE; // mouth_f는 0 ~ 1 사이(보통 0.1 ~ 0.3), ROBOT_MOUTH_TUNE는 입을 최대로 크게 벌리는 정도
 
   dxl_goal_position_mouth_double = DEFAULT_MOUTH - delta_mouth - pitch_diff / ROBOT_MOUTH_PITCH_COMPENSATION;
 
@@ -637,6 +637,7 @@ double getSegmentAverageGrad(const vector<float>& data, const string& delta, con
     double sum = accumulate(grad.begin(), grad.end(), 0.0);
     return sum / grad.size();
 }
+
 // getNextSegment_SegSeg 함수
 vector<vector<double>> getNextSegment_SegSeg(
     const vector<double>& PrevEndOneBefore,
@@ -678,10 +679,18 @@ vector<vector<double>> getNextSegment_SegSeg(
         }
     }
     
-    cout << "Number of valid indices: " << indices.size() << endl;
+    //cout << "Number of valid indices: " << indices.size() << endl;
     if (indices.empty()) {
-        cerr << "Error: No valid indices found. Check distance threshold or input data." << endl;
-        return vector<vector<double>>(); // 빈 결과 반환
+        cout << "No valid indices found. Returning current segment." << endl;
+
+        // 현재 segment 값을 반환
+        vector<vector<double>> currentSegment(K, vector<double>(D, 0.0));
+        for (size_t k = 0; k < K; ++k) {
+            for (size_t d = 0; d < D; ++d) {
+                currentSegment[k][d] = segmentData[k * D * N + d * N + 0]; // 첫 번째 슬라이스 사용
+            }
+        }
+        return currentSegment;
     }
 
     sort(indices.begin(), indices.end(), [&distances](size_t a, size_t b) {

@@ -12,6 +12,7 @@
 #include <cmath>
 #include <sndfile.h> // 오디오 파일 입출력을 위한 헤더
 #include <fstream>
+#include <filesystem>   
 //#include <Egien/Dense>
 // 매크로 및 필요한 함수 정의 포함
 #include <cstdlib>
@@ -30,17 +31,23 @@
 #define INTERVAL_MS 360 // 시퀀스 1개 당 시간
 
 
-#define RESULT_FILE "result_audio.wav" // 오디오 파일 경로
+#define RESULT_FILE "output.wav" // 오디오 파일 경로
 #define AGAIN_FILE "again.wav" // 중간에 말이 들어왔을 때 인터럽트 기능으로 다시 말해달라는 오디오
-
+#define RESPONSE_FILE "response.wav" // 레이야라고 물을 때 첫 대답하는 파일
+#define FINISH_FILE "finish.wav" // 종료할 때 말하는 오디오 파일
 
 using namespace std;
 using namespace Eigen;
 
 // 전역 변수 및 동기화 도구
+const std::string music_dir = "/home/hyeonwoo/animate_taehwang/animate_robot/animated_robot/audio_wav/music";
+const std::string vocal_dir = "/home/hyeonwoo/animate_taehwang/animate_robot/animated_robot/audio_wav/vocal";
+std::string vocal_file_path;
 std::mutex mtx;
 std::condition_variable cv;
-std::chrono::time_point<std::chrono::high_resolution_clock> start_time;
+std::chrono::time_point<std::chrono::high_resolution_clock> start_time; // 쓰레드 대기 시간 설정용
+std::chrono::time_point<std::chrono::system_clock> startTime;   //프로세스 수행 타임 체크용
+
 std::atomic<bool> stop_flag(false);
 std::atomic<bool> interrupt_flag(false);
 std::atomic<bool> again_flag(false);
@@ -72,37 +79,97 @@ int DXL_past_position[DXL_NUM] = {0, 0, 0, 0, 0};
 // 로그 출력을 위한 뮤텍스
 std::mutex cout_mutex;
 
+std::string ray_mode = "sleep";
+std::string wait_mode_flag = "on"; 
+bool music_flag = 0;
+bool playing_music_flag = 0;
+std::string music_user_txt;
 
-std::string execPythonScript(const std::string& file_path) {
-    std::string command = "python3 stt_script.py " + file_path;
+std::string execPythonScript() {
+    // 파이썬 스크립트 실행(인자 없음)
+    std::string command = "python3 push_to_talk_app.py " + ray_mode;
+
     std::array<char, 128> buffer;
     std::string result;
 
-    // popen을 사용해 Python 스크립트 호출 및 결과 가져오기
+    // popen을 사용해 Python 스크립트를 호출 & 결과 가져오기
     std::shared_ptr<FILE> pipe(popen(command.c_str(), "r"), pclose);
-    if (!pipe) throw std::runtime_error("popen() failed!");
+    if (!pipe) {
+        throw std::runtime_error("popen() failed!");
+    }
+
+    bool gpt_done_flag = false;
 
     while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
+        std::string line(buffer.data());
+        std::cout << "[PYTHON] " << line;
+
+        // if (line.find("사용자 질문 종료") != std::string::npos) {
+        //     startTime = std::chrono::system_clock::now();
+        // }
+        if (line.find("GPT 답변(음성)이 모두 종료되었습니다") != std::string::npos) {
+            gpt_done_flag = true;
+        }
+
+        
+
+        if(line == "awake\n"){
+            result = "awake";
+            return result;
+        }
+        else if(line == "sleep\n"){
+            result = "sleep";
+            return result;
+        }
+        else if(line == "singing\n"){
+            music_user_txt = result;
+            cout << "music user txt : " << result << '\n';
+            result = "singing";
+            return result;              //user_txt를 main문에 넘겨줌. 
+        }
+        result += line;
+    }
+
+    // GPT 응답이 끝났는지 확인
+    if (!gpt_done_flag) {
+        std::cerr << "[경고] GPT 응답 종료 신호를 못 받음!" << std::endl;
     }
     return result;
 }
 
-std::string execGPTScript(const std::string& prompt) {
-    std::string command = "python3 gpt_script.py \"" + prompt + "\"";
-    std::array<char, 128> buffer;
-    std::string result;
+// std::string execGPTScript(const std::string& prompt) {
+//     std::string command = "python3 gpt_script.py \"" + prompt + "\"";
+//     std::array<char, 128> buffer;
+//     std::string result;
 
-    std::shared_ptr<FILE> pipe(popen(command.c_str(), "r"), pclose);
-    if (!pipe) throw std::runtime_error("popen() failed!");
+//     std::shared_ptr<FILE> pipe(popen(command.c_str(), "r"), pclose);
+//     if (!pipe) throw std::runtime_error("popen() failed!");
 
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
-    }
-    return result;
-}
+//     while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+//         result += buffer.data();
+//     }
+//     return result;
+// }
+
+// std::string execGptTtsScript(const std::string& prompt, const std::string& output_file) {
+//     // 새로 합친 스크립트 사용
+//     std::string command = "python3 gpt_script.py \"" + prompt + "\" \"" + output_file + "\"";
+
+//     std::array<char, 128> buffer;
+//     std::string result;
+
+//     // 표준 출력(stdout)을 받아오기
+//     std::shared_ptr<FILE> pipe(popen(command.c_str(), "r"), pclose);
+//     if (!pipe) throw std::runtime_error("popen() failed!");
+
+//     while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+//         result += buffer.data();
+//     }
+//     return result;  // 최종 GPT 답변 텍스트 (stdout로 찍힌 것)
+// }
 
 std::string execTtsPythonScript(const std::string& text, const std::string& output_file) {
+    cout << "TTS in" << '\n';
     std::string command = "python3 tts_script.py \"" + text + "\" " + output_file;
     std::array<char, 128> buffer;
     std::string result;
@@ -114,23 +181,6 @@ std::string execTtsPythonScript(const std::string& text, const std::string& outp
         result += buffer.data();
     }
     return result;
-}
-
-std::string execGptTtsScript(const std::string& prompt, const std::string& output_file) {
-    // 새로 합친 스크립트 사용
-    std::string command = "python3 gpt_script.py \"" + prompt + "\" \"" + output_file + "\"";
-
-    std::array<char, 128> buffer;
-    std::string result;
-
-    // 표준 출력(stdout)을 받아오기
-    std::shared_ptr<FILE> pipe(popen(command.c_str(), "r"), pclose);
-    if (!pipe) throw std::runtime_error("popen() failed!");
-
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
-    }
-    return result;  // 최종 GPT 답변 텍스트 (stdout로 찍힌 것)
 }
 
 // 시간 포맷터 함수
@@ -364,6 +414,19 @@ private:
 
 // 첫 번째 쓰레드: 음성 녹음 및 분할
 void record_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& soundStream) {
+    
+    SF_INFO vocal_sfinfo;
+    SNDFILE* vocal_sndfile = nullptr;
+    
+
+    if (playing_music_flag) {
+        // **Vocal 파일 열기**
+        vocal_sndfile = sf_open(vocal_file_path.c_str(), SFM_READ, &vocal_sfinfo);
+        if (!vocal_sndfile) {
+            std::cerr << "Error opening vocal file: " << vocal_file_path << '\n';
+            return;
+        }
+    }
 
     int channels = sfinfo.channels;
     int samplerate = sfinfo.samplerate;
@@ -373,6 +436,7 @@ void record_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream
     sf_count_t total_frames = sfinfo.frames; // 파일의 총 프레임 수
 
     std::vector<float> audioBuffer(frames_per_interval * channels);
+    std::vector<float> vocalBuffer(frames_per_interval * channels);
 
     sf_count_t position = 0;
 
@@ -414,11 +478,22 @@ void record_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream
         // 사운드 스트림에 데이터 추가
         soundStream.appendData(int16Data);
 
-        {
+        if(playing_music_flag){
+            sf_count_t vocal_framesRead = sf_readf_float(vocal_sndfile, &vocalBuffer[0], frames_to_read);
+            // 보컬 버퍼 크기 조정
+            vocalBuffer.resize(vocal_framesRead * channels);
+            {
+                std::lock_guard<std::mutex> lock(audio_queue_mutex);
+                audio_queue.push(vocalBuffer);
+            }
+            audio_queue_cv.notify_one();
+        }else{
+            {
             std::lock_guard<std::mutex> lock(audio_queue_mutex);
             audio_queue.push(audioBuffer);
+            }
+            audio_queue_cv.notify_one();
         }
-        audio_queue_cv.notify_one();
 
         {
             std::lock_guard<std::mutex> lock(cout_mutex);
@@ -597,10 +672,10 @@ void generate_motion(SNDFILE* sndfile, const SF_INFO& sfinfo) {
 
             double sc = 0.4/s_max;
 
-            cout << "s_max : " << s_max << " sc: " << sc << '\n';
-            cout << "raw_sample : " << max_sample << '\n';
+            //cout << "s_max : " << s_max << " sc: " << sc << '\n';
+            //cout << "raw_sample : " << max_sample << '\n';
             max_sample = sc  * max_sample;
-            cout << "sc_sample : " << max_sample << '\n';
+            //cout << "sc_sample : " << max_sample << '\n';
 
 
             // max_sample을 이전 5개값과 평균을 내서 평균값을 max_sample로 사용
@@ -609,7 +684,7 @@ void generate_motion(SNDFILE* sndfile, const SF_INFO& sfinfo) {
                 update_final_result(moving_average_window, MOVING_AVERAGE_WINDOW_SIZE, max_sample);
             }
 
-            cout << "AVG_sample : " << max_sample << '\n';
+            //cout << "AVG_sample : " << max_sample << '\n';
 
             // max_sample 값이 min_open 값 이하일 때 하이퍼 탄젠트 적용해서 mouth 모션을 좀 더 역동적으로 만들어줌.
             if(num_motion_size > 5){
@@ -620,13 +695,13 @@ void generate_motion(SNDFILE* sndfile, const SF_INFO& sfinfo) {
             }else{
                 max_sample = 0;
             }
-            cout << "ex_v1_max_sc_avg : " << ex_v1_max_sc_avg << ", exx_v1_max_sc_avg : " << exx_v1_max_sc_avg << '\n';
+            //cout << "ex_v1_max_sc_avg : " << ex_v1_max_sc_avg << ", exx_v1_max_sc_avg : " << exx_v1_max_sc_avg << '\n';
             exx_v1_max_sc_avg = ex_v1_max_sc_avg;
             ex_v1_max_sc_avg = max_sample;
 
-            cout << "final_result : " << final_result << '\n';
+            //cout << "final_result : " << final_result << '\n';
             float calculate_result = calculate_mouth(final_result, MAX_MOUTH, MIN_MOUTH);
-            cout<< "calculate result : " << calculate_result << '\n';   
+            //cout<< "calculate result : " << calculate_result << '\n';   
 
             motion_results.push_back(calculate_result);
             
@@ -640,7 +715,7 @@ void generate_motion(SNDFILE* sndfile, const SF_INFO& sfinfo) {
 
                 // 평균 기울기 값이 4개 class 중 어디에 해당하는지 판단 
                 segClass = assignClassWith1DMiddleBoundary(avg_grad, boundaries);
-                cout << "Assigned class : " << segClass << endl;
+                //cout << "Assigned class : " << segClass << endl;
                 string filePath;
 
                 switch (segClass) {
@@ -654,7 +729,7 @@ void generate_motion(SNDFILE* sndfile, const SF_INFO& sfinfo) {
                 }
 
                 cnpy::NpyArray segment = cnpy::npy_load(filePath);
-                cout << "npy load complete" << '\n';
+                //cout << "npy load complete" << '\n';
 
                 //segment 선택
                 deliverSegment = getNextSegment_SegSeg(prevEndOneBefore, prevEnd, segment, true, true);
@@ -717,29 +792,32 @@ void control_motor() {
     int DXL_ID[DXL_NUM] = { DXL1_ID, DXL2_ID, DXL3_ID, DXL4_ID, DXL5_ID };
     int DXL_initial_position[DXL_NUM] = { DEFAULT_PITCH, DEFAULT_ROLL_R, DEFAULT_ROLL_L, DEFAULT_YAW, DEFAULT_MOUTH };
     uint8_t dxl_error = 0;
-
-
-    if (first_run_flag == 1) {
-        if (!(portHandler->openPort())) {
-            printf("Failed to open the port!\n");
-            return;
-        }
-
-        if (!(portHandler->setBaudRate(BAUDRATE))) {
-            printf("Failed to change the baudrate!\n");
-            return;
-        }
-
-        if (!enable_torque(packetHandler, portHandler, DXL_ID, dxl_error)) {
-            printf("Failed to torque enable\n");
-            return;
-        }
-        int dummy_positions[DXL_NUM] = { DEFAULT_PITCH, DEFAULT_ROLL_R, DEFAULT_ROLL_L, DEFAULT_YAW, DEFAULT_MOUTH };
-
-        //cout << "첫번째 모터 구동 " << '\n';
-        moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, dummy_positions, DXL_PROFILE_VELOCITY);
-        first_run_flag = 0;
+    
+    if (!(portHandler->openPort())) {
+        printf("Failed to open the port!\n");
+        return;
     }
+    // if (first_run_flag == 1) {
+    //     if (!(portHandler->openPort())) {
+    //         printf("Failed to open the port!\n");
+    //         return;
+    //     }
+
+    //     // if (!(portHandler->setBaudRate(BAUDRATE))) {
+    //     //     printf("Failed to change the baudrate!\n");
+    //     //     return;
+    //     // }
+
+    //     // if (!enable_torque(packetHandler, portHandler, DXL_ID, dxl_error)) {
+    //     //     printf("Failed to torque enable\n");
+    //     //     return;
+    //     // }
+    //     int dummy_positions[DXL_NUM] = { DEFAULT_PITCH, DEFAULT_ROLL_R, DEFAULT_ROLL_L, DEFAULT_YAW, DEFAULT_MOUTH };
+
+    //     //cout << "첫번째 모터 구동 " << '\n';
+    //     moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, dummy_positions, 200);
+    //     first_run_flag = 0;
+    // }
 
     // 최초 값으로 모터를 움직임
    // moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_initial_position, DXL_PROFILE_VELOCITY);
@@ -833,82 +911,252 @@ void control_motor() {
             // 모터를 목표 위치로 이동
             //cout << "모터 구동 " << '\n';
             moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_goal_position, DXL_PROFILE_VELOCITY);
-            {
-            std::lock_guard<std::mutex> lock(cout_mutex);
-            std::cout << "[Cycle " << cycle_num << " | " << get_time_str() << "] Controlling motor based on generated motion..." << '\n';
-            }
+            
             // 이전 위치 업데이트
             for (int i = 0; i < DXL_NUM; i++) {
                 DXL_past_position[i] = DXL_goal_position[i];
             }
-
+            {
+                std::lock_guard<std::mutex> lock(cout_mutex);
+                std::cout << "[Cycle " << cycle_num << " | " << get_time_str() << "] Controlling motor based on generated motion..." << '\n';
+            }
             // 필요한 경우 대기 시간 추가
-            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            std::this_thread::sleep_for(std::chrono::milliseconds(39));
         }
 
         
     }
     moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_initial_position, 1000);
 }
+std::vector<std::string> csv_read_row(std::istream& in, char delimiter)
+{
+    std::stringstream ss;
+    bool inquotes = false;
+    std::vector<std::string> row;
+    while (in.good())
+    {
+        char c = in.get();
+        if (!inquotes && c == '"') {
+            inquotes = true;
+        }
+        else if (inquotes && c == '"') {
+            if (in.peek() == '"') {
+                ss << (char)in.get();
+            } else {
+                inquotes = false;
+            }
+        }
+        else if (!inquotes && c == delimiter) {
+            row.push_back(ss.str());
+            ss.str(""); ss.clear();
+        }
+        else if (!inquotes && (c == '\r' || c == '\n')) {
+            if (in.peek() == '\n') in.get();
+            row.push_back(ss.str());
+            return row;
+        }
+        else {
+            ss << c;
+        }
+    }
+    // 파일 끝까지 왔는데 남은 스트링이 있으면
+    if (!ss.str().empty())
+        row.push_back(ss.str());
+    return row;
+}
+
+void initDynamixel(){
+    
+}
+void wait_control_motor(){
+    first_run_flag = 1;
+    // 모터 초기 설정 코드
+    cout << "ray mode : " << ray_mode << '\n';
+    if(wait_mode_flag == "off") return;
+    while(!motion_queue.empty()) motion_queue.pop();
+    while(!slice_queue.empty()) slice_queue.pop();
+    dynamixel::PortHandler *portHandler = dynamixel::PortHandler::getPortHandler(DEVICENAME);
+    dynamixel::PacketHandler *packetHandler = dynamixel::PacketHandler::getPacketHandler(PROTOCOL_VERSION);
+
+    // GroupSyncWrite 인스턴스 초기화
+    dynamixel::GroupSyncWrite groupSyncWritePosition(portHandler, packetHandler, ADDR_PRO_GOAL_POSITION, LEN_PRO_GOAL_POSITION);
+    dynamixel::GroupSyncWrite groupSyncWriteVelocity(portHandler, packetHandler, ADDR_PRO_PROFILE_VELOCITY, LEN_PRO_PROFILE_VELOCITY);
+    // Present Position을 위한 GroupSyncRead 인스턴스 초기화
+    dynamixel::GroupSyncRead groupSyncRead(portHandler, packetHandler, ADDR_PRO_PRESENT_POSITION, LEN_PRO_PRESENT_POSITION);
+
+    int DXL_ID[DXL_NUM] = { DXL1_ID, DXL2_ID, DXL3_ID, DXL4_ID, DXL5_ID };
+    int DXL_initial_position[DXL_NUM] = { DEFAULT_PITCH, DEFAULT_ROLL_R, DEFAULT_ROLL_L, DEFAULT_YAW, DEFAULT_MOUTH };
+    uint8_t dxl_error = 0;
 
 
+    if (first_run_flag == 1) {
+        if (!(portHandler->openPort())) {
+            printf("Failed to open the port!\n");
+            return;
+        }
 
+        if (!(portHandler->setBaudRate(BAUDRATE))) {
+            printf("Failed to change the baudrate!\n");
+            return;
+        }
+
+        if (!enable_torque(packetHandler, portHandler, DXL_ID, dxl_error)) {
+            printf("Failed to torque enable\n");
+            return;
+        }
+        int dummy_positions[DXL_NUM] = { DEFAULT_PITCH, DEFAULT_ROLL_R, DEFAULT_ROLL_L, DEFAULT_YAW, DEFAULT_MOUTH };
+
+        //cout << "첫번째 모터 구동 " << '\n';
+        moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, dummy_positions, 300);
+        first_run_flag = 0;
+    }
+
+   std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    constexpr auto FRAME_INTERVAL = std::chrono::milliseconds(35);
+    std::string line;
+    while(wait_mode_flag == "on"){
+        std::ifstream headGesture("empty_10min.csv");
+        if (!headGesture) {
+            std::cerr << "Empty HeadGesture File not found\n";
+            return;
+        }
+        while(headGesture.good()){
+            auto headRow = csv_read_row(headGesture, ',');
+            if(wait_mode_flag == "off") break;
+            float roll_s = stof(headRow[0]);
+            float pitch_s = stof(headRow[1]);
+            float yaw_s = stof(headRow[2]);
+            float mouth_s = 0;
+
+            double ratiooo = 1.4;
+
+            vector<int> DXL = RPY2DXL(roll_s * ratiooo , pitch_s *ratiooo, yaw_s * ratiooo, mouth_s, 0);
+            
+            update_DXL_goal_position(DXL_goal_position,
+                                        DXL[0],
+                                        DXL[1],
+                                        DXL[2],
+                                        DXL[3],
+                                        DXL[4]);
+        
+
+            groupSyncRead.clearParam(); // 파라미터 초기화
+
+            moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_goal_position, DXL_PROFILE_VELOCITY);
+
+            std::this_thread::sleep_for(FRAME_INTERVAL);
+        }
+    }
+    cout << "wait mode finish " << '\n';
+   // portHandler -> closePort(); // 이거 계속 쓸꺼면 control_motor 함수에도 추가해주기 
+}
+
+// 문자열에서 모든 공백 제거
+std::string normalizeString(const std::string& input) {
+    std::string normalized = input;
+    normalized.erase(remove_if(normalized.begin(), normalized.end(), ::isspace), normalized.end());
+    return normalized;
+}
 
 int main() {
-    // 반복 시작 전 사용자 안내
-    std::cout << "Press 'q' to stop the program." << std::endl;
-
-    while (true) {
-        // 입력된 키가 'q'이면 루프 종료
-        if (std::cin.rdbuf()->in_avail() && std::cin.peek() == 'q') {
-            std::cout << "Program ending." << std::endl;
-            break;
+    std::vector<std::pair<std::string, std::string>> music_files; // 제목과 가수 저장
+    namespace fs = std::filesystem;
+    // 디렉터리에서 .wav 파일 이름 가져오기
+    for (const auto& entry : fs::directory_iterator(music_dir)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".wav") {
+            // 파일 이름에서 제목과 가수 추출
+            std::string file_name = entry.path().stem().string(); // 확장자 제외한 파일명
+            size_t underscore_pos = file_name.find('_');
+            if (underscore_pos != std::string::npos) {
+                std::string title = file_name.substr(0, underscore_pos); // 언더바 전까지만 제목
+                std::string artist = file_name.substr(underscore_pos + 1); // 언더바 이후는 가수
+                music_files.emplace_back(title, artist);
+            }
         }
-        stop_flag = 0;                          //파일 끝에 들어오면 종료를 위한 플래그, while 문 첫 시작에 초기화
+    }
+    pair<string,string> play_music;
+    while (true) {
+        wait_mode_flag = "on";
+        std::thread wait_mode(wait_control_motor);
+        wait_mode.detach();
+        stop_flag = 0;                          // 파일 끝에 들어오면 종료를 위한 플래그, while 문 첫 시작에 초기화
         again_flag = 0;
         MySoundRecorder recorder;
         SF_INFO sfinfo;
         SNDFILE* sndfile;
-        BackgroundSoundRecorder bgRecorder;
-        auto start = std::chrono::steady_clock::now();
+        //BackgroundSoundRecorder bgRecorder;
+        //auto startTime = std::chrono::system_clock::now();
+        wait_mode_flag = "off";
+        if(!music_flag){
+            std::cout << "Real time API Start" << '\n';
+            std::string transcription = execPythonScript();
+            startTime = std::chrono::system_clock::now();
+            if(transcription == "awake") {
+                ray_mode = "active";
+                sndfile = sf_open(RESPONSE_FILE, SFM_READ, &sfinfo);
 
-        if (!interrupt_flag){
-            if (recorder.start(44100)) {
-                while (true) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (!sndfile) {
+                    std::cerr << "Error opening input file: " << RESPONSE_FILE << '\n';
+                    return -1;
+                }
+            }
+            else if(transcription == "sleep"){
+                ray_mode = "sleep";
+                sndfile = sf_open(FINISH_FILE, SFM_READ, &sfinfo);
 
-                    // 2초 동안 음성이 없으면 녹음 종료
-                    if (recorder.start_flag == 1 && recorder.isSilent) {
-                        auto current = std::chrono::steady_clock::now();
-                        auto silentDuration = std::chrono::duration_cast<std::chrono::seconds>(current - start);
-                        
-                        if (silentDuration.count() >= 2) {
-                            recorder.stop();
-                            break;
+            }
+            else if(transcription == "singing"){                                    // 일단 현재는 제목 우선 탐색인데, 만약 똑같은 제목이지만 가수가 다를 때의 상황도 고려해야함. 
+                std::string normalized_input = normalizeString(music_user_txt);
+                cout << "singing start" << '\n';
+
+                // 가수/제목 중 "제목 우선" 탐색
+                enum class MatchType { None, Title, Artist };
+                struct MatchInfo {
+                    std::pair<std::string, std::string> song;
+                    MatchType type = MatchType::None;
+                    size_t match_length = 0;
+                };
+
+                MatchInfo best_match;
+
+                for (const auto& song : music_files) {
+                    std::string normalized_title = normalizeString(song.first);
+                    std::string normalized_artist = normalizeString(song.second);
+
+                    if (normalized_input.find(normalized_title) != std::string::npos) {
+                        if (best_match.type != MatchType::Title || normalized_title.size() > best_match.match_length) {
+                            best_match = {song, MatchType::Title, normalized_title.size()};
                         }
-                    } else if (!recorder.isSilent) {
-                        start = std::chrono::steady_clock::now(); // 음성이 감지되면 타이머 초기화
+                    }
+                    else if (normalized_input.find(normalized_artist) != std::string::npos) {
+                        if (best_match.type != MatchType::Title && normalized_artist.size() > best_match.match_length) {
+                            best_match = {song, MatchType::Artist, normalized_artist.size()};
+                        }
                     }
                 }
-                std::string transcription = execPythonScript(INPUT_FILE);
 
-                std::cout << "Transcription: " << transcription << std::endl;
-               
-                // std::string gpt_result = execGPTScript(transcription);
-                // std::cout << "GPT Answer : " << gpt_result << '\n';
+                if (best_match.type != MatchType::None) {
+                    std::string tts_msg = best_match.song.first + " 노래 말씀이신가요? 지금 " +
+                                        best_match.song.first + " by " + best_match.song.second + "를 재생할게요.";
+                    cout << "tts_msg : " << tts_msg << '\n';
+                    execTtsPythonScript(tts_msg, RESULT_FILE);
+                    play_music = best_match.song;
+                    music_flag = 1;
+                    cout << "music_flag change : " << music_flag << '\n';
+                }
+                else if(normalized_input == "노래불러줘" || normalized_input == "노래들려줘" || normalized_input == "노래틀어줘"){
+                    execTtsPythonScript("네,무슨 노래 불러줄까요?", RESULT_FILE);
+                } 
+                else {
+                    execTtsPythonScript("말씀하신 곡은 목록에 없어요. 다시 말씀해 주세요!", RESULT_FILE);
+                }
+                sndfile = sf_open(RESULT_FILE, SFM_READ, &sfinfo);
 
-                // std::string tts_result = execTtsPythonScript(gpt_result, RESULT_FILE);
-
-                std::string final_text = execGptTtsScript(transcription, RESULT_FILE);
-
-                // if (!tts_result.empty()) {
-                //     std::cout << tts_result << " TTS generated audio saved to: " << RESULT_FILE << std::endl;
-                // } else {
-                //     std::cerr << "Error generating TTS audio." << std::endl;
-                //     return -1;
-                // }
-
-
+            }
+            else{
+                cout << "ray mode : " << ray_mode << '\n';
+                //std::cout << "Transcription: " << transcription << std::endl;
                 sndfile = sf_open(RESULT_FILE, SFM_READ, &sfinfo);
                 if (!sndfile) {
                     std::cerr << "Error opening input file: " << RESULT_FILE << '\n';
@@ -916,31 +1164,22 @@ int main() {
                 }
             }
         }
-        else if(interrupt_flag){
-
-            std::cout << "Again sequnce start " << '\n';
-            sndfile = sf_open(AGAIN_FILE, SFM_READ, &sfinfo);
-            //std::this_thread::sleep_for(std::chrono::milliseconds(30));
-            if (!sndfile) {
-                std::cerr << "Error opening input file: " << AGAIN_FILE << '\n';
-                return -1;
-            }
-            again_flag = 1;
-            interrupt_flag = 0; // interrupt_flag가 켜져있으면 각 쓰레드 동작을 못하기 때문에 꺼야됨
+        else if(music_flag){
+            music_flag = 0;
+            cout << "music_flag IN" << '\n';
+            std::string play_song_path = music_dir + "/" + play_music.first + "_" + play_music.second + ".wav";
+            vocal_file_path = vocal_dir + "/" + play_music.first + "_" + play_music.second + "_" + "vocals" + ".wav";
+            sndfile = sf_open(play_song_path.c_str(), SFM_READ, &sfinfo);
+            cout << "------------------------------MUSIC ON ------------------------" <<'\n';
+            playing_music_flag = 1;
         }
+        CustomSoundStream soundStream(sfinfo.channels, sfinfo.samplerate);
+
+        auto endTime = std::chrono::system_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime);
+        std::cout << "Realtime API Time: " << duration.count() << " seconds" << std::endl;
 
         start_time = std::chrono::high_resolution_clock::now();
-
-        CustomSoundStream soundStream(sfinfo.channels, sfinfo.samplerate);
-        
-        
-
-        if(!again_flag) {
-            
-            bgRecorder.start(44100);
-            std::cout << "Background Record Start " << '\n';
-        }
-
         std::thread t1(record_and_split, sndfile, sfinfo, std::ref(soundStream));
         std::thread t2(generate_motion, sndfile, sfinfo);
         std::thread t3(control_motor);
@@ -949,15 +1188,9 @@ int main() {
         t2.join();
         t3.join();
 
-        if(!again_flag) {
-            bgRecorder.stop();
-            std::cout << "Backgroun Record Stop" << '\n';
-        }
         sf_close(sndfile);
-    
+        playing_music_flag = 0;
     }
-        
+    
     return 0;
 }
-
-

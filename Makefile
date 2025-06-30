@@ -26,7 +26,7 @@
 TARGET      = play_audio_DXL
 
 # important directories used by assorted rules and other variables
-DIR_DXL    = /home/taehwang/DXL/DynamixelSDK-3.7.31/c++
+DIR_DXL    = /home/hyeonwoo/DXL/DynamixelSDK-3.7.31/c++
 DIR_OBJS   = .objects
 
 # compiler options
@@ -41,21 +41,19 @@ LNKFLAGS    = $(CXFLAGS) #-Wl,-rpath,$(DIR_THOR)/lib
 #---------------------------------------------------------------------
 # Core components (all of these are likely going to be needed)
 #---------------------------------------------------------------------
-INCLUDES   += -I$(DIR_DXL)/include/dynamixel_sdk
+INCLUDES   += -I/home/hyeonwoo/DXL/DynamixelSDK-3.7.31/c++/include/dynamixel_sdk
 INCLUDES   += -I/usr/include/eigen3
 INCLUDES   += -I/usr/include/opencv4
 INCLUDES   += -I/usr/include/SFML
-INCLUDES   += -I/home/taehwang/animate_taehwang/animate_robot/pipeline/play_audio_DXL/cnpy
-INCLUDES   += -I/cnpy/zlib
+INCLUDES += -I$(CURDIR)
+INCLUDES += -I$(CURDIR)/cnpy
+INCLUDES += -I$(CURDIR)/cnpy/zlib
 
-LIBRARIES  += -ldxl_x64_cpp
-LIBRARIES  += -lrt
-LIBRARIES  += -lasound
-LIBRARIES  += -lsndfile
-LIBRARIES  += -lportaudio
-LIBRARIES  += -lsfml-audio
-LIBRARIES  += -lsfml-system
-LIBRARIES  += -lz
+
+LNKFLAGS += -L/home/hyeonwoo/DXL/DynamixelSDK-3.7.31/c++/build/linux64
+LIBRARIES += -ldxl_x64_cpp -lrt -lasound -lsndfile -lportaudio -lsfml-audio -lsfml-system -lz
+
+
 
 #---------------------------------------------------------------------
 # Files
