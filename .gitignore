@@ -2,6 +2,8 @@
 bin/
 build/
 
+assets/audio/music
+assets/audio/vocal
 output/
 third_party/
 
