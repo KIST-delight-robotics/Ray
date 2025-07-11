@@ -1,38 +1,36 @@
-
-#include <sndfile.h>
-#include <iostream>
-#include <string>
-#include <vector>
-#include <sstream>
-#include <fstream>
+// C++ Standard Library
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <cstdlib>
+#include <cstring>
 #include <deque>
+#include <fstream>
+#include <iostream>
 #include <numeric>
-#include "dynamixel_sdk.h"                        // Uses Dynamixel SDK library
+#include <random>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <tuple>
+#include <vector>
+
+// Linux/System headers
 #include <fcntl.h>
 #include <termios.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <cmath>
-#include <thread>
-#include <chrono>
-#include <cstring>
-#include <Eigen/Dense>
-#include <condition_variable>
-#include <SFML/Audio.hpp>
 
-#include <cstdlib>
-#include <ctime>
-#include <algorithm>
-#include <random>
+// External Libraries
 #include <Eigen/Dense>
 #include <unsupported/Eigen/Splines>
-#include <tuple>
+#include <SFML/Audio.hpp>
+#include <sndfile.h>
+
 #include "cnpy.h"
+#include "dynamixel_sdk.h" // Uses Dynamixel SDK library
+
 using namespace std;
 using namespace Eigen;
-
-#define AUDIO_INPUT_PATH                    "/home/taehwang/animated_robot/audio_wav/"
-#define CSV_INPUT_PATH                      "/home/taehwang/animated_robot/python_function/generate_motion/csv_file/"
 
 #define FORMAT              SF_FORMAT_WAV | SF_FORMAT_PCM_16
 #define CHUNK_SIZE          1024
