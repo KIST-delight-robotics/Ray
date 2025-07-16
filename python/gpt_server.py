@@ -1,19 +1,18 @@
-import asyncio
-import base64
+import os
+import re
+import time
 import wave
 import json
-import websockets
-from openai import AsyncOpenAI
-import logging
-import sounddevice as sd
 import queue
+import base64
+import asyncio
+import logging
+import websockets
+import sounddevice as sd
+from pathlib import Path
+from openai import AsyncOpenAI
 from google.cloud import speech, texttospeech
 from google.api_core import exceptions
-import os
-import functools
-import time
-import re
-from pathlib import Path
 
 # --- 로깅 설정 ---
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s')
@@ -205,6 +204,7 @@ async def generate_gpt_response_audio(user_text: str) -> str:
     """
     global openai_connection, GPT_RESPONSE_TIME, GPT_RESPONSE_TEXT
     async with openai_lock:
+        first_received = True
         start_time = time.time() * 1000
         logging.info(f"💬 GPT 대화 시작: {user_text}")
         log_conversation("user", user_text)
@@ -219,6 +219,9 @@ async def generate_gpt_response_audio(user_text: str) -> str:
             accumulated_transcripts = {}
             async for event in openai_connection:
                 if event.type == "response.audio.delta":
+                    if first_received:
+                        logging.info(f"GPT 응답 시작 시간: {time.time() * 1000 - start_time}ms")
+                        first_received = False
                     wf.writeframes(base64.b64decode(event.delta))
                 elif event.type == "response.audio_transcript.delta":
                     accumulated_transcripts[event.item_id] = accumulated_transcripts.get(event.item_id, "") + event.delta
