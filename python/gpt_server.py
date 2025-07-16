@@ -33,12 +33,13 @@ OUTPUT_DIR = PROJECT_ROOT / "output"
 ASSETS_AUDIO_DIR = ASSETS_DIR / "audio"
 MUSIC_DIR = ASSETS_AUDIO_DIR / "music"
 OUTPUT_AUDIO_DIR = OUTPUT_DIR / "audio"
+LOG_DIR = OUTPUT_DIR / "logs"
 
 # 디렉토리 생성 (없을 경우)
 OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 COMMAND_CONFIG_FILE = str(CONFIG_DIR / "ray_conversation.json")
-LOG_FILE = str(OUTPUT_DIR / "conversation_log.json")
 OUTPUT_GPT_FILE = str(OUTPUT_AUDIO_DIR / "output_gpt.wav")
 OUTPUT_TTS_FILE = str(OUTPUT_AUDIO_DIR / "output_tts.wav")
 AWAKE_FILE = str(ASSETS_AUDIO_DIR / "awake.wav")
@@ -54,9 +55,7 @@ SAMPLE_RATE = 24000
 VOICE = "ash"
 
 # --- 전역 변수 ---
-openai_connection = None
 openai_lock = asyncio.Lock()
-ray_mode = "sleep"
 # 시간 측정용 전역 변수
 stt_first_attempt_flag = True  # STT 첫 시도 여부 플래그
 STT_READY_TIME = 0  # STT 준비 시간 (프로그램 시작 후 음성 입력 대기까지의 시간 측정용)
@@ -196,18 +195,58 @@ def find_music_file(user_text):
                 
     return best_match if best_match['song_path'] else None
 
+# --- OpenAI 세션 관리 ---
+async def start_new_openai_session():
+    """
+    새로운 OpenAI 실시간 세션을 비동기적으로 설정하고,
+    connection_manager와 connection 객체를 반환합니다.
+    """
+    logging.info("🤖 새로운 OpenAI 세션 연결 시작...")
+    connection_manager = None
+    try:
+        openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        connection_manager = openai_client.beta.realtime.connect(model="gpt-4o-realtime-preview")
+        openai_connection = await connection_manager.__aenter__()
+        await openai_connection.session.update(session={
+            "instructions": "너는 애니매트로닉스 로봇이야. 너의 이름은 레이야. 내가 물어보는 것들에 대해 잘 대답해줘",
+            "voice": VOICE
+        })
+        logging.info("✅ 새로운 OpenAI 세션이 연결되었습니다.")
+        return connection_manager, openai_connection
+    except Exception as e:
+        logging.error(f"❌ OpenAI 세션 시작 중 오류 발생: {e}")
+        if connection_manager:
+            await connection_manager.__aexit__(None, None, None)
+        return None, None
+
+async def end_current_openai_session(connection_manager):
+    """
+    현재 OpenAI 세션을 비동기적으로 종료합니다.
+    """
+    if not connection_manager:
+        return
+    logging.info("🔌 OpenAI 세션을 종료합니다.")
+    try:
+        await connection_manager.__aexit__(None, None, None)
+        logging.info("✅ OpenAI 세션이 성공적으로 종료되었습니다.")
+    except Exception as e:
+        logging.error(f"❌ OpenAI 세션 종료 중 오류 발생: {e}")
+
 # --- GPT 응답 생성 ---
-async def generate_gpt_response_audio(user_text: str) -> str:
+async def generate_gpt_response_audio(user_text: str, openai_connection, log_file: str) -> str:
     """
-    GPT-4o-realtime API를 사용하여 사용자 텍스트에 대한 음성 응답을 생성하고 파일로 저장합니다.
-    세션은 전역 `openai_connection`을 사용합니다.
+    주어진 OpenAI 세션을 사용하여 사용자 텍스트에 대한 AI 음성 응답을 생성하고 파일로 저장합니다.
     """
-    global openai_connection, GPT_RESPONSE_TIME, GPT_RESPONSE_TEXT
+    global GPT_RESPONSE_TIME, GPT_RESPONSE_TEXT
+    if not openai_connection:
+        logging.error("❌ GPT 요청 실패: OpenAI 세션이 유효하지 않습니다.")
+        return None
+
     async with openai_lock:
         first_received = True
         start_time = time.time() * 1000
         logging.info(f"💬 GPT 대화 시작: {user_text}")
-        log_conversation("user", user_text)
+        log_conversation("user", user_text, log_file)
         await openai_connection.conversation.item.create(
             item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]}
         )
@@ -230,36 +269,40 @@ async def generate_gpt_response_audio(user_text: str) -> str:
                     logging.info(f"[응답] {final_text}")
                     GPT_RESPONSE_TIME = time.time() * 1000 - start_time
                     GPT_RESPONSE_TEXT = final_text
-                    log_conversation("assistant", final_text)
+                    log_conversation("assistant", final_text, log_file)
                     break
     return OUTPUT_GPT_FILE
 
 # --- 대화 로깅 ---
-def log_conversation(role, text):
+def log_conversation(role, text, log_file):
+    """지정된 로그 파일에 대화를 기록합니다."""
+    if not log_file:
+        logging.warning("⚠️ 로그 파일 경로가 지정되지 않아 대화 로깅을 건너뜁니다.")
+        return
     try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            log_entry = {"role": role, "content": text}
+        with open(log_file, "a", encoding="utf-8") as f:
+            log_entry = {"role": role, "content": text, "timestamp": time.time()}
             f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
     except Exception as e:
-        logging.error(f"❌ 로그 파일 작성 중 오류: {e}")
+        logging.error(f"❌ 로그 파일({log_file}) 작성 중 오류: {e}")
 
 # --- 메인 핸들러 ---
 async def chat_handler(websocket):
-    global openai_connection, ray_mode, stt_first_attempt_flag, STT_READY_TIME, STT_DONE_TIME, GPT_RESPONSE_TIME, GPT_RESPONSE_TEXT
-    if not openai_connection:
-        logging.error("❌ OpenAI 전역 세션이 설정되지 않았습니다.")
-        return
+    global stt_first_attempt_flag, STT_READY_TIME, STT_DONE_TIME, GPT_RESPONSE_TIME, GPT_RESPONSE_TEXT
+    
+    ray_mode = "sleep"
+    session_task = None
+    log_file_path = None
 
-    logging.info(f"✅ C++ 클라이언트 연결됨. 현재 모드: {ray_mode}")
+    logging.info(f"✅ C++ 클라이언트 연결됨. 초기 모드: {ray_mode}")
     
     try:
-        # 클라이언트로부터 메시지를 기다림
         async for message in websocket:
             data = json.loads(message)
             if data.get("request") != "next_action":
                 continue
 
-            file_to_play = None
+            response_payload = None
             user_text = ""
             GPT_RESPONSE_TEXT = ""
             STT_DONE_TIME = 0
@@ -269,78 +312,136 @@ async def chat_handler(websocket):
                 logging.info("💤 Sleep 모드 시작. '레이' 호출 대기 중...")
                 user_text = await run_stt(timeout_sec=5)
                 if "레이" in user_text:
-                    logging.info("'레이' 호출 감지!")
+                    logging.info("'레이' 호출 감지! Active 모드로 전환합니다.")
                     ray_mode = "active"
-                    file_to_play = AWAKE_FILE
+                    
+                    response_payload = {"action": "play_audio", "file_to_play": AWAKE_FILE}
+
+                    if session_task:
+                        logging.warning("⚠️ 이전 세션 작업이 아직 완료되지 않았을 수 있습니다. 취소하고 새 작업을 시작합니다.")
+                        session_task.cancel()
+
+                    timestamp = time.strftime("%Y%m%d_%H%M%S")
+                    log_file_path = str(LOG_DIR / f"conversation_{timestamp}.json")
+                    logging.info(f"새 대화 세션 시작. 로그 파일: {log_file_path}")
+                    session_task = asyncio.create_task(start_new_openai_session())
                 else:
-                    await websocket.send(json.dumps({"action": "sleep"}))
-                    logging.info("레이 호출 없음. C++ 클라이언트에 sleep 유지 신호 전송.")
-                    continue
+                    response_payload = {"action": "sleep"}
             
             # --- ACTIVE 모드 처리 ---
             elif ray_mode == "active":
                 logging.info("⚡ Active 모드 시작. 사용자 질문 대기 중...")
                 user_text = ""
                 for attempt in range(3):
-                    if attempt == 0:
-                        stt_first_attempt_flag = True
-                    else:
-                        stt_first_attempt_flag = False
+                    stt_first_attempt_flag = (attempt == 0)
                     text = await run_stt(timeout_sec=5.0)
                     if text:
                         user_text = text
                         break
                     logging.info(f"묵묵부답... ({attempt+1}/3)")
 
-                if not user_text:
-                    logging.info("응답 없음. Sleep 모드로 전환.")
+                is_quit_command = any(kw in user_text for kw in cfg["conditions"].get("QUIT_PROGRAM", []))
+                if not user_text or is_quit_command:
+                    logging.info("응답 없거나 종료 명령어 감지. Sleep 모드로 전환.")
                     ray_mode = "sleep"
-                    file_to_play = FINISH_FILE
-
-                # --- 키워드 처리 ---
-                # 종료 명령어
-                elif any(kw in user_text for kw in cfg["conditions"].get("QUIT_PROGRAM", [])):
-                    logging.info("종료 명령어 감지. Sleep 모드로 전환.")
-                    ray_mode = "sleep"
-                    file_to_play = FINISH_FILE
-                # 노래 명령어
-                elif any(kw in user_text for kw in cfg["conditions"].get("SING_A_SONG", [])):
-                    logging.info("노래 명령어 감지.")
-                    norm_input = normalize_string(user_text)
-                    if norm_input in ["노래불러줘", "노래들려줘", "노래틀어줘"]:
-                        response_text = "네, 무슨 노래 불러줄까요?"
-                        file_to_play = await run_tts(response_text, OUTPUT_TTS_FILE)
+                    response_payload = {"action": "play_audio", "file_to_play": FINISH_FILE}
+                    
+                    if session_task:
+                        # 백그라운드에서 세션 종료 실행
+                        async def end_session_safely(task):
+                            try:
+                                if task.done() and not task.cancelled():
+                                    manager, _ = task.result()
+                                    if manager:
+                                        await end_current_openai_session(manager)
+                                else:
+                                    task.cancel()
+                            except Exception as e:
+                                logging.error(f"세션 종료 처리 중 오류: {e}")
+                        asyncio.create_task(end_session_safely(session_task))
+                    
+                    session_task = None
+                    log_file_path = None
+                
+                else: # 실제 대화 처리
+                    if not session_task:
+                        logging.error("비정상적인 상태: Active 모드이지만 세션 생성 작업이 없습니다. Sleep 모드로 강제 전환합니다.")
+                        ray_mode = "sleep"
+                        response_payload = {"action": "play_audio", "file_to_play": FINISH_FILE}
                     else:
-                        found_song_info = find_music_file(user_text)
-                        if found_song_info:
-                            title = found_song_info['title']
-                            artist = found_song_info['artist']
-                            response_text = f"{title} 말씀이신가요? 지금 {title} by {artist}를 재생할게요."
-                            file_to_play = await run_tts(response_text, OUTPUT_TTS_FILE)
-                            await websocket.send(json.dumps({"action": "play_music", "file_to_play": file_to_play, "title": title, "artist": artist}))
-                            logging.info(f"C++ 클라이언트에 재생 명령 전송: {found_song_info['song_path']}")
-                            continue
-                        else:
-                            response_text = "말씀하신 곡은 목록에 없어요. 다시 말씀해 주세요!"
-                            file_to_play = await run_tts(response_text, OUTPUT_TTS_FILE)
+                        try:
+                            logging.info("OpenAI 세션 준비를 기다리는 중...")
+                            connection_manager, openai_connection = await asyncio.wait_for(session_task, timeout=10.0)
+                            
+                            if not openai_connection:
+                                raise ValueError("OpenAI 세션 연결에 실패했습니다.")
 
-                # --- 일반 대화 처리 (GPT 호출) ---
-                else:
-                    file_to_play = await generate_gpt_response_audio(user_text)
+                            # 키워드 처리 (노래)
+                            if any(kw in user_text for kw in cfg["conditions"].get("SING_A_SONG", [])):
+                                logging.info("노래 명령어 감지.")
+                                norm_input = normalize_string(user_text)
+                                if norm_input in ["노래불러줘", "노래들려줘", "노래틀어줘"]:
+                                    response_text = "네, 무슨 노래 불러줄까요?"
+                                    file_to_play = await run_tts(response_text, OUTPUT_TTS_FILE)
+                                    response_payload = {"action": "play_audio", "file_to_play": str(file_to_play)}
+                                else:
+                                    found_song_info = find_music_file(user_text)
+                                    if found_song_info:
+                                        title, artist = found_song_info['title'], found_song_info['artist']
+                                        response_text = f"{title} 말씀이신가요? 지금 {title} by {artist}를 재생할게요."
+                                        file_to_play = await run_tts(response_text, OUTPUT_TTS_FILE)
+                                        response_payload = {"action": "play_music", "file_to_play": file_to_play, "title": title, "artist": artist}
+                                    else:
+                                        response_text = "말씀하신 곡은 목록에 없어요. 다시 말씀해 주세요!"
+                                        file_to_play = await run_tts(response_text, OUTPUT_TTS_FILE)
+                                        response_payload = {"action": "play_audio", "file_to_play": str(file_to_play)}
+                            # 일반 대화 (GPT)
+                            else:
+                                file_to_play = await generate_gpt_response_audio(user_text, openai_connection, log_file_path)
+                                response_payload = {
+                                    "action": "play_audio",
+                                    "file_to_play": str(file_to_play) if file_to_play else None,
+                                    "stt_ready_time": STT_READY_TIME, "stt_done_time": STT_DONE_TIME,
+                                    "gpt_response_time": GPT_RESPONSE_TIME,
+                                    "user_text": user_text, "gpt_response_text": GPT_RESPONSE_TEXT
+                                }
 
-            await websocket.send(json.dumps({
-                "action": "play_audio",
-                "file_to_play": str(file_to_play) if file_to_play else None,
-                "stt_ready_time": STT_READY_TIME,
-                "stt_done_time": STT_DONE_TIME,
-                "gpt_response_time": GPT_RESPONSE_TIME,
-                "user_text": user_text,
-                "gpt_response_text": GPT_RESPONSE_TEXT
-            }))
-            logging.info(f"C++ 클라이언트에 재생 명령 전송: {file_to_play}")
+                        except (asyncio.TimeoutError, ValueError) as e:
+                            logging.error(f"❌ 세션 준비 실패 ({type(e).__name__}). Sleep 모드로 전환합니다.")
+                            ray_mode = "sleep"
+                            response_payload = {"action": "play_audio", "file_to_play": FINISH_FILE}
+                            if session_task:
+                                session_task.cancel()
+                            session_task = None
+                        except Exception as e:
+                            logging.error(f"❌ Active 모드 처리 중 오류: {e}. Sleep 모드로 전환합니다.", exc_info=True)
+                            ray_mode = "sleep"
+                            response_payload = {"action": "play_audio", "file_to_play": FINISH_FILE}
+                            if session_task and session_task.done() and not session_task.cancelled():
+                                manager, _ = session_task.result()
+                                if manager:
+                                    asyncio.create_task(end_current_openai_session(manager))
+                            session_task = None
+
+            if response_payload:
+                await websocket.send(json.dumps(response_payload))
+                logging.info(f"C++ 클라이언트에 응답 전송: {response_payload['action']}")
 
     except websockets.exceptions.ConnectionClosed as e:
         logging.warning(f"ℹ️ C++ 클라이언트 연결이 종료되었습니다: {e}")
+        if session_task:
+            logging.info("클라이언트 연결 종료로 인한 세션 정리 시작.")
+            # 백그라운드에서 안전하게 종료
+            async def final_cleanup(task):
+                if task.done() and not task.cancelled():
+                    try:
+                        manager, _ = task.result()
+                        if manager: await end_current_openai_session(manager)
+                    except Exception as ex:
+                        logging.error(f"최종 세션 정리 중 오류: {ex}")
+                else:
+                    task.cancel()
+            asyncio.create_task(final_cleanup(session_task))
     except Exception as e:
         logging.error(f"❌ 핸들러 처리 중 치명적 오류 발생: {e}", exc_info=True)
     finally:
@@ -353,10 +454,8 @@ async def warm_up_stt_api():
     Google STT API에 더미 요청을 보내 초기 연결 지연을 해소합니다.
     """
     logging.info("☁️ Google STT API 워밍업 시작...")
-
     start_time = time.time()
     try:
-        # 더미 오디오 데이터 생성
         def dummy_audio_generator():
             yield speech.StreamingRecognizeRequest(audio_content=b'\x00\x00')
 
@@ -372,72 +471,23 @@ async def warm_up_stt_api():
 
         def run_dummy_request():
             responses = stt_client.streaming_recognize(streaming_config, dummy_audio_generator())
-            # 요청이 실제로 전송되고 처리되도록 생성기를 소모합니다.
-            for _ in responses:
-                pass
+            for _ in responses: pass
                 
         await asyncio.to_thread(run_dummy_request)
-
         elapsed_time = time.time() - start_time
         logging.info("☁️ Google STT API 워밍업 완료. 소요 시간: {:.2f}초".format(elapsed_time))
-        return  # 성공 시 함수 종료
     except Exception as e:
         logging.error(f"❌ STT API 워밍업 중 오류 발생: {e}")
 
-# --- OpenAI 연결 설정 ---
-async def setup_openai_connection():
-    """
-    OpenAI 실시간 세션을 비동기적으로 설정하고, 전역 변수 openai_connection에 저장합니다.
-    connection_manager를 반환하여 세션 종료 시 사용할 수 있도록 합니다.
-    """
-    global openai_connection
-    logging.info("🤖 OpenAI 세션 연결 시작...")
-    
-    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-    connection_manager = openai_client.beta.realtime.connect(model="gpt-4o-realtime-preview")
-    openai_connection = await connection_manager.__aenter__()
-    await openai_connection.session.update(session={
-        "instructions": "너는 애니매트로닉스 로봇이야. 너의 이름은 레이야. 내가 물어보는 것들에 대해 잘 대답해줘",
-        "voice": VOICE
-    })
-    logging.info("✅ OpenAI 전역 세션이 연결되었습니다.")
-    return connection_manager
-
 async def main():
-    logging.info("🚀 서버 초기화 시작: API 워밍업 및 연결을 수행합니다...")
-    connection_manager = None
+    logging.info("🚀 서버 초기화 시작: API 워밍업을 수행합니다...")
     try:
-        # 시간이 소요되는 네트워크 작업들을 병렬로 실행
-        results = await asyncio.gather(
-            warm_up_stt_api(),
-            setup_openai_connection(),
-            return_exceptions=True
-        )
-
-        # gather 결과 처리
-        stt_warmup_success = False
-        for result in results:
-            if isinstance(result, Exception):
-                logging.error(f"❌ 초기화 중 오류 발생: {result}", exc_info=result)
-            elif hasattr(result, '__aexit__'): # OpenAI connection_manager 식별
-                connection_manager = result
-            else: # warm_up_stt_api는 성공 시 None을 반환하므로 성공으로 간주
-                stt_warmup_success = True
-
-        if not connection_manager:
-            logging.error("❌ OpenAI 연결에 실패하여 서버를 시작할 수 없습니다.")
-            return
-        if not stt_warmup_success:
-            logging.warning("⚠️ STT API 워밍업에 실패했지만 서버는 계속 실행됩니다.")
-
-        # WebSocket 서버 시작
+        await warm_up_stt_api()
         server = await websockets.serve(chat_handler, "127.0.0.1", 5000)
         logging.info("🚀 통합 WebSocket 서버가 127.0.0.1:5000 에서 시작되었습니다.")
         await server.wait_closed()
-    finally:
-        if connection_manager:
-            logging.info("🔌 OpenAI 전역 세션을 종료합니다.")
-            await connection_manager.__aexit__(None, None, None)
+    except Exception as e:
+        logging.error(f"❌ 서버 실행 중 오류 발생: {e}", exc_info=True)
 
 if __name__ == "__main__":
     try:
