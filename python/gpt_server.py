@@ -15,7 +15,7 @@ from google.cloud import speech, texttospeech
 from google.api_core import exceptions
 
 # --- 로깅 설정 ---
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format='[python] [%(levelname)s] %(message)s')
 
 # --- 설정 ---
 # OpenAI API 키 설정
@@ -56,12 +56,7 @@ VOICE = "ash"
 
 # --- 전역 변수 ---
 openai_lock = asyncio.Lock()
-# 시간 측정용 전역 변수
-stt_first_attempt_flag = True  # STT 첫 시도 여부 플래그
-STT_READY_TIME = 0  # STT 준비 시간 (프로그램 시작 후 음성 입력 대기까지의 시간 측정용)
 STT_DONE_TIME = 0  # STT 완료 시간 (사용자 입력 완료 후 음성 출력까지의 시간 측정용)
-GPT_RESPONSE_TIME = 0  # GPT 응답 시간 (GPT 응답 생성에 걸린 시간)
-GPT_RESPONSE_TEXT = ""
 
 # --- STT 기능 (기존 push_to_talk_app.py에서 가져옴) ---
 async def run_stt(timeout_sec: float = 5.0):
@@ -69,7 +64,7 @@ async def run_stt(timeout_sec: float = 5.0):
     timeout_sec 초 안에 최종 STT 결과(final_text)를 못 얻으면
     빈 문자열을 리턴하고 즉시 종료합니다.
     """
-    global STT_READY_TIME, STT_DONE_TIME, stt_first_attempt_flag
+    global STT_DONE_TIME
     q_audio = queue.Queue()
     recording_done = asyncio.Event()
 
@@ -115,8 +110,6 @@ async def run_stt(timeout_sec: float = 5.0):
     try:
         with sd.InputStream(samplerate=stt_sample_rate, channels=CHANNELS, dtype="int16", callback=callback):
             logging.info("🎙️ STT 시작: 말하세요...")
-            if stt_first_attempt_flag:
-                STT_READY_TIME = time.time() * 1000
             responses = stt_client.streaming_recognize(streaming_config, audio_generator(), timeout=timeout_sec)
 
             for response in responses:
@@ -233,45 +226,68 @@ async def end_current_openai_session(connection_manager):
         logging.error(f"❌ OpenAI 세션 종료 중 오류 발생: {e}")
 
 # --- GPT 응답 생성 ---
-async def generate_gpt_response_audio(user_text: str, openai_connection, log_file: str) -> str:
+async def stream_gpt_response(websocket, user_text: str, openai_connection, log_file: str):
     """
-    주어진 OpenAI 세션을 사용하여 사용자 텍스트에 대한 AI 음성 응답을 생성하고 파일로 저장합니다.
+    주어진 OpenAI 세션을 사용하여 AI 음성 응답을 생성하고,
+    오디오 청크를 WebSocket을 통해 실시간으로 스트리밍합니다.
     """
-    global GPT_RESPONSE_TIME, GPT_RESPONSE_TEXT
     if not openai_connection:
-        logging.error("❌ GPT 요청 실패: OpenAI 세션이 유효하지 않습니다.")
-        return None
+        logging.error("❌ GPT 스트리밍 실패: OpenAI 세션이 유효하지 않습니다.")
+        return
 
     async with openai_lock:
         first_received = True
         start_time = time.time() * 1000
         logging.info(f"💬 GPT 대화 시작: {user_text}")
         log_conversation("user", user_text, log_file)
+        
         await openai_connection.conversation.item.create(
             item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]}
         )
+        
+        # 스트리밍 시작을 C++ 클라이언트에 알림
+        initial_payload = {
+            "action": "gpt_stream_start",
+            "stt_done_time": STT_DONE_TIME
+        }
+        await websocket.send(json.dumps(initial_payload))
+        logging.info("C++ 클라이언트에 스트리밍 시작 알림 전송.")
+
         await openai_connection.response.create()
-        with wave.open(OUTPUT_GPT_FILE, "wb") as wf:
-            wf.setnchannels(CHANNELS)
-            wf.setsampwidth(2)
-            wf.setframerate(SAMPLE_RATE)
-            accumulated_transcripts = {}
+        
+        accumulated_transcripts = {}
+        try:
             async for event in openai_connection:
                 if event.type == "response.audio.delta":
                     if first_received:
-                        logging.info(f"GPT 응답 시작 시간: {time.time() * 1000 - start_time}ms")
+                        logging.info(f"GPT 응답 스트림 시작 시간: {time.time() * 1000 - start_time}ms")
                         first_received = False
-                    wf.writeframes(base64.b64decode(event.delta))
+                    
+                    # 오디오 청크를 Base64 그대로 전송
+                    await websocket.send(json.dumps({
+                        "action": "audio_chunk",
+                        "data": event.delta
+                    }))
+
                 elif event.type == "response.audio_transcript.delta":
                     accumulated_transcripts[event.item_id] = accumulated_transcripts.get(event.item_id, "") + event.delta
+                
                 elif event.type == "response.audio.done":
                     final_text = accumulated_transcripts.get(event.item_id, "")
                     logging.info(f"[응답] {final_text}")
-                    GPT_RESPONSE_TIME = time.time() * 1000 - start_time
-                    GPT_RESPONSE_TEXT = final_text
+                    logging.info(f"GPT 응답 스트림 완료 시간: {time.time() * 1000 - start_time}ms")
                     log_conversation("assistant", final_text, log_file)
+                    
+                    # 스트리밍 종료를 C++ 클라이언트에 알림
+                    await websocket.send(json.dumps({
+                        "action": "gpt_stream_end"
+                    }))
+                    logging.info("C++ 클라이언트에 스트리밍 종료 알림 전송.")
                     break
-    return OUTPUT_GPT_FILE
+        except websockets.exceptions.ConnectionClosed:
+            logging.warning("스트리밍 중 클라이언트 연결이 종료되었습니다.")
+        except Exception as e:
+            logging.error(f"GPT 스트리밍 중 오류 발생: {e}")
 
 # --- 대화 로깅 ---
 def log_conversation(role, text, log_file):
@@ -288,7 +304,7 @@ def log_conversation(role, text, log_file):
 
 # --- 메인 핸들러 ---
 async def chat_handler(websocket):
-    global stt_first_attempt_flag, STT_READY_TIME, STT_DONE_TIME, GPT_RESPONSE_TIME, GPT_RESPONSE_TEXT
+    global STT_DONE_TIME
     
     ray_mode = "sleep"
     session_task = None
@@ -304,7 +320,6 @@ async def chat_handler(websocket):
 
             response_payload = None
             user_text = ""
-            GPT_RESPONSE_TEXT = ""
             STT_DONE_TIME = 0
 
             # --- SLEEP 모드 처리 ---
@@ -315,7 +330,7 @@ async def chat_handler(websocket):
                     logging.info("'레이' 호출 감지! Active 모드로 전환합니다.")
                     ray_mode = "active"
                     
-                    response_payload = {"action": "play_audio", "file_to_play": AWAKE_FILE}
+                    response_payload = {"action": "play_audio", "file_to_play": AWAKE_FILE, "stt_done_time": STT_DONE_TIME}
 
                     if session_task:
                         logging.warning("⚠️ 이전 세션 작업이 아직 완료되지 않았을 수 있습니다. 취소하고 새 작업을 시작합니다.")
@@ -326,15 +341,14 @@ async def chat_handler(websocket):
                     logging.info(f"새 대화 세션 시작. 로그 파일: {log_file_path}")
                     session_task = asyncio.create_task(start_new_openai_session())
                 else:
-                    response_payload = {"action": "sleep"}
+                    response_payload = {"action": "continue_sleep"}
             
             # --- ACTIVE 모드 처리 ---
             elif ray_mode == "active":
                 logging.info("⚡ Active 모드 시작. 사용자 질문 대기 중...")
                 user_text = ""
                 for attempt in range(3):
-                    stt_first_attempt_flag = (attempt == 0)
-                    text = await run_stt(timeout_sec=5.0)
+                    text = await run_stt(timeout_sec=10)
                     if text:
                         user_text = text
                         break
@@ -344,7 +358,7 @@ async def chat_handler(websocket):
                 if not user_text or is_quit_command:
                     logging.info("응답 없거나 종료 명령어 감지. Sleep 모드로 전환.")
                     ray_mode = "sleep"
-                    response_payload = {"action": "play_audio", "file_to_play": FINISH_FILE}
+                    response_payload = {"action": "play_audio", "file_to_play": FINISH_FILE, "stt_done_time": STT_DONE_TIME}
                     
                     if session_task:
                         # 백그라운드에서 세션 종료 실행
@@ -383,28 +397,22 @@ async def chat_handler(websocket):
                                 if norm_input in ["노래불러줘", "노래들려줘", "노래틀어줘"]:
                                     response_text = "네, 무슨 노래 불러줄까요?"
                                     file_to_play = await run_tts(response_text, OUTPUT_TTS_FILE)
-                                    response_payload = {"action": "play_audio", "file_to_play": str(file_to_play)}
+                                    response_payload = {"action": "play_audio", "file_to_play": str(file_to_play), "stt_done_time": STT_DONE_TIME}
                                 else:
                                     found_song_info = find_music_file(user_text)
                                     if found_song_info:
                                         title, artist = found_song_info['title'], found_song_info['artist']
                                         response_text = f"{title} 말씀이신가요? 지금 {title} by {artist}를 재생할게요."
                                         file_to_play = await run_tts(response_text, OUTPUT_TTS_FILE)
-                                        response_payload = {"action": "play_music", "file_to_play": file_to_play, "title": title, "artist": artist}
+                                        response_payload = {"action": "play_music", "file_to_play": file_to_play, "title": title, "artist": artist, "stt_done_time": STT_DONE_TIME}
                                     else:
                                         response_text = "말씀하신 곡은 목록에 없어요. 다시 말씀해 주세요!"
                                         file_to_play = await run_tts(response_text, OUTPUT_TTS_FILE)
-                                        response_payload = {"action": "play_audio", "file_to_play": str(file_to_play)}
-                            # 일반 대화 (GPT)
+                                        response_payload = {"action": "play_audio", "file_to_play": str(file_to_play), "stt_done_time": STT_DONE_TIME}
+                            # 일반 대화 (GPT 스트리밍)
                             else:
-                                file_to_play = await generate_gpt_response_audio(user_text, openai_connection, log_file_path)
-                                response_payload = {
-                                    "action": "play_audio",
-                                    "file_to_play": str(file_to_play) if file_to_play else None,
-                                    "stt_ready_time": STT_READY_TIME, "stt_done_time": STT_DONE_TIME,
-                                    "gpt_response_time": GPT_RESPONSE_TIME,
-                                    "user_text": user_text, "gpt_response_text": GPT_RESPONSE_TEXT
-                                }
+                                await stream_gpt_response(websocket, user_text, openai_connection, log_file_path)
+                                response_payload = None # 스트리밍 함수가 직접 통신하므로 별도 payload 없음
 
                         except (asyncio.TimeoutError, ValueError) as e:
                             logging.error(f"❌ 세션 준비 실패 ({type(e).__name__}). Sleep 모드로 전환합니다.")
