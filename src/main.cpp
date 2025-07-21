@@ -372,7 +372,12 @@ void generate_motion(int channels, int samplerate) {
 
         // 오디오 데이터 가져오기
         std::unique_lock<std::mutex> lock(audio_queue_mutex);
-        audio_queue_cv.wait(lock, [] {return !audio_queue.empty();});
+        audio_queue_cv.wait(lock, [] {return !audio_queue.empty() || stop_flag;});
+
+        if (stop_flag && audio_queue.empty()) {
+            std::cout << "generate motion break ------------------------" << std::endl;
+            break;
+        }
 
         audio_buffer = std::move(audio_queue.front());
         audio_queue.pop();
@@ -926,15 +931,15 @@ int main() {
                 if (action == "audio_chunk") {
                     std::string b64_data = response.value("data", "");
                     std::string decoded_data;
-                    macaron::Base64::Decode(b64_data, decoded_data);
-                    
+                    macaron::Base64::Decode(b64_data, decoded_data); // 스트리밍된 오디오 데이터 디코딩
+                    // 스트리밍 버퍼에 데이터 추가
                     std::lock_guard<std::mutex> lock(stream_buffer_mutex);
                     stream_buffer.insert(stream_buffer.end(), decoded_data.begin(), decoded_data.end());
-                    stream_buffer_cv.notify_one(); // 데이터가 추가되었음을 디스패처 스레드에 알림
+                    stream_buffer_cv.notify_one();
 
                 } else if (action == "gpt_stream_end") {
                     is_streaming = false; // 스트리밍 종료 플래그 설정
-                    stream_buffer_cv.notify_one(); // 디스패처 스레드가 즉시 확인하도록 깨움
+                    stream_buffer_cv.notify_one();
                 } else {
                     // audio_chunk가 아닌 다른 모든 메시지(gpt_streaming_start, play_audio 등)는 메인 루프가 처리하도록 큐에 넣음
                     std::lock_guard<std::mutex> lock(server_message_queue_mutex);
