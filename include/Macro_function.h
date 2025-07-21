@@ -97,8 +97,8 @@ using namespace Eigen;
 // extern int DEFAULT_MOUTH;
 
 //robot parameter
-#define PULLY_DIAMETER                      44 
-#define ROBOT_HEIGHT                        120             // 베이스부터 실이 연결된 레이어 까지의 높이 small -> 100,Large -> 180
+#define PULLY_DIAMETER                      50
+#define ROBOT_HEIGHT                        110             // 베이스부터 실이 연결된 레이어 까지의 높이 small -> 100,Large -> 180
 #define ROBOT_HOLE_RADIUS                   25              // 로봇 머리 구멍 반지름 small -> 25, Large -> 50
 #define ROBOT_YAW_GEAR_RATIO                2               // yaw 모터가 direct하게 머리를 회전시킨다면 1로 설정 아니면 2
 #define ROBOT_MOUTH_TUNE                    90              // 최대 mouse movement size in DXL dimension -> 최초값에서 입모터 조정해보면서 결정
