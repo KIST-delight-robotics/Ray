@@ -1,0 +1,24 @@
+# Build output
+bin/
+build/
+
+assets/audio/music
+assets/audio/vocal
+output/
+third_party/
+
+# Object files, libraries, and archives
+*.o
+*.a
+*.so
+*.obj
+*.lib
+*.dll
+*.exe
+
+# Core dumps
+core
+
+# IDE-specific files
+*.vscode/
+*.vs/

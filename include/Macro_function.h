@@ -1,38 +1,36 @@
-
-#include <sndfile.h>
-#include <iostream>
-#include <string>
-#include <vector>
-#include <sstream>
-#include <fstream>
+// C++ Standard Library
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <cstdlib>
+#include <cstring>
 #include <deque>
+#include <fstream>
+#include <iostream>
 #include <numeric>
-#include "dynamixel_sdk.h"                        // Uses Dynamixel SDK library
+#include <random>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <tuple>
+#include <vector>
+
+// Linux/System headers
 #include <fcntl.h>
 #include <termios.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <cmath>
-#include <thread>
-#include <chrono>
-#include <cstring>
-#include <Eigen/Dense>
-#include <condition_variable>
-#include <SFML/Audio.hpp>
 
-#include <cstdlib>
-#include <ctime>
-#include <algorithm>
-#include <random>
+// External Libraries
 #include <Eigen/Dense>
 #include <unsupported/Eigen/Splines>
-#include <tuple>
+#include <SFML/Audio.hpp>
+#include <sndfile.h>
+
 #include "cnpy.h"
+#include "dynamixel_sdk.h" // Uses Dynamixel SDK library
+
 using namespace std;
 using namespace Eigen;
-
-#define AUDIO_INPUT_PATH                    "/home/taehwang/animated_robot/audio_wav/"
-#define CSV_INPUT_PATH                      "/home/taehwang/animated_robot/python_function/generate_motion/csv_file/"
 
 #define FORMAT              SF_FORMAT_WAV | SF_FORMAT_PCM_16
 #define CHUNK_SIZE          1024
@@ -86,11 +84,12 @@ using namespace Eigen;
 #define AUDIO_DEVICE                        "hw:1"
 
 //DXL initial goal position
-#define DEFAULT_PITCH                       300
-#define DEFAULT_ROLL_R                      2650
-#define DEFAULT_ROLL_L                      1100
-#define DEFAULT_YAW                         2200
-#define DEFAULT_MOUTH                       1000
+#define DEFAULT_PITCH                       3300
+#define DEFAULT_ROLL_R                      1550
+#define DEFAULT_ROLL_L                      3200
+#define DEFAULT_YAW                         1000
+#define DEFAULT_MOUTH                       1700
+
 // extern int DEFAULT_PITCH;
 // extern int DEFAULT_ROLL_R;
 // extern int DEFAULT_ROLL_L;
@@ -98,8 +97,8 @@ using namespace Eigen;
 // extern int DEFAULT_MOUTH;
 
 //robot parameter
-#define PULLY_DIAMETER                      50 
-#define ROBOT_HEIGHT                        100             // 베이스부터 실이 연결된 레이어 까지의 높이 small -> 100,Large -> 180
+#define PULLY_DIAMETER                      50
+#define ROBOT_HEIGHT                        110             // 베이스부터 실이 연결된 레이어 까지의 높이 small -> 100,Large -> 180
 #define ROBOT_HOLE_RADIUS                   25              // 로봇 머리 구멍 반지름 small -> 25, Large -> 50
 #define ROBOT_YAW_GEAR_RATIO                2               // yaw 모터가 direct하게 머리를 회전시킨다면 1로 설정 아니면 2
 #define ROBOT_MOUTH_TUNE                    90              // 최대 mouse movement size in DXL dimension -> 최초값에서 입모터 조정해보면서 결정
