@@ -308,7 +308,7 @@ async def chat_handler(websocket):
     
     ray_mode = "sleep"
     session_task = None
-    log_file_path = None
+    log_file_path = ""
 
     logging.info(f"✅ C++ 클라이언트 연결됨. 초기 모드: {ray_mode}")
     
@@ -375,7 +375,7 @@ async def chat_handler(websocket):
                         asyncio.create_task(end_session_safely(session_task))
                     
                     session_task = None
-                    log_file_path = None
+                    log_file_path = ""
                 
                 else: # 실제 대화 처리
                     if not session_task:
