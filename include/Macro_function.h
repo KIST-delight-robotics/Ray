@@ -84,11 +84,11 @@ using namespace Eigen;
 #define AUDIO_DEVICE                        "hw:1"
 
 //DXL initial goal position
-#define DEFAULT_PITCH                       3300
+#define DEFAULT_PITCH                       3480
 #define DEFAULT_ROLL_R                      1550
-#define DEFAULT_ROLL_L                      3200
+#define DEFAULT_ROLL_L                      600
 #define DEFAULT_YAW                         1000
-#define DEFAULT_MOUTH                       1700
+#define DEFAULT_MOUTH                       1580
 
 // extern int DEFAULT_PITCH;
 // extern int DEFAULT_ROLL_R;
