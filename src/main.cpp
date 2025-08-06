@@ -837,18 +837,11 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 std::thread wait_mode(wait_control_motor);
                 wait_mode.detach();
             }
-
-            json request;
-            request["request"] = "next_action";
-            webSocket.send(request.dump());
             
             json response;
             {
                 std::unique_lock<std::mutex> lock(server_message_queue_mutex);
-                if (!server_message_queue_cv.wait_for(lock, std::chrono::seconds(30), [] { return !server_message_queue.empty(); })) {
-                    std::cerr << "서버 응답 대기 시간 초과" << std::endl;
-                    continue;
-                }
+                server_message_queue_cv.wait(lock, [] { return !server_message_queue.empty(); });
                 response = server_message_queue.front();
                 server_message_queue.pop();
             }
@@ -876,9 +869,6 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 is_streaming = true; // 스트리밍 시작 플래그 설정
                 sfinfo.channels = AUDIO_CHANNELS;
                 sfinfo.samplerate = AUDIO_SAMPLE_RATE;
-            }
-            else if (action == "continue_sleep") {
-                continue;
             }
 
             wait_mode_flag = "off";

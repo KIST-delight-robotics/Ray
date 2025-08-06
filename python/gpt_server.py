@@ -9,6 +9,9 @@ import asyncio
 import logging
 import websockets
 import sounddevice as sd
+import torch
+import torchaudio
+import numpy as np
 from pathlib import Path
 from openai import AsyncOpenAI
 from google.cloud import speech, texttospeech
@@ -33,11 +36,9 @@ OUTPUT_DIR = PROJECT_ROOT / "output"
 ASSETS_AUDIO_DIR = ASSETS_DIR / "audio"
 MUSIC_DIR = ASSETS_AUDIO_DIR / "music"
 OUTPUT_AUDIO_DIR = OUTPUT_DIR / "audio"
-LOG_DIR = OUTPUT_DIR / "logs"
 
 # 디렉토리 생성 (없을 경우)
 OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 COMMAND_CONFIG_FILE = str(CONFIG_DIR / "ray_conversation.json")
 OUTPUT_GPT_FILE = str(OUTPUT_AUDIO_DIR / "output_gpt.wav")
@@ -54,9 +55,78 @@ CHANNELS = 1
 SAMPLE_RATE = 24000
 VOICE = "ash"
 
+# 오디오 장치 설정 (직접 지정)
+INPUT_DEVICE_INDEX = 7  # PipeWire를 통해 echo-cancel-source 접근
+
 # --- 전역 변수 ---
-openai_lock = asyncio.Lock()
 STT_DONE_TIME = 0  # STT 완료 시간 (사용자 입력 완료 후 음성 출력까지의 시간 측정용)
+
+# VAD 관련 전역 변수
+vad_model = None
+vad_sample_rate = 16000
+vad_chunk_size = 512  # 32ms at 16kHz
+is_streaming_response = False  # AI 응답 스트리밍 상태
+
+# --- 오디오 장치 관리 ---
+def find_pipewire_device():
+    """PipeWire 장치를 동적으로 찾습니다."""
+    try:
+        devices = sd.query_devices()
+        for idx, device in enumerate(devices):
+            if device['max_input_channels'] > 0:  # type: ignore
+                device_name = str(device['name']).lower()  # type: ignore
+                # PipeWire 또는 echo-cancel 장치 찾기
+                if 'pipewire' in device_name or ('echo' in device_name and 'cancel' in device_name):
+                    logging.info(f"🔍 동적으로 발견된 장치: [{idx}] {device['name']}")  # type: ignore
+                    return idx
+        
+        # 못 찾으면 설정값 사용
+        logging.warning(f"동적 장치 검색 실패. 기본값 {INPUT_DEVICE_INDEX} 사용")
+        return INPUT_DEVICE_INDEX
+    except Exception as e:
+        logging.error(f"장치 검색 중 오류: {e}")
+        return INPUT_DEVICE_INDEX
+
+def initialize_audio_device():
+    """오디오 입력 장치를 검증합니다."""
+    try:        
+        # 동적으로 장치 찾기
+        device_idx = find_pipewire_device()
+        
+        # 장치 확인
+        try:
+            device_info = sd.query_devices(device_idx)
+            if device_info['max_input_channels'] > 0:  # type: ignore
+                logging.info(f"✅ 입력 장치 확인됨: [{device_idx}] {device_info['name']}")  # type: ignore
+                return True
+            else:
+                logging.error(f"❌ 장치 {device_idx}는 입력을 지원하지 않습니다.")
+                return False
+        except Exception as e:
+            logging.error(f"❌ 장치 {device_idx}에 접근할 수 없습니다: {e}")
+            return False
+        
+    except Exception as e:
+        logging.error(f"❌ 오디오 장치 초기화 중 오류: {e}")
+        return False
+
+# get_input_device 함수 제거 - 직접 INPUT_DEVICE_INDEX 사용
+
+# --- VAD 초기화 ---
+def initialize_vad():
+    """Silero VAD 모델을 초기화합니다."""
+    global vad_model
+    try:
+        model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',  # type: ignore
+                                     model='silero_vad',
+                                     force_reload=False,
+                                     onnx=True)  # ONNX 런타임을 사용하여 CPU 성능을 최적화
+        vad_model = model
+        logging.info(f"✅ Silero VAD 모델 초기화 완료 - 타입: {type(vad_model)}")
+        return True
+    except Exception as e:
+        logging.error(f"❌ VAD 모델 초기화 실패: {e}")
+        return False
 
 # --- STT 기능 (기존 push_to_talk_app.py에서 가져옴) ---
 async def run_stt(timeout_sec: float = 5.0):
@@ -73,18 +143,11 @@ async def run_stt(timeout_sec: float = 5.0):
             logging.warning(f"[오디오 상태] {status}")
         q_audio.put(bytes(indata))
 
-    input_device_index = None
-    for idx, dev in enumerate(sd.query_devices()):
-        if dev['max_input_channels'] > 0:
-            input_device_index = idx
-            break
-
-    if input_device_index is None:
-        logging.error("[오류] 입력 가능한 마이크 장치를 찾을 수 없습니다.")
-        return ""
-
-    device_info = sd.query_devices(input_device_index, 'input')
-    stt_sample_rate = int(device_info['default_samplerate'])
+    # 동적으로 장치 검색
+    device_idx = find_pipewire_device()
+    
+    device_info = sd.query_devices(device_idx, 'input')
+    stt_sample_rate = int(device_info['default_samplerate'])  # type: ignore
 
     stt_client = speech.SpeechClient()
     config = speech.RecognitionConfig(
@@ -108,7 +171,7 @@ async def run_stt(timeout_sec: float = 5.0):
     final_text = ""
 
     try:
-        with sd.InputStream(samplerate=stt_sample_rate, channels=CHANNELS, dtype="int16", callback=callback):
+        with sd.InputStream(samplerate=stt_sample_rate, channels=CHANNELS, dtype="int16", callback=callback, device=device_idx):
             logging.info("🎙️ STT 시작: 말하세요...")
             responses = stt_client.streaming_recognize(streaming_config, audio_generator(), timeout=timeout_sec)
 
@@ -188,136 +251,194 @@ def find_music_file(user_text):
                 
     return best_match if best_match['song_path'] else None
 
-# --- OpenAI 세션 관리 ---
-async def start_new_openai_session():
-    """
-    새로운 OpenAI 실시간 세션을 비동기적으로 설정하고,
-    connection_manager와 connection 객체를 반환합니다.
-    """
-    logging.info("🤖 새로운 OpenAI 세션 연결 시작...")
-    connection_manager = None
-    try:
-        openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        connection_manager = openai_client.beta.realtime.connect(model="gpt-4o-realtime-preview")
-        openai_connection = await connection_manager.__aenter__()
-        await openai_connection.session.update(session={
-            "instructions": "너는 애니매트로닉스 로봇이야. 너의 이름은 레이야. 내가 물어보는 것들에 대해 잘 대답해줘",
-            "voice": VOICE
-        })
-        logging.info("✅ 새로운 OpenAI 세션이 연결되었습니다.")
-        return connection_manager, openai_connection
-    except Exception as e:
-        logging.error(f"❌ OpenAI 세션 시작 중 오류 발생: {e}")
-        if connection_manager:
-            await connection_manager.__aexit__(None, None, None)
-        return None, None
-
-async def end_current_openai_session(connection_manager):
-    """
-    현재 OpenAI 세션을 비동기적으로 종료합니다.
-    """
-    if not connection_manager:
-        return
-    logging.info("🔌 OpenAI 세션을 종료합니다.")
-    try:
-        await connection_manager.__aexit__(None, None, None)
-        logging.info("✅ OpenAI 세션이 성공적으로 종료되었습니다.")
-    except Exception as e:
-        logging.error(f"❌ OpenAI 세션 종료 중 오류 발생: {e}")
-
 # --- GPT 응답 생성 ---
-async def stream_gpt_response(websocket, user_text: str, openai_connection, log_file: str):
+async def realtime_session(websocket):
     """
-    주어진 OpenAI 세션을 사용하여 AI 음성 응답을 생성하고,
-    오디오 청크를 WebSocket을 통해 실시간으로 스트리밍합니다.
+    VAD를 사용한 음성 감지와 OpenAI Realtime API 연동.
+    사용자 발화를 감지하여 텍스트로 입력하고, AI 응답을 스트리밍합니다.
     """
-    if not openai_connection:
-        logging.error("❌ GPT 스트리밍 실패: OpenAI 세션이 유효하지 않습니다.")
-        return
-
-    async with openai_lock:
-        first_received = True
-        start_time = time.time() * 1000
-        logging.info(f"💬 GPT 대화 시작: {user_text}")
-        log_conversation("user", user_text, log_file)
-        
-        await openai_connection.conversation.item.create(
-            item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]}
-        )
-        
-        # 스트리밍 시작을 C++ 클라이언트에 알림
-        initial_payload = {
-            "action": "gpt_stream_start",
-            "stt_done_time": STT_DONE_TIME
-        }
-        await websocket.send(json.dumps(initial_payload))
-        logging.info("C++ 클라이언트에 스트리밍 시작 알림 전송.")
-
-        await openai_connection.response.create()
-        
-        accumulated_transcripts = {}
-        try:
-            async for event in openai_connection:
-                if event.type == "response.audio.delta":
-                    if first_received:
-                        logging.info(f"GPT 응답 스트림 시작 시간: {time.time() * 1000 - start_time}ms")
-                        first_received = False
-                    
-                    # 오디오 청크를 Base64 그대로 전송
-                    await websocket.send(json.dumps({
-                        "action": "audio_chunk",
-                        "data": event.delta
-                    }))
-
-                elif event.type == "response.audio_transcript.delta":
-                    accumulated_transcripts[event.item_id] = accumulated_transcripts.get(event.item_id, "") + event.delta
-                
-                elif event.type == "response.audio.done":
-                    final_text = accumulated_transcripts.get(event.item_id, "")
-                    logging.info(f"[응답] {final_text}")
-                    logging.info(f"GPT 응답 스트림 완료 시간: {time.time() * 1000 - start_time}ms")
-                    log_conversation("assistant", final_text, log_file)
-                    
-                    # 스트리밍 종료를 C++ 클라이언트에 알림
-                    await websocket.send(json.dumps({
-                        "action": "gpt_stream_end"
-                    }))
-                    logging.info("C++ 클라이언트에 스트리밍 종료 알림 전송.")
-                    break
-        except websockets.exceptions.ConnectionClosed:
-            logging.warning("스트리밍 중 클라이언트 연결이 종료되었습니다.")
-        except Exception as e:
-            logging.error(f"GPT 스트리밍 중 오류 발생: {e}")
-
-# --- 대화 로깅 ---
-def log_conversation(role, text, log_file):
-    """지정된 로그 파일에 대화를 기록합니다."""
-    if not log_file:
-        logging.warning("⚠️ 로그 파일 경로가 지정되지 않아 대화 로깅을 건너뜁니다.")
-        return
+    global is_streaming_response
+    
+    logging.info("🤖 Realtime GPT 세션 시작...")
+    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    
+    # VAD 태스크를 위한 변수들
+    vad_task = None
+    current_response_id = None
+    
     try:
-        with open(log_file, "a", encoding="utf-8") as f:
-            log_entry = {"role": role, "content": text, "timestamp": time.time()}
-            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+        async with openai_client.beta.realtime.connect(model="gpt-4o-mini-realtime-preview") as openai_connection:
+            await openai_connection.session.update(session={
+                "instructions": "너는 애니매트로닉스 로봇이야. 너의 이름은 레이야. 내가 물어보는 것들에 대해 잘 대답해줘",
+                "voice": VOICE
+            })
+
+            accumulated_transcripts = {}
+            
+            # VAD 기반 음성 감지 시작
+            async def vad_loop():
+                global is_streaming_response
+                
+                # VAD를 위한 오디오 설정
+                audio_queue = queue.Queue()
+                speech_start_counter = 0
+                min_speech_chunks = 5  # 약 160ms (32ms * 5)
+                
+                def audio_callback(indata, frames, time_info, status):
+                    if status:
+                        logging.warning(f"[오디오 상태] {status}")
+                    audio_queue.put(indata.copy())
+                
+                # 마이크 설정 - 동적으로 장치 검색
+                device_idx = find_pipewire_device()
+                
+                try:
+                    with sd.InputStream(
+                        samplerate=vad_sample_rate,
+                        channels=1,
+                        dtype=np.float32,
+                        blocksize=vad_chunk_size,
+                        callback=audio_callback,
+                        device=device_idx
+                    ):
+                        logging.info("🎙️ VAD 기반 음성 감지 시작...")
+                        
+                        while True:
+                            try:
+                                # 오디오 청크 가져오기 (100ms 타임아웃)
+                                audio_chunk = audio_queue.get(timeout=0.1)
+                                
+                                # VAD 모델이 초기화되었는지 확인
+                                if vad_model is None:
+                                    logging.error("VAD 모델이 초기화되지 않았습니다.")
+                                    break
+                                
+                                # VAD 검사
+                                audio_tensor = torch.from_numpy(audio_chunk.flatten())
+                                with torch.no_grad():
+                                    speech_prob = vad_model(audio_tensor, vad_sample_rate).item()
+                                
+                                if speech_prob > 0.5:  # 음성 감지 임계값
+                                    speech_start_counter += 1
+                                    
+                                    # 충분한 음성 청크가 감지되면 즉시 응답 중단
+                                    if speech_start_counter >= min_speech_chunks:
+                                        logging.info("🗣️ 음성 감지! 응답 중단 및 STT 시작...")
+                                        
+                                        # 현재 응답이 진행 중이면 즉시 중단
+                                        if is_streaming_response and current_response_id:
+                                            try:
+                                                await openai_connection.response.cancel()
+                                                logging.info("기존 응답을 중단했습니다.")
+                                                is_streaming_response = False
+                                            except Exception as e:
+                                                logging.warning(f"응답 중단 중 오류: {e}")
+                                        
+                                        # STT 실행
+                                        user_text = await run_stt(timeout_sec=30.0)
+                                        speech_start_counter = 0  # 카운터 리셋
+                                        
+                                        if user_text.strip():
+                                            logging.info(f"사용자 발화 감지: '{user_text}'")
+                                            
+                                            try:
+                                                # 새로운 대화 생성
+                                                await openai_connection.conversation.item.create(
+                                                    item={
+                                                        "type": "message",
+                                                        "role": "user", 
+                                                        "content": [{"type": "input_text", "text": user_text}]
+                                                    }
+                                                )
+                                                logging.info("사용자 메시지를 대화에 추가했습니다.")
+                                                
+                                                # AI 응답 요청
+                                                await openai_connection.response.create()
+                                                logging.info("AI 응답을 요청했습니다.")
+                                            except Exception as e:
+                                                logging.error(f"❌ OpenAI API 호출 중 오류: {e}")
+                                                logging.error(f"오류 타입: {type(e).__name__}")
+                                                logging.error(f"오류 세부사항: {str(e)}")
+                                        else:
+                                            logging.warning("STT 결과가 비어있습니다.")
+                                else:
+                                    # 음성이 감지되지 않으면 카운터 리셋
+                                    speech_start_counter = 0
+                            
+                            except queue.Empty:
+                                continue
+                            except asyncio.CancelledError:
+                                logging.info("VAD 루프가 취소되었습니다.")
+                                break
+                            except Exception as e:
+                                logging.error(f"VAD 처리 중 오류: {e}")
+                                break
+                                
+                except Exception as e:
+                    logging.error(f"VAD 루프 중 오류: {e}")
+            
+            # OpenAI 이벤트 처리 함수
+            async def handle_openai_events():
+                async for event in openai_connection:
+                    logging.info(f"📨 OpenAI 이벤트 수신: {event.type}")
+                    
+                    if event.type == "response.created":
+                        nonlocal current_response_id
+                        current_response_id = event.response.id
+                        global is_streaming_response
+                        is_streaming_response = True
+                        logging.info("새로운 응답 스트림이 시작되었습니다.")
+                        # 스트리밍 시작을 C++ 클라이언트에 알림
+                        await websocket.send(json.dumps({"action": "gpt_stream_start"}))
+                    
+                    elif event.type == "response.audio.delta":
+                        # 오디오 청크를 C++ 클라이언트로 전송
+                        await websocket.send(json.dumps({
+                            "action": "audio_chunk",
+                            "data": event.delta
+                        }))
+
+                    elif event.type == "response.audio_transcript.delta":
+                        # AI 응답의 중간 텍스트
+                        accumulated_transcripts[event.item_id] = accumulated_transcripts.get(event.item_id, "") + event.delta
+                    
+                    elif event.type == "response.audio.done":
+                        # AI 응답 오디오 스트림이 끝났을 때
+                        final_text = accumulated_transcripts.get(event.item_id, "")
+                        logging.info(f"[응답] {final_text}")
+                        is_streaming_response = False
+                        current_response_id = None
+                        # 스트리밍 종료를 C++ 클라이언트에 알림
+                        await websocket.send(json.dumps({"action": "gpt_stream_end"}))
+                    
+                    elif event.type == "response.done":
+                        is_streaming_response = False
+                        current_response_id = None
+
+            # VAD 태스크와 OpenAI 이벤트 처리를 병렬로 실행
+            await asyncio.gather(
+                vad_loop(),
+                handle_openai_events()
+            )
+
+    except websockets.exceptions.ConnectionClosed:
+        logging.warning("스트리밍 중 클라이언트 연결이 종료되었습니다.")
     except Exception as e:
-        logging.error(f"❌ 로그 파일({log_file}) 작성 중 오류: {e}")
+        logging.error(f"❌ Realtime GPT 세션 중 오류 발생: {e}", exc_info=True)
+    finally:
+        # 정리 작업
+        is_streaming_response = False
 
 # --- 메인 핸들러 ---
 async def chat_handler(websocket):
     global STT_DONE_TIME
     
     ray_mode = "sleep"
-    session_task = None
-    log_file_path = ""
 
-    logging.info(f"✅ C++ 클라이언트 연결됨. 초기 모드: {ray_mode}")
+    logging.info(f"✅ C++ 클라이언트 연결됨.")
     
     try:
-        async for message in websocket:
-            data = json.loads(message)
-            if data.get("request") != "next_action":
-                continue
-
+        while True:
             response_payload = None
             user_text = ""
             STT_DONE_TIME = 0
@@ -329,107 +450,22 @@ async def chat_handler(websocket):
                 if "레이" in user_text:
                     logging.info("'레이' 호출 감지! Active 모드로 전환합니다.")
                     ray_mode = "active"
-                    
                     response_payload = {"action": "play_audio", "file_to_play": AWAKE_FILE, "stt_done_time": STT_DONE_TIME}
-
-                    if session_task:
-                        logging.warning("⚠️ 이전 세션 작업이 아직 완료되지 않았을 수 있습니다. 취소하고 새 작업을 시작합니다.")
-                        session_task.cancel()
-
-                    timestamp = time.strftime("%Y%m%d_%H%M%S")
-                    log_file_path = str(LOG_DIR / f"conversation_{timestamp}.json")
-                    logging.info(f"새 대화 세션 시작. 로그 파일: {log_file_path}")
-                    session_task = asyncio.create_task(start_new_openai_session())
                 else:
-                    response_payload = {"action": "continue_sleep"}
+                    await asyncio.sleep(0.1)
+                    continue
             
             # --- ACTIVE 모드 처리 ---
             elif ray_mode == "active":
-                logging.info("⚡ Active 모드 시작. 사용자 질문 대기 중...")
-                user_text = ""
-                for attempt in range(3):
-                    text = await run_stt(timeout_sec=10)
-                    if text:
-                        user_text = text
-                        break
-                    logging.info(f"묵묵부답... ({attempt+1}/3)")
-
-                is_quit_command = any(kw in user_text for kw in cfg["conditions"].get("QUIT_PROGRAM", []))
-                if not user_text or is_quit_command:
-                    logging.info("응답 없거나 종료 명령어 감지. Sleep 모드로 전환.")
-                    ray_mode = "sleep"
-                    response_payload = {"action": "play_audio", "file_to_play": FINISH_FILE, "stt_done_time": STT_DONE_TIME}
-                    
-                    if session_task:
-                        # 백그라운드에서 세션 종료 실행
-                        async def end_session_safely(task):
-                            try:
-                                if task.done() and not task.cancelled():
-                                    manager, _ = task.result()
-                                    if manager:
-                                        await end_current_openai_session(manager)
-                                else:
-                                    task.cancel()
-                            except Exception as e:
-                                logging.error(f"세션 종료 처리 중 오류: {e}")
-                        asyncio.create_task(end_session_safely(session_task))
-                    
-                    session_task = None
-                    log_file_path = ""
+                logging.info("⚡ Active 모드 시작. 실시간 대화를 시작합니다.")
                 
-                else: # 실제 대화 처리
-                    if not session_task:
-                        logging.error("비정상적인 상태: Active 모드이지만 세션 생성 작업이 없습니다. Sleep 모드로 강제 전환합니다.")
-                        ray_mode = "sleep"
-                        response_payload = {"action": "play_audio", "file_to_play": FINISH_FILE}
-                    else:
-                        try:
-                            logging.info("OpenAI 세션 준비를 기다리는 중...")
-                            connection_manager, openai_connection = await asyncio.wait_for(session_task, timeout=10.0)
-                            
-                            if not openai_connection:
-                                raise ValueError("OpenAI 세션 연결에 실패했습니다.")
-
-                            # 키워드 처리 (노래)
-                            if any(kw in user_text for kw in cfg["conditions"].get("SING_A_SONG", [])):
-                                logging.info("노래 명령어 감지.")
-                                norm_input = normalize_string(user_text)
-                                if norm_input in ["노래불러줘", "노래들려줘", "노래틀어줘"]:
-                                    response_text = "네, 무슨 노래 불러줄까요?"
-                                    file_to_play = await run_tts(response_text, OUTPUT_TTS_FILE)
-                                    response_payload = {"action": "play_audio", "file_to_play": str(file_to_play), "stt_done_time": STT_DONE_TIME}
-                                else:
-                                    found_song_info = find_music_file(user_text)
-                                    if found_song_info:
-                                        title, artist = found_song_info['title'], found_song_info['artist']
-                                        response_text = f"{title} 말씀이신가요? 지금 {title} by {artist}를 재생할게요."
-                                        file_to_play = await run_tts(response_text, OUTPUT_TTS_FILE)
-                                        response_payload = {"action": "play_music", "file_to_play": file_to_play, "title": title, "artist": artist, "stt_done_time": STT_DONE_TIME}
-                                    else:
-                                        response_text = "말씀하신 곡은 목록에 없어요. 다시 말씀해 주세요!"
-                                        file_to_play = await run_tts(response_text, OUTPUT_TTS_FILE)
-                                        response_payload = {"action": "play_audio", "file_to_play": str(file_to_play), "stt_done_time": STT_DONE_TIME}
-                            # 일반 대화 (GPT 스트리밍)
-                            else:
-                                await stream_gpt_response(websocket, user_text, openai_connection, log_file_path)
-                                response_payload = None # 스트리밍 함수가 직접 통신하므로 별도 payload 없음
-
-                        except (asyncio.TimeoutError, ValueError) as e:
-                            logging.error(f"❌ 세션 준비 실패 ({type(e).__name__}). Sleep 모드로 전환합니다.")
-                            ray_mode = "sleep"
-                            response_payload = {"action": "play_audio", "file_to_play": FINISH_FILE}
-                            if session_task:
-                                session_task.cancel()
-                            session_task = None
-                        except Exception as e:
-                            logging.error(f"❌ Active 모드 처리 중 오류: {e}. Sleep 모드로 전환합니다.", exc_info=True)
-                            ray_mode = "sleep"
-                            response_payload = {"action": "play_audio", "file_to_play": FINISH_FILE}
-                            if session_task and session_task.done() and not session_task.cancelled():
-                                manager, _ = session_task.result()
-                                if manager:
-                                    asyncio.create_task(end_current_openai_session(manager))
-                            session_task = None
+                # realtime_session이 (연결 종료 등의 이유로) 완전히 끝날 때까지 여기서 대기합니다.
+                await realtime_session(websocket)
+                
+                # realtime_session이 종료되었으므로, sleep 모드로 돌아갑니다.
+                logging.info("Realtime 세션이 종료되었습니다. Sleep 모드로 전환합니다.")
+                ray_mode = "sleep"
+                response_payload = {"action": "play_audio", "file_to_play": FINISH_FILE}
 
             if response_payload:
                 await websocket.send(json.dumps(response_payload))
@@ -437,23 +473,11 @@ async def chat_handler(websocket):
 
     except websockets.exceptions.ConnectionClosed as e:
         logging.warning(f"ℹ️ C++ 클라이언트 연결이 종료되었습니다: {e}")
-        if session_task:
-            logging.info("클라이언트 연결 종료로 인한 세션 정리 시작.")
-            # 백그라운드에서 안전하게 종료
-            async def final_cleanup(task):
-                if task.done() and not task.cancelled():
-                    try:
-                        manager, _ = task.result()
-                        if manager: await end_current_openai_session(manager)
-                    except Exception as ex:
-                        logging.error(f"최종 세션 정리 중 오류: {ex}")
-                else:
-                    task.cancel()
-            asyncio.create_task(final_cleanup(session_task))
     except Exception as e:
         logging.error(f"❌ 핸들러 처리 중 치명적 오류 발생: {e}", exc_info=True)
     finally:
         logging.info(f"🔌 C++ 클라이언트 연결 핸들러 종료: {websocket.remote_address}")
+
 
 # --- Google STT API 워밍업 ---
 async def warm_up_stt_api():
@@ -490,6 +514,16 @@ async def warm_up_stt_api():
 async def main():
     logging.info("🚀 서버 초기화 시작: API 워밍업을 수행합니다...")
     try:
+        # 오디오 장치 초기화
+        if not initialize_audio_device():
+            logging.error("오디오 장치 초기화에 실패했습니다. 서버를 종료합니다.")
+            return
+        
+        # VAD 모델 초기화
+        if not initialize_vad():
+            logging.error("VAD 모델 초기화에 실패했습니다. 서버를 종료합니다.")
+            return
+        
         await warm_up_stt_api()
         server = await websockets.serve(chat_handler, "127.0.0.1", 5000)
         logging.info("🚀 통합 WebSocket 서버가 127.0.0.1:5000 에서 시작되었습니다.")
