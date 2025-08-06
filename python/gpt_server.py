@@ -13,6 +13,7 @@ import torch
 import torchaudio
 import numpy as np
 from pathlib import Path
+from dataclasses import dataclass
 from openai import AsyncOpenAI
 from google.cloud import speech, texttospeech
 from google.api_core import exceptions
@@ -65,7 +66,12 @@ STT_DONE_TIME = 0  # STT 완료 시간 (사용자 입력 완료 후 음성 출�
 vad_model = None
 vad_sample_rate = 16000
 vad_chunk_size = 512  # 32ms at 16kHz
-is_streaming_response = False  # AI 응답 스트리밍 상태
+
+@dataclass
+class RealtimeSessionState:
+    openai_connection: object
+    is_streaming_response: bool = False
+    current_response_id: str | None = None
 
 # --- 오디오 장치 관리 ---
 def find_pipewire_device():
@@ -127,6 +133,106 @@ def initialize_vad():
     except Exception as e:
         logging.error(f"❌ VAD 모델 초기화 실패: {e}")
         return False
+    
+async def vad_loop(state: RealtimeSessionState):
+
+    # VAD를 위한 오디오 설정
+    audio_queue = asyncio.Queue()
+    speech_start_counter = 0
+    min_speech_chunks = 5  # 약 160ms (32ms * 5)
+    
+    loop = asyncio.get_running_loop()
+
+    def audio_callback(indata, frames, time_info, status):
+        if status:
+            logging.warning(f"[오디오 상태] {status}")
+        loop.call_soon_threadsafe(audio_queue.put_nowait, indata.copy())
+    
+    # 마이크 설정 - 동적으로 장치 검색
+    device_idx = find_pipewire_device()
+    
+    try:
+        with sd.InputStream(
+            samplerate=vad_sample_rate,
+            channels=1,
+            dtype=np.float32,
+            blocksize=vad_chunk_size,
+            callback=audio_callback,
+            device=device_idx
+        ):
+            logging.info("🎙️ VAD 기반 음성 감지 시작...")
+            
+            while True:
+                try:
+                    # 오디오 청크 가져오기
+                    audio_chunk = await audio_queue.get()
+                    
+                    # VAD 모델이 초기화되었는지 확인
+                    if vad_model is None:
+                        logging.error("VAD 모델이 초기화되지 않았습니다.")
+                        break
+                    
+                    # VAD 검사
+                    audio_tensor = torch.from_numpy(audio_chunk.flatten())
+                    with torch.no_grad():
+                        speech_prob = vad_model(audio_tensor, vad_sample_rate).item()
+                    
+                    if speech_prob > 0.5:  # 음성 감지 임계값
+                        speech_start_counter += 1
+                        
+                        # 충분한 음성 청크가 감지되면 즉시 응답 중단
+                        if speech_start_counter >= min_speech_chunks:
+                            logging.info("🗣️ 음성 감지! 응답 중단 및 STT 시작...")
+                            
+                            # 현재 응답이 진행 중이면 즉시 중단
+                            if state.is_streaming_response and state.current_response_id:
+                                try:
+                                    await state.openai_connection.response.cancel()
+                                    logging.info("기존 응답을 중단했습니다.")
+                                    state.is_streaming_response = False
+                                except Exception as e:
+                                    logging.warning(f"응답 중단 중 오류: {e}")
+                            
+                            # STT 실행
+                            user_text = await run_stt(timeout_sec=30.0)
+                            speech_start_counter = 0  # 카운터 리셋
+                            
+                            if user_text.strip():
+                                logging.info(f"사용자 발화 감지: '{user_text}'")
+                                
+                                try:
+                                    # 새로운 대화 생성
+                                    await state.openai_connection.conversation.item.create(
+                                        item={
+                                            "type": "message",
+                                            "role": "user", 
+                                            "content": [{"type": "input_text", "text": user_text}]
+                                        }
+                                    )
+                                    logging.info("사용자 메시지를 대화에 추가했습니다.")
+                                    # AI 응답 요청
+                                    await state.openai_connection.response.create()
+                                    logging.info("AI 응답을 요청했습니다.")
+
+                                except Exception as e:
+                                    logging.error(f"❌ OpenAI API 호출 중 오류: {e}")
+                            else:
+                                logging.warning("STT 결과가 비어있습니다.")
+                    else:
+                        # 음성이 감지되지 않으면 카운터 리셋
+                        speech_start_counter = 0
+                
+                except queue.Empty:
+                    continue
+                except asyncio.CancelledError:
+                    logging.info("VAD 루프가 취소되었습니다.")
+                    break
+                except Exception as e:
+                    logging.error(f"VAD 처리 중 오류: {e}")
+                    break
+                    
+    except Exception as e:
+        logging.error(f"VAD 루프 중 오류: {e}")
 
 # --- STT 기능 (기존 push_to_talk_app.py에서 가져옴) ---
 async def run_stt(timeout_sec: float = 5.0):
@@ -257,15 +363,11 @@ async def realtime_session(websocket):
     VAD를 사용한 음성 감지와 OpenAI Realtime API 연동.
     사용자 발화를 감지하여 텍스트로 입력하고, AI 응답을 스트리밍합니다.
     """
-    global is_streaming_response
     
     logging.info("🤖 Realtime GPT 세션 시작...")
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
     
-    # VAD 태스크를 위한 변수들
     vad_task = None
-    current_response_id = None
-    
     try:
         async with openai_client.beta.realtime.connect(model="gpt-4o-mini-realtime-preview") as openai_connection:
             await openai_connection.session.update(session={
@@ -273,161 +375,53 @@ async def realtime_session(websocket):
                 "voice": VOICE
             })
 
+            session_state = RealtimeSessionState(openai_connection=openai_connection)
+
+            vad_task = asyncio.create_task(vad_loop(session_state))
+
             accumulated_transcripts = {}
-            
-            # VAD 기반 음성 감지 시작
-            async def vad_loop():
-                global is_streaming_response
-                
-                # VAD를 위한 오디오 설정
-                audio_queue = queue.Queue()
-                speech_start_counter = 0
-                min_speech_chunks = 5  # 약 160ms (32ms * 5)
-                
-                def audio_callback(indata, frames, time_info, status):
-                    if status:
-                        logging.warning(f"[오디오 상태] {status}")
-                    audio_queue.put(indata.copy())
-                
-                # 마이크 설정 - 동적으로 장치 검색
-                device_idx = find_pipewire_device()
-                
-                try:
-                    with sd.InputStream(
-                        samplerate=vad_sample_rate,
-                        channels=1,
-                        dtype=np.float32,
-                        blocksize=vad_chunk_size,
-                        callback=audio_callback,
-                        device=device_idx
-                    ):
-                        logging.info("🎙️ VAD 기반 음성 감지 시작...")
                         
-                        while True:
-                            try:
-                                # 오디오 청크 가져오기 (100ms 타임아웃)
-                                audio_chunk = audio_queue.get(timeout=0.1)
-                                
-                                # VAD 모델이 초기화되었는지 확인
-                                if vad_model is None:
-                                    logging.error("VAD 모델이 초기화되지 않았습니다.")
-                                    break
-                                
-                                # VAD 검사
-                                audio_tensor = torch.from_numpy(audio_chunk.flatten())
-                                with torch.no_grad():
-                                    speech_prob = vad_model(audio_tensor, vad_sample_rate).item()
-                                
-                                if speech_prob > 0.5:  # 음성 감지 임계값
-                                    speech_start_counter += 1
-                                    
-                                    # 충분한 음성 청크가 감지되면 즉시 응답 중단
-                                    if speech_start_counter >= min_speech_chunks:
-                                        logging.info("🗣️ 음성 감지! 응답 중단 및 STT 시작...")
-                                        
-                                        # 현재 응답이 진행 중이면 즉시 중단
-                                        if is_streaming_response and current_response_id:
-                                            try:
-                                                await openai_connection.response.cancel()
-                                                logging.info("기존 응답을 중단했습니다.")
-                                                is_streaming_response = False
-                                            except Exception as e:
-                                                logging.warning(f"응답 중단 중 오류: {e}")
-                                        
-                                        # STT 실행
-                                        user_text = await run_stt(timeout_sec=30.0)
-                                        speech_start_counter = 0  # 카운터 리셋
-                                        
-                                        if user_text.strip():
-                                            logging.info(f"사용자 발화 감지: '{user_text}'")
-                                            
-                                            try:
-                                                # 새로운 대화 생성
-                                                await openai_connection.conversation.item.create(
-                                                    item={
-                                                        "type": "message",
-                                                        "role": "user", 
-                                                        "content": [{"type": "input_text", "text": user_text}]
-                                                    }
-                                                )
-                                                logging.info("사용자 메시지를 대화에 추가했습니다.")
-                                                
-                                                # AI 응답 요청
-                                                await openai_connection.response.create()
-                                                logging.info("AI 응답을 요청했습니다.")
-                                            except Exception as e:
-                                                logging.error(f"❌ OpenAI API 호출 중 오류: {e}")
-                                                logging.error(f"오류 타입: {type(e).__name__}")
-                                                logging.error(f"오류 세부사항: {str(e)}")
-                                        else:
-                                            logging.warning("STT 결과가 비어있습니다.")
-                                else:
-                                    # 음성이 감지되지 않으면 카운터 리셋
-                                    speech_start_counter = 0
-                            
-                            except queue.Empty:
-                                continue
-                            except asyncio.CancelledError:
-                                logging.info("VAD 루프가 취소되었습니다.")
-                                break
-                            except Exception as e:
-                                logging.error(f"VAD 처리 중 오류: {e}")
-                                break
-                                
-                except Exception as e:
-                    logging.error(f"VAD 루프 중 오류: {e}")
-            
-            # OpenAI 이벤트 처리 함수
-            async def handle_openai_events():
-                async for event in openai_connection:
-                    logging.info(f"📨 OpenAI 이벤트 수신: {event.type}")
-                    
-                    if event.type == "response.created":
-                        nonlocal current_response_id
-                        current_response_id = event.response.id
-                        global is_streaming_response
-                        is_streaming_response = True
-                        logging.info("새로운 응답 스트림이 시작되었습니다.")
-                        # 스트리밍 시작을 C++ 클라이언트에 알림
-                        await websocket.send(json.dumps({"action": "gpt_stream_start"}))
-                    
-                    elif event.type == "response.audio.delta":
-                        # 오디오 청크를 C++ 클라이언트로 전송
-                        await websocket.send(json.dumps({
-                            "action": "audio_chunk",
-                            "data": event.delta
-                        }))
+            async for event in openai_connection:
+                logging.info(f"📨 OpenAI 이벤트 수신: {event.type}")
+                
+                if event.type == "response.created":
+                    session_state.current_response_id = event.response.id
+                    session_state.is_streaming_response = True
+                    logging.info("새로운 응답 스트림이 시작되었습니다.")
+                    # 스트리밍 시작을 C++ 클라이언트에 알림
+                    await websocket.send(json.dumps({"action": "gpt_stream_start"}))
+                
+                elif event.type == "response.audio.delta":
+                    # 오디오 청크를 C++ 클라이언트로 전송
+                    await websocket.send(json.dumps({
+                        "action": "audio_chunk",
+                        "data": event.delta
+                    }))
 
-                    elif event.type == "response.audio_transcript.delta":
-                        # AI 응답의 중간 텍스트
-                        accumulated_transcripts[event.item_id] = accumulated_transcripts.get(event.item_id, "") + event.delta
-                    
-                    elif event.type == "response.audio.done":
-                        # AI 응답 오디오 스트림이 끝났을 때
-                        final_text = accumulated_transcripts.get(event.item_id, "")
-                        logging.info(f"[응답] {final_text}")
-                        is_streaming_response = False
-                        current_response_id = None
-                        # 스트리밍 종료를 C++ 클라이언트에 알림
-                        await websocket.send(json.dumps({"action": "gpt_stream_end"}))
-                    
-                    elif event.type == "response.done":
-                        is_streaming_response = False
-                        current_response_id = None
-
-            # VAD 태스크와 OpenAI 이벤트 처리를 병렬로 실행
-            await asyncio.gather(
-                vad_loop(),
-                handle_openai_events()
-            )
+                elif event.type == "response.audio_transcript.delta":
+                    # AI 응답의 중간 텍스트
+                    accumulated_transcripts[event.item_id] = accumulated_transcripts.get(event.item_id, "") + event.delta
+                
+                elif event.type == "response.done":
+                    # AI 응답 오디오 스트림이 끝났을 때
+                    final_text = accumulated_transcripts.get(event.response.id, "")
+                    logging.info(f"[응답] {final_text}")
+                    session_state.is_streaming_response = False
+                    session_state.current_response_id = None
+                    # 스트리밍 종료를 C++ 클라이언트에 알림
+                    await websocket.send(json.dumps({"action": "gpt_stream_end"}))
 
     except websockets.exceptions.ConnectionClosed:
         logging.warning("스트리밍 중 클라이언트 연결이 종료되었습니다.")
     except Exception as e:
         logging.error(f"❌ Realtime GPT 세션 중 오류 발생: {e}", exc_info=True)
     finally:
-        # 정리 작업
-        is_streaming_response = False
+        if vad_task and not vad_task.done():
+            vad_task.cancel()
+        try:
+            await vad_task
+        except asyncio.CancelledError:
+            logging.info("VAD 태스크가 취소되었습니다.")
 
 # --- 메인 핸들러 ---
 async def chat_handler(websocket):
