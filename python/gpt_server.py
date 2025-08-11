@@ -161,7 +161,7 @@ async def vad_loop(state: RealtimeSessionState):
             device=device_idx
         ):
             logging.info("🎙️ VAD 기반 음성 감지 시작...")
-            
+
             while True:
                 try:
                     # 오디오 청크 가져오기
@@ -176,7 +176,7 @@ async def vad_loop(state: RealtimeSessionState):
                     audio_tensor = torch.from_numpy(audio_chunk.flatten())
                     with torch.no_grad():
                         speech_prob = vad_model(audio_tensor, vad_sample_rate).item()
-                    
+                    logging.info(f"음성 확률: {speech_prob:.4f}")
                     if speech_prob > 0.5:  # 음성 감지 임계값
                         speech_start_counter += 1
                         
@@ -418,10 +418,10 @@ async def realtime_session(websocket):
     finally:
         if vad_task and not vad_task.done():
             vad_task.cancel()
-        try:
-            await vad_task
-        except asyncio.CancelledError:
-            logging.info("VAD 태스크가 취소되었습니다.")
+            try:
+                await vad_task
+            except asyncio.CancelledError:
+                logging.info("VAD 태스크가 취소되었습니다.")
 
 # --- 메인 핸들러 ---
 async def chat_handler(websocket):
