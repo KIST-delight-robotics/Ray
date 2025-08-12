@@ -33,9 +33,8 @@ OUTPUT_AUDIO_DIR = OUTPUT_DIR / "audio"
 OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- 오디오 설정 ---
-# STT와 VAD가 요구하는 스펙이 다르므로, 고음질인 STT를 기준으로 스트림을 열고 VAD를 위해 다운샘플링합니다.
-STT_SAMPLE_RATE = 24000
-VAD_SAMPLE_RATE = 16000
+# Google STT 권장사항 및 VAD 모델과의 통일을 위해 16000Hz로 샘플레이트를 고정합니다.
+SAMPLE_RATE = 16000
 CHANNELS = 1
 AUDIO_DTYPE = "int16"
 
@@ -54,32 +53,33 @@ class AudioProcessor:
         self.stt_result_queue = stt_result_queue
         self.main_loop = main_loop
         self.is_running = threading.Event()
-        self.is_speaking = False
-        self.stt_in_progress = False
+        self.stt_finished_event = threading.Event() # STT 세션의 완료/활성 상태를 관리하는 이벤트
+        self.stt_finished_event.set() # 초기 상태는 '완료(set)'로 설정
 
         # --- 오디오 버퍼 ---
         self.audio_queue = queue.Queue() # 마이크 콜백에서 받은 원본 오디오가 쌓이는 곳
-        self.stt_pre_buffer = deque(maxlen=int(STT_SAMPLE_RATE * 1.5)) # STT를 위한 1.5초 분량의 사전 버퍼
+        # 0.5초 분량의 오디오를 바이트 단위로 저장하는 롤링 버퍼
+        self.max_pre_buffer_bytes = int(SAMPLE_RATE * 0.5 * 2) # 0.5초 * 16000Hz * 2bytes(int16)
+        self.stt_pre_buffer = b''
+        self.vad_buffer = torch.tensor([]) # VAD 처리를 위한 버퍼
 
         # --- VAD 설정 ---
         model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', force_reload=False, onnx=True)
         self.vad_model = model
-        self.vad_iterator = utils[3](model, min_speech_duration_ms=100) # VADIterator
-        # STT 샘플링 레이트(24kHz) -> VAD 샘플링 레이트(16kHz)로 변환하는 리샘플러
-        self.resampler = torchaudio.transforms.Resample(orig_freq=STT_SAMPLE_RATE, new_freq=VAD_SAMPLE_RATE)
+        self.vad_iterator = utils[3](model) # VADIterator
         logging.info("✅ Silero VAD 초기화 완료")
 
         # --- STT 설정 ---
         self.stt_client = speech.SpeechClient()
         self.stt_config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=STT_SAMPLE_RATE,
+            sample_rate_hertz=SAMPLE_RATE,
             language_code="ko-KR",
         )
         self.stt_streaming_config = speech.StreamingRecognitionConfig(
             config=self.stt_config,
             interim_results=True,
-            single_utterance=True, # 한 문장이 끝나면 자동으로 인식 종료
+            single_utterance=True,
         )
         logging.info("✅ Google STT 클라이언트 초기화 완료")
 
@@ -93,16 +93,19 @@ class AudioProcessor:
         """STT API에 오디오를 공급하는 제너레이터. 사전 버퍼 -> 실시간 오디오 순으로 공급."""
         # 1. VAD가 감지되기 전까지 쌓아둔 사전 버퍼(pre-buffer)부터 보냄
         if self.stt_pre_buffer:
-            logging.info(f"사전 버퍼 ({len(self.stt_pre_buffer) * 1024 / STT_SAMPLE_RATE:.2f}초) 전송 중...")
-            yield b''.join(self.stt_pre_buffer)
-            self.stt_pre_buffer.clear()
+            duration_sec = (len(self.stt_pre_buffer) / 2) / SAMPLE_RATE
+            logging.info(f"사전 버퍼 ({duration_sec:.2f}초) 전송 중...")
+            yield speech.StreamingRecognizeRequest(audio_content=self.stt_pre_buffer)
+            self.stt_pre_buffer = b'' # 사전 버퍼는 전송 후 초기화
 
-        # 2. 실시간으로 들어오는 오디오 계속 전송
-        while self.is_speaking:
+        # 2. 실시간으로 들어오는 오디오 전송
+        while not self.stt_finished_event.is_set():
             try:
                 chunk = self.audio_queue.get(timeout=0.1)
-                yield chunk
+                yield speech.StreamingRecognizeRequest(audio_content=chunk.tobytes())
             except queue.Empty:
+                if self.stt_finished_event.is_set():
+                    break
                 continue
 
     def _run_stt(self):
@@ -113,19 +116,21 @@ class AudioProcessor:
                 if not response.results or not response.results[0].alternatives:
                     continue
                 result = response.results[0]
+                transcript = result.alternatives[0].transcript
                 if result.is_final:
                     final_text = result.alternatives[0].transcript.strip()
                     logging.info(f"✅ STT 최종 결과: '{final_text}'")
                     # 메인 asyncio 루프로 결과를 안전하게 전송
-                    self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
+                    if final_text: # 최종 텍스트가 있을 때만 큐에 넣음
+                        self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
                     return
-        except exceptions.OutOfRange:
-            logging.warning("STT: 사용자가 너무 빨리 말을 중단했습니다.")
+                else:
+                    logging.info(f"✅ STT 중간 결과: '{transcript}'")
         except Exception as e:
             logging.error(f"STT 세션 중 오류: {e}")
         finally:
-            self.stt_in_progress = False
             self.vad_iterator.reset_states()
+            self.stt_finished_event.set() # VAD 루프를 다시 시작하도록 신호
             logging.info("STT 세션 종료 및 VAD 상태 초기화")
 
     def start(self):
@@ -138,46 +143,58 @@ class AudioProcessor:
 
         try:
             with sd.InputStream(
-                samplerate=STT_SAMPLE_RATE,
+                samplerate=SAMPLE_RATE,
                 channels=CHANNELS,
                 dtype=AUDIO_DTYPE,
-                blocksize=1024, # 1024 samples per chunk
                 callback=self._audio_callback,
                 device=device_idx
             ):
+                VAD_CHUNK_SIZE = 512 # Silero VAD는 16kHz에서 512 샘플 크기를 사용
                 while self.is_running.is_set():
-                    # 1. 마이크로부터 오디오 청크를 가져옴
-                    audio_chunk_int16 = self.audio_queue.get()
-                    self.stt_pre_buffer.append(audio_chunk_int16.tobytes())
+                    # STT 세션이 끝날 때까지 대기
+                    self.stt_finished_event.wait()
+                    if not self.is_running.is_set(): break # stop()이 호출되면 즉시 종료
 
-                    # 2. VAD를 위해 오디오 형식 변환 (int16 -> float32 -> 16kHz)
+                    # STT가 비활성화 상태일 때만 VAD를 위해 오디오 처리
+                    try:
+                        audio_chunk_int16 = self.audio_queue.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+
+                    # 사전 버퍼 저장 (롤링 버퍼)
+                    new_bytes = audio_chunk_int16.tobytes()
+                    self.stt_pre_buffer = (self.stt_pre_buffer + new_bytes)[-self.max_pre_buffer_bytes:]
+
+                    # VAD 처리를 위해 float32로 변환하고 버퍼에 추가
                     audio_chunk_float32 = audio_chunk_int16.astype(np.float32) / 32768.0
                     audio_tensor = torch.from_numpy(audio_chunk_float32.flatten())
-                    resampled_tensor = self.resampler(audio_tensor)
+                    self.vad_buffer = torch.cat([self.vad_buffer, audio_tensor])
 
-                    # 3. VAD로 음성 감지
-                    speech_dict = self.vad_iterator(resampled_tensor, return_seconds=True)
+                    # VAD 버퍼에 처리할 데이터가 충분한지 확인하고, 있다면 처리
+                    while len(self.vad_buffer) >= VAD_CHUNK_SIZE:
+                        vad_chunk = self.vad_buffer[:VAD_CHUNK_SIZE]
+                        self.vad_buffer = self.vad_buffer[VAD_CHUNK_SIZE:]
 
-                    if speech_dict:
-                        if 'start' in speech_dict and not self.is_speaking:
-                            self.is_speaking = True
-                            logging.info("🗣️ 음성 시작 감지!")
-                            # STT가 이미 진행 중이 아니라면 새로 시작
-                            if not self.stt_in_progress:
-                                self.stt_in_progress = True
-                                threading.Thread(target=self._run_stt).start()
-                        
-                        elif 'end' in speech_dict and self.is_speaking:
-                            self.is_speaking = False
-                            logging.info("묵음 감지.")
-                    
+                        speech_dict = self.vad_iterator(vad_chunk, return_seconds=True)
+
+                        if speech_dict and 'start' in speech_dict:
+                            self.stt_finished_event.clear() # STT 시작. VAD 루프를 '대기' 상태로 전환
+                            logging.info("🗣️ 음성 시작 감지! STT 시작.")
+                            threading.Thread(target=self._run_stt).start()
+                            # STT가 이제 오디오를 직접 소비하므로 VAD 버퍼 초기화
+                            self.vad_buffer = torch.tensor([])
+                            break # VAD 처리 루프 종료, STT가 이제 활성화됨
+
         except Exception as e:
             logging.error(f"오디오 처리 루프 중 치명적 오류: {e}", exc_info=True)
 
     def stop(self):
         """오디오 처리 스레드를 안전하게 종료."""
         self.is_running.clear()
+        self.stt_finished_event.set() # 대기 상태의 스레드가 있다면 즉시 깨워서 종료되도록
         logging.info("오디오 처리 스레드 종료 신호 전송")
+
+
 
 # ==================================================================================================
 # 비동기 통신 및 메인 로직
@@ -280,8 +297,10 @@ def find_input_device():
         devices = sd.query_devices()
         for idx, device in enumerate(devices):
             if device['max_input_channels'] > 0:
-                logging.info(f"🔍 발견된 입력 장치: [{idx}] {device['name']}")
-                return idx
+                device_name = str(device['name']).lower()
+                if 'pipewire' in device_name:
+                    logging.info(f"🔍 발견된 입력 장치: [{idx}] {device['name']}")
+                    return idx
         logging.error("❌ 사용 가능한 오디오 입력 장치를 찾지 못했습니다.")
         return None
     except Exception as e:
