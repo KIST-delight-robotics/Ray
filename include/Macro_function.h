@@ -86,9 +86,9 @@ using namespace Eigen;
 //DXL initial goal position
 #define DEFAULT_PITCH                       3480
 #define DEFAULT_ROLL_R                      1550
-#define DEFAULT_ROLL_L                      600
+#define DEFAULT_ROLL_L                      650
 #define DEFAULT_YAW                         1000
-#define DEFAULT_MOUTH                       1580
+#define DEFAULT_MOUTH                       2210
 
 // extern int DEFAULT_PITCH;
 // extern int DEFAULT_ROLL_R;
