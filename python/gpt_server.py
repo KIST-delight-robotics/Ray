@@ -23,7 +23,7 @@ from google.api_core import exceptions
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
 
 # --- 기본 설정 --- 
-# OpenAI & Google Cloud 인증 정보는 환경 변수를 통해 설정해야 합니다.
+# OpenAI 키 & Google Cloud 인증파일 경로 환경변수 등록 필요
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # --- 경로 설정 ---
@@ -43,7 +43,6 @@ AWAKE_FILE = ASSETS_DIR / "audio" / "awake.wav"
 SLEEP_FILE = ASSETS_DIR / "audio" / "sleep.wav"
 
 # --- 오디오 설정 ---
-# Google STT 권장사항 및 VAD 모델과의 통일을 위해 16000Hz로 샘플레이트를 고정합니다.
 SAMPLE_RATE = 16000
 CHANNELS = 1
 AUDIO_DTYPE = "int16"
@@ -51,6 +50,10 @@ AUDIO_DTYPE = "int16"
 # --- OpenAI 설정 ---
 PROMPT = prompts.MONDAY_PROMPT
 VOICE = "coral"
+
+# --- 키워드 설정 ---
+START_KEYWORD = "레이"
+END_KEYWORDS = ["종료", "쉬어"]
 
 # ==================================================================================================
 # 오디오 처리기 (VAD & STT 통합)
@@ -65,17 +68,19 @@ class AudioProcessor:
         self.main_loop = main_loop
         self.websocket = websocket
         self.is_running = threading.Event()
-        self.vad_active_flag = threading.Event() # VAD 감지 활성화 플래그
-        self.vad_active_flag.set() # 초기 상태는 '활성화(set)'로 설정
+        self.vad_active_flag = threading.Event()
+        self.vad_active_flag.set()
 
         # --- 오디오 버퍼 ---
-        self.audio_queue = queue.Queue() # 마이크 콜백에서 받은 원본 오디오가 쌓이는 곳
-        # VAD 감지 전 오디오를 저장하는 롤링 버퍼 (numpy 배열 청크 저장)
-        PRE_BUFFER_DURATION = 0.5  # 사전 버퍼링 시간 (초)
-        self.VAD_CHUNK_SIZE = 512 # Silero VAD는 16kHz에서 512 샘플 크기를 사용
+        # 원본 오디오 버퍼
+        self.audio_queue = queue.Queue()
+        # STT 사전 버퍼
+        PRE_BUFFER_DURATION = 0.5 # 사전 버퍼 길이 (초)
+        self.VAD_CHUNK_SIZE = 512
         pre_buffer_max_chunks = math.ceil(SAMPLE_RATE * PRE_BUFFER_DURATION / self.VAD_CHUNK_SIZE)
         self.stt_pre_buffer = deque(maxlen=pre_buffer_max_chunks)
-        self.vad_buffer = torch.tensor([]) # VAD 처리를 위한 버퍼
+        # VAD 처리를 위한 버퍼
+        self.vad_buffer = torch.tensor([])
 
         # --- VAD 설정 ---
         model, _ = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', force_reload=False, onnx=True)
@@ -100,35 +105,29 @@ class AudioProcessor:
         logging.info("✅ Google STT 클라이언트 초기화 완료")
 
     def _audio_callback(self, indata, frames, time_info, status):
-        """사운드디바이스 콜백. 원본 오디오를 큐에 넣기만 함."""
+        """사운드디바이스 콜백. 원본 오디오를 큐에 저장."""
         if status:
-            # ALSA 에러를 로그로만 남기고 계속 진행
-            if status.input_overflow:
-                logging.debug("Input overflow 발생 (일시적)")
-            elif status.input_underflow:
-                logging.debug("Input underflow 발생 (일시적)")
-            else:
-                logging.warning(f"[오디오 상태] {status}")
-        
+            logging.warning(f"[오디오 상태] {status}")
+
         try:
             self.audio_queue.put(indata.copy())
         except Exception as e:
             logging.debug(f"오디오 큐 저장 중 오류: {e}")
 
-    def _stt_audio_generator(self, stt_should_stop=None):
+    def _stt_audio_generator(self, stt_stop_flag=None):
         """STT API에 오디오를 공급하는 제너레이터. 사전 버퍼 -> 실시간 오디오 순으로 공급."""
-        # 1. VAD가 감지되기 전까지 쌓아둔 사전 버퍼(pre-buffer)부터 보냄
+        # 1. VAD가 감지되기 전까지 쌓아둔 사전 버퍼(pre-buffer) 전송
         if self.stt_pre_buffer:
             combined_audio = np.concatenate(list(self.stt_pre_buffer))
             duration_sec = len(combined_audio) / SAMPLE_RATE
             yield speech.StreamingRecognizeRequest(audio_content=combined_audio.tobytes())
             logging.info(f"사전 버퍼 ({duration_sec:.2f}초) 전송 완료")
-            self.stt_pre_buffer.clear() # 사전 버퍼는 전송 후 초기화
+            self.stt_pre_buffer.clear()
 
         # 2. 실시간으로 들어오는 오디오 전송
         while not self.vad_active_flag.is_set():
             # 타임아웃 신호가 있으면 즉시 중단
-            if stt_should_stop and stt_should_stop.is_set():
+            if stt_stop_flag and stt_stop_flag.is_set():
                 logging.info("타임아웃으로 인해 오디오 생성기 중단")
                 break
                 
@@ -145,31 +144,31 @@ class AudioProcessor:
         
         first_response_timeout = 3.0  # 첫 응답 타임아웃 (초)
         start_time = time.time()
-        has_received_first_response = threading.Event()
-        stt_should_stop = threading.Event()
+        first_response_event = threading.Event()
+        stt_stop_flag = threading.Event()
         
         def timeout_checker():
             """첫 응답 타임아웃을 실시간으로 체크하는 함수"""
-            if not has_received_first_response.wait(timeout=first_response_timeout):
+            if not first_response_event.wait(timeout=first_response_timeout):
                 logging.warning(f"STT 첫 응답 타임아웃 ({first_response_timeout}초) - 세션 종료")
-                stt_should_stop.set()
+                stt_stop_flag.set()
         
         # 타임아웃 체커를 별도 스레드에서 실행
         timeout_thread = threading.Thread(target=timeout_checker, daemon=True)
         timeout_thread.start()
         
         try:
-            responses = self.stt_client.streaming_recognize(self.stt_streaming_config, self._stt_audio_generator(stt_should_stop))
+            responses = self.stt_client.streaming_recognize(self.stt_streaming_config, self._stt_audio_generator(stt_stop_flag))
             
             for response in responses:
                 # STT 중단 신호가 있으면 즉시 종료
-                if stt_should_stop.is_set():
+                if stt_stop_flag.is_set():
                     logging.info("타임아웃으로 인한 STT 세션 중단")
                     return
                 
                 # 첫 응답이 도착했음을 알림
-                if not has_received_first_response.is_set():
-                    has_received_first_response.set()
+                if not first_response_event.is_set():
+                    first_response_event.set()
                     logging.info(f"STT 첫 응답 수신 (소요시간: {time.time() - start_time:.2f}초)")
                     
                     # c++에 인터럽션 신호 전송
@@ -185,8 +184,8 @@ class AudioProcessor:
                 if result.is_final:
                     final_text = result.alternatives[0].transcript.strip()
                     logging.info(f"✅ STT 최종 결과: '{final_text}'")
-                    # 메인 asyncio 루프로 결과를 안전하게 전송
-                    if final_text: # 최종 텍스트가 있을 때만 큐에 넣음
+                    # STT 완료시 메인 asyncio 루프로 결과 전송
+                    if final_text:
                         self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
                     return
                 else:
@@ -196,11 +195,10 @@ class AudioProcessor:
         except Exception as e:
             logging.error(f"STT 세션 중 오류: {e}")
         finally:
-            # 타임아웃 체커 스레드 정리
-            has_received_first_response.set()  # 타임아웃 스레드가 대기 중이라면 깨워서 종료시킴
-            self.stt_pre_buffer.clear() # 사전 버퍼 초기화
-            self.vad_model.reset_states() # VAD 모델 상태 초기화
-            self.vad_active_flag.set() # VAD 루프를 다시 시작하도록 신호
+            first_response_event.set()
+            self.stt_pre_buffer.clear()
+            self.vad_model.reset_states()
+            self.vad_active_flag.set()
             logging.info("STT 세션 종료 및 VAD 감지 시작")
 
     def start(self):
@@ -295,7 +293,7 @@ class AudioProcessor:
 # ==================================================================================================
 
 async def handle_stt_results(stt_queue: asyncio.Queue, openai_connection, session_state, session_end_flag: asyncio.Event):
-    """(태스크 A) STT 결과를 받아 OpenAI에 전송하는 역할"""
+    """(태스크 A) STT 결과를 받아 OpenAI에 전송"""
     while True:
         try:
             user_text = await stt_queue.get()
@@ -311,7 +309,7 @@ async def handle_stt_results(stt_queue: asyncio.Queue, openai_connection, sessio
                 except Exception as e:
                     logging.warning(f"응답 중단 중 오류: {e}")
             
-            if any(kw in user_text for kw in ["종료", "쉬어"]):
+            if any(kw in user_text for kw in END_KEYWORDS):
                 # 종료 키워드 감지 시 세션 종료, Sleep 모드로 전환
                 logging.info(f"종료 키워드 감지: '{user_text}' - 세션을 종료합니다.")
                 session_end_flag.set() 
@@ -331,7 +329,7 @@ async def handle_stt_results(stt_queue: asyncio.Queue, openai_connection, sessio
             logging.error(f"STT 결과 처리 중 오류: {e}", exc_info=True)
 
 async def handle_openai_responses(openai_connection, websocket, session_state, session_end_flag: asyncio.Event):
-    """(태스크 B) OpenAI의 응답을 받아 C++ 클라이언트에 전송하는 역할"""
+    """(태스크 B) OpenAI의 응답을 받아 C++ 클라이언트에 전송"""
     try:
         async for event in openai_connection:
             if event.type == "response.created":
@@ -403,9 +401,9 @@ async def realtime_session(websocket):
         logging.info("🤖 Realtime GPT 세션 종료.")
 
 # --- Sleep 모드 로직 ---
-async def wakeword_detection_loop(websocket, keyword: str = "레이"):
-    """'레이'라는 키워드를 감지할 때까지 VAD-STT 루프를 실행 (Sleep 모드)"""
-    logging.info(f"💤 Sleep 모드 시작. '{keyword}' 호출 대기 중...")
+async def wakeword_detection_loop(websocket):
+    """START_KEYWORD를 감지할 때까지 VAD-STT 루프를 실행 (Sleep 모드)"""
+    logging.info(f"💤 Sleep 모드 시작. '{START_KEYWORD}' 호출 대기 중...")
     audio_processor = None
     audio_thread = None
     
@@ -420,8 +418,8 @@ async def wakeword_detection_loop(websocket, keyword: str = "레이"):
         while True:
             stt_result = await keyword_queue.get()
             logging.info(f"[Sleep Mode] STT 결과: {stt_result}")
-            if keyword in stt_result:
-                logging.info(f"'{keyword}' 호출 감지! Active 모드로 전환합니다.")
+            if START_KEYWORD in stt_result:
+                logging.info(f"'{START_KEYWORD}' 호출 감지! Active 모드로 전환합니다.")
                 return # 호출이 감지되면 함수 종료 -> Active 모드로 전환
     
     except asyncio.CancelledError:
@@ -436,8 +434,9 @@ async def wakeword_detection_loop(websocket, keyword: str = "레이"):
         logging.info("💤 Sleep 모드 종료.")
 
 
-# --- 기존 헬퍼 함수들 ---
+# --- 헬퍼 함수들 ---
 def find_input_device():
+    """오디오 입력 장치 검색"""
     try:
         devices = sd.query_devices()
         for idx, device in enumerate(devices):
@@ -459,7 +458,7 @@ async def chat_handler(websocket):
             # 1. Sleep 모드: 키워드 감지 대기
             await wakeword_detection_loop(websocket)
 
-            # Sleep 모드 종료 후 기상 음성 재생
+            # Sleep 모드 종료 후 AWAKE 음성 재생
             await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(AWAKE_FILE)}))
 
             # 2. Active 모드: 실시간 대화 세션 진행
