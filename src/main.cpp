@@ -830,8 +830,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
         // --- 루프 시작 시 상태 초기화 ---
         stop_flag = false;
         is_streaming = false;
-        user_interruption_flag = false;
-        {
+        { // user_interruption_flag를 여기서 리셋하면 안됨. 이전 루프에서 발생한 인터럽트가 다음 루프 시작 시에도 유효해야 할 수 있음.
             // 스트리밍 오디오 버퍼 초기화
             std::lock_guard<std::mutex> lock(stream_buffer_mutex);
             stream_buffer.clear();
@@ -897,7 +896,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
         if (!is_file_based && !is_streaming) { // 파일 기반 재생 또는 스트리밍이 아닌 경우 에러 처리
             std::cerr << "Error: No valid audio source." << std::endl;
             if (sndfile) sf_close(sndfile);
-            continue;
+            continue; // 메인 루프의 처음으로 돌아가 다음 명령을 기다림
         }
 
         CustomSoundStream soundStream(sfinfo.channels, sfinfo.samplerate);
@@ -923,6 +922,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
         if (user_interruption_flag) {
             std::cout << "Interruption handling: Cleaning up resources." << std::endl;
             soundStream.stop();
+            soundStream.clearBuffer(); // 재생 버퍼에 남아있는 오디오 데이터를 제거합니다.
             
             // 모든 큐 비우기
             std::queue<std::vector<float>> empty_audio_q;
@@ -934,7 +934,6 @@ void robot_main_loop(std::future<void> server_ready_future) {
             std::queue<std::vector<std::vector<double>>> empty_head_q;
             std::swap(head_motion_queue, empty_head_q);
 
-            user_interruption_flag = false; // 플래그 리셋
             if (sndfile) sf_close(sndfile);
             playing_music_flag = false;
             continue; // 메인 루프의 처음으로 돌아가 다음 명령을 기다림
@@ -964,6 +963,7 @@ int main() {
                 std::string type = response.value("type", "");
 
                 if (type == "audio_chunk") {
+                    if (user_interruption_flag) return; // 인터럽트 상태에서는 오디오 청크를 무시
                     std::string b64_data = response.value("data", "");
                     std::string decoded_data;
                     macaron::Base64::Decode(b64_data, decoded_data); // 스트리밍된 오디오 데이터 디코딩
@@ -986,6 +986,10 @@ int main() {
                         mouth_motion_queue_cv.notify_all();
                     }
                 } else { // audio_chunk가 아닌 다른 모든 메시지(gpt_streaming_start, play_audio 등)는 메인 루프가 처리하도록 큐에 넣음
+                    // 새로운 재생 시작을 알리는 모든 메시지 유형에 대해 인터럽트 플래그를 즉시 리셋
+                    if (type == "gpt_stream_start" || type == "play_audio" || type == "play_music") {
+                        user_interruption_flag = false;
+                    }
                     std::lock_guard<std::mutex> lock(server_message_queue_mutex);
                     server_message_queue.push(response);
                     server_message_queue_cv.notify_one();
