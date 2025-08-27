@@ -7,12 +7,12 @@ import asyncio
 import logging
 import threading
 import math
+import base64
 from collections import deque
 
 import websockets
 import sounddevice as sd
 import torch
-import torchaudio
 import numpy as np
 from pathlib import Path
 from openai import AsyncOpenAI
@@ -22,7 +22,7 @@ from google.api_core import exceptions
 # --- 로깅 설정 ---
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
 
-# --- 기본 설정 --- 
+# --- 기본 설정 ---
 # OpenAI 키 & Google Cloud 인증파일 경로 환경변수 등록 필요
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -48,8 +48,13 @@ CHANNELS = 1
 AUDIO_DTYPE = "int16"
 
 # --- OpenAI 설정 ---
+USE_REALTIME_API = True  # <<<< API 선택 플래그 (False로 설정 시 Responses API 사용)
+REALTIME_MODEL = "gpt-4o-realtime-preview"
+RESPONSES_API_MODEL = "gpt-4.1"
 PROMPT = prompts.MONDAY_PROMPT
 VOICE = "coral"
+TTS_MODEL = "gpt-4o-mini-tts"
+
 
 # --- 키워드 설정 ---
 START_KEYWORD = "레이"
@@ -150,7 +155,7 @@ class AudioProcessor:
         def timeout_checker():
             """첫 응답 타임아웃을 실시간으로 체크하는 함수"""
             if not first_response_event.wait(timeout=first_response_timeout):
-                logging.warning(f"STT 첫 응답 타임아웃 ({first_response_timeout}초) - 세션 종료")
+                logging.warning(f"STT 첫 응답 타임아웃 - 세션 종료")
                 stt_stop_flag.set()
         
         # 타임아웃 체커를 별도 스레드에서 실행
@@ -233,8 +238,6 @@ class AudioProcessor:
                     except queue.Empty:
                         continue
 
-                    start_time = time.perf_counter()
-
                     # 사전 버퍼 저장 (롤링 버퍼)
                     self.stt_pre_buffer.append(audio_chunk_int16)
 
@@ -273,10 +276,6 @@ class AudioProcessor:
                         # STT 시작과 함께 VAD 관련 상태를 깨끗하게 초기화.
                         self.vad_buffer = torch.tensor([])
                         self.consecutive_speech_chunks = 0
-
-                    processing_time_ms = (time.perf_counter() - start_time) * 1000
-                    logging.debug(f"오디오 청크 처리 시간: {processing_time_ms:.2f}ms")
-
         except Exception as e:
             logging.error(f"오디오 처리 루프 중 치명적 오류: {e}", exc_info=True)
 
@@ -289,10 +288,10 @@ class AudioProcessor:
 
 
 # ==================================================================================================
-# 비동기 통신 및 메인 로직
+# Realtime API 파이프라인
 # ==================================================================================================
 
-async def handle_stt_results(stt_queue: asyncio.Queue, openai_connection, session_state, session_end_flag: asyncio.Event):
+async def handle_stt_results_for_realtime(stt_queue: asyncio.Queue, openai_connection, session_state, session_end_flag: asyncio.Event):
     """(태스크 A) STT 결과를 받아 OpenAI에 전송"""
     while True:
         try:
@@ -328,7 +327,7 @@ async def handle_stt_results(stt_queue: asyncio.Queue, openai_connection, sessio
         except Exception as e:
             logging.error(f"STT 결과 처리 중 오류: {e}", exc_info=True)
 
-async def handle_openai_responses(openai_connection, websocket, session_state, session_end_flag: asyncio.Event):
+async def handle_openai_responses_for_realtime(openai_connection, websocket, session_state, session_end_flag: asyncio.Event):
     """(태스크 B) OpenAI의 응답을 받아 C++ 클라이언트에 전송"""
     try:
         async for event in openai_connection:
@@ -350,18 +349,16 @@ async def handle_openai_responses(openai_connection, websocket, session_state, s
     except Exception as e:
         logging.error(f"OpenAI 응답 처리 중 오류: {e}", exc_info=True)
     finally:
-        if not session_end_flag.set():
+        if not session_end_flag.is_set():
             session_end_flag.set()
 
-async def realtime_session(websocket):
-    """사용자 발화와 AI 응답을 동시에 처리하는 메인 세션 (Active 모드)"""
-    logging.info("🤖 Realtime GPT 세션 시작...")
+async def realtime_pipeline(websocket):
+    logging.info("🤖 Realtime API 파이프라인 시작...")
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-    audio_processor = None
-    audio_thread = None
-
+    audio_processor, audio_thread = None, None
+    task_a, task_b = None, None
     try:
-        async with openai_client.beta.realtime.connect(model="gpt-4o-realtime-preview") as openai_connection:
+        async with openai_client.beta.realtime.connect(model=REALTIME_MODEL) as openai_connection:
             await openai_connection.session.update(session={
                 "instructions": PROMPT,
                 "voice": VOICE
@@ -378,35 +375,126 @@ async def realtime_session(websocket):
             audio_thread.start()
 
             # 2. STT 결과 처리와 OpenAI 응답 처리를 두 개의 태스크로 만들어 동시 실행
-            task_a = asyncio.create_task(handle_stt_results(stt_result_queue, openai_connection, session_state, session_end_flag))
-            task_b = asyncio.create_task(handle_openai_responses(openai_connection, websocket, session_state, session_end_flag))
+            task_a = asyncio.create_task(handle_stt_results_for_realtime(stt_result_queue, openai_connection, session_state, session_end_flag))
+            task_b = asyncio.create_task(handle_openai_responses_for_realtime(openai_connection, websocket, session_state, session_end_flag))
 
             await session_end_flag.wait()
-
-    except websockets.exceptions.ConnectionClosed:
-        logging.warning("클라이언트 연결이 종료되었습니다.")
-    except Exception as e:
-        logging.error(f"Realtime GPT 세션 중 오류 발생: {e}", exc_info=True)
     finally:
-        # audio_processor와 audio_thread 정리
-        if audio_processor:
-            audio_processor.stop()
-        if audio_thread and audio_thread.is_alive():
-            audio_thread.join(timeout=1.0)
-        # 태스크 취소
-        if 'task_a' in locals() and not task_a.done():
-            task_a.cancel()
-        if 'task_b' in locals() and not task_b.done():
-            task_b.cancel()
-        logging.info("🤖 Realtime GPT 세션 종료.")
+        if audio_processor: audio_processor.stop()
+        if audio_thread and audio_thread.is_alive(): audio_thread.join(timeout=1.0)
+        if task_a and not task_a.done(): task_a.cancel()
+        if task_b and not task_b.done(): task_b.cancel()
+        logging.info("🤖 Realtime API 파이프라인 종료.")
 
-# --- Sleep 모드 로직 ---
+# ==================================================================================================
+# Responses API 파이프라인
+# ==================================================================================================
+async def handle_text_to_speech_stream(response_stream, client, websocket, history):
+    """Responses API의 텍스트 스트림을 받아 TTS 오디오 스트림으로 변환 후 전송"""
+    await websocket.send(json.dumps({"type": "gpt_stream_start"}))
+    
+    full_response_text = ""
+    sentence_buffer = ""
+    try:
+        async for event in response_stream:
+            if event.type == "response.output_text.delta":
+                text_chunk = event.delta
+                sentence_buffer += text_chunk
+                full_response_text += text_chunk
+                
+                if any(p in sentence_buffer for p in ".?!"):
+                    async with client.audio.speech.with_streaming_response.create(
+                        model=TTS_MODEL,
+                        voice=VOICE,
+                        input=sentence_buffer,
+                        response_format="pcm"
+                    ) as tts_response:
+                        async for audio_chunk in tts_response.iter_bytes(chunk_size=4096):
+                            await websocket.send(json.dumps({
+                                "type": "audio_chunk", 
+                                "data": base64.b64encode(audio_chunk).decode('utf-8')
+                            }))
+                    sentence_buffer = ""
+
+        if sentence_buffer.strip():
+            async with client.audio.speech.with_streaming_response.create(
+                model=TTS_MODEL,
+                voice=VOICE,
+                input=sentence_buffer,
+                response_format="pcm"
+            ) as tts_response:
+                async for audio_chunk in tts_response.iter_bytes(chunk_size=4096):
+                    await websocket.send(json.dumps({
+                        "type": "audio_chunk", 
+                        "data": base64.b64encode(audio_chunk).decode('utf-8')
+                    }))
+
+    except asyncio.CancelledError:
+        logging.info("TTS 스트림 처리가 중단되었습니다.")
+        raise # 인터럽션을 상위 루프에 전파
+    finally:
+        await websocket.send(json.dumps({"type": "gpt_stream_end"}))
+        if full_response_text:
+            history.append({"role": "assistant", "content": full_response_text})
+            logging.info(f"OpenAI 응답 완료: '{full_response_text}'")
+
+async def responses_pipeline(websocket):
+    logging.info("🤖 Responses API 파이프라인 시작...")
+    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    audio_processor, audio_thread = None, None
+    
+    history = [{"role": "system", "content": PROMPT}]
+    
+    stt_result_queue = asyncio.Queue()
+    main_loop = asyncio.get_running_loop()
+    
+    try:
+        audio_processor = AudioProcessor(stt_result_queue, main_loop, websocket)
+        audio_thread = threading.Thread(target=audio_processor.start, daemon=True)
+        audio_thread.start()
+
+        tts_task = None
+        while True:
+            user_text = await stt_result_queue.get()
+
+            if tts_task and not tts_task.done():
+                tts_task.cancel()
+                logging.info("진행 중인 TTS 작업을 중단했습니다.")
+
+            if any(kw in user_text for kw in END_KEYWORDS):
+                break
+
+            history.append({"role": "user", "content": user_text})
+            
+            response_stream = await openai_client.responses.create(
+                model=RESPONSES_API_MODEL,
+                input=history,
+                # reasoning={ "effort": "low" },
+                # text={ "verbosity": "low" },
+                stream=True
+            )
+            
+            tts_task = asyncio.create_task(
+                handle_text_to_speech_stream(response_stream, openai_client, websocket, history)
+            )
+            try:
+                await tts_task
+            except asyncio.CancelledError:
+                # 인터럽션 발생 시, 이미 로깅 및 처리가 되었으므로 다음 루프를 계속 진행
+                pass
+
+    finally:
+        if audio_processor: audio_processor.stop()
+        if audio_thread and audio_thread.is_alive(): audio_thread.join(timeout=1.0)
+        logging.info("🤖 Responses API 파이프라인 종료.")
+
+# ==================================================================================================
+# Sleep 모드 및 메인 핸들러
+# ==================================================================================================
 async def wakeword_detection_loop(websocket):
     """START_KEYWORD를 감지할 때까지 VAD-STT 루프를 실행 (Sleep 모드)"""
     logging.info(f"💤 Sleep 모드 시작. '{START_KEYWORD}' 호출 대기 중...")
-    audio_processor = None
-    audio_thread = None
-    
+    audio_processor, audio_thread = None, None
     try:
         keyword_queue = asyncio.Queue()
         main_loop = asyncio.get_running_loop()
@@ -419,22 +507,12 @@ async def wakeword_detection_loop(websocket):
             stt_result = await keyword_queue.get()
             logging.info(f"[Sleep Mode] STT 결과: {stt_result}")
             if START_KEYWORD in stt_result:
-                logging.info(f"'{START_KEYWORD}' 호출 감지! Active 모드로 전환합니다.")
-                return # 호출이 감지되면 함수 종료 -> Active 모드로 전환
-    
-    except asyncio.CancelledError:
-        logging.info("호출 감지 루프가 취소되었습니다.")
-    except Exception as e:
-        logging.error(f"호출 감지 루프 중 오류: {e}", exc_info=True)
+                return
     finally:
-        if audio_processor:
-            audio_processor.stop()
-        if audio_thread and audio_thread.is_alive():
-            audio_thread.join(timeout=1.0)
+        if audio_processor: audio_processor.stop()
+        if audio_thread and audio_thread.is_alive(): audio_thread.join(timeout=1.0)
         logging.info("💤 Sleep 모드 종료.")
 
-
-# --- 헬퍼 함수들 ---
 def find_input_device():
     """오디오 입력 장치 검색"""
     try:
@@ -460,11 +538,13 @@ async def chat_handler(websocket):
 
             # Sleep 모드 종료 후 AWAKE 음성 재생
             await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(AWAKE_FILE)}))
-
-            # 2. Active 모드: 실시간 대화 세션 진행
-            await realtime_session(websocket)
             
-            # Active 모드가 끝나면 다시 Sleep 모드로 돌아감
+            # 2. Active 모드
+            if USE_REALTIME_API:
+                await realtime_pipeline(websocket)
+            else:
+                await responses_pipeline(websocket)
+            
             await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(SLEEP_FILE)}))
             logging.info("Active 세션 종료. 다시 Sleep 모드로 전환합니다.")
 
