@@ -219,10 +219,10 @@ void stream_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream
             soundStream.play();
             playback_started = true;
             // 로그 출력
-            auto playback_start_time = std::chrono::high_resolution_clock::now().time_since_epoch();
+            auto playback_start_time = std::chrono::system_clock::now().time_since_epoch();
             {
                 std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "[시간 측정] STT 완료 후 음성 재생까지의 시간: " 
+                std::cout << "[시간 측정] STT 완료 후 음성 재생까지의 시간: "
                           << std::chrono::duration<double, std::milli>(playback_start_time).count() - STT_DONE_TIME << "ms"
                           << std::endl;
             }
@@ -309,10 +309,10 @@ void read_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& 
             soundStream.play();
             playback_started = true;
             // 로그 출력
-            auto playback_start_time = std::chrono::high_resolution_clock::now().time_since_epoch();
+            auto playback_start_time = std::chrono::system_clock::now().time_since_epoch();
             {
                 std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "[시간 측정] STT 완료 후 음성 재생까지의 시간: " 
+                std::cout << "[시간 측정] STT 완료 후 음성 재생까지의 시간: "
                           << std::chrono::duration<double, std::milli>(playback_start_time).count() - STT_DONE_TIME << "ms"
                           << std::endl;
             }
@@ -865,10 +865,6 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 server_message_queue.pop();
             }
             
-            if (response.contains("stt_done_time")) {
-                STT_DONE_TIME = response["stt_done_time"].get<double>();
-            }
-
             std::string type = response.value("type", "error");
             
             if (type == "play_audio") {
@@ -975,6 +971,13 @@ int main() {
                 } else if (type == "gpt_stream_end") {
                     is_streaming = false; // 스트리밍 종료 플래그 설정
                     stream_buffer_cv.notify_one();
+                } else if (type == "stt_done") {
+                    // STT 완료 시간을 main에서 직접 처리
+                    if (response.contains("stt_done_time")) {
+                        STT_DONE_TIME = response["stt_done_time"].get<double>();
+                        std::lock_guard<std::mutex> lock(cout_mutex);
+                        std::cout << "[시간 측정] STT 완료 시각(ms): " << STT_DONE_TIME << std::endl;
+                    }
                 } else if (type == "user_interruption") {
                     if (is_speaking) {
                         std::lock_guard<std::mutex> lock(cout_mutex);

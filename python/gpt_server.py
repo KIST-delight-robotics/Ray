@@ -7,6 +7,7 @@ import asyncio
 import logging
 import threading
 import math
+import uuid
 import base64
 from collections import deque
 
@@ -25,6 +26,7 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(
 # --- 기본 설정 ---
 # OpenAI 키 & Google Cloud 인증파일 경로 환경변수 등록 필요
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GOOGLE_CLOUD_PROJECT_ID = "beaming-ion-393306"
 
 # --- 경로 설정 ---
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -48,10 +50,10 @@ CHANNELS = 1
 AUDIO_DTYPE = "int16"
 
 # --- OpenAI 설정 ---
-USE_REALTIME_API = True  # <<<< API 선택 플래그 (False로 설정 시 Responses API 사용)
+USE_REALTIME_API = False  # <<<< API 선택 플래그 (False로 설정 시 Responses API 사용)
 REALTIME_MODEL = "gpt-4o-mini-realtime-preview"
-RESPONSES_API_MODEL = "gpt-4.1"
-PROMPT = prompts.MONDAY_PROMPT
+RESPONSES_API_MODEL = "gpt-5-nano"
+PROMPT = prompts.SYSTEM_PROMPT_0
 VOICE = "coral"
 TTS_MODEL = "gpt-4o-mini-tts"
 
@@ -67,7 +69,7 @@ END_KEYWORDS = ["종료", "쉬어"]
 class AudioProcessor:
     """마이크 입력부터 VAD, STT까지 모든 오디오 처리를 전담하는 클래스"""
 
-    def __init__(self, stt_result_queue: asyncio.Queue, main_loop: asyncio.AbstractEventLoop, websocket):
+    def __init__(self, stt_result_queue: asyncio.Queue, main_loop: asyncio.AbstractEventLoop, websocket, adaptation_config=None):
         # --- 상태 변수 ---
         self.stt_result_queue = stt_result_queue
         self.main_loop = main_loop
@@ -101,6 +103,7 @@ class AudioProcessor:
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=SAMPLE_RATE,
             language_code="ko-KR",
+            adaptation=adaptation_config
         )
         self.stt_streaming_config = speech.StreamingRecognitionConfig(
             config=self.stt_config,
@@ -190,6 +193,11 @@ class AudioProcessor:
                     final_text = result.alternatives[0].transcript.strip()
                     logging.info(f"✅ STT 최종 결과: '{final_text}'")
                     # STT 완료시 메인 asyncio 루프로 결과 전송
+                    stt_completion_time = int(time.time() * 1000)
+                    asyncio.run_coroutine_threadsafe(
+                        self.websocket.send(json.dumps({"type": "stt_done", "stt_done_time": stt_completion_time})),
+                        self.main_loop
+                    )
                     if final_text:
                         self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
                     return
@@ -439,7 +447,7 @@ async def realtime_pipeline(websocket, conversation_log):
 # ==================================================================================================
 # Responses API 파이프라인
 # ==================================================================================================
-async def handle_text_to_speech_stream(response_stream, client, websocket, history):
+async def handle_tts_stream(response_stream, client, websocket, history):
     """Responses API의 텍스트 스트림을 받아 TTS 오디오 스트림으로 변환 후 전송"""
     await websocket.send(json.dumps({"type": "gpt_stream_start"}))
     
@@ -488,6 +496,32 @@ async def handle_text_to_speech_stream(response_stream, client, websocket, histo
             history.append({"role": "assistant", "content": full_response_text})
             logging.info(f"OpenAI 응답 완료: '{full_response_text}'")
 
+async def handle_tts_oneshot(response_text, client, websocket, conversation_log):
+    """전체 텍스트를 받아 한 번에 TTS 처리하는 함수"""
+    try:
+        # 텍스트 전체를 한 번에 TTS 처리
+        async with client.audio.speech.with_streaming_response.create(
+            model=TTS_MODEL,
+            voice=VOICE,
+            input=response_text,
+            response_format="pcm"
+        ) as tts_response:
+            async for audio_chunk in tts_response.iter_bytes(chunk_size=4096):
+                await websocket.send(json.dumps({
+                    "type": "audio_chunk", 
+                    "data": base64.b64encode(audio_chunk).decode('utf-8')
+                }))
+                
+        # 응답 히스토리에 추가
+        conversation_log.append({"role": "assistant", "content": response_text})
+        logging.info(f"OpenAI 응답 완료: '{response_text}'")
+        
+    except asyncio.CancelledError:
+        logging.info("TTS 처리가 중단되었습니다.")
+        raise
+    finally:
+        await websocket.send(json.dumps({"type": "gpt_stream_end"}))
+
 async def responses_pipeline(websocket):
     logging.info("🤖 Responses API 파이프라인 시작...")
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -516,16 +550,17 @@ async def responses_pipeline(websocket):
 
             history.append({"role": "user", "content": user_text})
             
-            response_stream = await openai_client.responses.create(
+            response = await openai_client.responses.create(
                 model=RESPONSES_API_MODEL,
                 input=history,
-                # reasoning={ "effort": "low" },
-                # text={ "verbosity": "low" },
-                stream=True
+                reasoning={ "effort": "minimal" },
+                text={ "verbosity": "low" },
+                # stream=True
             )
-            
+            response_text = response.output_text
+
             tts_task = asyncio.create_task(
-                handle_text_to_speech_stream(response_stream, openai_client, websocket, history)
+                handle_tts_oneshot(response_text, openai_client, websocket, history)
             )
             try:
                 await tts_task
@@ -539,6 +574,171 @@ async def responses_pipeline(websocket):
         logging.info("🤖 Responses API 파이프라인 종료.")
 
 # ==================================================================================================
+# Unified API Pipeline (Realtime + Responses)
+# ==================================================================================================
+
+async def run_realtime_task(websocket, openai_connection, conversation_log, realtime_finished_event: asyncio.Event, item_ids_to_manage: list):
+    """(Task 1) Realtime API를 호출하고 오디오를 스트리밍합니다."""
+    logging.info("⚡️ Realtime Task 시작...")
+    
+    try:
+        # 1. 이전 턴에서 생성된 모든 대화 아이템들을 삭제하여 세션을 초기화
+        if item_ids_to_manage:
+            logging.info(f"이전 Realtime 대화 아이템 {len(item_ids_to_manage)}개 삭제 중...")
+            delete_tasks = [openai_connection.conversation.item.delete(item_id=item_id) for item_id in item_ids_to_manage]
+            await asyncio.gather(*delete_tasks, return_exceptions=True) # 예외가 발생해도 계속 진행
+            item_ids_to_manage.clear()
+            logging.info("이전 아이템 삭제 완료.")
+
+        # 2. 현재 대화 기록을 기반으로 새 아이템들을 생성
+        await openai_connection.session.update(session={"instructions": PROMPT, "voice": VOICE})
+
+        history_items = [entry for entry in conversation_log if entry['role'] != 'system']
+        for entry in history_items:
+            item_to_create = {
+                "type": "message",
+                "role": entry['role'],
+                "content": [{"type": "input_text", "text": entry['content']}]
+            }
+            await openai_connection.conversation.item.create(item=item_to_create)
+
+        # 3. 응답 생성 시작
+        await openai_connection.response.create()
+
+        logging.info(f"Realtime API에 '{conversation_log[-1]['content']}' 전송 및 응답 요청")
+
+        # 4. 오디오 스트림 처리
+        async for event in openai_connection:
+            if event.type == "conversation.item.created":
+                item_ids_to_manage.append(event.item.id)
+            if event.type == "response.audio.delta":
+                await websocket.send(json.dumps({"type": "audio_chunk", "data": event.delta}))
+            elif event.type == "response.done":
+                logging.info("⚡️ Realtime API 응답 스트림 완료.")
+                break # 응답이 끝나면 루프 종료
+    
+    except asyncio.CancelledError:
+        logging.info("⚡️ Realtime Task가 외부에서 중단되었습니다.")
+    except Exception as e:
+        logging.error(f"⚡️ Realtime Task 실행 중 오류: {e}", exc_info=True)
+    finally:
+        # 태스크가 정상적으로 끝나든, 취소되든 항상 이벤트를 설정하여 Responses Task의 대기를 해제
+        realtime_finished_event.set()
+        logging.info("⚡️ Realtime Task 종료.")
+
+
+async def run_responses_task(websocket, openai_client, conversation_log, realtime_finished_event: asyncio.Event):
+    """(Task 2) Responses API를 호출하고, Realtime 응답이 끝난 후 TTS를 스트리밍합니다."""
+    logging.info("🧠 Responses Task 시작...")
+    try:
+        # 1. Responses API로부터 텍스트 답변 생성
+        response = await openai_client.responses.create(
+            model="gpt-5",
+            input=conversation_log,
+            reasoning={ "effort": "low" },
+            text={ "verbosity": "low" },
+        )
+        response_text = response.output_text
+        logging.info(f"🧠 Responses API 답변 생성 완료: '{response_text}'")
+
+        # 2. Realtime API의 응답이 끝날 때까지 대기
+        logging.info("...Realtime 응답이 끝나기를 대기 중...")
+        await realtime_finished_event.wait()
+        
+        # 대기 후, 현재 태스크가 취소되었는지 확인
+        await asyncio.sleep(0) # 다른 태스크에 제어권을 넘겨 즉시 취소 예외를 받을 기회를 줌
+
+        # 3. Realtime 응답이 끝나면, 생성된 텍스트로 TTS 스트리밍 시작
+        logging.info("...Realtime 응답 완료. Responses API의 TTS를 시작합니다.")
+        # handle_tts_oneshot은 내부적으로 history에 assistant 응답을 추가함
+        await handle_tts_oneshot(response_text, openai_client, websocket, conversation_log)
+
+    except asyncio.CancelledError:
+        logging.info("🧠 Responses Task가 외부에서 중단되었습니다.")
+    except Exception as e:
+        logging.error(f"🧠 Responses Task 실행 중 오류: {e}", exc_info=True)
+    finally:
+        logging.info("🧠 Responses Task 종료.")
+
+
+async def unified_active_pipeline(websocket, conversation_log):
+    """사용자 입력에 대해 Realtime API와 Responses API를 동시에 호출하여 순차적으로 응답하는 통합 파이프라인"""
+    logging.info("🤖 Unified Active Pipeline 시작...")
+    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    audio_processor, audio_thread = None, None
+    active_response_tasks = []
+
+    stt_result_queue = asyncio.Queue()
+    main_loop = asyncio.get_running_loop()
+
+    # Active 모드에 진입할 때 Realtime API 연결을 한 번만 생성
+    async with openai_client.beta.realtime.connect(model=REALTIME_MODEL) as openai_connection:
+        realtime_item_ids_to_manage = []
+        try:
+            # 1. 오디오 처리기 시작
+            audio_processor = AudioProcessor(stt_result_queue, main_loop, websocket)
+            audio_thread = threading.Thread(target=audio_processor.start, daemon=True)
+            audio_thread.start()
+
+            # 2. 사용자 입력을 기다리는 메인 루프
+            while True:
+                user_text = await stt_result_queue.get()
+
+                # 3. 새 입력이 들어오면, 이전의 모든 AI 응답 태스크를 즉시 중단
+                if active_response_tasks:
+                    logging.info(f"사용자 인터럽션 감지: '{user_text}'. 이전 응답 태스크를 중단합니다.")
+                    for task in active_response_tasks:
+                        task.cancel()
+                    # 모든 태스크가 완전히 취소될 때까지 기다림
+                    await asyncio.gather(*active_response_tasks, return_exceptions=True)
+                    active_response_tasks = []
+
+                # 4. 종료 키워드 확인
+                if any(kw in user_text for kw in END_KEYWORDS):
+                    await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(SLEEP_FILE)}))
+                    logging.info(f"종료 키워드 감지: '{user_text}' - 세션을 종료합니다.")
+                    break # Active Pipeline 종료
+
+                # 5. 대화 기록에 사용자 메시지 추가
+                conversation_log.append({"role": "user", "content": user_text})
+
+                # 6. 두 API 태스크 간의 동기화를 위한 이벤트 생성
+                realtime_finished_event = asyncio.Event()
+                
+                # 7. 클라이언트에 GPT 스트림 시작 신호 전송
+                await websocket.send(json.dumps({"type": "gpt_stream_start"}))
+                logging.info("두 API 태스크 시작")
+
+                # 8. Realtime 및 Responses API 태스크를 생성하고 동시에 실행
+                realtime_task = asyncio.create_task(
+                    run_realtime_task(websocket, openai_connection, conversation_log, realtime_finished_event, realtime_item_ids_to_manage)
+                )
+                responses_task = asyncio.create_task(
+                    run_responses_task(websocket, openai_client, conversation_log, realtime_finished_event)
+                )
+                active_response_tasks = [realtime_task, responses_task]
+
+        except Exception as e:
+            logging.error(f"Unified Active Pipeline에서 오류 발생: {e}", exc_info=True)
+        finally:
+            # 파이프라인 종료 시 모든 리소스 정리
+            if active_response_tasks:
+                for task in active_response_tasks:
+                    task.cancel()
+                await asyncio.gather(*active_response_tasks, return_exceptions=True)
+
+            # Active 모드 종료 시 서버에 남아있는 아이템들을 모두 정리
+            if realtime_item_ids_to_manage:
+                logging.info(f"Active 세션 종료. 남은 Realtime 아이템 {len(realtime_item_ids_to_manage)}개 정리 중...")
+                delete_tasks = [openai_connection.conversation.item.delete(item_id=item_id) for item_id in realtime_item_ids_to_manage]
+                await asyncio.gather(*delete_tasks, return_exceptions=True)
+                logging.info("남은 아이템 정리 완료.")
+
+            if audio_processor: audio_processor.stop()
+            if audio_thread and audio_thread.is_alive(): audio_thread.join(timeout=1.0)
+            logging.info("🤖 Unified Active Pipeline 종료.")
+
+# ==================================================================================================
 # Sleep 모드 및 메인 핸들러
 # ==================================================================================================
 async def wakeword_detection_loop(websocket):
@@ -548,6 +748,23 @@ async def wakeword_detection_loop(websocket):
     try:
         keyword_queue = asyncio.Queue()
         main_loop = asyncio.get_running_loop()
+
+        # adaptation_client = speech.AdaptationClient()
+        # parent = f"projects/{GOOGLE_CLOUD_PROJECT_ID}/locations/global"
+
+        # phrase_set_response = adaptation_client.create_phrase_set(
+        #     {
+        #         "parent": parent,
+        #         "phrase_set_id": "wakeup_keywords",
+        #         "phrase_set": {
+        #             "phrases": [{"value": START_KEYWORD}],
+        #             "boost": 20.0  # boost 값으로 인식률 가중치 부여
+        #         }
+        #     }
+        # )
+        # phrase_set_name = phrase_set_response.name
+
+        # adaptation_config = speech.SpeechAdaptation(phrase_set_references=[phrase_set_name])
 
         audio_processor = AudioProcessor(keyword_queue, main_loop, websocket)
         audio_thread = threading.Thread(target=audio_processor.start, daemon=True)
@@ -588,14 +805,12 @@ async def chat_handler(websocket):
             # 1. Sleep 모드: 키워드 감지 대기
             await wakeword_detection_loop(websocket)
 
-            # Sleep 모드 종료 후 AWAKE 음성 재생
+            # 2. Sleep 모드 종료 후 AWAKE 음성 재생
             await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(AWAKE_FILE)}))
             
-            # 2. Active 모드
-            if USE_REALTIME_API:
-                await realtime_pipeline(websocket, conversation_log)
-            else:
-                await responses_pipeline(websocket)
+            # 3. Active 모드
+            await unified_active_pipeline(websocket, conversation_log)
+            # await realtime_pipeline(websocket, conversation_log)
             
             # await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(SLEEP_FILE)}))
             logging.info("Active 세션 종료. 다시 Sleep 모드로 전환합니다.")
