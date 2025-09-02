@@ -163,7 +163,7 @@ void stream_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream
     const size_t bytes_per_interval = samplerate * channels * sizeof(sf::Int16) * INTERVAL_MS / 1000;
     bool playback_started = false;
 
-    for (int cycle_num = 0; ; ++cycle_num) {
+    for (int cycle_num = -2; ; ++cycle_num) {
         if (user_interruption_flag) {
             std::cout << "Interruption detected in stream_and_split." << std::endl;
             break;
@@ -212,24 +212,9 @@ void stream_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream
             audio_queue.push(audio_for_motion);
         }
         audio_queue_cv.notify_one();
-
-        // --- 4. 재생 시작 ---
-        // 2 사이클 이후 오디오 재생을 시작합니다.
-        if (!playback_started && cycle_num >= 2) {
-            soundStream.play();
-            playback_started = true;
-            // 로그 출력
-            auto playback_start_time = std::chrono::system_clock::now().time_since_epoch();
-            {
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "[시간 측정] STT 완료 후 음성 재생까지의 시간: "
-                          << std::chrono::duration<double, std::milli>(playback_start_time).count() - STT_DONE_TIME << "ms"
-                          << std::endl;
-            }
-        }
     }
 
-    // --- 5. 종료 처리 ---
+    // --- 4. 종료 처리 ---
     // 모든 처리가 끝났음을 후속 스레드에 알립니다.
     stop_flag = true;
     audio_queue_cv.notify_one(); // 대기 중인 generate_motion 스레드를 깨워 종료 조건을 확인시킵니다.
@@ -263,7 +248,7 @@ void read_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& 
         vocal_buffer.resize(frames_per_interval * channels);
     }
 
-    for (int cycle_num = 0; ; ++cycle_num) {
+    for (int cycle_num = -2; ; ++cycle_num) {
         if (user_interruption_flag) {
             std::cout << "Interruption detected in read_and_split." << std::endl;
             break;
@@ -303,25 +288,10 @@ void read_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& 
         }
         audio_queue_cv.notify_one();
 
-        // --- 4. 재생 시작 ---
-        // 2 사이클 이후 오디오 재생을 시작합니다.
-        if (!playback_started && cycle_num >= 2) {
-            soundStream.play();
-            playback_started = true;
-            // 로그 출력
-            auto playback_start_time = std::chrono::system_clock::now().time_since_epoch();
-            {
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "[시간 측정] STT 완료 후 음성 재생까지의 시간: "
-                          << std::chrono::duration<double, std::milli>(playback_start_time).count() - STT_DONE_TIME << "ms"
-                          << std::endl;
-            }
-        }
-
         position += frames_per_interval;
     }
 
-    // --- 5. 종료 처리 ---
+    // --- 4. 종료 처리 ---
     // 모든 처리가 끝났음을 후속 스레드에 알립니다.
     stop_flag = true;
     audio_queue_cv.notify_one(); // 대기 중인 generate_motion 스레드를 깨워 종료 조건을 확인시킵니다.
@@ -367,7 +337,7 @@ void generate_motion(int channels, int samplerate) {
 
     int first_segment_flag = 1;
 
-    for (int cycle_num = 1; ; ++cycle_num) {
+    for (int cycle_num = -1; ; ++cycle_num) {
         if (user_interruption_flag) {
             std::cout << "Interruption detected in generate_motion." << std::endl;
             break;
@@ -570,7 +540,7 @@ void generate_motion(int channels, int samplerate) {
 }
 
 
-void control_motor() {
+void control_motor(CustomSoundStream& soundStream) {
     first_run_flag = 1;
     // 모터 초기 설정 코드
     while(!mouth_motion_queue.empty()) mouth_motion_queue.pop();
@@ -593,12 +563,24 @@ void control_motor() {
         return;
     }
 
+    // 스레드 3이 시작될 때 오디오 재생
+    soundStream.play();
+
+    // 로그 출력
+    auto playback_start_time = std::chrono::high_resolution_clock::now().time_since_epoch();
+    {
+        std::lock_guard<std::mutex> lock(cout_mutex);
+        std::cout << "[시간 측정] STT 완료 후 음성 재생까지의 시간: " 
+                  << std::chrono::duration<double, std::milli>(playback_start_time).count() - STT_DONE_TIME << "ms"
+                  << std::endl;
+    }
+
     // 최초 모터 이동 후 값을 업데이트
     for (int i = 0; i < DXL_NUM; i++) {
         DXL_past_position[i] = DXL_initial_position[i];
     }
 
-    int cycle_num = 2; // cycle_num을 2부터 시작
+    int cycle_num = 0; // cycle_num을 2부터 시작
     std::vector<std::vector<double>> current_motion_data(9, std::vector<double>(3, 0.0));
 
     for (;; cycle_num++) {
@@ -905,7 +887,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
 
         std::thread t1(t1_func, sndfile, sfinfo, std::ref(soundStream));
         std::thread t2 = std::thread(generate_motion, sfinfo.channels, sfinfo.samplerate);
-        std::thread t3 = std::thread(control_motor);
+        std::thread t3 = std::thread(control_motor, std::ref(soundStream));
 
         // --- 3. 스레드 종료 대기 ---
         t1.join();

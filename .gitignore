@@ -22,3 +22,6 @@ core
 # IDE-specific files
 *.vscode/
 *.vs/
+
+# Python cache
+__pycache__/
