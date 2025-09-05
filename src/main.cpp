@@ -207,6 +207,12 @@ void stream_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream
         // --- 3. 데이터 전달 ---
         // 가공된 데이터를 각각의 소비자(재생, 모션 생성)에게 전달합니다.
         soundStream.appendData(audio_for_playback);
+        // {
+        //     auto now_ms = std::chrono::high_resolution_clock::now();
+        //     std::lock_guard<std::mutex> lock(cout_mutex);
+        //     std::cout << "[시간 측정] start → " << cycle_num + 2 << " 번 오디오 append: "
+        //               << std::chrono::duration_cast<std::chrono::milliseconds>(now_ms - start_time).count() << "ms" << std::endl;
+        // }
         {
             std::lock_guard<std::mutex> lock(audio_queue_mutex);
             audio_queue.push(audio_for_motion);
@@ -563,24 +569,13 @@ void control_motor(CustomSoundStream& soundStream) {
         return;
     }
 
-    // 스레드 3이 시작될 때 오디오 재생
-    soundStream.play();
-
-    // 로그 출력
-    auto playback_start_time = std::chrono::high_resolution_clock::now().time_since_epoch();
-    {
-        std::lock_guard<std::mutex> lock(cout_mutex);
-        std::cout << "[시간 측정] STT 완료 후 음성 재생까지의 시간: " 
-                  << std::chrono::duration<double, std::milli>(playback_start_time).count() - STT_DONE_TIME << "ms"
-                  << std::endl;
-    }
 
     // 최초 모터 이동 후 값을 업데이트
     for (int i = 0; i < DXL_NUM; i++) {
         DXL_past_position[i] = DXL_initial_position[i];
     }
 
-    int cycle_num = 0; // cycle_num을 2부터 시작
+    int cycle_num = 0;
     std::vector<std::vector<double>> current_motion_data(9, std::vector<double>(3, 0.0));
 
     for (;; cycle_num++) {
@@ -629,6 +624,21 @@ void control_motor(CustomSoundStream& soundStream) {
                 motion_data = mouth_motion_queue.front();
                 mouth_motion_queue.pop();
                 
+            }
+
+            if (cycle_num == 0 && i == 0) {
+                soundStream.play(); // 첫 사이클에서 오디오 재생
+                // 로그 출력
+                auto playback_start_time = std::chrono::high_resolution_clock::now();
+                {
+                    std::lock_guard<std::mutex> lock(cout_mutex);
+                    auto playback_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(playback_start_time.time_since_epoch()).count();
+                    std::cout << "[시간 측정] start → 오디오 재생 시작: "
+                            << std::chrono::duration_cast<std::chrono::milliseconds>(playback_start_time - start_time).count() << "ms\n" 
+                            << "[시간 측정] stt 완료 → 오디오 재생 시작: "
+                            << static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(playback_start_time.time_since_epoch()).count() - STT_DONE_TIME) << "ms" << std::endl;
+                }
+                start_time = std::chrono::high_resolution_clock::now();
             }
             
             // 모터 제어 로직 구현
@@ -954,11 +964,9 @@ int main() {
                     is_streaming = false; // 스트리밍 종료 플래그 설정
                     stream_buffer_cv.notify_one();
                 } else if (type == "stt_done") {
-                    // STT 완료 시간을 main에서 직접 처리
                     if (response.contains("stt_done_time")) {
                         STT_DONE_TIME = response["stt_done_time"].get<double>();
                         std::lock_guard<std::mutex> lock(cout_mutex);
-                        std::cout << "[시간 측정] STT 완료 시각(ms): " << STT_DONE_TIME << std::endl;
                     }
                 } else if (type == "user_interruption") {
                     if (is_speaking) {

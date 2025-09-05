@@ -26,14 +26,13 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(
 # --- 기본 설정 ---
 # OpenAI 키 & Google Cloud 인증파일 경로 환경변수 등록 필요
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GOOGLE_CLOUD_PROJECT_ID = "beaming-ion-393306"
 
 # --- 경로 설정 ---
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if PROJECT_ROOT not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-import config.prompts as prompts
+from config.prompts import SYSTEM_PROMPT
 
 ASSETS_DIR = PROJECT_ROOT / "assets"
 OUTPUT_DIR = PROJECT_ROOT / "output"
@@ -53,7 +52,7 @@ AUDIO_DTYPE = "int16"
 USE_REALTIME_API = False  # <<<< API 선택 플래그 (False로 설정 시 Responses API 사용)
 REALTIME_MODEL = "gpt-4o-mini-realtime-preview"
 RESPONSES_API_MODEL = "gpt-5-nano"
-PROMPT = prompts.SYSTEM_PROMPT_0
+PROMPT = SYSTEM_PROMPT
 VOICE = "coral"
 TTS_MODEL = "gpt-4o-mini-tts"
 
@@ -193,13 +192,13 @@ class AudioProcessor:
                     final_text = result.alternatives[0].transcript.strip()
                     logging.info(f"✅ STT 최종 결과: '{final_text}'")
                     # STT 완료시 메인 asyncio 루프로 결과 전송
+                    if final_text:
+                        self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
                     stt_completion_time = int(time.time() * 1000)
                     asyncio.run_coroutine_threadsafe(
                         self.websocket.send(json.dumps({"type": "stt_done", "stt_done_time": stt_completion_time})),
                         self.main_loop
                     )
-                    if final_text:
-                        self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
                     return
                 else:
                     logging.info(f"✅ STT 중간 결과: '{transcript}'")
@@ -213,6 +212,30 @@ class AudioProcessor:
             self.vad_model.reset_states()
             self.vad_active_flag.set()
             logging.info("STT 세션 종료 및 VAD 감지 시작")
+
+    def _process_audio_for_vad(self, audio_chunk_int16):
+        # float32로 변환 (Silero VAD 요구사항)
+        audio_chunk_float32 = audio_chunk_int16.astype(np.float32) / 32768.0
+        audio_tensor = torch.from_numpy(audio_chunk_float32.flatten())
+        
+        # 버퍼에 현재 청크 추가
+        self.vad_buffer = torch.cat([self.vad_buffer, audio_tensor])
+        
+        # 충분한 데이터가 있으면 VAD 처리
+        while len(self.vad_buffer) >= self.VAD_CHUNK_SIZE:
+            # 청크 크기만큼 추출하여 처리
+            vad_chunk = self.vad_buffer[:self.VAD_CHUNK_SIZE]
+            self.vad_buffer = self.vad_buffer[self.VAD_CHUNK_SIZE:]
+            
+            # VAD 모델로 음성 확률 계산
+            speech_prob = self.vad_model(vad_chunk, SAMPLE_RATE).item()
+            
+            # 임계값 이상이면 연속 카운터 증가, 아니면 리셋
+            if speech_prob > self.VAD_THRESHOLD:
+                self.consecutive_speech_chunks += 1
+                logging.debug(f"VAD 음성 감지: {speech_prob:.2f}, 연속 청크: {self.consecutive_speech_chunks}")
+            else:
+                self.consecutive_speech_chunks = 0
 
     def start(self):
         """오디오 처리 스레드의 메인 루프. 이 함수가 별도 스레드에서 실행됨."""
@@ -246,42 +269,19 @@ class AudioProcessor:
                     except queue.Empty:
                         continue
 
-                    # 사전 버퍼 저장 (롤링 버퍼)
+                    # 사전 버퍼 저장
                     self.stt_pre_buffer.append(audio_chunk_int16)
 
-                    # VAD 처리를 위해 float32로 변환하고 버퍼에 추가
-                    audio_chunk_float32 = audio_chunk_int16.astype(np.float32) / 32768.0
-                    audio_tensor = torch.from_numpy(audio_chunk_float32.flatten())
+                    # VAD 처리
+                    self._process_audio_for_vad(audio_chunk_int16)
 
-                    if len(audio_tensor) == self.VAD_CHUNK_SIZE and len(self.vad_buffer) == 0:
-                        speech_prob = self.vad_model(audio_tensor, SAMPLE_RATE).item()
-                        if speech_prob > self.VAD_THRESHOLD:
-                            self.consecutive_speech_chunks += 1
-                        else:
-                            self.consecutive_speech_chunks = 0
-                    else:
-                        logging.debug("예외 경로 실행: 오디오 청크 크기가 비정상이거나 버퍼가 남아있습니다.")
-                        self.vad_buffer = torch.cat([self.vad_buffer, audio_tensor])
-                        
-                        # 버퍼에 VAD를 처리할 만큼의 데이터가 쌓였는지 확인.
-                        while len(self.vad_buffer) >= self.VAD_CHUNK_SIZE:
-                            vad_chunk = self.vad_buffer[:self.VAD_CHUNK_SIZE]
-                            self.vad_buffer = self.vad_buffer[self.VAD_CHUNK_SIZE:]
-
-                            speech_prob = self.vad_model(vad_chunk, SAMPLE_RATE).item()
-                            if speech_prob > self.VAD_THRESHOLD:
-                                self.consecutive_speech_chunks += 1
-                            else:
-                                self.consecutive_speech_chunks = 0
-                            break
-                    
-                    # 연속적으로 음성이 감지되면 STT 세션을 시작.
+                    # 연속적으로 음성이 감지되면 STT 세션 시작.
                     if self.consecutive_speech_chunks >= self.VAD_CONSECUTIVE_CHUNKS:
-                        self.vad_active_flag.clear() # VAD 루프를 '대기' 상태로 전환.
+                        self.vad_active_flag.clear() # VAD 루프를 대기 상태로 전환.
                         logging.info(f"🗣️ 음성 시작 감지! STT 시작.")
                         threading.Thread(target=self._run_stt).start()
                         
-                        # STT 시작과 함께 VAD 관련 상태를 깨끗하게 초기화.
+                        # STT 시작과 함께 VAD 관련 상태 초기화.
                         self.vad_buffer = torch.tensor([])
                         self.consecutive_speech_chunks = 0
         except Exception as e:
@@ -324,11 +324,11 @@ async def handle_stt_results_for_realtime(stt_queue: asyncio.Queue, openai_conne
                 break  # STT 결과 처리 루프 종료
             else:
                 # OpenAI에 사용자 메시지 전송 및 AI 응답 요청
-                send_item = await openai_connection.conversation.item.create(
+                await openai_connection.conversation.item.create(
                     item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]}
                 )
                 await openai_connection.response.create()
-                logging.info(send_item)
+                await websocket.send(json.dumps({"type": "gpt_stream_start"}))
                 logging.info(f"OpenAI에 사용자 메시지 '{user_text}' 전송 및 응답 요청")
 
         except asyncio.CancelledError:
@@ -355,7 +355,6 @@ async def handle_openai_responses_for_realtime(openai_connection, websocket, ses
 
             if event.type == "response.created":
                 session_state['is_streaming_response'] = True
-                await websocket.send(json.dumps({"type": "gpt_stream_start"}))
             
             elif event.type == "response.audio.delta":
                 await websocket.send(json.dumps({"type": "audio_chunk", "data": event.delta}))
@@ -577,7 +576,7 @@ async def responses_pipeline(websocket):
 # Unified API Pipeline (Realtime + Responses)
 # ==================================================================================================
 
-async def run_realtime_task(websocket, openai_connection, conversation_log, realtime_finished_event: asyncio.Event, item_ids_to_manage: list):
+async def run_realtime_task(websocket, openai_connection, conversation_log, realtime_finished_event: asyncio.Event, item_ids_to_manage: list, connect_start_time):
     """(Task 1) Realtime API를 호출하고 오디오를 스트리밍합니다."""
     logging.info("⚡️ Realtime Task 시작...")
     
@@ -598,7 +597,7 @@ async def run_realtime_task(websocket, openai_connection, conversation_log, real
             item_to_create = {
                 "type": "message",
                 "role": entry['role'],
-                "content": [{"type": "input_text", "text": entry['content']}]
+                "content": [{"type": "input_text" if entry['role'] == 'user' else "text", "text": entry['content']}]
             }
             await openai_connection.conversation.item.create(item=item_to_create)
 
@@ -611,11 +610,19 @@ async def run_realtime_task(websocket, openai_connection, conversation_log, real
         async for event in openai_connection:
             if event.type == "conversation.item.created":
                 item_ids_to_manage.append(event.item.id)
-            if event.type == "response.audio.delta":
+                # await openai_connection.conversation.item.retrieve(item_id=event.previous_item_id)
+            elif event.type == "response.audio.delta":
                 await websocket.send(json.dumps({"type": "audio_chunk", "data": event.delta}))
             elif event.type == "response.done":
                 logging.info("⚡️ Realtime API 응답 스트림 완료.")
                 break # 응답이 끝나면 루프 종료
+            elif event.type == "response.created":
+                # 클라이언트에 GPT 스트림 시작 신호 전송
+                await websocket.send(json.dumps({"type": "gpt_stream_start"}))
+            elif event.type == "conversation.item.retrieved":
+                logging.info(f"이전 대화 항목이 검색되었습니다: {event.item}")
+            elif event.type == "error":
+                logging.error(f"Realtime API 오류 이벤트: {event}")
     
     except asyncio.CancelledError:
         logging.info("⚡️ Realtime Task가 외부에서 중단되었습니다.")
@@ -670,6 +677,7 @@ async def unified_active_pipeline(websocket, conversation_log):
 
     stt_result_queue = asyncio.Queue()
     main_loop = asyncio.get_running_loop()
+    connect_start_time = time.time()
 
     # Active 모드에 진입할 때 Realtime API 연결을 한 번만 생성
     async with openai_client.beta.realtime.connect(model=REALTIME_MODEL) as openai_connection:
@@ -704,14 +712,10 @@ async def unified_active_pipeline(websocket, conversation_log):
 
                 # 6. 두 API 태스크 간의 동기화를 위한 이벤트 생성
                 realtime_finished_event = asyncio.Event()
-                
-                # 7. 클라이언트에 GPT 스트림 시작 신호 전송
-                await websocket.send(json.dumps({"type": "gpt_stream_start"}))
-                logging.info("두 API 태스크 시작")
 
-                # 8. Realtime 및 Responses API 태스크를 생성하고 동시에 실행
+                # 7. Realtime 및 Responses API 태스크를 생성하고 동시에 실행
                 realtime_task = asyncio.create_task(
-                    run_realtime_task(websocket, openai_connection, conversation_log, realtime_finished_event, realtime_item_ids_to_manage)
+                    run_realtime_task(websocket, openai_connection, conversation_log, realtime_finished_event, realtime_item_ids_to_manage, connect_start_time)
                 )
                 responses_task = asyncio.create_task(
                     run_responses_task(websocket, openai_client, conversation_log, realtime_finished_event)
