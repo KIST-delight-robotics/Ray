@@ -82,10 +82,15 @@ std::condition_variable server_message_queue_cv;
 std::promise<void> server_ready_promise;
 
 // 스트리밍 데이터 처리를 위한 전역 변수
-std::atomic<bool> is_streaming(false);
-std::vector<uint8_t> stream_buffer;
-std::mutex stream_buffer_mutex;
-std::condition_variable stream_buffer_cv;
+std::atomic<bool> is_realtime_streaming(false);
+std::vector<uint8_t> realtime_stream_buffer;
+std::mutex realtime_stream_buffer_mutex;
+std::condition_variable realtime_stream_buffer_cv;
+
+std::atomic<bool> is_responses_streaming(false);
+std::vector<uint8_t> responses_stream_buffer;
+std::mutex responses_stream_buffer_mutex;
+std::condition_variable responses_stream_buffer_cv;
 
 // 쓰레드가 INTERVAL_MS 주기로 동작하게 하는 함수
 void wait_for_next_cycle(int cycle_num) {
@@ -156,12 +161,29 @@ private:
 };
 
 // 첫 번째 쓰레드: 오디오 스트림을 받아 분할합니다.
-void stream_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& soundStream) {
+void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream, const std::string& stream_type) {
+    // --- 스트림 타입에 따라 사용할 버퍼와 동기화 객체 선택 ---
+    std::vector<uint8_t>* buffer;
+    std::mutex* buffer_mutex;
+    std::condition_variable* buffer_cv;
+    std::atomic<bool>* is_streaming_flag;
+
+    if (stream_type == "realtime") {
+        buffer = &realtime_stream_buffer;
+        buffer_mutex = &realtime_stream_buffer_mutex;
+        buffer_cv = &realtime_stream_buffer_cv;
+        is_streaming_flag = &is_realtime_streaming;
+    } else { // "responses"
+        buffer = &responses_stream_buffer;
+        buffer_mutex = &responses_stream_buffer_mutex;
+        buffer_cv = &responses_stream_buffer_cv;
+        is_streaming_flag = &is_responses_streaming;
+    }
+
     // --- 초기 설정 ---
     int channels = sfinfo.channels;
     int samplerate = sfinfo.samplerate;
     const size_t bytes_per_interval = samplerate * channels * sizeof(sf::Int16) * INTERVAL_MS / 1000;
-    bool playback_started = false;
 
     for (int cycle_num = -2; ; ++cycle_num) {
         if (user_interruption_flag) {
@@ -171,29 +193,26 @@ void stream_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream
         wait_for_next_cycle(cycle_num);
 
         // --- 1. 데이터 획득 ---
-        // 스트리밍 버퍼에서 주기(INTERVAL_MS)에 해당하는 오디오 데이터를 가져옵니다.
         std::vector<uint8_t> raw_chunk;
         {
-            std::unique_lock<std::mutex> lock(stream_buffer_mutex);
-            stream_buffer_cv.wait(lock, [&] {
-                return stream_buffer.size() >= bytes_per_interval || !is_streaming;
+            std::unique_lock<std::mutex> lock(*buffer_mutex);
+            buffer_cv->wait(lock, [&] {
+                return buffer->size() >= bytes_per_interval || !(*is_streaming_flag);
             });
 
-            // 스트리밍이 종료되었고 버퍼가 비었으면 스레드를 종료합니다.
-            if (!is_streaming && stream_buffer.empty()) {
+            if (!(*is_streaming_flag) && buffer->empty()) {
                 break;
             }
 
-            size_t size_to_take = std::min(stream_buffer.size(), bytes_per_interval);
-            size_to_take -= size_to_take % (sizeof(sf::Int16) * channels); // Int16 단위로 데이터 정렬
+            size_t size_to_take = std::min(buffer->size(), bytes_per_interval);
+            size_to_take -= size_to_take % (sizeof(sf::Int16) * channels);
             if (size_to_take == 0) continue;
 
-            raw_chunk.assign(stream_buffer.begin(), stream_buffer.begin() + size_to_take);
-            stream_buffer.erase(stream_buffer.begin(), stream_buffer.begin() + size_to_take);
+            raw_chunk.assign(buffer->begin(), buffer->begin() + size_to_take);
+            buffer->erase(buffer->begin(), buffer->begin() + size_to_take);
         }
 
         // --- 2. 데이터 가공 ---
-        // 획득한 데이터를 재생용(Int16)과 모션 생성용(float)으로 변환합니다.
         size_t num_samples = raw_chunk.size() / sizeof(sf::Int16);
         std::vector<sf::Int16> audio_for_playback(num_samples);
         std::vector<float> audio_for_motion(num_samples);
@@ -205,14 +224,7 @@ void stream_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream
         }
 
         // --- 3. 데이터 전달 ---
-        // 가공된 데이터를 각각의 소비자(재생, 모션 생성)에게 전달합니다.
         soundStream.appendData(audio_for_playback);
-        // {
-        //     auto now_ms = std::chrono::high_resolution_clock::now();
-        //     std::lock_guard<std::mutex> lock(cout_mutex);
-        //     std::cout << "[시간 측정] start → " << cycle_num + 2 << " 번 오디오 append: "
-        //               << std::chrono::duration_cast<std::chrono::milliseconds>(now_ms - start_time).count() << "ms" << std::endl;
-        // }
         {
             std::lock_guard<std::mutex> lock(audio_queue_mutex);
             audio_queue.push(audio_for_motion);
@@ -221,9 +233,8 @@ void stream_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream
     }
 
     // --- 4. 종료 처리 ---
-    // 모든 처리가 끝났음을 후속 스레드에 알립니다.
     stop_flag = true;
-    audio_queue_cv.notify_one(); // 대기 중인 generate_motion 스레드를 깨워 종료 조건을 확인시킵니다.
+    audio_queue_cv.notify_one();
 }
 
 // 첫 번째 쓰레드: 오디오 파일을 읽어 분할합니다.
@@ -821,11 +832,15 @@ void robot_main_loop(std::future<void> server_ready_future) {
     while (true) {
         // --- 루프 시작 시 상태 초기화 ---
         stop_flag = false;
-        is_streaming = false;
-        { // user_interruption_flag를 여기서 리셋하면 안됨. 이전 루프에서 발생한 인터럽트가 다음 루프 시작 시에도 유효해야 할 수 있음.
-            // 스트리밍 오디오 버퍼 초기화
-            std::lock_guard<std::mutex> lock(stream_buffer_mutex);
-            stream_buffer.clear();
+        is_realtime_streaming = false;
+        is_responses_streaming = false;
+        {
+            std::lock_guard<std::mutex> lock(realtime_stream_buffer_mutex);
+            realtime_stream_buffer.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(responses_stream_buffer_mutex);
+            responses_stream_buffer.clear();
         }
         
         SF_INFO sfinfo;
@@ -842,7 +857,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
             if (sndfile) is_file_based = true;
             playing_music_flag = true;
         }
-        else { // wait_mode_flag가 on이면 wait_control_motor를 실행하고, off이면 다음 행동을 결정
+        else {
             if (wait_mode_flag == "off") {
                 wait_mode_flag = "on";
                 std::thread wait_mode(wait_control_motor);
@@ -871,9 +886,9 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 sndfile = sf_open(file_to_play.c_str(), SFM_READ, &sfinfo);
                 if (sndfile) is_file_based = true;
             }
-            else if (type == "gpt_stream_start") {
+            else if (type == "realtime_stream_start") {
                 is_file_based = false;
-                is_streaming = true; // 스트리밍 시작 플래그 설정
+                is_realtime_streaming = true;
                 sfinfo.channels = AUDIO_CHANNELS;
                 sfinfo.samplerate = AUDIO_SAMPLE_RATE;
             }
@@ -881,44 +896,90 @@ void robot_main_loop(std::future<void> server_ready_future) {
             wait_mode_flag = "off";
         }
 
-        if (!is_file_based && !is_streaming) { // 파일 기반 재생 또는 스트리밍이 아닌 경우 에러 처리
+        if (!is_file_based && !is_realtime_streaming) {
             std::cerr << "Error: No valid audio source." << std::endl;
             if (sndfile) sf_close(sndfile);
-            continue; // 메인 루프의 처음으로 돌아가 다음 명령을 기다림
+            continue;
         }
 
         CustomSoundStream soundStream(sfinfo.channels, sfinfo.samplerate);
+        CustomSoundStream soundStream_resp(sfinfo.channels, sfinfo.samplerate); // Responses용 사운드 스트림
 
         // --- 2. 스레드 시작 ---
         is_speaking = true;
         start_time = std::chrono::high_resolution_clock::now();
         
-        auto t1_func = is_file_based ? &read_and_split : &stream_and_split;
+        if (is_file_based) {
+            std::thread t1(read_and_split, sndfile, sfinfo, std::ref(soundStream));
+            std::thread t2(generate_motion, sfinfo.channels, sfinfo.samplerate);
+            std::thread t3(control_motor, std::ref(soundStream));
+            t1.join();
+            t2.join();
+            t3.join();
+        } else {
+            // Realtime 처리
+            std::thread t1_realtime(stream_and_split, std::ref(sfinfo), std::ref(soundStream), "realtime");
+            std::thread t2_realtime(generate_motion, sfinfo.channels, sfinfo.samplerate);
+            std::thread t3_realtime(control_motor, std::ref(soundStream));
+            
+            t1_realtime.join();
+            t2_realtime.join();
+            t3_realtime.join();
 
-        std::thread t1(t1_func, sndfile, sfinfo, std::ref(soundStream));
-        std::thread t2 = std::thread(generate_motion, sfinfo.channels, sfinfo.samplerate);
-        std::thread t3 = std::thread(control_motor, std::ref(soundStream));
+            // Responses 처리
+            if (!user_interruption_flag) {
+                // std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                
+                // 스레드 큐 초기화
+                {
+                    std::lock_guard<std::mutex> lock(audio_queue_mutex);
+                    std::queue<std::vector<float>> empty_audio_q;
+                    std::swap(audio_queue, empty_audio_q);
+                }
+                
+                {
+                    std::lock_guard<std::mutex> lock(mouth_motion_queue_mutex);
+                    std::queue<std::pair<int, float>> empty_mouth_q;
+                    std::swap(mouth_motion_queue, empty_mouth_q);
+                    std::queue<std::vector<std::vector<double>>> empty_head_q;
+                    std::swap(head_motion_queue, empty_head_q);
+                }
 
-        // --- 3. 스레드 종료 대기 ---
-        t1.join();
-        t2.join();
-        t3.join();
+                // Responses 스트림이 시작되고 데이터가 들어올 때까지 대기
+                {
+                    std::unique_lock<std::mutex> lock(responses_stream_buffer_mutex);
+                    responses_stream_buffer_cv.wait(lock, []{ return is_responses_streaming || !responses_stream_buffer.empty(); });
+                }
+
+                if (is_responses_streaming || !responses_stream_buffer.empty()) {
+                    stop_flag = false; // 다음 재생을 위해 stop_flag 리셋
+                    std::thread t1_responses(stream_and_split, std::ref(sfinfo), std::ref(soundStream_resp), "responses");
+                    std::thread t2_responses(generate_motion, sfinfo.channels, sfinfo.samplerate);
+                    std::thread t3_responses(control_motor, std::ref(soundStream_resp));
+
+                    t1_responses.join();
+                    t2_responses.join();
+                    t3_responses.join();
+                }
+            }
+        }
         
         is_speaking = false;
 
-        // 인터럽트 발생 시 정리 작업
         if (user_interruption_flag) {
             std::cout << "Interruption handling: Cleaning up resources." << std::endl;
             soundStream.stop();
-            soundStream.clearBuffer(); // 재생 버퍼에 남아있는 오디오 데이터를 제거합니다.
+            soundStream.clearBuffer();
             
-            // 모든 큐 비우기
+            if (is_responses_streaming || !responses_stream_buffer.empty()) {
+                soundStream_resp.stop();
+                soundStream_resp.clearBuffer();
+            }
+            
             std::queue<std::vector<float>> empty_audio_q;
             std::swap(audio_queue, empty_audio_q);
-
             std::queue<std::pair<int, float>> empty_mouth_q;
             std::swap(mouth_motion_queue, empty_mouth_q);
-            
             std::queue<std::vector<std::vector<double>>> empty_head_q;
             std::swap(head_motion_queue, empty_head_q);
 
@@ -931,6 +992,11 @@ void robot_main_loop(std::future<void> server_ready_future) {
         // 오디오 재생이 끝날 때까지 대기
         while (soundStream.getStatus() == sf::Sound::Playing) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (is_responses_streaming || !responses_stream_buffer.empty()) {
+            while (soundStream_resp.getStatus() == sf::Sound::Playing) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
         }
 
         if (sndfile) sf_close(sndfile);
@@ -950,37 +1016,47 @@ int main() {
                 json response = json::parse(msg->str);
                 std::string type = response.value("type", "");
 
-                if (type == "audio_chunk") {
-                    if (user_interruption_flag) return; // 인터럽트 상태에서는 오디오 청크를 무시
+                if (type == "realtime_audio_chunk") {
+                    if (user_interruption_flag) return;
                     std::string b64_data = response.value("data", "");
                     std::string decoded_data;
-                    macaron::Base64::Decode(b64_data, decoded_data); // 스트리밍된 오디오 데이터 디코딩
-                    // 스트리밍 버퍼에 데이터 추가
-                    std::lock_guard<std::mutex> lock(stream_buffer_mutex);
-                    stream_buffer.insert(stream_buffer.end(), decoded_data.begin(), decoded_data.end());
-                    stream_buffer_cv.notify_one();
-
-                } else if (type == "gpt_stream_end") {
-                    is_streaming = false; // 스트리밍 종료 플래그 설정
-                    stream_buffer_cv.notify_one();
+                    macaron::Base64::Decode(b64_data, decoded_data);
+                    std::lock_guard<std::mutex> lock(realtime_stream_buffer_mutex);
+                    realtime_stream_buffer.insert(realtime_stream_buffer.end(), decoded_data.begin(), decoded_data.end());
+                    realtime_stream_buffer_cv.notify_one();
+                } else if (type == "realtime_stream_end") {
+                    is_realtime_streaming = false;
+                    realtime_stream_buffer_cv.notify_one();
+                } else if (type == "responses_audio_chunk") {
+                    if (user_interruption_flag) return;
+                    std::string b64_data = response.value("data", "");
+                    std::string decoded_data;
+                    macaron::Base64::Decode(b64_data, decoded_data);
+                    std::lock_guard<std::mutex> lock(responses_stream_buffer_mutex);
+                    responses_stream_buffer.insert(responses_stream_buffer.end(), decoded_data.begin(), decoded_data.end());
+                    responses_stream_buffer_cv.notify_one();
+                } else if (type == "responses_stream_start") {
+                    is_responses_streaming = true;
+                    responses_stream_buffer_cv.notify_one();
+                } else if (type == "responses_stream_end") {
+                    is_responses_streaming = false;
+                    responses_stream_buffer_cv.notify_one();
                 } else if (type == "stt_done") {
                     if (response.contains("stt_done_time")) {
                         STT_DONE_TIME = response["stt_done_time"].get<double>();
-                        std::lock_guard<std::mutex> lock(cout_mutex);
                     }
                 } else if (type == "user_interruption") {
                     if (is_speaking) {
-                        std::lock_guard<std::mutex> lock(cout_mutex);
                         std::cout << "[WebSocket] User interruption received." << std::endl;
                         user_interruption_flag = true;
-                        // 모든 조건 변수를 깨워 스레드들이 즉시 인터럽트 플래그를 확인하도록 함
-                        stream_buffer_cv.notify_all();
+                        realtime_stream_buffer_cv.notify_all();
+                        responses_stream_buffer_cv.notify_all();
                         audio_queue_cv.notify_all();
                         mouth_motion_queue_cv.notify_all();
                     }
                 } else { // audio_chunk가 아닌 다른 모든 메시지(gpt_streaming_start, play_audio 등)는 메인 루프가 처리하도록 큐에 넣음
                     // 새로운 재생 시작을 알리는 모든 메시지 유형에 대해 인터럽트 플래그를 즉시 리셋
-                    if (type == "gpt_stream_start" || type == "play_audio" || type == "play_music") {
+                    if (type == "realtime_stream_start" || type == "play_audio" || type == "play_music") {
                         user_interruption_flag = false;
                     }
                     std::lock_guard<std::mutex> lock(server_message_queue_mutex);
@@ -988,15 +1064,12 @@ int main() {
                     server_message_queue_cv.notify_one();
                 }
             } catch (const json::parse_error& e) {
-                std::lock_guard<std::mutex> lock(cout_mutex);
                 std::cerr << "JSON 파싱 오류: " << e.what() << " | 원본 메시지: " << msg->str << std::endl;
             }
         } else if (msg->type == ix::WebSocketMessageType::Open) {
-            std::lock_guard<std::mutex> lock(cout_mutex);
             std::cout << "[WebSocket] 서버에 성공적으로 연결되었습니다." << std::endl;
-            server_ready_promise.set_value(); // 서버가 준비되었음을 알림
+            server_ready_promise.set_value();
         } else if (msg->type == ix::WebSocketMessageType::Error) {
-            std::lock_guard<std::mutex> lock(cout_mutex);
             std::cerr << "[WebSocket] 연결 오류: " << msg->errorInfo.reason << std::endl;
         }
     });

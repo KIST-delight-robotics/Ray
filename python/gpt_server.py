@@ -498,7 +498,7 @@ async def handle_tts_stream(response_stream, client, websocket, history):
 async def handle_tts_oneshot(response_text, client, websocket, conversation_log):
     """전체 텍스트를 받아 한 번에 TTS 처리하는 함수"""
     try:
-        # 텍스트 전체를 한 번에 TTS 처리
+        await websocket.send(json.dumps({"type": "responses_stream_start"}))
         async with client.audio.speech.with_streaming_response.create(
             model=TTS_MODEL,
             voice=VOICE,
@@ -507,7 +507,7 @@ async def handle_tts_oneshot(response_text, client, websocket, conversation_log)
         ) as tts_response:
             async for audio_chunk in tts_response.iter_bytes(chunk_size=4096):
                 await websocket.send(json.dumps({
-                    "type": "audio_chunk", 
+                    "type": "responses_audio_chunk", 
                     "data": base64.b64encode(audio_chunk).decode('utf-8')
                 }))
                 
@@ -519,7 +519,7 @@ async def handle_tts_oneshot(response_text, client, websocket, conversation_log)
         logging.info("TTS 처리가 중단되었습니다.")
         raise
     finally:
-        await websocket.send(json.dumps({"type": "gpt_stream_end"}))
+        await websocket.send(json.dumps({"type": "responses_stream_end"}))
 
 async def responses_pipeline(websocket):
     logging.info("🤖 Responses API 파이프라인 시작...")
@@ -611,16 +611,21 @@ async def run_realtime_task(websocket, openai_connection, conversation_log, real
             if event.type == "conversation.item.created":
                 item_ids_to_manage.append(event.item.id)
                 # await openai_connection.conversation.item.retrieve(item_id=event.previous_item_id)
+
             elif event.type == "response.audio.delta":
-                await websocket.send(json.dumps({"type": "audio_chunk", "data": event.delta}))
-            elif event.type == "response.done":
-                logging.info("⚡️ Realtime API 응답 스트림 완료.")
-                break # 응답이 끝나면 루프 종료
+                await websocket.send(json.dumps({"type": "realtime_audio_chunk", "data": event.delta}))
+
             elif event.type == "response.created":
-                # 클라이언트에 GPT 스트림 시작 신호 전송
-                await websocket.send(json.dumps({"type": "gpt_stream_start"}))
+                await websocket.send(json.dumps({"type": "realtime_stream_start"}))
+                
+            elif event.type == "response.done":
+                await websocket.send(json.dumps({"type": "realtime_stream_end"}))
+                logging.info("⚡️ Realtime API 응답 스트림 완료.")
+                break
+
             elif event.type == "conversation.item.retrieved":
                 logging.info(f"이전 대화 항목이 검색되었습니다: {event.item}")
+
             elif event.type == "error":
                 logging.error(f"Realtime API 오류 이벤트: {event}")
     
@@ -657,7 +662,6 @@ async def run_responses_task(websocket, openai_client, conversation_log, realtim
 
         # 3. Realtime 응답이 끝나면, 생성된 텍스트로 TTS 스트리밍 시작
         logging.info("...Realtime 응답 완료. Responses API의 TTS를 시작합니다.")
-        # handle_tts_oneshot은 내부적으로 history에 assistant 응답을 추가함
         await handle_tts_oneshot(response_text, openai_client, websocket, conversation_log)
 
     except asyncio.CancelledError:
