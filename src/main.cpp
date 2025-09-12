@@ -444,7 +444,7 @@ void generate_motion(int channels, int samplerate) {
 
             ////////////////////////////////////////////////////
 
-            // s_max 값 구하기 (s_max가 크면 scaling이 작아져 값이 전체적으로 작아지는 ���할을 함)
+            // s_max 값 구하기 (s_max가 크면 scaling이 작아져 값이 전체적으로 작아지는 역할을 함)
             if(num_motion_size > 2 && max_sample > v1_th && v1_max[v1_max.size()-2] < v1_th){
                 if(v1_max.size() < 100){
                     for(float i = 0; i< v1_max.size(); i++){
@@ -846,6 +846,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
         SF_INFO sfinfo;
         SNDFILE* sndfile = nullptr;
         bool is_file_based = false;
+        bool responses_only_flag = false;
 
         // --- 1. 다음 행동 결정 ---
         if(music_flag) {
@@ -893,10 +894,18 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 sfinfo.samplerate = AUDIO_SAMPLE_RATE;
             }
 
+            else if (type == "responses_only") {
+                is_file_based = false;
+                is_realtime_streaming = false;
+                responses_only_flag = true;
+                sfinfo.channels = AUDIO_CHANNELS;
+                sfinfo.samplerate = AUDIO_SAMPLE_RATE;
+            }
+
             wait_mode_flag = "off";
         }
 
-        if (!is_file_based && !is_realtime_streaming) {
+        if (!is_file_based && !is_realtime_streaming && !responses_only_flag) {
             std::cerr << "Error: No valid audio source." << std::endl;
             if (sndfile) sf_close(sndfile);
             continue;
@@ -916,16 +925,18 @@ void robot_main_loop(std::future<void> server_ready_future) {
             t1.join();
             t2.join();
             t3.join();
-        } else {
-            // Realtime 처리
-            std::thread t1_realtime(stream_and_split, std::ref(sfinfo), std::ref(soundStream), "realtime");
-            std::thread t2_realtime(generate_motion, sfinfo.channels, sfinfo.samplerate);
-            std::thread t3_realtime(control_motor, std::ref(soundStream));
+        } else { // realtime or responses
+            if (!responses_only_flag) {
+                // Realtime 처리
+                std::thread t1_realtime(stream_and_split, std::ref(sfinfo), std::ref(soundStream), "realtime");
+                std::thread t2_realtime(generate_motion, sfinfo.channels, sfinfo.samplerate);
+                std::thread t3_realtime(control_motor, std::ref(soundStream));
+                
+                t1_realtime.join();
+                t2_realtime.join();
+                t3_realtime.join();
+            }
             
-            t1_realtime.join();
-            t2_realtime.join();
-            t3_realtime.join();
-
             // Responses 처리
             if (!user_interruption_flag) {
                 // std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -1056,7 +1067,7 @@ int main() {
                     }
                 } else { // audio_chunk가 아닌 다른 모든 메시지(gpt_streaming_start, play_audio 등)는 메인 루프가 처리하도록 큐에 넣음
                     // 새로운 재생 시작을 알리는 모든 메시지 유형에 대해 인터럽트 플래그를 즉시 리셋
-                    if (type == "realtime_stream_start" || type == "play_audio" || type == "play_music") {
+                    if (type == "realtime_stream_start" || type == "play_audio" || type == "play_music" || type == "responses_only") {
                         user_interruption_flag = false;
                     }
                     std::lock_guard<std::mutex> lock(server_message_queue_mutex);
