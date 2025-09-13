@@ -55,6 +55,8 @@ TTS_MODEL = "gpt-4o-mini-tts"
 START_KEYWORD = "레이"
 END_KEYWORDS = ["종료", "쉬어"]
 
+ACTIVE_SESSION_TIMEOUT = 120.0 # 초 단위
+
 
 def find_input_device():
     """오디오 입력 장치 검색"""
@@ -532,38 +534,44 @@ async def unified_active_pipeline(websocket, conversation_log):
 
             # 2. 사용자 입력을 기다리는 메인 루프
             while True:
-                user_text = await stt_result_queue.get()
+                try:
+                    user_text = await asyncio.wait_for(stt_result_queue.get(), timeout=ACTIVE_SESSION_TIMEOUT)
 
-                # 3. 새 입력이 들어오면, 이전의 모든 AI 응답 태스크를 즉시 중단
-                if active_response_tasks:
-                    logging.info(f"사용자 인터럽션 감지: '{user_text}'. 이전 응답 태스크를 중단합니다.")
-                    for task in active_response_tasks:
-                        task.cancel()
-                    # 모든 태스크가 완전히 취소될 때까지 기다림
-                    await asyncio.gather(*active_response_tasks, return_exceptions=True)
-                    active_response_tasks = []
+                    # 3. 새 입력이 들어오면, 이전의 모든 AI 응답 태스크를 즉시 중단
+                    if active_response_tasks:
+                        logging.info(f"사용자 인터럽션 감지: '{user_text}'. 이전 응답 태스크를 중단합니다.")
+                        for task in active_response_tasks:
+                            task.cancel()
+                        # 모든 태스크가 완전히 취소될 때까지 기다림
+                        await asyncio.gather(*active_response_tasks, return_exceptions=True)
+                        active_response_tasks = []
 
-                # 4. 종료 키워드 확인
-                if any(kw in user_text for kw in END_KEYWORDS):
+                    # 4. 종료 키워드 확인
+                    if any(kw in user_text for kw in END_KEYWORDS):
+                        await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(SLEEP_FILE)}))
+                        logging.info(f"종료 키워드 감지: '{user_text}' - 세션을 종료합니다.")
+                        break # Active Pipeline 종료
+
+                    # 5. 대화 기록에 사용자 메시지 추가
+                    conversation_log.append({"role": "user", "content": user_text})
+
+                    # 6. 두 API 태스크 간의 동기화를 위한 이벤트 생성
+                    realtime_finished_event = asyncio.Event()
+
+                    # 7. Realtime 및 Responses API 태스크를 생성하고 동시에 실행
+                    realtime_task = asyncio.create_task(
+                        run_realtime_task(websocket, openai_connection, conversation_log, realtime_finished_event, realtime_item_ids_to_manage, user_text)
+                    )
+                    # await websocket.send(json.dumps({"type": "responses_only"}))
+                    responses_task = asyncio.create_task(
+                        run_responses_task(websocket, openai_client, conversation_log, realtime_finished_event)
+                    )
+                    active_response_tasks = [responses_task, realtime_task]
+                    
+                except asyncio.TimeoutError:
+                    logging.info(f"⏰ {ACTIVE_SESSION_TIMEOUT}초 동안 입력이 없어 Active 세션을 종료합니다.")
                     await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(SLEEP_FILE)}))
-                    logging.info(f"종료 키워드 감지: '{user_text}' - 세션을 종료합니다.")
-                    break # Active Pipeline 종료
-
-                # 5. 대화 기록에 사용자 메시지 추가
-                conversation_log.append({"role": "user", "content": user_text})
-
-                # 6. 두 API 태스크 간의 동기화를 위한 이벤트 생성
-                realtime_finished_event = asyncio.Event()
-
-                # 7. Realtime 및 Responses API 태스크를 생성하고 동시에 실행
-                realtime_task = asyncio.create_task(
-                    run_realtime_task(websocket, openai_connection, conversation_log, realtime_finished_event, realtime_item_ids_to_manage, user_text)
-                )
-                # await websocket.send(json.dumps({"type": "responses_only"}))
-                responses_task = asyncio.create_task(
-                    run_responses_task(websocket, openai_client, conversation_log, realtime_finished_event)
-                )
-                active_response_tasks = [responses_task, realtime_task]
+                    break
 
         except Exception as e:
             logging.error(f"Unified Active Pipeline에서 오류 발생: {e}", exc_info=True)
