@@ -2,12 +2,14 @@ import os
 import sys
 import time
 import json
+import uuid
 import queue
 import asyncio
 import logging
 import threading
 import math
 import base64
+from datetime import datetime
 from collections import deque
 
 import websockets
@@ -19,6 +21,12 @@ from openai import AsyncOpenAI
 from google.cloud import speech
 from google.api_core import exceptions
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from config.prompts import SYSTEM_PROMPT, REALTIME_PROMPT, SUMMARY_PROMPT_TEMPLATE
+
 # --- 로깅 설정 ---
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
 
@@ -27,16 +35,12 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # --- 경로 설정 ---
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if PROJECT_ROOT not in sys.path:
-    sys.path.append(str(PROJECT_ROOT))
-
-from config.prompts import SYSTEM_PROMPT, REALTIME_PROMPT
-
 ASSETS_DIR = PROJECT_ROOT / "assets"
 OUTPUT_DIR = PROJECT_ROOT / "output"
 OUTPUT_AUDIO_DIR = OUTPUT_DIR / "audio"
+OUTPUT_LOG_DIR = OUTPUT_DIR / "logs"
 OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # 재생용 오디오 파일
 AWAKE_FILE = ASSETS_DIR / "audio" / "awake.wav"
@@ -113,6 +117,7 @@ class AudioProcessor:
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=SAMPLE_RATE,
             language_code="ko-KR",
+            enable_automatic_punctuation=True,
             adaptation=adaptation_config
         )
         self.stt_streaming_config = speech.StreamingRecognitionConfig(
@@ -146,7 +151,7 @@ class AudioProcessor:
         while not self.vad_active_flag.is_set():
             # 타임아웃 신호가 있으면 즉시 중단
             if (stt_stop_flag and stt_stop_flag.is_set()) or (inactivity_stop_flag and inactivity_stop_flag.is_set()):
-                logging.info("오디오 생성기 중단")
+                logging.info("STT 오디오 생성기 중단")
                 break
                 
             try:
@@ -410,10 +415,133 @@ async def handle_tts_oneshot(response_text, client, websocket):
 
 
 # ==================================================================================================
+# 대화 기록 관리
+# ==================================================================================================
+
+class ConversationManager:
+    def __init__(self, client: AsyncOpenAI):
+        self.client = client
+        self.session_id = None
+        self.session_start_time = None
+        self.current_conversation_log = []
+
+    def start_new_session(self):
+        self.session_id = str(uuid.uuid4())
+        self.session_start_time = datetime.now()
+        self.current_conversation_log = self._create_initial_context(SYSTEM_PROMPT, num_recent=2)
+
+    def add_message(self, role: str, content: str):
+        message = {"role": role, "content": content}
+        self.current_conversation_log.append(message)
+
+    def get_current_log(self) -> list:
+        return self.current_conversation_log
+    
+    async def end_session(self):
+        if len(self.current_conversation_log) < 2:
+            logging.info("저장할 대화 기록이 없어 세션 종료를 건너뜁니다.")
+            return
+        
+        # 1. 요약 생성
+        summary = await self._summarize_session()
+
+        # 2. 데이터 구조화
+        session_data = {
+            "session_id": self.session_id,
+            "start_time": self.session_start_time.isoformat(),
+            "end_time": datetime.now().isoformat(),
+            "summary": summary,
+            "full_log": self.current_conversation_log
+        }
+
+        # 3. 파일로 저장 (파일명에 타임스탬프를 넣어 정렬하기 쉽게)
+        timestamp = self.session_start_time.strftime("%Y%m%d_%H%M%S")
+        filepath = OUTPUT_LOG_DIR / f"{timestamp}.json"
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(session_data, f, ensure_ascii=False, indent=2)
+            logging.info(f"📋 세션 기록 저장 완료: {filepath}")
+        except Exception as e:
+            logging.error(f"📋 세션 기록 저장 중 오류 발생: {e}")
+
+        # 현재 세션 정보 초기화
+        self.session_id = None
+        self.session_start_time = None
+        self.current_conversation_log = []
+    
+    async def _summarize_session(self) -> str:
+        """OpenAI API를 호출하여 현재 세션의 대화를 요약."""
+        # 시스템 프롬프트는 요약에 포함하지 않음.
+        log_for_summary = [msg for msg in self.current_conversation_log if msg.get("role") != "system"]
+        
+        if not log_for_summary:
+            return "요약할 내용 없음."
+        
+        # 대화 기록을 하나의 텍스트로 변환
+        conversation_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in log_for_summary])
+
+        prompt = SUMMARY_PROMPT_TEMPLATE.format(conversation_text=conversation_text)
+
+        try:
+            logging.info("📋 세션 요약 API 호출...")
+            response = await self.client.responses.create(
+                model="gpt-5-mini",
+                input=[{"role": "user", "content": prompt}],
+                temperature=0.2
+            )
+            summary = response.output_text
+            logging.info(f"📋 세션 요약 완료:\n{summary}")
+            return summary
+        except Exception as e:
+            logging.error(f"📋 세션 요약 중 오류 발생: {e}")
+            return "요약 생성 실패."
+    
+    def _create_initial_context(self, system_prompt: str, num_recent: int = 2) -> list:
+        """새 세션 시작 시 초기 컨텍스트를 구성."""
+        initial_context = []
+        
+        # 1. 시스템 프롬프트 추가
+        initial_context.append({"role": "system", "content": system_prompt})
+        
+        # 2. 최근 세션 요약본 로드
+        recent_summaries = self._load_recent_summaries_from_files(num_recent)
+        if recent_summaries:
+            summary_text = "\n\n---\n\n".join(recent_summaries)
+            # 시스템 메시지로 과거 요약 정보를 제공
+            initial_context.append({
+                "role": "system",
+                "content": f"## 참고: 과거 대화 요약\n{summary_text}"
+            })
+            logging.info(f" 최근 대화 요약 {len(recent_summaries)}개를 컨텍스트에 추가했습니다.")
+
+        initial_context.append({"role": "system", "content": "[새 대화 시작]"})
+        return initial_context
+
+    def _load_recent_summaries_from_files(self, num_to_load: int) -> list:
+        """로그 폴더에서 가장 최근의 요약 파일을 찾아 내용을 반환."""
+        try:
+            # 파일명을 기준으로 최신순으로 정렬
+            history_files = sorted(OUTPUT_LOG_DIR.glob("*.json"), key=os.path.getmtime, reverse=True)
+            
+            summaries = []
+            for filepath in history_files[:num_to_load]:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # 요약본 앞에 시간 정보를 붙여주면 LLM이 시간 순서를 이해하는 데 도움이 됨
+                    summary_with_time = f"[{data.get('start_time')[:10]}]\n{data.get('summary', '')}"
+                    summaries.append(summary_with_time)
+            
+            return summaries
+        except Exception as e:
+            logging.error(f"최근 요약 로드 중 오류: {e}")
+            return []
+
+# ==================================================================================================
 # Unified API Pipeline (Realtime + Responses)
 # ==================================================================================================
 
-async def run_realtime_task(websocket, openai_connection, conversation_log, realtime_finished_event: asyncio.Event, item_ids_to_manage: list, user_text):
+async def run_realtime_task(websocket, realtime_connection, conversation_log, realtime_finished_event: asyncio.Event, item_ids_to_manage: list, user_text):
     """(Task 1) Realtime API를 호출하고 오디오를 스트리밍합니다."""
     logging.info("⚡️ Realtime Task 시작...")
     
@@ -421,15 +549,15 @@ async def run_realtime_task(websocket, openai_connection, conversation_log, real
         # 1. 이전 턴에서 생성된 모든 대화 아이템들을 삭제하여 세션을 초기화
         if item_ids_to_manage:
             logging.info(f"이전 Realtime 대화 아이템 {len(item_ids_to_manage)}개 삭제 중...")
-            delete_tasks = [openai_connection.conversation.item.delete(item_id=item_id) for item_id in item_ids_to_manage]
+            delete_tasks = [realtime_connection.conversation.item.delete(item_id=item_id) for item_id in item_ids_to_manage]
             await asyncio.gather(*delete_tasks, return_exceptions=True) # 예외가 발생해도 계속 진행
             item_ids_to_manage.clear()
             logging.info("이전 아이템 삭제 완료.")
 
         # 2. 현재 대화 기록을 기반으로 새 아이템들을 생성
-        await openai_connection.session.update(session={"instructions": REALTIME_PROMPT, "voice": VOICE})
+        await realtime_connection.session.update(session={"instructions": REALTIME_PROMPT, "voice": VOICE})
 
-        await openai_connection.conversation.item.create(
+        await realtime_connection.conversation.item.create(
             item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]}
         )
 
@@ -440,17 +568,17 @@ async def run_realtime_task(websocket, openai_connection, conversation_log, real
         #         "role": entry['role'],
         #         "content": [{"type": "input_text" if entry['role'] == 'user' else "text", "text": entry['content']}]
         #     }
-        #     await openai_connection.conversation.item.create(item=item_to_create)
+        #     await realtime_connection.conversation.item.create(item=item_to_create)
 
         # 3. 응답 생성 시작
         realtime_start_time = time.time()
-        await openai_connection.response.create()
+        await realtime_connection.response.create()
 
         # 4. 오디오 스트림 처리
-        async for event in openai_connection:
+        async for event in realtime_connection:
             if event.type == "conversation.item.created":
                 item_ids_to_manage.append(event.item.id)
-                # await openai_connection.conversation.item.retrieve(item_id=event.previous_item_id)
+                # await realtime_connection.conversation.item.retrieve(item_id=event.previous_item_id)
 
             elif event.type == "response.audio.delta":
                 await websocket.send(json.dumps({"type": "realtime_audio_chunk", "data": event.delta}))
@@ -479,18 +607,19 @@ async def run_realtime_task(websocket, openai_connection, conversation_log, real
         logging.info("⚡️ Realtime Task 종료.")
 
 
-async def run_responses_task(websocket, openai_client, conversation_log, realtime_finished_event: asyncio.Event):
+async def run_responses_task(websocket, openai_client, manager: ConversationManager, realtime_finished_event: asyncio.Event):
     """(Task 2) Responses API를 호출하고, Realtime 응답이 끝난 후 TTS를 스트리밍합니다."""
     
     logging.info("🧠 Responses Task 시작...")
+    responses_start_time = time.time()
     response_text = ""
+    current_log = manager.get_current_log()
 
     try:
-        responses_start_time = time.time()
         # 1. Responses API로부터 텍스트 답변 생성
         response = await openai_client.responses.create(
             model="gpt-4.1",
-            input=conversation_log,
+            input=current_log,
             # reasoning={ "effort": "low" },
             # text={ "verbosity": "low" },
             # stream=True
@@ -503,7 +632,7 @@ async def run_responses_task(websocket, openai_client, conversation_log, realtim
         await handle_tts_oneshot(response_text, openai_client, websocket)
 
         # 3. 대화 기록 추가
-        conversation_log.append({"role": "assistant", "content": response_text})
+        manager.add_message("assistant", response_text)
 
     except asyncio.CancelledError:
         logging.info("🧠 Responses Task가 외부에서 중단되었습니다.")
@@ -513,10 +642,9 @@ async def run_responses_task(websocket, openai_client, conversation_log, realtim
         logging.info("🧠 Responses Task 종료.")
 
 
-async def unified_active_pipeline(websocket, conversation_log):
+async def unified_active_pipeline(websocket, openai_client, manager: ConversationManager):
     """사용자 입력에 대해 Realtime API와 Responses API를 동시에 호출하여 순차적으로 응답하는 통합 파이프라인"""
     logging.info("🤖 Unified Active Pipeline 시작...")
-    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
     audio_processor, audio_thread = None, None
     active_response_tasks = []
 
@@ -524,7 +652,7 @@ async def unified_active_pipeline(websocket, conversation_log):
     main_loop = asyncio.get_running_loop()
 
     # Active 모드에 진입할 때 Realtime API 연결을 한 번만 생성
-    async with openai_client.beta.realtime.connect(model="gpt-4o-mini-realtime-preview") as openai_connection:
+    async with openai_client.beta.realtime.connect(model="gpt-4o-mini-realtime-preview") as realtime_connection:
         realtime_item_ids_to_manage = []
         try:
             # 1. 오디오 처리기 시작
@@ -540,9 +668,7 @@ async def unified_active_pipeline(websocket, conversation_log):
                     # 3. 새 입력이 들어오면, 이전의 모든 AI 응답 태스크를 즉시 중단
                     if active_response_tasks:
                         logging.info(f"사용자 인터럽션 감지: '{user_text}'. 이전 응답 태스크를 중단합니다.")
-                        for task in active_response_tasks:
-                            task.cancel()
-                        # 모든 태스크가 완전히 취소될 때까지 기다림
+                        for task in active_response_tasks: task.cancel()
                         await asyncio.gather(*active_response_tasks, return_exceptions=True)
                         active_response_tasks = []
 
@@ -550,21 +676,21 @@ async def unified_active_pipeline(websocket, conversation_log):
                     if any(kw in user_text for kw in END_KEYWORDS):
                         await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(SLEEP_FILE)}))
                         logging.info(f"종료 키워드 감지: '{user_text}' - 세션을 종료합니다.")
-                        break # Active Pipeline 종료
+                        break
 
                     # 5. 대화 기록에 사용자 메시지 추가
-                    conversation_log.append({"role": "user", "content": user_text})
+                    manager.add_message("user", user_text)
 
                     # 6. 두 API 태스크 간의 동기화를 위한 이벤트 생성
                     realtime_finished_event = asyncio.Event()
 
                     # 7. Realtime 및 Responses API 태스크를 생성하고 동시에 실행
-                    realtime_task = asyncio.create_task(
-                        run_realtime_task(websocket, openai_connection, conversation_log, realtime_finished_event, realtime_item_ids_to_manage, user_text)
-                    )
                     # await websocket.send(json.dumps({"type": "responses_only"}))
+                    realtime_task = asyncio.create_task(
+                        run_realtime_task(websocket, realtime_connection, manager, realtime_finished_event, realtime_item_ids_to_manage, user_text)
+                    )
                     responses_task = asyncio.create_task(
-                        run_responses_task(websocket, openai_client, conversation_log, realtime_finished_event)
+                        run_responses_task(websocket, openai_client, manager, realtime_finished_event)
                     )
                     active_response_tasks = [responses_task, realtime_task]
                     
@@ -578,16 +704,9 @@ async def unified_active_pipeline(websocket, conversation_log):
         finally:
             # 파이프라인 종료 시 모든 리소스 정리
             if active_response_tasks:
-                for task in active_response_tasks:
-                    task.cancel()
+                for task in active_response_tasks: task.cancel()
                 await asyncio.gather(*active_response_tasks, return_exceptions=True)
-
-            # Active 모드 종료 시 서버에 남아있는 아이템들을 모두 정리
-            if realtime_item_ids_to_manage:
-                logging.info(f"Active 세션 종료. 남은 Realtime 아이템 {len(realtime_item_ids_to_manage)}개 정리 중...")
-                delete_tasks = [openai_connection.conversation.item.delete(item_id=item_id) for item_id in realtime_item_ids_to_manage]
-                await asyncio.gather(*delete_tasks, return_exceptions=True)
-                logging.info("남은 아이템 정리 완료.")
+                active_response_tasks = []
 
             if audio_processor: audio_processor.stop()
             if audio_thread and audio_thread.is_alive(): audio_thread.join(timeout=1.0)
@@ -644,10 +763,9 @@ async def wakeword_detection_loop(websocket):
 
 async def chat_handler(websocket):
     logging.info(f"✅ C++ 클라이언트 연결됨: {websocket.remote_address}")
-    
-    conversation_log = []  # 대화 기록 저장용 리스트
-    conversation_log.append({"role": "system", "content": SYSTEM_PROMPT})
-    conversation_log.append({"role": "system", "content": "[start new chat]"})
+
+    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    conversation_manager = ConversationManager(client=openai_client)
 
     try:
         while True:
@@ -657,9 +775,15 @@ async def chat_handler(websocket):
             # 2. Sleep 모드 종료 후 AWAKE 음성 재생
             await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(AWAKE_FILE)}))
             
-            # 3. Active 모드
-            await unified_active_pipeline(websocket, conversation_log)
+            # 3. 새 세션 시작
+            conversation_manager.start_new_session()
             
+            # 4. Active 모드 실행
+            await unified_active_pipeline(websocket, openai_client, conversation_manager)
+
+            # 5. Active 모드 종료 후 세션 정리
+            await conversation_manager.end_session()
+
             logging.info("Active 세션 종료. 다시 Sleep 모드로 전환합니다.")
 
     except websockets.exceptions.ConnectionClosed:
