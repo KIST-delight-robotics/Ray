@@ -29,6 +29,8 @@
 
 using json = nlohmann::json;
 
+// #define MOTOR_ENABLED // 모터 연결 없이 테스트하려면 주석 처리
+
 #define INTERVAL_MS 360 // 시퀀스 1개 당 시간
 #define AUDIO_SAMPLE_RATE 24000
 #define AUDIO_CHANNELS 1
@@ -562,6 +564,8 @@ void control_motor(CustomSoundStream& soundStream) {
     // 모터 초기 설정 코드
     while(!mouth_motion_queue.empty()) mouth_motion_queue.pop();
     while(!head_motion_queue.empty()) head_motion_queue.pop();
+
+    #ifdef MOTOR_ENABLED
     dynamixel::PortHandler *portHandler = dynamixel::PortHandler::getPortHandler(DEVICENAME);
     dynamixel::PacketHandler *packetHandler = dynamixel::PacketHandler::getPacketHandler(PROTOCOL_VERSION);
 
@@ -585,6 +589,9 @@ void control_motor(CustomSoundStream& soundStream) {
     for (int i = 0; i < DXL_NUM; i++) {
         DXL_past_position[i] = DXL_initial_position[i];
     }
+    #else
+    std::cout << "[DUMMY MOTOR] 모터 제어 (control_motor) 시작. 실제 모터는 움직이지 않습니다." << std::endl;
+    #endif
 
     int cycle_num = 0;
     std::vector<std::vector<double>> current_motion_data(9, std::vector<double>(3, 0.0));
@@ -661,6 +668,7 @@ void control_motor(CustomSoundStream& soundStream) {
 
             DXL_goal_position_vec = RPY2DXL(roll_final, pitch_final, yaw_final, mouth_final, 0);
 
+            #ifdef MOTOR_ENABLED
             update_DXL_goal_position(DXL_goal_position,
                                      DXL_goal_position_vec[0],
                                      DXL_goal_position_vec[1],
@@ -692,13 +700,20 @@ void control_motor(CustomSoundStream& soundStream) {
             for (int i = 0; i < DXL_NUM; i++) {
                 DXL_past_position[i] = DXL_goal_position[i];
             }
+            #endif
+
             // 필요한 경우 대기 시간 추가
             std::this_thread::sleep_for(std::chrono::milliseconds(39));
         }
 
         
     }
+    #ifdef MOTOR_ENABLED
     moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_initial_position, 100); //1000
+    #else
+    // --- 가짜 모터 종료 로그 ---
+    std::cout << "[DUMMY MOTOR] 모터 제어 (control_motor) 종료." << std::endl;
+    #endif
 }
 
 std::vector<std::string> csv_read_row(std::istream& in, char delimiter) {
@@ -746,6 +761,8 @@ void wait_control_motor(){
     if(wait_mode_flag == "off") return;
     while(!mouth_motion_queue.empty()) mouth_motion_queue.pop();
     while(!head_motion_queue.empty()) head_motion_queue.pop();
+
+    #ifdef MOTOR_ENABLED
     dynamixel::PortHandler *portHandler = dynamixel::PortHandler::getPortHandler(DEVICENAME);
     dynamixel::PacketHandler *packetHandler = dynamixel::PacketHandler::getPacketHandler(PROTOCOL_VERSION);
 
@@ -781,12 +798,17 @@ void wait_control_motor(){
         moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, dummy_positions, 100); //300
         first_run_flag = 0;
     }
+    #else
+    // --- 가짜 모터 초기화 ---
+    std::cout << "[DUMMY MOTOR] 대기 모드 (wait_control_motor) 시작." << std::endl;
+    #endif
 
    std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     constexpr auto FRAME_INTERVAL = std::chrono::milliseconds(35);
     std::string line;
     while(wait_mode_flag == "on"){
+        #ifdef MOTOR_ENABLED
         std::ifstream headGesture(IDLE_MOTION_FILE);
         if (!headGesture) {
             std::cerr << "Empty HeadGesture File not found." << std::endl;
@@ -818,6 +840,13 @@ void wait_control_motor(){
 
             std::this_thread::sleep_for(FRAME_INTERVAL);
         }
+        #else
+        // --- 가짜 모터 대기 동작 ---
+        if(wait_mode_flag == "off") break;
+        // 실제 모션 파일은 읽지 않고, 대기 중임을 알리며 잠시 대기
+        std::cout << "[DUMMY MOTOR] 대기 모드 동작 중..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(1)); // 1초마다 로그 출력
+        #endif
     }
     std::cout << "wait mode finish " << std::endl;
    // portHandler -> closePort(); // 이거 계속 쓸꺼면 control_motor 함수에도 추가해주기 
