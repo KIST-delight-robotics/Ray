@@ -42,3 +42,8 @@ START_KEYWORD = "레이"
 END_KEYWORDS = ["종료", "쉬어"]
 ACTIVE_SESSION_TIMEOUT = 120.0 # 사용자 응답 없이 Active 모드가 유지되는 최대 시간 (초)
 
+# --- Smart Turn 모델 설정 ---
+SMART_TURN_MODEL_PATH = "smart-turn-v3.0.onnx"
+TURN_END_SILENCE_CHUNKS = 15  # 15 chunks * 32ms/chunk ≈ 480ms
+MAX_TURN_CHUNKS = 313       # 313 chunks * 32ms/chunk ≈ 10 seconds
+SMART_TURN_GRACE_PERIOD_S = 1.5  # Smart Turn이 '진행중'으로 판단 시 유예 시간 (초)
