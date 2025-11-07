@@ -28,16 +28,17 @@ AUDIO_CONFIG = {
     'PRE_BUFFER_DURATION': 0.3,     # STT에 전달될 사전 버퍼 길이 (초)
     'VAD_THRESHOLD': 0.5,           # VAD 민감도 (0.0 ~ 1.0, 높을수록 민감)
     'VAD_CONSECUTIVE_CHUNKS': 3,    # VAD가 음성으로 판단하기 위한 연속 청크 수.
-    'VAD_RESET_INTERVAL': 10.0,     # VAD 상태 초기화 시간 (초)
+    'VAD_RESET_INTERVAL': 20.0,     # 주기적으로 VAD 상태를 초기화하는 간격 (초)
 }
 
 # --- OpenAI 설정 ---
 TTS_MODEL = "gpt-4o-mini-tts"
 VOICE = "coral"
 REALTIME_MODEL = "gpt-4o-mini-realtime-preview"
-RESPONSES_MODEL = "gpt-4.1" # 기존 코드에서 사용하던 모델
+RESPONSES_MODEL = "gpt-4.1"
 
 # --- 키워드 및 타임아웃 설정 ---
 START_KEYWORD = "레이"
 END_KEYWORDS = ["종료", "쉬어"]
-ACTIVE_SESSION_TIMEOUT = 120.0 # 초 단위 (2분)
+ACTIVE_SESSION_TIMEOUT = 120.0 # 사용자 응답 없이 Active 모드가 유지되는 최대 시간 (초)
+

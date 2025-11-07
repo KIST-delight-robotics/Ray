@@ -58,6 +58,13 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(json cnpy Eigen3 SFML ixwebsocket)
 
 # ==================================================================
+# 시스템 라이브러리 찾기
+# ==================================================================
+
+find_library(WIRINGPI_LIBRARY NAMES wiringPi)
+find_path(WIRINGPI_INCLUDE_DIR NAMES wiringPi.h)
+
+# ==================================================================
 # 프로젝트 소스 코드 및 실행 파일 정의
 # ==================================================================
 
@@ -78,6 +85,7 @@ target_include_directories(Ray PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/cpp"
     ${cnpy_SOURCE_DIR}
     third_party/DynamixelSDK-3.7.31/c++/include/dynamixel_sdk
+    ${WIRINGPI_INCLUDE_DIR}
 )
 
 target_link_directories(Ray PRIVATE
@@ -93,4 +101,5 @@ target_link_libraries(Ray PRIVATE
     dxl_x64_cpp
     ixwebsocket
     sndfile
+    ${WIRINGPI_LIBRARY}
 )

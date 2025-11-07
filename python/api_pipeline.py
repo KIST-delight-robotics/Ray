@@ -220,6 +220,11 @@ async def wakeword_detection_loop(websocket):
                 if START_KEYWORD in stt_result:
                     await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(AWAKE_FILE)}))
                     return
+                # # 테스트용 코드
+                # await asyncio.sleep(1)
+                # await websocket.send(json.dumps({"type": "play_audio", "file_to_play": "test_audio.wav"}))
+                # await websocket.send(json.dumps({"type": "play_music", "title": "가까운 듯 먼 그대여", "artist": "카더가든", "file_to_play": "test_audio.wav"}))
+                # return
     except Exception as e:
         logger.error(f"Wakeword detection loop에서 오류 발생: {e}", exc_info=True)
     finally:

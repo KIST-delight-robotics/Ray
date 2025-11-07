@@ -18,6 +18,9 @@
 #include <ctime>
 #include <algorithm>
 #include <tuple>
+#include <wiringPiI2C.h>
+#include <wiringPi.h>
+#include <unistd.h>
 #include "cnpy.h"
 #include "Macro_function.h"
 
@@ -29,11 +32,22 @@
 
 using json = nlohmann::json;
 
-// #define MOTOR_ENABLED // 모터 연결 없이 테스트하려면 주석 처리
+#define MOTOR_ENABLED // 모터 연결 없이 테스트하려면 주석 처리
 
 #define INTERVAL_MS 360 // 시퀀스 1개 당 시간
 #define AUDIO_SAMPLE_RATE 24000
 #define AUDIO_CHANNELS 1
+#define MPU6050_ADDR 0x68
+int fd;
+
+int DEFAULT_PITCH = 3540;
+int DEFAULT_ROLL_R = 2560;
+int DEFAULT_ROLL_L = 1970;
+int DEFAULT_YAW = 1000;
+int DEFAULT_MOUTH = 1120;
+
+dynamixel::PortHandler *portHandler;
+dynamixel::PacketHandler *packetHandler;
 
 // 파일 경로 설정
 const std::string ASSETS_DIR = "assets";
@@ -54,7 +68,6 @@ std::atomic<bool> user_interruption_flag(false);
 std::atomic<bool> is_speaking(false);
 
 int first_move_flag = 1;
-int first_run_flag = 1;
 float final_result = 0.0f;
 
 std::queue<std::vector<float>> audio_queue;
@@ -75,6 +88,8 @@ std::mutex cout_mutex;
 std::string wait_mode_flag = "off";
 bool music_flag = 0;
 bool playing_music_flag = 0;
+
+bool finish_adjust_ready = false;
 
 // WebSocket 관련 전역 객체
 ix::WebSocket webSocket;
@@ -162,6 +177,100 @@ private:
     std::condition_variable m_condition;
 };
 
+bool initialize_dynamixel() {
+    portHandler = dynamixel::PortHandler::getPortHandler(DEVICENAME);
+    packetHandler = dynamixel::PacketHandler::getPacketHandler(PROTOCOL_VERSION);
+
+    if (!(portHandler->openPort())) {
+        std::lock_guard<std::mutex> lock(cout_mutex);
+        std::cerr << "Failed to open the port!" << std::endl;
+        return false;
+    }
+
+    std::vector<int> rate_options = {9600, 57600, 115200, 1000000, 2000000, 3000000, 4000000, 4500000};
+    int dxl_comm_result = COMM_TX_FAIL;             // 통신 결과
+    uint8_t dxl_error = 0;                          // 모터 에러 상태
+
+    for (int rate : rate_options) {
+        if (!portHandler->setBaudRate(rate)) {
+            printf("Failed to change the baudrate %d (Skipping)\n", rate);
+            continue;
+        }
+        printf("Trying %d bps...\n", rate);
+
+        dxl_comm_result = packetHandler->ping(portHandler, DXL1_ID, &dxl_error);
+
+        if (dxl_comm_result == COMM_SUCCESS && dxl_error == 0) {
+            printf("Success!\n");
+            printf("Baudrate set to %d bps.\n", rate);
+            break; // 성공적으로 통신이 이루어지면 루프 종료
+        } else {
+            printf("Failed.\n");
+        }
+    }
+
+    int DXL_ID[DXL_NUM] = { DXL1_ID, DXL2_ID, DXL3_ID, DXL4_ID, DXL5_ID };
+
+    if (!disable_torque(packetHandler, portHandler, DXL_ID, dxl_error)) {
+        printf("Failed to torque disable\n");
+        return false;
+    } 
+    else {
+        // 드라이브 모드를 TIME BASED PROFILE로 설정
+        set_profile(packetHandler, portHandler, DXL_ID, dxl_error, DRIVE_MODE_PROFILE);
+        set_baudrate(packetHandler, portHandler, DXL_ID, dxl_error, BAUDRATE);
+    }
+
+    if (!enable_torque(packetHandler, portHandler, DXL_ID, dxl_error)) {
+        printf("Failed to torque enable\n");
+        return false;
+    }
+
+    printf("Motors initialized (Port Open, Torque On).\n");
+    return true;
+}
+
+void move_to_initial_position() {
+    // GroupSyncWrite 인스턴스 초기화
+    dynamixel::GroupSyncWrite groupSyncWritePosition(portHandler, packetHandler, ADDR_PRO_GOAL_POSITION, LEN_PRO_GOAL_POSITION);
+    dynamixel::GroupSyncWrite groupSyncWriteVelocity(portHandler, packetHandler, ADDR_PRO_PROFILE_VELOCITY, LEN_PRO_PROFILE_VELOCITY);
+
+    int DXL_ID[DXL_NUM] = { DXL1_ID, DXL2_ID, DXL3_ID, DXL4_ID, DXL5_ID };
+    int DXL_initial_position[DXL_NUM] = { DEFAULT_PITCH, DEFAULT_ROLL_R, DEFAULT_ROLL_L, DEFAULT_YAW, DEFAULT_MOUTH };
+
+    // 초기 위치로 이동
+    moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_initial_position, DXL_PROFILE_VELOCITY_INIT); //300
+
+    // 모터 위치 업데이트
+    for (int i = 0; i < DXL_NUM; i++) {
+        DXL_past_position[i] = DXL_initial_position[i];
+    }
+    
+
+    // 현재 위치 읽기 테스트
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    dynamixel::GroupSyncRead groupSyncRead(portHandler, packetHandler, ADDR_PRO_PRESENT_POSITION, LEN_PRO_PRESENT_POSITION);
+    groupSyncRead.clearParam();
+    for (int i = 0; i < DXL_NUM; i++) {
+        groupSyncRead.addParam(DXL_ID[i]);
+    }
+    auto read_start = std::chrono::high_resolution_clock::now();
+    int dxl_comm_result = groupSyncRead.txRxPacket();
+    auto read_end = std::chrono::high_resolution_clock::now();
+    auto read_duration = std::chrono::duration_cast<std::chrono::milliseconds>(read_end - read_start).count();
+
+    if (dxl_comm_result != COMM_SUCCESS) {
+        printf("Failed to read present position: %s\n", packetHandler->getTxRxResult(dxl_comm_result));
+    } else {
+        for (int i = 0; i < DXL_NUM; i++) {
+            uint8_t id = DXL_ID[i];
+            int32_t present_position = groupSyncRead.getData(id, ADDR_PRO_PRESENT_POSITION, LEN_PRO_PRESENT_POSITION);
+            printf("[ID: %d] pos: %d\n", id, present_position);
+        }
+        printf("Read Duration: %ld ms\n", read_duration);
+    }
+}
+
 // 첫 번째 쓰레드: 오디오 스트림을 받아 분할합니다.
 void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream, const std::string& stream_type) {
     // --- 스트림 타입에 따라 사용할 버퍼와 동기화 객체 선택 ---
@@ -187,7 +296,7 @@ void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream, con
     int samplerate = sfinfo.samplerate;
     const size_t bytes_per_interval = samplerate * channels * sizeof(sf::Int16) * INTERVAL_MS / 1000;
 
-    for (int cycle_num = -2; ; ++cycle_num) {
+    for (int cycle_num = -1; ; ++cycle_num) {
         if (user_interruption_flag) {
             std::cout << "Interruption detected in stream_and_split." << std::endl;
             break;
@@ -267,7 +376,7 @@ void read_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& 
         vocal_buffer.resize(frames_per_interval * channels);
     }
 
-    for (int cycle_num = -2; ; ++cycle_num) {
+    for (int cycle_num = -1; ; ++cycle_num) {
         if (user_interruption_flag) {
             std::cout << "Interruption detected in read_and_split." << std::endl;
             break;
@@ -356,7 +465,7 @@ void generate_motion(int channels, int samplerate) {
 
     int first_segment_flag = 1;
 
-    for (int cycle_num = -1; ; ++cycle_num) {
+    for (int cycle_num = 0; ; ++cycle_num) {
         if (user_interruption_flag) {
             std::cout << "Interruption detected in generate_motion." << std::endl;
             break;
@@ -560,40 +669,24 @@ void generate_motion(int channels, int samplerate) {
 
 
 void control_motor(CustomSoundStream& soundStream) {
-    first_run_flag = 1;
     // 모터 초기 설정 코드
     while(!mouth_motion_queue.empty()) mouth_motion_queue.pop();
     while(!head_motion_queue.empty()) head_motion_queue.pop();
 
     #ifdef MOTOR_ENABLED
-    dynamixel::PortHandler *portHandler = dynamixel::PortHandler::getPortHandler(DEVICENAME);
-    dynamixel::PacketHandler *packetHandler = dynamixel::PacketHandler::getPacketHandler(PROTOCOL_VERSION);
-
-    // GroupSyncWrite 인스턴스 초기화
+    // GroupSyncWrite 인스턴스 초기화, Present Position을 위한 GroupSyncRead 인스턴스 초기화
     dynamixel::GroupSyncWrite groupSyncWritePosition(portHandler, packetHandler, ADDR_PRO_GOAL_POSITION, LEN_PRO_GOAL_POSITION);
     dynamixel::GroupSyncWrite groupSyncWriteVelocity(portHandler, packetHandler, ADDR_PRO_PROFILE_VELOCITY, LEN_PRO_PROFILE_VELOCITY);
-    // Present Position을 위한 GroupSyncRead 인스턴스 초기화
     dynamixel::GroupSyncRead groupSyncRead(portHandler, packetHandler, ADDR_PRO_PRESENT_POSITION, LEN_PRO_PRESENT_POSITION);
 
     int DXL_ID[DXL_NUM] = { DXL1_ID, DXL2_ID, DXL3_ID, DXL4_ID, DXL5_ID };
     int DXL_initial_position[DXL_NUM] = { DEFAULT_PITCH, DEFAULT_ROLL_R, DEFAULT_ROLL_L, DEFAULT_YAW, DEFAULT_MOUTH };
     uint8_t dxl_error = 0;
-    
-    if (!(portHandler->openPort())) {
-        printf("Failed to open the port!\n");
-        return;
-    }
-
-
-    // 최초 모터 이동 후 값을 업데이트
-    for (int i = 0; i < DXL_NUM; i++) {
-        DXL_past_position[i] = DXL_initial_position[i];
-    }
     #else
     std::cout << "[DUMMY MOTOR] 모터 제어 (control_motor) 시작. 실제 모터는 움직이지 않습니다." << std::endl;
     #endif
 
-    int cycle_num = 0;
+    int cycle_num = 1;
     std::vector<std::vector<double>> current_motion_data(9, std::vector<double>(3, 0.0));
 
     for (;; cycle_num++) {
@@ -603,6 +696,7 @@ void control_motor(CustomSoundStream& soundStream) {
         }
         
         wait_for_next_cycle(cycle_num);
+
         std::pair<int, float> motion_data;
 
         std::unique_lock<std::mutex> lock(mouth_motion_queue_mutex);
@@ -619,6 +713,27 @@ void control_motor(CustomSoundStream& soundStream) {
         int num_motor_updates = INTERVAL_MS / 40;
 
         std::vector<int> DXL_goal_position_vec;
+
+        if (cycle_num == 1) {
+            soundStream.play(); // 첫 사이클에서 오디오 재생
+            // 로그 출력
+            auto playback_start_time = std::chrono::high_resolution_clock::now();
+            {
+                std::lock_guard<std::mutex> lock(cout_mutex);
+                auto playback_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(playback_start_time.time_since_epoch()).count();
+                std::cout << "[시간 측정] start → 오디오 재생 시작: "
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(playback_start_time - start_time).count() << "ms\n" 
+                        << "[시간 측정] stt 완료 → 오디오 재생 시작: "
+                        << static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(playback_start_time.time_since_epoch()).count() - STT_DONE_TIME) << "ms" << std::endl;
+            }
+        }
+
+        auto expected_playback_ms = (cycle_num - 1) * INTERVAL_MS;
+        float actual_playback_ms = 0.0f;
+        if (soundStream.getStatus() == sf::Sound::Playing) {
+            actual_playback_ms = soundStream.getPlayingOffset().asMilliseconds();
+        }
+        float playback_diff_ms = actual_playback_ms - expected_playback_ms;
         
         for (int i = 0; i < num_motor_updates; ++i) {
             //cout << "stop flag : " << stop_flag << " motion queue size : " << mouth_motion_queue.size() << '\n';
@@ -644,20 +759,7 @@ void control_motor(CustomSoundStream& soundStream) {
                 
             }
 
-            if (cycle_num == 0 && i == 0) {
-                soundStream.play(); // 첫 사이클에서 오디오 재생
-                // 로그 출력
-                auto playback_start_time = std::chrono::high_resolution_clock::now();
-                {
-                    std::lock_guard<std::mutex> lock(cout_mutex);
-                    auto playback_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(playback_start_time.time_since_epoch()).count();
-                    std::cout << "[시간 측정] start → 오디오 재생 시작: "
-                            << std::chrono::duration_cast<std::chrono::milliseconds>(playback_start_time - start_time).count() << "ms\n" 
-                            << "[시간 측정] stt 완료 → 오디오 재생 시작: "
-                            << static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(playback_start_time.time_since_epoch()).count() - STT_DONE_TIME) << "ms" << std::endl;
-                }
-                start_time = std::chrono::high_resolution_clock::now();
-            }
+
             
             // 모터 제어 로직 구현
             float motor_value = motion_data.second;
@@ -690,26 +792,43 @@ void control_motor(CustomSoundStream& soundStream) {
             }
 
 
-            groupSyncRead.clearParam(); // 파라미터 초기화
-
             // 모터를 목표 위치로 이동
             //cout << "모터 구동 " << '\n';
+            auto dxl_start = std::chrono::steady_clock::now();
             moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_goal_position, DXL_PROFILE_VELOCITY);
+            auto dxl_end = std::chrono::steady_clock::now();
+            auto dxl_duration = std::chrono::duration_cast<std::chrono::microseconds>(dxl_end - dxl_start);
+
+            if (dxl_duration.count() > 1000) {
+                std::cout << "Warning: DXL processing took " << (dxl_duration.count()/1000.0) 
+                         << "ms" << std::endl;
+            }
             
             // 이전 위치 업데이트
             for (int i = 0; i < DXL_NUM; i++) {
                 DXL_past_position[i] = DXL_goal_position[i];
             }
+
+            if (i == 0 and cycle_num % 10 == 0) {
+                auto now = std::chrono::high_resolution_clock::now();
+                auto motion_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time);
+                auto expected_motion = cycle_num * INTERVAL_MS;
+
+                std::cout << "Cycle " << cycle_num << ": motion_elapsed=" << motion_elapsed.count()
+                            << "ms, expected=" << expected_motion
+                            << "ms, diff=" << (motion_elapsed.count() - expected_motion) << "ms" << std::endl;
+                std::cout << "Cycle " << cycle_num << ": playback_elapsed=" << actual_playback_ms
+                            << "ms, expected=" << expected_playback_ms
+                            << "ms, diff=" << playback_diff_ms << "ms" << std::endl;
+            }
             #endif
 
             // 필요한 경우 대기 시간 추가
-            std::this_thread::sleep_for(std::chrono::milliseconds(39));
+            std::this_thread::sleep_for(std::chrono::milliseconds(38));
         }
-
-        
     }
     #ifdef MOTOR_ENABLED
-    moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_initial_position, 100); //1000
+    moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_initial_position, DXL_PROFILE_VELOCITY_INIT); //1000
     #else
     // --- 가짜 모터 종료 로그 ---
     std::cout << "[DUMMY MOTOR] 모터 제어 (control_motor) 종료." << std::endl;
@@ -752,20 +871,13 @@ std::vector<std::string> csv_read_row(std::istream& in, char delimiter) {
     return row;
 }
 
-void initDynamixel(){
-    
-}
 void wait_control_motor(){
-    first_run_flag = 1;
     // 모터 초기 설정 코드
     if(wait_mode_flag == "off") return;
     while(!mouth_motion_queue.empty()) mouth_motion_queue.pop();
     while(!head_motion_queue.empty()) head_motion_queue.pop();
 
     #ifdef MOTOR_ENABLED
-    dynamixel::PortHandler *portHandler = dynamixel::PortHandler::getPortHandler(DEVICENAME);
-    dynamixel::PacketHandler *packetHandler = dynamixel::PacketHandler::getPacketHandler(PROTOCOL_VERSION);
-
     // GroupSyncWrite 인스턴스 초기화
     dynamixel::GroupSyncWrite groupSyncWritePosition(portHandler, packetHandler, ADDR_PRO_GOAL_POSITION, LEN_PRO_GOAL_POSITION);
     dynamixel::GroupSyncWrite groupSyncWriteVelocity(portHandler, packetHandler, ADDR_PRO_PROFILE_VELOCITY, LEN_PRO_PROFILE_VELOCITY);
@@ -775,29 +887,6 @@ void wait_control_motor(){
     int DXL_ID[DXL_NUM] = { DXL1_ID, DXL2_ID, DXL3_ID, DXL4_ID, DXL5_ID };
     int DXL_initial_position[DXL_NUM] = { DEFAULT_PITCH, DEFAULT_ROLL_R, DEFAULT_ROLL_L, DEFAULT_YAW, DEFAULT_MOUTH };
     uint8_t dxl_error = 0;
-
-
-    if (first_run_flag == 1) {
-        if (!(portHandler->openPort())) {
-            printf("Failed to open the port!\n");
-            return;
-        }
-
-        if (!(portHandler->setBaudRate(BAUDRATE))) {
-            printf("Failed to change the baudrate!\n");
-            return;
-        }
-
-        if (!enable_torque(packetHandler, portHandler, DXL_ID, dxl_error)) {
-            printf("Failed to torque enable\n");
-            return;
-        }
-        int dummy_positions[DXL_NUM] = { DEFAULT_PITCH, DEFAULT_ROLL_R, DEFAULT_ROLL_L, DEFAULT_YAW, DEFAULT_MOUTH };
-
-        //cout << "첫번째 모터 구동 " << '\n';
-        moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, dummy_positions, 100); //300
-        first_run_flag = 0;
-    }
     #else
     // --- 가짜 모터 초기화 ---
     std::cout << "[DUMMY MOTOR] 대기 모드 (wait_control_motor) 시작." << std::endl;
@@ -850,6 +939,379 @@ void wait_control_motor(){
     }
     std::cout << "wait mode finish " << std::endl;
    // portHandler -> closePort(); // 이거 계속 쓸꺼면 control_motor 함수에도 추가해주기 
+}
+
+// MPU6050 초기화
+void mpu6050_init() {
+    wiringPiI2CWriteReg8(fd, 0x6B, 0);
+}
+
+// 16비트 데이터 읽기
+int read_raw_data(int addr) {
+    int high = wiringPiI2CReadReg8(fd, addr);
+    int low = wiringPiI2CReadReg8(fd, addr + 1);
+    int value = (high << 8) | low;
+
+    if (value > 32768)
+        value -= 65536;
+    return value;
+}
+
+void initialize_robot_posture() {
+    dynamixel::PortHandler *portHandler = dynamixel::PortHandler::getPortHandler(DEVICENAME);
+    dynamixel::PacketHandler *packetHandler = dynamixel::PacketHandler::getPacketHandler(PROTOCOL_VERSION);
+
+    dynamixel::GroupSyncWrite groupSyncWritePosition(portHandler, packetHandler, ADDR_PRO_GOAL_POSITION, LEN_PRO_GOAL_POSITION);
+    dynamixel::GroupSyncWrite groupSyncWriteVelocity(portHandler, packetHandler, ADDR_PRO_PROFILE_VELOCITY, LEN_PRO_PROFILE_VELOCITY);
+    
+    int DXL_ID[DXL_NUM] = { DXL1_ID, DXL2_ID, DXL3_ID, DXL4_ID, DXL5_ID };
+    uint8_t dxl_error = 0;
+
+    if (!portHandler->openPort()) {
+        std::cerr << "포트 열기 실패!" << std::endl;
+        return;
+    }
+    if (!portHandler->setBaudRate(57600)) {
+        std::cerr << "Baudrate 설정 실패!" << std::endl;
+        return;
+    }
+
+    // 4) 토크 활성화
+    if (!enable_torque(packetHandler, portHandler, DXL_ID, dxl_error)) {
+        printf("Failed to torque enable\n");
+        return;
+    }
+    
+        
+    //현재 모터 위치를 순차적 읽기
+    std::vector<int> dxl_id_list = {1, 2, 3, 4, 5};  // 모터 ID
+    for (int id : dxl_id_list) {
+        int dxl_comm_result = COMM_TX_FAIL;
+        uint8_t dxl_error = 0;
+        int32_t present_position = 0;
+
+        // 각 모터의 현재 위치 read
+        dxl_comm_result = packetHandler->read4ByteTxRx(
+            portHandler,
+            id,
+            ADDR_PRO_PRESENT_POSITION,    // 현재 위치 주소 (XM 계열 = 132)
+            (uint32_t*)&present_position,
+            &dxl_error
+        );
+
+        if (dxl_comm_result != COMM_SUCCESS) {
+            std::cout << "[ID:" << id << "] read4ByteTxRx 통신 실패: "
+                    << packetHandler->getTxRxResult(dxl_comm_result) << std::endl;
+        } else if (dxl_error != 0) {
+            std::cout << "[ID:" << id << "] 패킷 에러: "
+                    << packetHandler->getRxPacketError(dxl_error) << std::endl;
+        } else {
+            // 정상적으로 위치값 읽은 경우
+            std::cout << "[ID:" << id << "] 현재 위치(Present Position) = "
+                    << present_position << std::endl;
+            if(id == 1){
+                DEFAULT_PITCH = present_position;
+            }
+            else if(id == 2){
+                DEFAULT_ROLL_R = present_position;
+            }
+            else if(id == 3){
+                DEFAULT_ROLL_L = present_position;
+            }
+            else if(id == 4){
+                DEFAULT_YAW = present_position;
+            }
+            else if(id == 5){
+                DEFAULT_MOUTH = present_position;
+            }
+        }
+    }
+
+    // 6) MPU6050 초기화
+    if (wiringPiSetup() == -1) {
+        std::cerr << "WiringPi 초기화 실패!" << std::endl;
+        return;
+    }
+    fd = wiringPiI2CSetup(MPU6050_ADDR);
+    if (fd == -1) {
+        std::cerr << "MPU6050 I2C 연결 실패!" << std::endl;
+        return;
+    }
+    mpu6050_init();
+    std::cout << "MPU6050 데이터 수집 시작..." << std::endl;
+
+    std::vector<int> DXL_goal_position;
+    int Roll_L_adjust_flag = 0;
+    int Roll_R_adjust_flag = 0;
+    int Pitch_adjust_flag = 0;
+    int mouth_adjust_flag = 0;
+
+    const float current_threshold_mA = -20;   // 목표 전류 임계값 (mA)
+    const int adjustment_increment = 20;       // 모터 위치 조정 증분 (펄스)
+    bool tension_satisfied = false;
+    const int sample_count = 3;
+
+    std::cout << "Roll 조정" << std::endl;
+
+    int sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
+    for (int i = 0; i < sample_count; i++) {
+        sum_accel_x += read_raw_data(0x3B);
+        sum_accel_y += read_raw_data(0x3D);
+        sum_accel_z += read_raw_data(0x3F);
+        delay(10);  // 각 샘플 사이에 짧은 딜레이
+    }
+    int avg_accel_x = sum_accel_x / sample_count;
+    int avg_accel_y = sum_accel_y / sample_count;
+    int avg_accel_z = sum_accel_z / sample_count;
+    
+    // 5-2. 평균 센서값을 g 단위로 변환
+    float Ax = avg_accel_x / 16384.0;
+    float Ay = avg_accel_y / 16384.0;
+    float Az = avg_accel_z / 16384.0;
+
+    std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
+    DXL_goal_position = {DEFAULT_PITCH , DEFAULT_ROLL_R, DEFAULT_ROLL_L, DEFAULT_YAW, DEFAULT_MOUTH};
+    if (Ax > 0){
+        // Roll_L 조정
+        while(true){
+            DXL_goal_position[2] -= adjustment_increment;
+            moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_goal_position.data(), DXL_PROFILE_VELOCITY);
+
+            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
+            for (int i = 0; i < sample_count; i++) {
+                sum_accel_x += read_raw_data(0x3B);
+                sum_accel_y += read_raw_data(0x3D);
+                sum_accel_z += read_raw_data(0x3F);
+                delay(10);  // 각 샘플 사이에 짧은 딜레이
+            }
+            avg_accel_x = sum_accel_x / sample_count;
+            avg_accel_y = sum_accel_y / sample_count;
+            avg_accel_z = sum_accel_z / sample_count;
+            Ax = avg_accel_x / 16384.0;
+            Ay = avg_accel_y / 16384.0;
+            Az = avg_accel_z / 16384.0;
+
+            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
+            if(Ax < -0.15) break;
+        }
+        
+        // Roll_R 조정
+        while(true){
+            DXL_goal_position[1] -= adjustment_increment;
+            moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_goal_position.data(), DXL_PROFILE_VELOCITY);
+
+            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
+            for (int i = 0; i < sample_count; i++) {
+                sum_accel_x += read_raw_data(0x3B);
+                sum_accel_y += read_raw_data(0x3D);
+                sum_accel_z += read_raw_data(0x3F);
+                delay(10);  // 각 샘플 사이에 짧은 딜레이
+            }
+            avg_accel_x = sum_accel_x / sample_count;
+            avg_accel_y = sum_accel_y / sample_count;
+            avg_accel_z = sum_accel_z / sample_count;
+            Ax = avg_accel_x / 16384.0;
+            Ay = avg_accel_y / 16384.0;
+            Az = avg_accel_z / 16384.0;
+
+            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
+            if(Ax > 0.01) break;
+        }
+    }
+    else if (Ax <= 0){
+        while(true){
+            DXL_goal_position[1] -= adjustment_increment;
+            moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_goal_position.data(), DXL_PROFILE_VELOCITY);
+
+            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
+            for (int i = 0; i < sample_count; i++) {
+                sum_accel_x += read_raw_data(0x3B);
+                sum_accel_y += read_raw_data(0x3D);
+                sum_accel_z += read_raw_data(0x3F);
+                delay(10);  // 각 샘플 사이에 짧은 딜레이
+            }
+            avg_accel_x = sum_accel_x / sample_count;
+            avg_accel_y = sum_accel_y / sample_count;
+            avg_accel_z = sum_accel_z / sample_count;
+            Ax = avg_accel_x / 16384.0;
+            Ay = avg_accel_y / 16384.0;
+            Az = avg_accel_z / 16384.0;
+
+            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
+            if(Ax > 0.15) break;
+        }
+
+        // Roll_L 조정
+        while(true){
+            DXL_goal_position[2] -= adjustment_increment;
+            moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_goal_position.data(), DXL_PROFILE_VELOCITY);
+
+            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
+            for (int i = 0; i < sample_count; i++) {
+                sum_accel_x += read_raw_data(0x3B);
+                sum_accel_y += read_raw_data(0x3D);
+                sum_accel_z += read_raw_data(0x3F);
+                delay(10);  // 각 샘플 사이에 짧은 딜레이
+            }
+            avg_accel_x = sum_accel_x / sample_count;
+            avg_accel_y = sum_accel_y / sample_count;
+            avg_accel_z = sum_accel_z / sample_count;
+            Ax = avg_accel_x / 16384.0;
+            Ay = avg_accel_y / 16384.0;
+            Az = avg_accel_z / 16384.0;
+
+            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
+            if(Ax < -0.01) break;
+        }
+    }
+    
+    std::cout << "Pitch 조정" << std::endl;
+
+    sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
+    for (int i = 0; i < sample_count; i++) {
+        sum_accel_x += read_raw_data(0x3B);
+        sum_accel_y += read_raw_data(0x3D);
+        sum_accel_z += read_raw_data(0x3F);
+        delay(10);  // 각 샘플 사이에 짧은 딜레이
+    }
+    avg_accel_x = sum_accel_x / sample_count;
+    avg_accel_y = sum_accel_y / sample_count;
+    avg_accel_z = sum_accel_z / sample_count;
+    Ax = avg_accel_x / 16384.0;
+    Ay = avg_accel_y / 16384.0;
+    Az = avg_accel_z / 16384.0;
+    //pitch 조정 -일 때 생각해서 예외 처리 실행해야할 듯 
+    if(Ay > 0.009){
+        std::cout << "Ay > 0.009" << std::endl;
+        while(true){
+            DXL_goal_position[0] -= adjustment_increment;
+            moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_goal_position.data(), DXL_PROFILE_VELOCITY);
+
+            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
+            for (int i = 0; i < sample_count; i++) {
+                sum_accel_x += read_raw_data(0x3B);
+                sum_accel_y += read_raw_data(0x3D);
+                sum_accel_z += read_raw_data(0x3F);
+                delay(10);  // 각 샘플 사이에 짧은 딜레이
+            }
+            avg_accel_x = sum_accel_x / sample_count;
+            avg_accel_y = sum_accel_y / sample_count;
+            avg_accel_z = sum_accel_z / sample_count;
+            Ax = avg_accel_x / 16384.0;
+            Ay = avg_accel_y / 16384.0;
+            Az = avg_accel_z / 16384.0;
+
+            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
+            if(Ay < 0.009) break;
+        }
+    }
+    else{
+        std::cout << "Ay < 0.009" << std::endl;
+        //pitch가 이미 앞으로 당겨져 있을 경우 예외 처리
+        int now_Ay = Ay;
+        while(true){
+            DXL_goal_position[0] -= adjustment_increment;
+            moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_goal_position.data(), DXL_PROFILE_VELOCITY);
+
+            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
+            for (int i = 0; i < sample_count; i++) {
+                sum_accel_x += read_raw_data(0x3B);
+                sum_accel_y += read_raw_data(0x3D);
+                sum_accel_z += read_raw_data(0x3F);
+                delay(10);  // 각 샘플 사이에 짧은 딜레이
+            }
+            avg_accel_x = sum_accel_x / sample_count;
+            avg_accel_y = sum_accel_y / sample_count;
+            avg_accel_z = sum_accel_z / sample_count;
+            Ax = avg_accel_x / 16384.0;
+            Ay = avg_accel_y / 16384.0;
+            Az = avg_accel_z / 16384.0;
+
+            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
+            if(Ay < now_Ay - 0.01) break;
+        }
+
+        while(true){
+            DXL_goal_position[1] -= adjustment_increment;
+            DXL_goal_position[2] -= adjustment_increment;
+            moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_goal_position.data(), DXL_PROFILE_VELOCITY);
+
+            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
+            for (int i = 0; i < sample_count; i++) {
+                sum_accel_x += read_raw_data(0x3B);
+                sum_accel_y += read_raw_data(0x3D);
+                sum_accel_z += read_raw_data(0x3F);
+                delay(10);  // 각 샘플 사이에 짧은 딜레이
+            }
+            avg_accel_x = sum_accel_x / sample_count;
+            avg_accel_y = sum_accel_y / sample_count;
+            avg_accel_z = sum_accel_z / sample_count;
+            Ax = avg_accel_x / 16384.0;
+            Ay = avg_accel_y / 16384.0;
+            Az = avg_accel_z / 16384.0;
+
+            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
+            if(Ay > 0.009) break;
+        }
+    }
+    
+    std::cout << "Mouth 조정" << std::endl;
+    
+    while(!mouth_adjust_flag){
+        DXL_goal_position[4] -= adjustment_increment;
+        moveDXLtoDesiredPosition(groupSyncWriteVelocity, groupSyncWritePosition, DXL_ID, DXL_goal_position.data(), DXL_PROFILE_VELOCITY);
+
+        int id = 5;
+        uint8_t dxl_err = 0;
+        int dxl_comm_result = COMM_TX_FAIL;
+        int16_t present_current = 0; // signed 16-bit
+        int16_t sum_current = 0;
+        for(int i = 0; i< 5; i++){
+                dxl_comm_result = packetHandler->read2ByteTxRx(
+                portHandler,
+                id,
+                ADDR_PRO_PRESENT_CURRENT,
+                (uint16_t*)&present_current,
+                &dxl_err
+            );
+            if (dxl_comm_result != COMM_SUCCESS) {
+                std::cout << "[ID:" << id << "] read2ByteTxRx(Current) 실패: "
+                        << packetHandler->getTxRxResult(dxl_comm_result) << std::endl;
+            } else if (dxl_err != 0) {
+                std::cout << "[ID:" << id << "] 패킷 에러: "
+                        << packetHandler->getRxPacketError(dxl_err) << std::endl;
+            } else {
+                // XM430 기준 1 LSB ≈ 2.69 mA
+                // ex) present_current = -50 -> 약 -134.5 mA
+                std::cout << "[ID:" << id << "] Present Current (LSB) = "
+                        << present_current << " => 약 "
+                        << present_current * 2.69 << " mA" << std::endl;
+             }
+            sum_current += present_current;
+            delay(20);
+        }
+        sum_current /= 5;
+
+        // 텐션 판별 예시
+        if (sum_current < 0) {
+            std::cout << " → 음수 전류: 반대 방향으로 텐션이 걸려 있음" << std::endl;
+        } else if (sum_current > 0) {
+            std::cout << " → 양수 전류: 해당 방향 텐션" << std::endl;
+        } else {
+            std::cout << " → 전류=0, 텐션이 없다" << std::endl;
+        }
+
+        
+        if (present_current < 0) mouth_adjust_flag = 1;
+            else mouth_adjust_flag = 0;
+            
+    }
+    
+    
+    
+    portHandler->closePort();  // 명확히 포트 닫기   
+    finish_adjust_ready = true;
+        
 }
 
 void robot_main_loop(std::future<void> server_ready_future) {
@@ -1045,6 +1507,17 @@ void robot_main_loop(std::future<void> server_ready_future) {
 }
 
 int main() {
+    #ifdef MOTOR_ENABLED
+    if (!initialize_dynamixel()) {
+        std::cerr << "모터 초기화 실패!" << std::endl;
+        return -1;
+    }
+    // 자이로센서를 이용한 로봇 초기자세 설정
+    // initialize_robot_posture();
+    
+    // 초기 자세로 이동
+    move_to_initial_position();
+    #endif
     
     // 웹소켓 서버 준비
     std::future<void> server_ready_future = server_ready_promise.get_future();

@@ -560,6 +560,150 @@ int enable_torque(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandle
   return 1;
 }
 
+int disable_torque(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error)
+{
+    int dxl_comm_result = COMM_TX_FAIL;
+
+  for(int i = 0; i < DXL_NUM; i++)
+  {
+    dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, DXL_ID[i], ADDR_PRO_TORQUE_ENABLE, TORQUE_DISABLE, &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+      printf("%s\n", packetHandler->getTxRxResult(dxl_comm_result));
+    }
+    else if (dxl_error != 0)
+    {
+      printf("%s\n", packetHandler->getRxPacketError(dxl_error));
+    }
+    else
+    {
+      printf("Dynamixel#%d -----> torque OFF \n", DXL_ID[i]);
+    }
+  }
+  return 1;
+}
+
+int set_profile(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error, int drive_mode_profile)
+{
+    const uint16_t PROFILE_BIT_MASK = 0b00000100; // Drive Mode (Addr 10)의 Bit 2
+    int dxl_comm_result = COMM_TX_FAIL;
+
+  for(int i = 0; i < DXL_NUM; i++)
+  {
+    uint8_t current_drive_mode = 0;
+    dxl_comm_result = packetHandler->read1ByteTxRx(portHandler, DXL_ID[i], ADDR_PRO_DRIVE_MODE, &current_drive_mode, &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+      printf("%s\n", packetHandler->getTxRxResult(dxl_comm_result));
+    }
+    else if (dxl_error != 0)
+    {
+      printf("%s\n", packetHandler->getRxPacketError(dxl_error));
+    }
+    uint8_t new_drive_mode;
+    if (drive_mode_profile == 0) // velocity based profile
+    {
+      new_drive_mode = current_drive_mode & (~PROFILE_BIT_MASK);
+    }
+    else // time based profile
+    {
+      new_drive_mode = current_drive_mode | PROFILE_BIT_MASK;
+    }
+
+    if (new_drive_mode != current_drive_mode)
+    {
+      dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, DXL_ID[i], ADDR_PRO_DRIVE_MODE, new_drive_mode, &dxl_error);
+      if (dxl_comm_result != COMM_SUCCESS)
+      {
+        printf("%s\n", packetHandler->getTxRxResult(dxl_comm_result));
+      }
+      else if (dxl_error != 0)
+      {
+        printf("%s\n", packetHandler->getRxPacketError(dxl_error));
+      }
+    }
+  }
+  return 1;
+}
+
+int set_baudrate(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error, int baudrate)
+{
+    int dxl_comm_result = COMM_TX_FAIL;
+    uint8_t new_baudrate_code;
+
+    switch (baudrate)
+    {
+      case 9600:
+        new_baudrate_code = 0;
+        break;
+      case 57600:
+        new_baudrate_code = 1;
+        break;
+      case 115200:
+        new_baudrate_code = 2;
+        break;
+      case 1000000:
+        new_baudrate_code = 3;
+        break;
+      case 2000000:
+        new_baudrate_code = 4;
+        break;
+      case 3000000:
+        new_baudrate_code = 5;
+        break;
+      case 4000000:
+        new_baudrate_code = 6;
+        break;
+      case 4500000:
+        new_baudrate_code = 7;
+        break;
+      default:
+        printf("Baudrate %d is not supported. Supported baudrates: 9600, 57600, 115200, 1000000, 2000000, 3000000\n", baudrate);
+        return 0;
+    }
+
+    printf("Current port baudrate: %d\n", portHandler->getBaudRate());
+
+    if (portHandler->getBaudRate() == baudrate)
+    {
+      printf("Port baudrate is already %d. No changes needed.\n", baudrate);
+      return 1;
+    }
+
+
+  for(int i = 0; i < DXL_NUM; i++)
+  {
+    dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, DXL_ID[i], ADDR_PRO_BAUDRATE, new_baudrate_code, &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+      printf("%s\n", packetHandler->getTxRxResult(dxl_comm_result));
+    }
+    else if (dxl_error != 0 || dxl_error != 0)
+    {
+      printf("%s\n", packetHandler->getRxPacketError(dxl_error));
+      return 0;
+    }
+    else
+    {
+      printf("Dynamixel#%d -----> baudrate changed to %d \n", DXL_ID[i], baudrate);
+    }
+  }
+
+  printf("Changing port baudrate to %d\n", baudrate);
+  if (!portHandler->setBaudRate(baudrate))
+  {
+      printf("Failed to change port baudrate to %d\n", baudrate);
+      return 0;
+  }
+
+  if (!enable_torque(packetHandler, portHandler, DXL_ID, dxl_error))
+  {
+      printf("Failed to re-enable torque after baudrate change\n");
+      return 0;
+  }
+  return 1;
+}
+
 // assignClassWith1DMiddleBoundary 함수
 int assignClassWith1DMiddleBoundary(double x, const vector<double>& boundaries) {
     for (size_t i = 0; i < boundaries.size(); ++i) {

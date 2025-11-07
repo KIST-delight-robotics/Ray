@@ -53,6 +53,8 @@ using namespace Eigen;
 #define ADDR_PRO_FEEDFORWARD_1ST_GAIN       90
 #define ADDR_PRO_POSITION_P_GAIN            84
 #define ADDR_PRO_PROFILE_ACCELERATION       108
+#define ADDR_PRO_DRIVE_MODE                 10
+#define ADDR_PRO_BAUDRATE                   8
 // Data Byte Length
 
 #define LEN_PRO_GOAL_POSITION               4
@@ -67,9 +69,10 @@ using namespace Eigen;
 #define TORQUE_DISABLE                      0
 
 #define DXL_PROFILE_VELOCITY_HOMING         500
-#define DXL_PROFILE_VELOCITY                40 
-#define DXL_PROFILE_VELOCITY_CONFIGCHANGE   70
-#define DXL_PROFILE_ACCELERATION 0 // 적절한 가속도 값 설정
+#define DXL_PROFILE_VELOCITY                60 
+// #define DXL_PROFILE_VELOCITY_CONFIGCHANGE   70
+#define DXL_PROFILE_VELOCITY_INIT           500
+#define DXL_PROFILE_ACCELERATION 20 // 적절한 가속도 값 설정
 
 #define DXL1_ID                             1 
 #define DXL2_ID                             2
@@ -78,31 +81,32 @@ using namespace Eigen;
 #define DXL5_ID                             5
 #define DXL_NUM                             5
 
-#define BAUDRATE                            57600 
+#define BAUDRATE                            1000000 // 9600, 57600, 115200, 1000000, 2000000, 3000000, 4000000, 4500000
+#define DRIVE_MODE_PROFILE                  1 // 0: Velocity Based Profile, 1: Time Based Profile
 
 #define DEVICENAME                          "/dev/ttyUSB0"  //sudo chmod a+rw /dev/ttyUSB0      //ls /dev/ttyUSB*   //pkill -f push_to_talk_app.py
 #define AUDIO_DEVICE                        "hw:1"
 
 //DXL initial goal position
-#define DEFAULT_PITCH                       3480
-#define DEFAULT_ROLL_R                      1550
-#define DEFAULT_ROLL_L                      650
-#define DEFAULT_YAW                         1000
-#define DEFAULT_MOUTH                       2210
+// #define DEFAULT_PITCH                       3540
+// #define DEFAULT_ROLL_R                      2560
+// #define DEFAULT_ROLL_L                      1970
+// #define DEFAULT_YAW                         1000
+// #define DEFAULT_MOUTH                       1120
 
-// extern int DEFAULT_PITCH;
-// extern int DEFAULT_ROLL_R;
-// extern int DEFAULT_ROLL_L;
-// extern int DEFAULT_YAW;
-// extern int DEFAULT_MOUTH;
+extern int DEFAULT_PITCH;
+extern int DEFAULT_ROLL_R;
+extern int DEFAULT_ROLL_L;
+extern int DEFAULT_YAW;
+extern int DEFAULT_MOUTH;
 
 //robot parameter
 #define PULLY_DIAMETER                      50
 #define ROBOT_HEIGHT                        110             // 베이스부터 실이 연결된 레이어 까지의 높이 small -> 100,Large -> 180
 #define ROBOT_HOLE_RADIUS                   25              // 로봇 머리 구멍 반지름 small -> 25, Large -> 50
 #define ROBOT_YAW_GEAR_RATIO                2               // yaw 모터가 direct하게 머리를 회전시킨다면 1로 설정 아니면 2
-#define ROBOT_MOUTH_TUNE                    90              // 최대 mouse movement size in DXL dimension -> 최초값에서 입모터 조정해보면서 결정
-#define ROBOT_MOUTH_BACK_COMPENSATION       1.2             // 입 움직임에 대한 뒷쪽 보상 -> TRO 논문 참조  small -> 1.2, Large -> 1.5
+#define ROBOT_MOUTH_TUNE                    70              // 최대 mouse movement size in DXL dimension -> 최초값에서 입모터 조정해보면서 결정
+#define ROBOT_MOUTH_BACK_COMPENSATION       1.5             // 입 움직임에 대한 뒷쪽 보상 -> TRO 논문 참조  small -> 1.2, Large -> 1.5
 #define ROBOT_MOUTH_PITCH_COMPENSATION      1.5             // 입 움직임에 따른 pitch 보상
 
 //linux
@@ -156,6 +160,12 @@ void update_DXL_goal_position(int DXL_goal_position[], int DXL_1, int DXL_2, int
 void trans_int2bin_4(uint8_t param_goal_position[4], int dxl_goal_position);
 
 int enable_torque(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error);
+
+int disable_torque(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error);
+
+int set_profile(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error, int drive_mode_profile);
+
+int set_baudrate(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error, int baudrate);
 
 int assignClassWith1DMiddleBoundary(double x, const vector<double>& boundaries);
 

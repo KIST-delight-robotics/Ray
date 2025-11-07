@@ -104,11 +104,11 @@ class ConversationManager:
 
         try:
             logger.info("📋 세션 요약 API 호출...")
-            response = await self.client.response.create(
+            responses = await self.client.responses.create(
                 model="gpt-5",
-                messages=[{"role": "user", "content": prompt}],
+                input=[{"role": "user", "content": prompt}],
             )
-            summary = response.output_text
+            summary = responses.output_text
             logger.info(f"📋 세션 요약 완료:\n{summary}")
             return summary
         except Exception as e:
