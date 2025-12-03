@@ -1,3 +1,4 @@
+import os
 import json
 import time
 import base64
@@ -19,8 +20,37 @@ from conversation_manager import ConversationManager
 logger = logging.getLogger(__name__)
 
 # ==================================================================================
-# TTS 핸들러
+# TTS 관련
 # ==================================================================================
+
+async def save_tts_to_file(response_text: str, client: AsyncOpenAI, filename: str = "output.mp3"):
+    """텍스트를 받아 TTS 오디오 파일로 저장"""
+    try:
+        async with client.audio.speech.with_streaming_response.create(
+            model=TTS_MODEL,
+            voice=VOICE,
+            input=response_text,
+            instructions="Speak in a positive tone.",
+            response_format="wav" 
+        ) as tts_response:
+            
+            logging.info(f"💾 TTS 파일 저장 시작: {filename}")
+            
+            with open(filename, "wb") as f:
+                async for audio_chunk in tts_response.iter_bytes(chunk_size=4096):
+                    if audio_chunk:
+                        f.write(audio_chunk)
+                        
+        logging.info("✅ TTS 파일 저장 완료")
+
+    except asyncio.CancelledError:
+        logging.info("🛑 TTS 처리가 중단되었습니다.")
+        # 파일이 쓰다 만 상태라면 삭제하는 로직이 필요할 수 있습니다.
+        if os.path.exists(filename):
+            os.remove(filename)
+        raise
+    except Exception as e:
+        logging.error(f"❌ TTS 저장 중 오류 발생: {e}")
 
 async def handle_tts_stream(response_stream, client: AsyncOpenAI, websocket, conversation_log: List[Dict[str, Any]], responses_start_time=None):
     """(사용되지 않음 - 참고용) Responses API의 텍스트 스트림을 받아 TTS 오디오 스트림으로 변환 후 전송"""
@@ -68,10 +98,13 @@ async def handle_tts_stream(response_stream, client: AsyncOpenAI, websocket, con
         if full_response_text:
             conversation_log.append({"role": "assistant", "content": full_response_text})
 
-async def handle_tts_oneshot(response_text: str, client: AsyncOpenAI, websocket):
+async def handle_tts_oneshot(response_text: str, client: AsyncOpenAI, websocket, realtime_start_event: asyncio.Event):
     """전체 텍스트를 받아 한 번에 TTS 처리하는 함수"""
     try:
-        await websocket.send(json.dumps({"type": "responses_stream_start"}))
+        if realtime_start_event.is_set():
+            await websocket.send(json.dumps({"type": "responses_stream_start"}))
+        else:
+            await websocket.send(json.dumps({"type": "responses_only"}))
         async with client.audio.speech.with_streaming_response.create(
             model=TTS_MODEL, voice=VOICE, input=response_text, response_format="pcm"
         ) as tts_response:
@@ -90,7 +123,7 @@ async def handle_tts_oneshot(response_text: str, client: AsyncOpenAI, websocket)
 # Unified API Pipeline (Realtime + Responses)
 # ==================================================================================
 
-async def run_realtime_task(websocket, realtime_connection, item_ids_to_manage: list, user_text: str):
+async def run_realtime_task(websocket, realtime_connection, item_ids_to_manage: list, user_text: str, realtime_start_event: asyncio.Event):
     """(Task 1) Realtime API를 호출하고 오디오를 스트리밍합니다."""
     logger.info("⚡️ Realtime Task 시작...")
     try:
@@ -114,10 +147,11 @@ async def run_realtime_task(websocket, realtime_connection, item_ids_to_manage: 
             elif event.type == "response.audio.delta":
                 await websocket.send(json.dumps({"type": "realtime_audio_chunk", "data": event.delta}))
             elif event.type == "response.created":
+                realtime_start_event.set()
                 await websocket.send(json.dumps({"type": "realtime_stream_start"}))
             elif event.type == "response.done":
                 await websocket.send(json.dumps({"type": "realtime_stream_end"}))
-                transcript = event.response.output[0].content[0].transcript if event.response.output else "[Realtime 응답 없음]"
+                transcript = event.response.output[0].content[0].transcript if event.response.output[0].content[0].type != "text" else "[Realtime 응답 없음]"
                 logger.info(f"⚡️ Realtime API 답변 완료: '{transcript}' (소요시간: {time.time() - realtime_start_time:.2f}초)")
                 break
             elif event.type == "error":
@@ -130,7 +164,7 @@ async def run_realtime_task(websocket, realtime_connection, item_ids_to_manage: 
     finally:
         logger.info("⚡️ Realtime Task 종료.")
 
-async def run_responses_task(websocket, openai_client: AsyncOpenAI, manager: ConversationManager):
+async def run_responses_task(websocket, openai_client: AsyncOpenAI, manager: ConversationManager, realtime_start_event: asyncio.Event):
     """(Task 2) Responses API를 호출하고, TTS를 스트리밍합니다."""
     logger.info("🧠 Responses Task 시작...")
     responses_start_time = time.time()
@@ -140,11 +174,28 @@ async def run_responses_task(websocket, openai_client: AsyncOpenAI, manager: Con
         response = await openai_client.responses.create(
             model=RESPONSES_MODEL,
             input=current_log,
+            tools=[
+                {
+                    "type": "web_search",
+                    "user_location": {
+                        "type": "approximate",
+                        "country": "KR",
+                    }
+                }
+            ],
+            reasoning={"effort": "none"},
+            text = {"verbosity": "low"},
         )
-        response_text = response.output_text
+        # logging.info(f"🧠 Responses Query: \n{response}")
+        # response_id = response.id
+
+        # response_item = await openai_client.responses.input_items.list(response_id)
+        # print(response_item.data)
+
+        response_text = response.output[0].content[0].text.strip()
         logger.info(f"🧠 Responses API 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
 
-        await handle_tts_oneshot(response_text, openai_client, websocket)
+        await handle_tts_oneshot(response_text, openai_client, websocket, realtime_start_event)
         manager.add_message("assistant", response_text)
 
     except asyncio.CancelledError:
@@ -168,6 +219,7 @@ async def unified_active_pipeline(websocket, openai_client: AsyncOpenAI, manager
                 while True:
                     try:
                         user_text = await asyncio.wait_for(stt_result_queue.get(), timeout=ACTIVE_SESSION_TIMEOUT)
+                        realtime_start_event = asyncio.Event()
 
                         if active_response_tasks:
                             logger.info(f"사용자 인터럽션 감지: '{user_text}'. 이전 응답 태스크를 중단합니다.")
@@ -183,10 +235,10 @@ async def unified_active_pipeline(websocket, openai_client: AsyncOpenAI, manager
                         manager.add_message("user", user_text)
 
                         realtime_task = asyncio.create_task(
-                            run_realtime_task(websocket, realtime_connection, realtime_item_ids_to_manage, user_text)
+                            run_realtime_task(websocket, realtime_connection, realtime_item_ids_to_manage, user_text, realtime_start_event)
                         )
                         responses_task = asyncio.create_task(
-                            run_responses_task(websocket, openai_client, manager)
+                            run_responses_task(websocket, openai_client, manager, realtime_start_event)
                         )
                         active_response_tasks = [responses_task, realtime_task]
                         
@@ -220,10 +272,10 @@ async def wakeword_detection_loop(websocket):
                 if START_KEYWORD in stt_result:
                     await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(AWAKE_FILE)}))
                     return
-                # # 테스트용 코드
+                # 테스트용 코드
                 # await asyncio.sleep(1)
                 # await websocket.send(json.dumps({"type": "play_audio", "file_to_play": "test_audio.wav"}))
-                # await websocket.send(json.dumps({"type": "play_music", "title": "가까운 듯 먼 그대여", "artist": "카더가든", "file_to_play": "test_audio.wav"}))
+                # await websocket.send(json.dumps({"type": "play_music", "title": "가까운 듯 먼 그대여", "artist": "카더가든"}))
                 # return
     except Exception as e:
         logger.error(f"Wakeword detection loop에서 오류 발생: {e}", exc_info=True)

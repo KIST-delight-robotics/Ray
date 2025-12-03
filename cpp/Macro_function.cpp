@@ -459,6 +459,270 @@ std::vector<int> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double mou
 
 }
 
+int calculateDXLGoalVelocity_velocityBased(double current_position, double goal_position, double current_velocity, double profile_acceleration, double control_ms)
+{
+    // --- 단위 변환용 상수 (XC 계열 기준) ---
+    // 이 상수는 특정 다이나믹셀 모델에 종속적임
+    const double RPM_PER_VEL_UNIT = 0.229;
+    const double RPM_SQ_PER_ACCEL_UNIT = 214.577;
+    const double TICK_PER_REVOLUTION = 4096.0;
+    const double MIN_PER_MS = 1.0 / 60000.0;
+
+    // 계산용 단위: tick, minute
+    const double TICK_PER_MIN_PER_VEL_UNIT = RPM_PER_VEL_UNIT * TICK_PER_REVOLUTION;
+    const double TICK_PER_MIN_SQ_PER_ACCEL_UNIT = RPM_SQ_PER_ACCEL_UNIT * TICK_PER_REVOLUTION;
+    const double VEL_UNIT_PER_TICK_PER_MIN = 1.0 / TICK_PER_MIN_PER_VEL_UNIT;
+
+    // --- 입력 값을 계산용 단위로 변환 ---
+    double a_mag = profile_acceleration * TICK_PER_MIN_SQ_PER_ACCEL_UNIT;
+    double T = control_ms * MIN_PER_MS;
+    double V_c = current_velocity * TICK_PER_MIN_PER_VEL_UNIT;
+    double delta_p = goal_position - current_position;
+
+    double goal_velocity;
+
+    // --- 경계 조건 확인 ---
+    // 제어 주기 동안 도달 가능한 변위의 최대/최소 범위 계산
+    double delta_p_max = (V_c + a_mag * T / 2.0) * T;
+    double delta_p_min = (V_c - a_mag * T / 2.0) * T;
+
+    if (delta_p >= delta_p_max) {
+        goal_velocity = V_c + a_mag * T; // 최대 속도
+    } else if (delta_p <= delta_p_min) {
+        goal_velocity = V_c - a_mag * T; // 최소 속도
+    } else {
+        // --- 목표가 도달 가능한 범위 내에 있는 경우 (이차방정식 풀이) ---
+
+        double a; // 부호가 적용된 실제 가속도
+
+        if (delta_p > V_c * T) { a = a_mag; } // 가속
+        else if (delta_p < V_c * T) { a = -a_mag; } // 감속
+        else {
+            // 현재 속도로 목표 위치에 도달하는 경우
+            goal_velocity = V_c;
+        }
+
+        if (delta_p != V_c * T) {
+            // 이차방정식 계수 계산
+            // Vg^2 - (2*a*T + 2*Vc)*Vg + (Vc^2 + 2*a*delta_p) = 0
+            double A = 1.0;
+            double B = -(2.0 * a * T + 2.0 * V_c);
+            double C = V_c * V_c + 2.0 * a * delta_p;
+
+            double discriminant = B * B - 4.0 * A * C;
+
+            // 판별식 안전장치
+            // (이론적으로는 위의 경계 처리로 인해 discriminant < 0이 될 수 없지만, 부동 소수점 연산 오류를 대비한 방어 코드)
+            if (discriminant < 0) {
+                // 경계 값에 근접한 경우, full 가/감속으로 처리
+                if (a > 0) {
+                    goal_velocity = V_c + a_mag * T;
+                } else {
+                    goal_velocity = V_c - a_mag * T;
+                }
+            }
+            else {
+                // 근의 공식 적용 및 해 선택
+                double sqrt_discriminant = sqrt(discriminant);
+
+                if (a > 0) {
+                    // 가속 -> 마이너스 근 선택
+                    goal_velocity = (-B - sqrt_discriminant) / (2.0 * A);
+                } else {
+                    // 감속 -> 플러스 근 선택
+                    goal_velocity = (-B + sqrt_discriminant) / (2.0 * A);
+                }
+            }
+        }
+    }
+
+    // --- 계산된 속도를 DXL 단위로 변환 후 반환 ---
+    return static_cast<int>(round(goal_velocity * VEL_UNIT_PER_TICK_PER_MIN));
+}
+
+int calculateDXLGoalVelocity_timeBased_ds(double current_position, double goal_position, double current_velocity, double profile_acceleration, double control_ms)
+{
+    // --- 단위 변환용 상수 (XC 계열 기준) ---
+    const double RPM_PER_VEL_UNIT = 0.229;
+    const double TICK_PER_REVOLUTION = 4096.0;
+    const double MIN_PER_MS = 1.0 / 60000.0;
+
+    // 계산용 단위: tick, minute
+    const double TICK_PER_MIN_PER_VEL_UNIT = RPM_PER_VEL_UNIT * TICK_PER_REVOLUTION;
+    const double VEL_UNIT_PER_TICK_PER_MIN = 1.0 / TICK_PER_MIN_PER_VEL_UNIT;
+
+    // --- 입력 값 유효성 검사 및 조정 ---
+    // 총 제어 시간이 0 이하면 움직일 수 없으므로 현재 속도 반환
+    if (control_ms <= 0) {
+        std::cerr << "Warning: Control time is zero or negative. Returning current velocity." << std::endl;
+        return static_cast<int>(std::round(current_velocity));
+    }
+    // 가속 시간은 총 제어 시간을 넘을 수 없음
+    if (profile_acceleration > control_ms) {
+        std::cerr << "Warning: Profile acceleration time exceeds control time. Adjusting to control time." << std::endl;
+        profile_acceleration = control_ms;
+    }
+
+    // --- 입력 값을 계산용 단위로 변환 ---
+    double s = goal_position - current_position; // 총 이동 거리 (tick)
+    double Vc = current_velocity * TICK_PER_MIN_PER_VEL_UNIT; // 현재 속도 (tick/min)
+    double Ta = profile_acceleration * MIN_PER_MS; // 가속 시간 (min)
+    double T_total = control_ms * MIN_PER_MS; // 총 이동 시간 (min)
+
+    double Vg; // 계산할 목표 속도 (tick/min)
+
+    // --- 핵심 로직: 목표 속도 계산 ---
+    // 공식: Vg = (2*s - Vc*Ta) / (2*T_total - Ta)
+    double numerator = 2.0 * s - Vc * Ta;
+    double denominator = 2.0 * T_total - Ta;
+
+    // 분모가 0이 되는 경우 방지 (부동 소수점 비교)
+    if (std::abs(denominator) < 1e-9) {
+        // 이 경우는 Ta가 T_total의 2배일 때 발생하며, 물리적으로 불가능한 상황.
+        // 안전하게 등가속 운동으로 간주하고 계산
+        std::cerr << "Warning: Denominator in velocity calculation is zero. Using alternative calculation." << std::endl;
+        if (std::abs(T_total) < 1e-9) { // 총 시간이 0에 가까우면
+             Vg = Vc; // 속도 변화 없음
+        } else {
+             // 등가속 공식: s = (Vc + Vg)/2 * T_total  => Vg = (2*s / T_total) - Vc
+             Vg = (2.0 * s / T_total) - Vc;
+        }
+    } else {
+        Vg = numerator / denominator;
+    }
+
+    // --- 계산된 속도를 DXL 단위로 변환 후 반환 ---
+    return static_cast<int>(std::round(Vg * VEL_UNIT_PER_TICK_PER_MIN));
+}
+
+int calculateDXLGoalVelocity_timeBased_ff(double current_position_real, double current_position_desired, double goal_position, double control_ms, double Kp)
+{
+    // --- 단위 변환용 상수 (XC 계열 기준) ---
+    const double RPM_PER_VEL_UNIT = 0.229;
+    const double TICK_PER_REVOLUTION = 4096.0;
+    const double MIN_PER_MS = 1.0 / 60000.0;
+
+    // 계산용 단위: tick, minute
+    const double TICK_PER_MIN_PER_VEL_UNIT = RPM_PER_VEL_UNIT * TICK_PER_REVOLUTION;
+    const double VEL_UNIT_PER_TICK_PER_MIN = 1.0 / TICK_PER_MIN_PER_VEL_UNIT;
+
+    // --- 입력 값을 계산용 단위로 변환 ---
+    double T_total = control_ms * MIN_PER_MS; // 총 이동 시간 (min)
+
+    // 피드포워드 속도 (tick/min)
+    double V_ff = (goal_position - current_position_desired) / T_total;
+
+    // 피드백 속도 (tick/min)
+    double position_error = current_position_desired - current_position_real;
+    double V_fb = position_error * Kp;
+    // 전체 목표 속도 (tick/min)
+    double Vg = V_ff + V_fb;
+
+    // --- 계산된 속도를 DXL 단위로 변환 후 반환 ---
+    return static_cast<int>(std::round(Vg * VEL_UNIT_PER_TICK_PER_MIN));
+}
+
+// 다이나믹셀의 현재 위치를 읽는 함수
+bool readDXLPresentPosition(
+    dynamixel::GroupSyncRead& groupSyncReadPosition,
+    int DXL_ID[],
+    int present_position[])
+{
+    groupSyncReadPosition.clearParam();
+    for (int i = 0; i < DXL_NUM; i++) {
+        groupSyncReadPosition.addParam(DXL_ID[i]);
+    }
+    if (groupSyncReadPosition.txRxPacket() != COMM_SUCCESS) {
+        fprintf(stderr, "Failed to read present position\n");
+        return false;
+    }
+    for (int i = 0; i < DXL_NUM; i++) {
+        if (groupSyncReadPosition.isAvailable(DXL_ID[i], ADDR_PRO_PRESENT_POSITION, LEN_PRO_PRESENT_POSITION)) {
+            present_position[i] = groupSyncReadPosition.getData(DXL_ID[i], ADDR_PRO_PRESENT_POSITION, LEN_PRO_PRESENT_POSITION);
+        }
+    }
+    return true;
+}
+
+// 다이나믹셀의 현재 속도를 읽는 함수
+bool readDXLPresentVelocity(
+    dynamixel::GroupSyncRead& groupSyncReadVelocity,
+    int DXL_ID[],
+    int present_velocity[])
+{
+    groupSyncReadVelocity.clearParam();
+    for (int i = 0; i < DXL_NUM; i++) {
+        groupSyncReadVelocity.addParam(DXL_ID[i]);
+    }
+    if (groupSyncReadVelocity.txRxPacket() != COMM_SUCCESS) {
+        fprintf(stderr, "Failed to read present velocity\n");
+        return false;
+    }
+    for (int i = 0; i < DXL_NUM; i++) {
+        if (groupSyncReadVelocity.isAvailable(DXL_ID[i], ADDR_PRO_PRESENT_VELOCITY, LEN_PRO_PRESENT_VELOCITY)) {
+            present_velocity[i] = groupSyncReadVelocity.getData(DXL_ID[i], ADDR_PRO_PRESENT_VELOCITY, LEN_PRO_PRESENT_VELOCITY);
+        }
+    }
+    return true;
+}
+
+// 다이나믹셀의 현재 속도와 위치를 한 번에 읽는 함수
+bool readDXLPresentState(dynamixel::GroupBulkRead &groupBulkRead, int DXL_ID[], int present_velocity[], int present_position[])
+{
+    groupBulkRead.clearParam();
+
+    // 각 다이나믹셀에 대해 현재 속도와 위치를 한 번에 읽도록 파라미터 추가
+    for (int i = 0; i < DXL_NUM; i++) {
+        if (!groupBulkRead.addParam(DXL_ID[i], ADDR_PRO_PRESENT_VELOCITY, LEN_PRO_PRESENT_VELOCITY + LEN_PRO_PRESENT_POSITION)) {
+            fprintf(stderr, "[ID:%03d] groupBulkRead addParam failed\n", DXL_ID[i]);
+            return false;
+        }
+    }
+
+    // BulkRead 패킷 전송 및 수신
+    if (groupBulkRead.txRxPacket() != COMM_SUCCESS) {
+        fprintf(stderr, "Failed to read present state (velocity and position)\n");
+        return false;
+    }
+
+    // 읽어온 데이터 파싱
+    for (int i = 0; i < DXL_NUM; i++) {
+        if (groupBulkRead.isAvailable(DXL_ID[i], ADDR_PRO_PRESENT_VELOCITY, LEN_PRO_PRESENT_VELOCITY + LEN_PRO_PRESENT_POSITION)) {
+            present_velocity[i] = groupBulkRead.getData(DXL_ID[i], ADDR_PRO_PRESENT_VELOCITY, LEN_PRO_PRESENT_VELOCITY);
+            present_position[i] = groupBulkRead.getData(DXL_ID[i], ADDR_PRO_PRESENT_POSITION, LEN_PRO_PRESENT_POSITION);
+        } else {
+            fprintf(stderr, "[ID:%03d] groupBulkRead getData failed\n", DXL_ID[i]);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// 계산된 목표 속도를 다이나믹셀에 쓰는 함수
+bool moveDXLwithVelocity(
+    dynamixel::GroupSyncWrite& groupSyncWriteVelocity,
+    int DXL_ID[],
+    int goal_velocity[])
+{
+    groupSyncWriteVelocity.clearParam();
+    uint8_t param_goal_velocity[4];
+
+    for (int i = 0; i < DXL_NUM; i++) {
+        trans_int2bin_4(param_goal_velocity, goal_velocity[i]); // int를 4-byte 배열로 변환
+        if (!groupSyncWriteVelocity.addParam(DXL_ID[i], param_goal_velocity)) {
+            fprintf(stderr, "[ID:%03d] groupSyncWriteVelocity addParam failed\n", DXL_ID[i]);
+            return false;
+        }
+    }
+
+    if (groupSyncWriteVelocity.txPacket() != COMM_SUCCESS) {
+        fprintf(stderr, "Failed to send goal velocity values\n");
+        return false;
+    }
+    return true;
+}
+
 // Move 5 DXL to DXL_goal_position with specified velocity and acceleration
 bool moveDXLtoDesiredPosition(
     dynamixel::GroupSyncWrite& groupSyncWriteVelocity,
@@ -583,7 +847,7 @@ int disable_torque(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandl
   return 1;
 }
 
-int set_profile(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error, int drive_mode_profile)
+int set_drive_mode_profile(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error, int drive_mode_profile)
 {
     const uint16_t PROFILE_BIT_MASK = 0b00000100; // Drive Mode (Addr 10)의 Bit 2
     int dxl_comm_result = COMM_TX_FAIL;
@@ -623,6 +887,26 @@ int set_profile(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler 
       }
     }
   }
+  return 1;
+}
+
+int set_operating_mode(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error, int operating_mode)
+{
+    int dxl_comm_result = COMM_TX_FAIL;
+
+  for(int i = 0; i < DXL_NUM; i++)
+  {
+    dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, DXL_ID[i], ADDR_PRO_OPERATING_MODE, operating_mode, &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+      printf("%s\n", packetHandler->getTxRxResult(dxl_comm_result));
+    }
+    else if (dxl_error != 0)
+    {
+      printf("%s\n", packetHandler->getRxPacketError(dxl_error));
+    }
+  }
+  printf("Operating mode changed to %d for all dynamixels\n", operating_mode);
   return 1;
 }
 
@@ -695,13 +979,160 @@ int set_baudrate(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler
       printf("Failed to change port baudrate to %d\n", baudrate);
       return 0;
   }
-
-  if (!enable_torque(packetHandler, portHandler, DXL_ID, dxl_error))
-  {
-      printf("Failed to re-enable torque after baudrate change\n");
-      return 0;
-  }
   return 1;
+}
+
+int set_return_delay_time(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error, int return_delay_time)
+{
+    int dxl_comm_result = COMM_TX_FAIL;
+
+  for(int i = 0; i < DXL_NUM; i++)
+  {
+    dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, DXL_ID[i], ADDR_PRO_RETURN_DELAY_TIME, return_delay_time, &dxl_error);
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+      printf("%s\n", packetHandler->getTxRxResult(dxl_comm_result));
+    }
+    else if (dxl_error != 0)
+    {
+      printf("%s\n", packetHandler->getRxPacketError(dxl_error));
+    }
+  }
+  printf("Return delay time changed to %d for all dynamixels\n", return_delay_time);
+  return 1;
+}
+
+int set_profile_acceleration(dynamixel::GroupSyncWrite &groupSyncWriteAcceleration, int *DXL_ID, int profile_acceleration)
+{
+    groupSyncWriteAcceleration.clearParam();
+
+    uint8_t param_profile_acceleration[4];
+    trans_int2bin_4(param_profile_acceleration, profile_acceleration);
+
+    for (int i = 0; i < DXL_NUM; i++)
+    {
+        if (!groupSyncWriteAcceleration.addParam(DXL_ID[i], param_profile_acceleration))
+        {
+            fprintf(stderr, "[ID:%03d] groupSyncWrite for Profile Acceleration addParam failed\n", DXL_ID[i]);
+            return 0; // fail
+        }
+    }
+
+    int dxl_comm_result = groupSyncWriteAcceleration.txPacket();
+    if (dxl_comm_result != COMM_SUCCESS)
+    {
+        fprintf(stderr, "Failed to set profile acceleration. Error code: %d\n", dxl_comm_result);
+        return 0; // fail
+    }
+
+    groupSyncWriteAcceleration.clearParam();
+    printf("Profile acceleration for all dynamixels set to %d\n", profile_acceleration);
+
+    return 1; // success
+}
+
+int set_feedforward (dynamixel::GroupSyncWrite &groupSyncWriteff1Gain, dynamixel::GroupSyncWrite &groupSyncWriteff2Gain, int *DXL_ID, int ff1, int ff2)
+{
+    groupSyncWriteff1Gain.clearParam();
+    groupSyncWriteff2Gain.clearParam();
+
+    // Feedforward 1st Gain (2 bytes)
+    uint8_t param_ff1_gain[2];
+    param_ff1_gain[0] = DXL_LOBYTE(ff1);
+    param_ff1_gain[1] = DXL_HIBYTE(ff1);
+
+    // Feedforward 2nd Gain (2 bytes)
+    uint8_t param_ff2_gain[2];
+    param_ff2_gain[0] = DXL_LOBYTE(ff2);
+    param_ff2_gain[1] = DXL_HIBYTE(ff2);
+
+    for (int i = 0; i < DXL_NUM; i++)
+    {
+        if (!groupSyncWriteff1Gain.addParam(DXL_ID[i], param_ff1_gain))
+        {
+            fprintf(stderr, "[ID:%03d] groupSyncWrite for Feedforward 1st Gain addParam failed\n", DXL_ID[i]);
+            return 0; // fail
+        }
+        if (!groupSyncWriteff2Gain.addParam(DXL_ID[i], param_ff2_gain))
+        {
+            fprintf(stderr, "[ID:%03d] groupSyncWrite for Feedforward 2nd Gain addParam failed\n", DXL_ID[i]);
+            return 0; // fail
+        }
+    }
+
+    int dxl_comm_result_ff1 = groupSyncWriteff1Gain.txPacket();
+    int dxl_comm_result_ff2 = groupSyncWriteff2Gain.txPacket();
+
+    if (dxl_comm_result_ff1 != COMM_SUCCESS)
+    {
+        fprintf(stderr, "Failed to set feedforward 1st gain. Error code: %d\n", dxl_comm_result_ff1);
+        return 0; // fail
+    }
+    if (dxl_comm_result_ff2 != COMM_SUCCESS)
+    {
+        fprintf(stderr, "Failed to set feedforward 2nd gain. Error code: %d\n", dxl_comm_result_ff2);
+        return 0; // fail
+    }
+
+    groupSyncWriteff1Gain.clearParam();
+    groupSyncWriteff2Gain.clearParam();
+    printf("Successfully set feedforward gains for all dynamixels:\n");
+    printf("- Feedforward 1st Gain: %d\n", ff1);
+    printf("- Feedforward 2nd Gain: %d\n", ff2);
+    return 1; // success
+}
+
+int set_initial_gain (dynamixel::GroupSyncWrite &groupSyncWritePGain, dynamixel::GroupSyncWrite &groupSyncWriteIGain, int *DXL_ID, int profile_acceleration, int velocity_p_gain, int velocity_i_gain)
+{
+    groupSyncWritePGain.clearParam();
+    groupSyncWriteIGain.clearParam();
+
+    // Velocity P Gain (2 bytes)
+    uint8_t param_p_gain[2];
+    param_p_gain[0] = DXL_LOBYTE(velocity_p_gain);
+    param_p_gain[1] = DXL_HIBYTE(velocity_p_gain);
+
+    // Velocity I Gain (2 bytes)
+    uint8_t param_i_gain[2];
+    param_i_gain[0] = DXL_LOBYTE(velocity_i_gain);
+    param_i_gain[1] = DXL_HIBYTE(velocity_i_gain);
+
+    for (int i = 0; i < DXL_NUM; i++)
+    {
+        if (!groupSyncWritePGain.addParam(DXL_ID[i], param_p_gain))
+        {
+            fprintf(stderr, "[ID:%03d] groupSyncWrite for Velocity P Gain addParam failed\n", DXL_ID[i]);
+            return 0; // fail
+        }
+        if (!groupSyncWriteIGain.addParam(DXL_ID[i], param_i_gain))
+        {
+            fprintf(stderr, "[ID:%03d] groupSyncWrite for Velocity I Gain addParam failed\n", DXL_ID[i]);
+            return 0; // fail
+        }
+    }
+
+    int dxl_comm_result_p = groupSyncWritePGain.txPacket();
+    int dxl_comm_result_i = groupSyncWriteIGain.txPacket();
+
+    if (dxl_comm_result_p != COMM_SUCCESS)
+    {
+        fprintf(stderr, "Failed to set velocity P gain. Error code: %d\n", dxl_comm_result_p);
+        return 0; // fail
+    }
+    if (dxl_comm_result_i != COMM_SUCCESS)
+    {
+        fprintf(stderr, "Failed to set velocity I gain. Error code: %d\n", dxl_comm_result_i);
+        return 0; // fail
+    }
+
+    groupSyncWritePGain.clearParam();
+    groupSyncWriteIGain.clearParam();
+    printf("Successfully set initial gains for all dynamixels:\n");
+    printf("- Profile Acceleration: %d\n", profile_acceleration);
+    printf("- Velocity P Gain: %d\n", velocity_p_gain);
+    printf("- Velocity I Gain: %d\n", velocity_i_gain);
+
+    return 1; // success
 }
 
 // assignClassWith1DMiddleBoundary 함수
@@ -799,16 +1230,14 @@ vector<vector<double>> getNextSegment_SegSeg(
 
     size_t distSelectNum = 20;
     double distSelectDist = 0.22;
-    //size_t gradSelectNum = 15;
+    size_t gradSelectNum = 15;
     size_t randomChooseNum = 10;
-    randomChooseNum = min(randomChooseNum, distSelectNum);
 
+    distSelectNum = min(distSelectNum, N);
+    
+    // 거리 기반 후보 선택
     vector<double> distances(N, 0.0);
-    vector<size_t> indices;
-    vector<double> gradFinal(D, 0.0);
-    for (size_t d = 0; d < D; ++d) {
-        gradFinal[d] = PrevEnd[d] - PrevEndOneBefore[d];
-    }
+    vector<size_t> distIndices;
 
     // 거리 계산
     for (size_t n = 0; n < N; ++n) {
@@ -819,34 +1248,126 @@ vector<vector<double>> getNextSegment_SegSeg(
         }
         distances[n] = sqrt(dist);
         if (distances[n] < distSelectDist) {
-            indices.push_back(n);
+            distIndices.push_back(n);
         }
     }
-    
-    //cout << "Number of valid indices: " << indices.size() << endl;
-    if (indices.empty()) {
-        cout << "No valid indices found. Returning current segment." << endl;
 
-        // 현재 segment 값을 반환
-        vector<vector<double>> currentSegment(K, vector<double>(D, 0.0));
+    // 거리 조건을 만족하는 후보가 randomChooseNum보다 적으면 가장 가까운 세그먼트를 선택
+    if (distIndices.size() < randomChooseNum) {
+        cout << "최소 거리 기준을 충족하는 세그먼트가 충분하지 않습니다. 가장 가까운 세그먼트를 선택합니다." << endl;
+        cout << "Number of valid indices: " << distIndices.size() << endl;
+        auto minIt = min_element(distances.begin(), distances.end());
+        size_t minIndex = distance(distances.begin(), minIt);
+
+        vector<vector<double>> selectedSegment(K, vector<double>(D, 0.0));
         for (size_t k = 0; k < K; ++k) {
             for (size_t d = 0; d < D; ++d) {
-                currentSegment[k][d] = segmentData[k * D * N + d * N + 0]; // 첫 번째 슬라이스 사용
+                selectedSegment[k][d] = segmentData[k * D * N + d * N + minIndex];
             }
         }
-        return currentSegment;
+        return selectedSegment;
     }
 
-    sort(indices.begin(), indices.end(), [&distances](size_t a, size_t b) {
+    // 거리 기준으로 후보들 정렬
+    sort(distIndices.begin(), distIndices.end(), [&distances](size_t a, size_t b) {
         return distances[a] < distances[b];
     });
-    randomChooseNum = std::min(randomChooseNum, indices.size());
 
-    // 랜덤 인덱스 선택
+    // 상위 distSelectNum 개수까지만 남김
+    if (distIndices.size() > distSelectNum) {
+        distIndices.resize(distSelectNum);
+    }
+
+    vector<size_t> finalIndices = distIndices;
+
+    // Gradient 기반 후보 선택
+    if (gradient) {
+        gradSelectNum = std::min(gradSelectNum, distIndices.size());
+
+        // 이전 세그먼트의 마지막 그래디언트 계산
+        vector<double> gradFinal(D, 0.0);
+        for (size_t d = 0; d < D; ++d) {
+            gradFinal[d] = PrevEnd[d] - PrevEndOneBefore[d];
+        }
+
+        // 각 후보 세그먼트의 시작 그래디언트와의 거리 계산
+        vector<pair<double, size_t>> gradDists; // {그래디언트 거리, 원본 인덱스}
+        for (size_t idx : distIndices) {
+            vector<double> startGrad(D);
+            for (size_t d = 0; d < D; ++d) {
+                double p1 = segmentData[0 * D * N + d * N + idx];
+                double p2 = segmentData[1 * D * N + d * N + idx];
+                startGrad[d] = p2 - p1;
+            }
+            // 그래디언트 거리 계산
+            double dist_sq = 0.0;
+            for (size_t d = 0; d < D; ++d) {
+                double diff = startGrad[d] - gradFinal[d];
+                dist_sq += diff * diff;
+            }
+            gradDists.push_back({sqrt(dist_sq), idx});
+        }
+
+        // 그래디언트 거리 기준으로 정렬
+        sort(gradDists.begin(), gradDists.end());
+
+        // 정렬된 인덱스를 gradIndices에 저장
+        vector<size_t> gradIndices;
+        for (const auto& pair : gradDists) {
+            gradIndices.push_back(pair.second);
+        }
+
+        // 상위 gradSelectNum 개수까지만 남김
+        if (gradIndices.size() > gradSelectNum) {
+            gradIndices.resize(gradSelectNum);
+        }
+
+        finalIndices = gradIndices;
+
+        if (gotoZero) {
+            vector<pair<double, size_t>> gotoZeroScores; // {점수, 원본 인덱스}
+            for (size_t idx : gradIndices) {
+                double score = 0.0;
+                for (size_t d = 0; d < D; ++d) {
+                    double startPoint = segmentData[0 * D * N + d * N + idx];
+                    double endPoint = segmentData[(K - 1) * D * N + d * N + idx];
+                    score += startPoint * (endPoint - startPoint);
+                }
+                gotoZeroScores.push_back({score, idx});
+            }
+
+            // gotoZero 점수 기준으로 정렬
+            sort(gotoZeroScores.begin(), gotoZeroScores.end());
+
+            // 정렬된 인덱스를 finalIndices에 저장
+            finalIndices.clear();
+            for (const auto& pair : gotoZeroScores) {
+                finalIndices.push_back(pair.second);
+            }
+        }
+    }
+
+    // 최종 세그먼트 선택
+    randomChooseNum = std::min(randomChooseNum, finalIndices.size());
+
+    if (randomChooseNum == 0) { // 후보가 없는 경우
+        // 이 경우 distIndices에서 가장 좋은 것(첫번째)을 선택
+        size_t chosenIndex = distIndices[0];
+
+        vector<vector<double>> selectedSegment(K, vector<double>(D));
+        for (size_t k = 0; k < K; ++k) {
+            for (size_t d = 0; d < D; ++d) {
+                selectedSegment[k][d] = segmentData[k * D * N + d * N + chosenIndex];
+            }
+        }
+        return selectedSegment;
+    }
+
+    // 최종 후보들 중 랜덤으로 하나 선택
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(0, randomChooseNum - 1);
-    size_t chosenIndex = indices[dis(gen)];
+    size_t chosenIndex = finalIndices[dis(gen)];
     //cout << "choseIndex : " << chosenIndex <<'\n';
     //cout << "Chosen index: " << chosenIndex << endl;
     if (chosenIndex >= N) {
@@ -923,76 +1444,72 @@ VectorXd toEigenVector(const vector<double>& stdVec) {
 }
 
 vector<vector<double>> connectTwoSegments(
-    const vector<double>& PrevEndOneBefore,
-    const std::array<double, 3>& lastValues,
+    const vector<vector<double>>& prevSegment,
     const vector<vector<double>>& nextSegment,
-    int n_interpolate
+    int n_new,
+    int n_anchor_past,
+    int n_anchor_future
 ) {
-    size_t D = nextSegment[0].size(); // Roll, Pitch, Yaw dimensions
-    int n_new = n_interpolate; // n_new를 n_interpolate와 동일하게 설정
-    double interval[3];
-    size_t totalSize = n_new + (nextSegment.size() - n_new); 
-    vector<vector<double>> interpolatedSegment(totalSize, vector<double>(D, 0.0));
+    // --- 안정성 및 입력 값 검증 ---
+    if (n_anchor_past + n_anchor_future < 4) {
+        cerr << "Error: Total anchors must be at least 4 for cubic spline interpolation." << endl;
+        return nextSegment;
+    }
+    if (prevSegment.size() < n_anchor_past) {
+        cerr << "Error: prevSegment does not have enough points for n_anchor_past." << endl;
+        return nextSegment;
+    }
+    if (nextSegment.size() < n_new + n_anchor_future) {
+        cerr << "Error: nextSegment does not have enough points for n_new and n_anchor_future." << endl;
+        return nextSegment;
+    }
 
+    size_t D = nextSegment[0].size(); // 차원 (Roll, Pitch, Yaw)
+    vector<vector<double>> interpolatedSegment = nextSegment; // 수정할 세그먼트 복사본 생성
 
     for (size_t d = 0; d < D; ++d) {
         vector<double> x_interpolate, y_interpolate;
 
-        interval[d] = lastValues[d]-nextSegment[0][d];
-        //cout << "interval : " << interval[d] << '\n';
-
-        x_interpolate.push_back(0);
-        x_interpolate.push_back(1);
+        // prevSegment의 끝점과 nextSegment의 시작점이 일치하도록 nextSegment 전체를 평행 이동
+        double last_val_prev = prevSegment.back()[d];
+        double first_val_next = nextSegment[0][d];
+        double interval = last_val_prev - first_val_next;
 
         for (size_t i = 0; i < nextSegment.size(); ++i) {
-            interpolatedSegment[i][d] = nextSegment[i][d]+interval[d];
+            interpolatedSegment[i][d] += interval;
         }
 
-         y_interpolate.push_back(PrevEndOneBefore[d]);
-         y_interpolate.push_back(lastValues[d]);
-
-        for(int i = 3; i<=5; i++){
-            x_interpolate.push_back(i+1);
-            double nextValue = interpolatedSegment[i - 1][d];
-            if (std::isnan(nextValue)) {
-                cerr << "Warning: nextSegment[" << i - 1 << "][" << d << "] is nan, replacing with 0.0" << endl;
-                nextValue = 0.0;
-            }
-            y_interpolate.push_back(nextValue);
+        // --- 앵커 포인트(제어점) 설정 ---
+        // 과거 앵커: prevSegment의 끝에서 n_anchor_past개의 포인트를 가져옴
+        for (int i = 0; i < n_anchor_past; ++i) {
+            x_interpolate.push_back(i);
+            y_interpolate.push_back(prevSegment[prevSegment.size() - n_anchor_past + i][d]);
         }
 
+        // 미래 앵커: nextSegment에서 새로 생성될 n_new개의 포인트 이후 지점부터 n_anchor_future개를 가져옴
+        for (int i = 0; i < n_anchor_future; ++i) {
+            // x 좌표는 보간 구간 뒤에 위치해야 함
+            x_interpolate.push_back(n_anchor_past + n_new + i);
+            // y 값은 n_new 인덱스부터 가져옴
+            y_interpolate.push_back(interpolatedSegment[n_new + i][d]);
+        }
+        
         // Eigen Vector로 변환
         VectorXd x = toEigenVector(x_interpolate);
         VectorXd y = toEigenVector(y_interpolate);
-        //cout << "x_interpolate: ";
-        //for (double val : x_interpolate) cout << val << " ";
-        //cout << endl;
 
-        // cout << "y_interpolate: ";
-        // for (double val : y_interpolate) cout << val << " ";
-        // cout << endl;
-
-        // 스플라인 피팅
+        // --- 3차 스플라인 피팅 ---
         int degree = 3;
-        Eigen::RowVectorXd y_row = y.transpose();
-        Eigen::Spline<double, 1> spline = Eigen::SplineFitting<Eigen::Spline<double, 1>>::Interpolate(y_row, degree, x);
+        Eigen::Spline<double, 1> spline = Eigen::SplineFitting<Eigen::Spline<double, 1>>::Interpolate(y.transpose(), degree, x);
 
-        for(int i = 1; i<= 2; i++){
-            double t = static_cast<double>(i+1);
-            if (t < x.minCoeff() || t > x.maxCoeff()) {
-                cerr << "Error: t is out of range. t: " << t 
-                    << ", range: [" << x.minCoeff() << ", " << x.maxCoeff() << "]" << endl;
-                continue;
-            }
+        // --- 새로운 포인트 보간 및 대체 ---
+        // nextSegment의 첫 n_new 개의 포인트를 새로운 값으로 대체
+        for (int i = 0; i < n_new; ++i) {
+            // 보간할 지점의 x값(t)은 과거 앵커와 미래 앵커 사이에 위치
+            double t = static_cast<double>(n_anchor_past + i);
 
             Eigen::Spline<double, 1>::PointType result = spline(t);
-            double interpolatedValue = result(0);
-
-            interpolatedSegment[i - 1][d] = interpolatedValue;
-
-            // 결과 출력
-            //cout << "InterpolatedSegment[" << i - 1 << "][" << d << "] = " << interpolatedValue << endl;
-            
+            interpolatedSegment[i][d] = result(0);
         }
     }
 

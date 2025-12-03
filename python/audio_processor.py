@@ -30,7 +30,7 @@ logging.basicConfig(
 )
 
 # ==================================================================================
-# SmartTurn Endpoint 로직을 클래스로 캡슐화
+# SmartTurn
 # ==================================================================================
 class SmartTurnProcessor:
     """Smart Turn v3 ONNX 모델을 사용하여 발화 종료를 예측하는 클래스."""
@@ -40,7 +40,7 @@ class SmartTurnProcessor:
             so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
             so.inter_op_num_threads = 1
             so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            self.session = ort.InferenceSession(onnx_path, sess_options=so)
+            self.session = ort.InferenceSession(onnx_path, sess_options=so, providers=['CPUExecutionProvider'])
             self.feature_extractor = WhisperFeatureExtractor(chunk_length=8)
             logging.info(f"✅ Smart Turn 모델 로드 완료: {onnx_path}")
         except Exception as e:
@@ -265,6 +265,10 @@ class GoogleSTTStreamer:
         """단일 STT 세션을 실행하고 최종 결과를 큐에 넣음."""
         logging.info("🚀 STT 세션 스레드 시작.")
         first_response_received = False
+
+        accumulated_transcripts = []
+        current_interim_transcript = ""
+
         try:
             audio_gen = self._stt_audio_generator()
             responses = self.stt_client.streaming_recognize(self.stt_streaming_config, audio_gen)
@@ -282,30 +286,61 @@ class GoogleSTTStreamer:
                     continue
 
                 result = response.results[0]
-                transcript = result.alternatives[0].transcript
+                transcript = result.alternatives[0].transcript.strip()
 
-                if result.is_final and self.stt_stop_event.is_set():
-                    final_text = transcript.strip()
-                    logging.info(f"✅ STT 최종 결과: '{final_text}'")
-                    if final_text:
-                        # 메인 스레드로 결과 전송
-                        self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
-                    
-                    # C++ 클라이언트에 STT 완료 신호 전송
-                    stt_completion_time = int(time.time() * 1000)
-                    asyncio.run_coroutine_threadsafe(
-                        self.websocket.send(json.dumps({"type": "stt_done", "stt_done_time": stt_completion_time})),
-                        self.main_loop
-                    )
-                    break # 최종 결과를 받으면 루프 종료
+                if result.is_final:
+                    accumulated_transcripts.append(transcript)
+                    current_interim_transcript = ""
+                    logging.info(f"✅ STT 최종 결과 조각: '{transcript}'")
                 else:
-                    logging.info(f"✅ STT 중간 결과: '{transcript}'")
+                    current_interim_transcript = transcript
+                    logging.info(f"🟩 STT 중간 결과: '{transcript}'")
+                
+                if self.stt_stop_event.is_set():
+                    break
+
+                # if result.is_final and self.stt_stop_event.is_set():
+                #     final_text = transcript.strip()
+                #     logging.info(f"✅ STT 최종 결과: '{final_text}'")
+                #     if final_text:
+                #         # 메인 스레드로 결과 전송
+                #         self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
+                    
+                #     # C++ 클라이언트에 STT 완료 신호 전송
+                #     stt_completion_time = int(time.time() * 1000)
+                #     asyncio.run_coroutine_threadsafe(
+                #         self.websocket.send(json.dumps({"type": "stt_done", "stt_done_time": stt_completion_time})),
+                #         self.main_loop
+                #     )
+                #     break # 최종 결과를 받으면 루프 종료
+                # else:
+                #     logging.info(f"✅ STT 중간 결과: '{transcript}'")
                     
         except exceptions.DeadlineExceeded as e:
             logging.warning(f"STT 세션 타임아웃(DeadlineExceeded): {e}")
         except Exception as e:
             logging.error(f"STT 세션 중 오류 발생: {e}", exc_info=True)
         finally:
+            # 최종 결과 반환
+            final_text_parts = accumulated_transcripts.copy()
+            if current_interim_transcript:
+                final_text_parts.append(current_interim_transcript)
+            final_text = " ".join(final_text_parts).strip()
+
+            if final_text:
+                logging.info(f"✅ STT 최종 결과: '{final_text}'")
+
+                # 메인 스레드로 결과 전송
+                self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
+
+                # C++ 클라이언트에 STT 완료 신호 전송
+                stt_completion_time = int(time.time() * 1000)
+                asyncio.run_coroutine_threadsafe(
+                    self.websocket.send(json.dumps({"type": "stt_done", "stt_done_time": stt_completion_time})),
+                    self.main_loop
+                )
+            else:
+                logging.info("❎ STT 인식 결과가 없습니다.")
             logging.info("🚀 STT 세션 스레드 종료.")
 
 # ==================================================================================
@@ -481,7 +516,7 @@ class AudioProcessor:
         """현재 발화 턴을 종료하는 헬퍼 함수"""
         if not self.user_is_speaking: return
         
-        logging.info("🤫 발화 종료 감지. STT 오디오 공급을 중단합니다.")
+        logging.info("🤫 인식 종료. STT 오디오 공급을 중단합니다.")
         self.stt_stop_event.set()
         self.user_is_speaking = False
         self.in_grace_period = False
