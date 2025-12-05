@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import wave
 import base64
 import asyncio
 import logging
@@ -133,7 +134,7 @@ async def run_realtime_task(websocket, realtime_connection, item_ids_to_manage: 
             await asyncio.gather(*delete_tasks, return_exceptions=True)
             item_ids_to_manage.clear()
 
-        await realtime_connection.session.update(session={"instructions": REALTIME_PROMPT, "voice": VOICE})
+        await realtime_connection.session.update(session={"type": "realtime", "instructions": REALTIME_PROMPT, "audio": {"output": {"voice": VOICE}}})
         await realtime_connection.conversation.item.create(
             item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]}
         )
@@ -141,21 +142,34 @@ async def run_realtime_task(websocket, realtime_connection, item_ids_to_manage: 
         realtime_start_time = time.time()
         await realtime_connection.response.create()
 
-        async for event in realtime_connection:
-            if event.type == "conversation.item.created":
-                item_ids_to_manage.append(event.item.id)
-            elif event.type == "response.audio.delta":
-                await websocket.send(json.dumps({"type": "realtime_audio_chunk", "data": event.delta}))
-            elif event.type == "response.created":
-                realtime_start_event.set()
-                await websocket.send(json.dumps({"type": "realtime_stream_start"}))
-            elif event.type == "response.done":
-                await websocket.send(json.dumps({"type": "realtime_stream_end"}))
-                transcript = event.response.output[0].content[0].transcript if event.response.output[0].content[0].type != "text" else "[Realtime 응답 없음]"
-                logger.info(f"⚡️ Realtime API 답변 완료: '{transcript}' (소요시간: {time.time() - realtime_start_time:.2f}초)")
-                break
-            elif event.type == "error":
-                logger.error(f"Realtime API 오류 이벤트: {event}")
+        with wave.open("output/audio/realtime.wav", "wb") as wf:
+            wf.setnchannels(AUDIO_CONFIG['CHANNELS'])
+            wf.setsampwidth(2)
+            wf.setframerate(AUDIO_CONFIG['SAMPLE_RATE'])
+
+            async for event in realtime_connection:
+
+                if event.type == "conversation.item.added":
+                    item_ids_to_manage.append(event.item.id)
+
+                elif event.type == "response.output_audio.delta":
+                    await websocket.send(json.dumps({"type": "realtime_audio_chunk", "data": event.delta}))
+                    bytes_data = base64.b64decode(event.delta)
+                    wf.writeframes(bytes_data)
+
+                elif event.type == "response.created":
+                    realtime_start_event.set()
+                    await websocket.send(json.dumps({"type": "realtime_stream_start"}))
+
+                elif event.type == "response.done":
+                    await websocket.send(json.dumps({"type": "realtime_stream_end"}))
+                    transcript = event.response.output[0].content[0].transcript if event.response.output[0].content[0].type != "text" else "[Realtime 응답 없음]"
+                    logger.info(f"⚡️ Realtime API 답변 완료: '{transcript}' (소요시간: {time.time() - realtime_start_time:.2f}초)")
+                    wf.close()
+                    break
+
+                elif event.type == "error":
+                    logger.error(f"Realtime API 오류 이벤트: {event}")
     
     except asyncio.CancelledError:
         logger.info("⚡️ Realtime Task가 외부에서 중단되었습니다.")
@@ -192,7 +206,7 @@ async def run_responses_task(websocket, openai_client: AsyncOpenAI, manager: Con
         # response_item = await openai_client.responses.input_items.list(response_id)
         # print(response_item.data)
 
-        response_text = response.output[0].content[0].text.strip()
+        response_text = response.output_text.strip()
         logger.info(f"🧠 Responses API 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
 
         await handle_tts_oneshot(response_text, openai_client, websocket, realtime_start_event)
@@ -212,7 +226,7 @@ async def unified_active_pipeline(websocket, openai_client: AsyncOpenAI, manager
     stt_result_queue = asyncio.Queue()
     main_loop = asyncio.get_running_loop()
 
-    async with openai_client.beta.realtime.connect(model=REALTIME_MODEL) as realtime_connection:
+    async with openai_client.realtime.connect(model=REALTIME_MODEL) as realtime_connection:
         realtime_item_ids_to_manage = []
         try:
             with AudioProcessor(stt_result_queue, main_loop, websocket, config=AUDIO_CONFIG) as audio_processor:

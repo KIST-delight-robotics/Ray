@@ -1391,9 +1391,9 @@ vector<vector<double>> multExpToSegment(
     float threshold,
     float div
 ) {
-    vector<int> decidenovocide(ex_energy.size(), 0);
-    vector<int> novoicesteps(ex_energy.size(), 0);
-    vector<float> novoiceexp(ex_energy.size(), 0.0);
+    vector<int> decidenovocide(ex_segment.size(), 0);
+    vector<int> novoicesteps(ex_segment.size(), 0);
+    vector<float> novoiceexp(ex_segment.size(), 0.0);
 
     // 1. 음성 여부 판단
     for (size_t i = 0; i < ex_energy.size(); ++i) {

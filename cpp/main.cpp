@@ -18,6 +18,7 @@
 #include <ctime>
 #include <algorithm>
 #include <tuple>
+#include <sstream>
 #include <wiringPiI2C.h>
 #include <wiringPi.h>
 #include <unistd.h>
@@ -168,7 +169,9 @@ public:
 
         logFile.open(ss.str());
         // 헤더 작성 (Mode 컬럼 추가)
-        logFile << "Timestamp_ms,Mode,Target_Pos_0,Target_Pos_1,Target_Pos_2,Target_Pos_3,Target_Pos_4,"
+        logFile << "Timestamp_ms,Mode,"
+                << "Target_Roll,Target_Pitch,Target_Yaw,Target_Mouth,"
+                << "Target_Pos_0,Target_Pos_1,Target_Pos_2,Target_Pos_3,Target_Pos_4,"
                 << "Present_Pos_0,Present_Pos_1,Present_Pos_2,Present_Pos_3,Present_Pos_4,"
                 << "Present_Vel_0,Present_Vel_1,Present_Vel_2,Present_Vel_3,Present_Vel_4\n";
         
@@ -177,7 +180,8 @@ public:
         std::cout << "[Logger] Started logging to " << ss.str() << std::endl;
     }
 
-    void log(const std::string& mode, 
+    void log(const std::string& mode,
+             const double* target_rpy,
              const int* target_pos, 
              const int* present_pos, 
              const int* present_vel) {
@@ -189,6 +193,8 @@ public:
 
         logFile << elapsed_ms << "," << mode;
         
+        // Target RPY (4 values)
+        for(int i=0; i<4; ++i) logFile << "," << target_rpy[i];
         // Target Positions (5 motors)
         for(int i=0; i<5; ++i) logFile << "," << target_pos[i];
         // Present Positions (5 motors)
@@ -208,6 +214,8 @@ public:
         }
     }
 };
+
+DataLogger robotLogger;
 
 // **CustomSoundStream 클래스 정의**
 class CustomSoundStream : public sf::SoundStream {
@@ -832,86 +840,163 @@ void generate_motion(int channels, int samplerate) {
 
             motion_results.push_back(calculate_result);
             
-            // -- 헤드 모션 생성 --
+            // -- 헤드 모션 생성을 위한 energy 저장 --
             double rms_value = calculateRMS(channel_divided, 0, frames_per_update);
             energy.push_back(rms_value);
 
-            if(i == num_motion_updates - 1) { // 마지막 업데이트일 때만 헤드 모션 생성
+            // if(i == num_motion_updates - 1) { // 마지막 업데이트일 때만 헤드 모션 생성
 
-                if(first_segment_flag == 1) {
+            //     if(first_segment_flag == 1) {
 
-                    double start_mouth = 0.0;
+            //         double start_mouth = 0.0;
 
-                    // 첫 세그먼트일 경우 prevSegment를 이전 값들로 초기화
-                    {
-                        std::lock_guard<std::mutex> lock(prev_values_mutex);
-                        prevSegment.clear();
-                        for (const auto& val : prevValues) {
-                            prevSegment.push_back({val[0], val[1], val[2]});
-                        }
-                        start_mouth = prevValues.back()[3];
-                    }
+            //         // 첫 세그먼트일 경우 prevSegment를 이전 값들로 초기화
+            //         {
+            //             std::lock_guard<std::mutex> lock(prev_values_mutex);
+            //             prevSegment.clear();
+            //             for (const auto& val : prevValues) {
+            //                 prevSegment.push_back({val[0], val[1], val[2]});
+            //             }
+            //             start_mouth = prevValues.back()[3];
+            //         }
 
-                    // // 말을 시작하는 시점의 입모양 보정
-                    // int blend_frames = 5; // 보정할 프레임 수 (5프레임 = 약 200ms)
+            //         // // 말을 시작하는 시점의 입모양 보정
+            //         // int blend_frames = 5; // 보정할 프레임 수 (5프레임 = 약 200ms)
 
-                    // for (int k = 0; k < blend_frames; ++k) {
-                    //     // 0.0 ~ 1.0 으로 증가하는 선형 비율 t
-                    //     double t = (double)(k + 1) / (double)(blend_frames);
+            //         // for (int k = 0; k < blend_frames; ++k) {
+            //         //     // 0.0 ~ 1.0 으로 증가하는 선형 비율 t
+            //         //     double t = (double)(k + 1) / (double)(blend_frames);
 
-                    //     // Smoothstep 적용 (3차 곡선 효과)
-                    //     double alpha = t * t * (3.0 - 2.0 * t);
+            //         //     // Smoothstep 적용 (3차 곡선 효과)
+            //         //     double alpha = t * t * (3.0 - 2.0 * t);
 
-                    //     // 보간: (시작값 * (1 - alpha)) + (목표값 * alpha)
-                    //     motion_results[k] = static_cast<float>(start_mouth * (1.0 - alpha) + motion_results[k] * alpha);
-                    // }
-                }
+            //         //     // 보간: (시작값 * (1 - alpha)) + (목표값 * alpha)
+            //         //     motion_results[k] = static_cast<float>(start_mouth * (1.0 - alpha) + motion_results[k] * alpha);
+            //         // }
+            //     }
                 
-                //평균 기울기 값 계산
-                avg_grad = getSegmentAverageGrad(energy, "one2one" , "abs");
+            //     //평균 기울기 값 계산
+            //     avg_grad = getSegmentAverageGrad(energy, "one2one" , "abs");
 
-                // 평균 기울기 값이 4개 class 중 어디에 해당하는지 판단 
-                segClass = assignClassWith1DMiddleBoundary(avg_grad, boundaries);
-                //cout << "Assigned class : " << segClass << endl;
-                std::string filePath;
+            //     // 평균 기울기 값이 4개 class 중 어디에 해당하는지 판단 
+            //     segClass = assignClassWith1DMiddleBoundary(avg_grad, boundaries);
+            //     //cout << "Assigned class : " << segClass << endl;
+            //     std::string filePath;
 
-                switch (segClass) {
-                    case 0: filePath =  "segment_0.npy"; break;
-                    case 1: filePath =  "segment_1.npy"; break;
-                    case 2: filePath =  "segment_2.npy"; break;
-                    case 3: filePath =  "segment_3.npy"; break;
-                    default:
-                        std::cerr << "Invalid segClass: " << segClass << std::endl;
-                        break;
-                }
+            //     switch (segClass) {
+            //         case 0: filePath =  "segment_0.npy"; break;
+            //         case 1: filePath =  "segment_1.npy"; break;
+            //         case 2: filePath =  "segment_2.npy"; break;
+            //         case 3: filePath =  "segment_3.npy"; break;
+            //         default:
+            //             std::cerr << "Invalid segClass: " << segClass << std::endl;
+            //             break;
+            //     }
 
-                cnpy::NpyArray segment = cnpy::npy_load(SEGMENTS_DIR + "/" + filePath);
+            //     cnpy::NpyArray segment = cnpy::npy_load(SEGMENTS_DIR + "/" + filePath);
 
-                for (int j = 0; j < 3; j++){
-                    prevEnd[j] = prevSegment[prevSegment.size() -1][j]; // prevSegment의 마지막 데이터 값
-                    prevEndOneBefore[j] = prevSegment[prevSegment.size() -2][j];
-                }
+            //     for (int j = 0; j < 3; j++){
+            //         prevEnd[j] = prevSegment[prevSegment.size() -1][j]; // prevSegment의 마지막 데이터 값
+            //         prevEndOneBefore[j] = prevSegment[prevSegment.size() -2][j];
+            //     }
 
-                //segment 선택
-                deliverSegment = getNextSegment_SegSeg(prevEndOneBefore, prevEnd, segment, true, true);
+            //     //segment 선택
+            //     deliverSegment = getNextSegment_SegSeg(prevEndOneBefore, prevEnd, segment, true, true);
             
-                // segment 보정 (무성구간에 따라서 값 보정)
-                deliverSegment = multExpToSegment(energy, deliverSegment, 0.01, 10);
+            //     // segment 보정 (무성구간에 따라서 값 보정)
+            //     deliverSegment = multExpToSegment(energy, deliverSegment, 0.01, 10);
 
-				if (first_segment_flag == 1) {
-					// 첫 세그먼트일 경우 이전 값들과 자연스럽게 이어지도록 보정
-					// std::vector<double> startPose = { prevEnd[0], prevEnd[1], prevEnd[2] };
-					// deliverSegment = applyOffsetDecay(startPose, deliverSegment, 9); // 5프레임 동안 보정 적용
-					first_segment_flag = 0;
-                }
-                else {
-                // 이전 Segment의 끝부분과 현재 Segment의 시작부분을 B-spline 보간법을 통해 자연스럽게 이어줌.
-                    deliverSegment = connectTwoSegments(prevSegment, deliverSegment, 3, 5, 3);
+			// 	if (first_segment_flag == 1) {
+			// 		// 첫 세그먼트일 경우 이전 값들과 자연스럽게 이어지도록 보정
+			// 		// std::vector<double> startPose = { prevEnd[0], prevEnd[1], prevEnd[2] };
+			// 		// deliverSegment = applyOffsetDecay(startPose, deliverSegment, 9); // 5프레임 동안 보정 적용
+			// 		first_segment_flag = 0;
+            //     }
+            //     else {
+            //     // 이전 Segment의 끝부분과 현재 Segment의 시작부분을 B-spline 보간법을 통해 자연스럽게 이어줌.
+            //         deliverSegment = connectTwoSegments(prevSegment, deliverSegment, 3, 5, 3);
+            //     }
+
+            //     // 현재 세그먼트를 다음 반복을 위해 저장
+            //     prevSegment = deliverSegment;
+            // }
+        }
+
+        if(!energy.empty()) { // 마우스 모션 생성 완료 후 마지막에 한번만 헤드 모션 생성
+
+            if(first_segment_flag == 1) {
+
+                double start_mouth = 0.0;
+
+                // 첫 세그먼트일 경우 prevSegment를 이전 값들로 초기화
+                {
+                    std::lock_guard<std::mutex> lock(prev_values_mutex);
+                    prevSegment.clear();
+                    for (const auto& val : prevValues) {
+                        prevSegment.push_back({val[0], val[1], val[2]});
+                    }
+                    start_mouth = prevValues.back()[3];
                 }
 
-                // 현재 세그먼트를 다음 반복을 위해 저장
-                prevSegment = deliverSegment;
+                // // 말을 시작하는 시점의 입모양 보정
+                // int blend_frames = 5; // 보정할 프레임 수 (5프레임 = 약 200ms)
+
+                // for (int k = 0; k < blend_frames; ++k) {
+                //     // 0.0 ~ 1.0 으로 증가하는 선형 비율 t
+                //     double t = (double)(k + 1) / (double)(blend_frames);
+
+                //     // Smoothstep 적용 (3차 곡선 효과)
+                //     double alpha = t * t * (3.0 - 2.0 * t);
+
+                //     // 보간: (시작값 * (1 - alpha)) + (목표값 * alpha)
+                //     motion_results[k] = static_cast<float>(start_mouth * (1.0 - alpha) + motion_results[k] * alpha);
+                // }
             }
+            
+            //평균 기울기 값 계산
+            avg_grad = getSegmentAverageGrad(energy, "one2one" , "abs");
+
+            // 평균 기울기 값이 4개 class 중 어디에 해당하는지 판단 
+            segClass = assignClassWith1DMiddleBoundary(avg_grad, boundaries);
+            //cout << "Assigned class : " << segClass << endl;
+            std::string filePath;
+
+            switch (segClass) {
+                case 0: filePath =  "segment_0.npy"; break;
+                case 1: filePath =  "segment_1.npy"; break;
+                case 2: filePath =  "segment_2.npy"; break;
+                case 3: filePath =  "segment_3.npy"; break;
+                default:
+                    std::cerr << "Invalid segClass: " << segClass << std::endl;
+                    break;
+            }
+
+            cnpy::NpyArray segment = cnpy::npy_load(SEGMENTS_DIR + "/" + filePath);
+
+            for (int j = 0; j < 3; j++){
+                prevEnd[j] = prevSegment[prevSegment.size() -1][j]; // prevSegment의 마지막 데이터 값
+                prevEndOneBefore[j] = prevSegment[prevSegment.size() -2][j];
+            }
+
+            //segment 선택
+            deliverSegment = getNextSegment_SegSeg(prevEndOneBefore, prevEnd, segment, true, true);
+        
+            // segment 보정 (무성구간에 따라서 값 보정)
+            deliverSegment = multExpToSegment(energy, deliverSegment, 0.01, 10);
+
+            if (first_segment_flag == 1) {
+                // 첫 세그먼트일 경우 이전 값들과 자연스럽게 이어지도록 보정
+                // std::vector<double> startPose = { prevEnd[0], prevEnd[1], prevEnd[2] };
+                // deliverSegment = applyOffsetDecay(startPose, deliverSegment, 9); // 5프레임 동안 보정 적용
+                first_segment_flag = 0;
+            }
+            else {
+            // 이전 Segment의 끝부분과 현재 Segment의 시작부분을 B-spline 보간법을 통해 자연스럽게 이어줌.
+                deliverSegment = connectTwoSegments(prevSegment, deliverSegment, 3, 5, 3);
+            }
+
+            // 현재 세그먼트를 다음 반복을 위해 저장
+            prevSegment = deliverSegment;
         }
 
         {
@@ -933,19 +1018,8 @@ void generate_motion(int channels, int samplerate) {
     }
 }
 
-// ========= 로깅 추가 임시 ===========
 
-struct LogEntry {
-    double timestamp_ms;
-    int target_position;
-    int target_velocity;
-    int present_position;
-    int present_velocity;
-};
-
-// ==================================
-
-void control_motor(CustomSoundStream& soundStream) {
+void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
     // 모터 초기 설정 코드
     while(!mouth_motion_queue.empty()) mouth_motion_queue.pop();
     while(!head_motion_queue.empty()) head_motion_queue.pop();
@@ -961,14 +1035,8 @@ void control_motor(CustomSoundStream& soundStream) {
     int DXL_initial_position[DXL_NUM] = { DEFAULT_PITCH, DEFAULT_ROLL_R, DEFAULT_ROLL_L, DEFAULT_YAW, DEFAULT_MOUTH };
     uint8_t dxl_error = 0;
     #else
-    std::cout << "[DUMMY MOTOR] 모터 제어 (control_motor) 시작. 실제 모터는 움직이지 않습니다." << std::endl;
+    std::cout << "[DUMMY MOTOR] control_motor (" << mode_label << ") start." << std::endl;
     #endif
-
-    // == 임시 ==
-    std::vector<LogEntry> data_buffer;
-    int LOGGING_DURATION_MS = 600000;
-    data_buffer.reserve(LOGGING_DURATION_MS * 2);
-    // ==========
 
     std::vector<std::vector<double>> current_motion_data(9, std::vector<double>(3, 0.0));
 
@@ -1096,18 +1164,6 @@ void control_motor(CustomSoundStream& soundStream) {
                 moveDXLtoDesiredPosition(groupSyncWriteProfileVelocity, groupSyncWritePosition, DXL_ID, DXL_goal_position, DXL_PROFILE_VELOCITY);
                 auto dxl_end = std::chrono::steady_clock::now();
                 auto dxl_duration = std::chrono::duration_cast<std::chrono::microseconds>(dxl_end - dxl_start);
-                
-                // // ====== 임시 로깅 =======
-                // auto current_time = std::chrono::high_resolution_clock::now();
-                // std::chrono::duration<double, std::milli> elapsed_ms = current_time - start_time;
-                // LogEntry current_log;
-                // current_log.timestamp_ms = elapsed_ms.count();
-                // current_log.target_position = DXL_goal_position[0];
-                // current_log.present_position = DXL_present_position[0];
-                // current_log.present_velocity = DXL_present_velocity[0];
-
-                // data_buffer.push_back(current_log);
-                // // =========================
 
                 if (dxl_duration.count() > 1000) {
                     std::cout << "Warning: DXL processing took " << (dxl_duration.count()/1000.0) 
@@ -1121,6 +1177,10 @@ void control_motor(CustomSoundStream& soundStream) {
             }
 
             updatePrevValues(roll_final, pitch_final, yaw_final, mouth_final);
+
+            double DXL_goal_rpy[4] = {roll_final, pitch_final, yaw_final, mouth_final};
+
+            robotLogger.log(mode_label, DXL_goal_rpy, DXL_goal_position, DXL_present_position, DXL_present_velocity);
 
             if (i == 0 and cycle_num % 10 == 0) {
                 auto expected_playback_ms = (cycle_num) * INTERVAL_MS;
@@ -1148,34 +1208,11 @@ void control_motor(CustomSoundStream& soundStream) {
             std::this_thread::sleep_until(start_time + std::chrono::milliseconds(cycle_num * INTERVAL_MS + i * 40 + 40));
         }
     }
-
-    // == 임시: 로그 파일로 저장 ==
-    // 파일 쓰기
-    // printf("Now writing data to 'single_step_response_buffered.csv'...\n");
-    // std::ofstream log_file("single_step_response_buffered.csv");
-    // log_file << "Timestamp(ms),TargetVelocity,PresentPosition,PresentVelocity\n";
-
-    // for (const auto& log_entry : data_buffer) {
-    //     log_file << log_entry.timestamp_ms << ","
-    //              << log_entry.target_velocity << ","
-    //              << log_entry.present_position << ","
-    //              << log_entry.present_velocity << "\n";
-    // }
-
-    // printf("Log file saved successfully.\n");
-
-    // log_file.close();
-    // =================================
     #ifdef MOTOR_ENABLED
-    // 초기 위치로 복귀
-    // if (OPERATING_MODE == 1) {
-    //     move_to_initial_position_velctrl();
-    // } else {
-    //     move_to_initial_position_posctrl();
-    // }
+    std::cout << "Control Motor (" << mode_label << ") finished." << std::endl;
     #else
     // --- 가짜 모터 종료 로그 ---
-    std::cout << "[DUMMY MOTOR] 모터 제어 (control_motor) 종료." << std::endl;
+    std::cout << "[DUMMY MOTOR] control_motor (" << mode_label << ") finished." << std::endl;
     #endif
 }
 
@@ -1232,9 +1269,12 @@ void wait_control_motor(){
     int DXL_initial_position[DXL_NUM] = { DEFAULT_PITCH, DEFAULT_ROLL_R, DEFAULT_ROLL_L, DEFAULT_YAW, DEFAULT_MOUTH };
     uint8_t dxl_error = 0;
 
-    std::ofstream csv_file;
-    csv_file.open("wait_mode_test_log.csv");
-    csv_file << "Timestamp(ms),Target Position,Target Velocity,Present Position,Present Velocity\n";
+    json led_msg;
+    led_msg["cmd"] = "led_ring";
+    led_msg["r"] = 233;
+    led_msg["g"] = 233;
+    led_msg["b"] = 50;
+    webSocket.sendText(led_msg.dump());
 
     std::cout << "대기 모드 (wait_control_motor) 시작." << std::endl;
     #else
@@ -1246,8 +1286,8 @@ void wait_control_motor(){
 
     auto wait_start_time = std::chrono::high_resolution_clock::now();
     int step = 0;
-
     constexpr auto FRAME_INTERVAL = std::chrono::milliseconds(35);
+
     while(wait_mode_flag == true){
         #ifdef MOTOR_ENABLED
         std::ifstream headGesture(IDLE_MOTION_FILE);
@@ -1297,54 +1337,33 @@ void wait_control_motor(){
 
 		targetTraj = applyOffsetDecay(startPose, targetTraj, SKIP_FRAMES);
 
-        // targetTraj 재생
-        for (const auto& pose : targetTraj) {
-            if(wait_mode_flag == false) break;
-
-            std::vector<int> DXL = RPY2DXL(pose[0] , pose[1], pose[2], pose[3], 0);
-            update_DXL_goal_position(DXL_goal_position,
-                                        DXL[0],
-                                        DXL[1],
-                                        DXL[2],
-                                        DXL[3],
-                                        DXL[4]);
-            // 모터 제어
-            // 속도제어 모드
-            if (OPERATING_MODE == 1) {
-                readDXLPresentState(groupBulkRead, DXL_ID, DXL_present_velocity, DXL_present_position);
-                for (int i = 0; i < DXL_NUM; i++) {
-                    DXL_goal_velocity[i] = calculateDXLGoalVelocity_timeBased_ds(DXL_present_position[i], DXL_goal_position[i], DXL_present_velocity[i], GOAL_VELOCITY_CALC_TA, 35);
-                }
-                
-                moveDXLwithVelocity(groupSyncWriteGoalVelocity, DXL_ID, DXL_goal_velocity);
-            }
-            // 위치제어 모드
-            else {
-                moveDXLtoDesiredPosition(groupSyncWriteProfileVelocity, groupSyncWritePosition, DXL_ID, DXL_goal_position, DXL_PROFILE_VELOCITY);
-            }
-
-            // 이전 위치 업데이트
-            updatePrevValues(pose[0], pose[1], pose[2], pose[3]);
-            for (int i = 0; i < DXL_NUM; i++) {
-                DXL_past_position[i] = DXL_goal_position[i];
-            }
-
-            std::this_thread::sleep_until(wait_start_time + FRAME_INTERVAL * step);
-            step ++;
-        }
-
-        // 이후 파일 모션 재생
+        // 모션 재생
         while(headGesture.good()){
-            auto headRow = csv_read_row(headGesture, ',');
-            if(wait_mode_flag == false) break;
-            float roll_s = std::stof(headRow[0]);
-            float pitch_s = std::stof(headRow[1]);
-            float yaw_s = std::stof(headRow[2]);
-            float mouth_s = 0;
+            double roll_final, pitch_final, yaw_final, mouth_final;
 
-            double ratiooo = 2.0;
+            if (step < SKIP_FRAMES) {
+                roll_final = targetTraj[step][0];
+                pitch_final = targetTraj[step][1];
+                yaw_final = targetTraj[step][2];
+                mouth_final = targetTraj[step][3];
+            } 
+            else {
+                auto headRow = csv_read_row(headGesture, ',');
+                if(wait_mode_flag == false) break;
+                double roll_s = std::stod(headRow[0]);
+                double pitch_s = std::stod(headRow[1]);
+                double yaw_s = std::stod(headRow[2]);
+                double mouth_s = 0;
 
-            std::vector<int> DXL = RPY2DXL(roll_s * ratiooo , pitch_s *ratiooo, yaw_s * ratiooo, mouth_s, 0);
+                double ratiooo = 2.0;
+
+                roll_final = roll_s * ratiooo;
+                pitch_final = pitch_s * ratiooo;
+                yaw_final = yaw_s * ratiooo;
+                mouth_final = mouth_s;
+            }
+
+            std::vector<int> DXL = RPY2DXL(roll_final , pitch_final, yaw_final, mouth_final, 0);
             
             update_DXL_goal_position(DXL_goal_position,
                                         DXL[0],
@@ -1353,10 +1372,11 @@ void wait_control_motor(){
                                         DXL[3],
                                         DXL[4]);
 
-            // 모터 제어
+            // 모터 값 읽기
+            readDXLPresentState(groupBulkRead, DXL_ID, DXL_present_velocity, DXL_present_position);
+
             // 속도제어 모드
             if (OPERATING_MODE == 1) {
-                readDXLPresentState(groupBulkRead, DXL_ID, DXL_present_velocity, DXL_present_position);
                 for (int i = 0; i < DXL_NUM; i++) {
                     DXL_goal_velocity[i] = calculateDXLGoalVelocity_timeBased_ds(DXL_present_position[i], DXL_goal_position[i], DXL_present_velocity[i], GOAL_VELOCITY_CALC_TA, 35);
                 }
@@ -1369,18 +1389,14 @@ void wait_control_motor(){
             }
 
             // 이전 위치 업데이트
-            updatePrevValues(roll_s * ratiooo , pitch_s *ratiooo, yaw_s * ratiooo, mouth_s);
+            updatePrevValues(roll_final, pitch_final, yaw_final, mouth_final);
             for (int i = 0; i < DXL_NUM; i++) {
                 DXL_past_position[i] = DXL_goal_position[i];
             }
 
-            auto current_time = std::chrono::high_resolution_clock::now();
-            std::chrono::duration<double, std::milli> timestamp = current_time - wait_start_time;
-            csv_file << timestamp.count() << ","
-                    << DXL_goal_position[0] << ","
-                    << DXL_goal_velocity[0] << ","
-                    << DXL_present_position[0] << ","
-                    << DXL_present_velocity[0] << "\n";
+            double DXL_goal_rpy[4] = {roll_final, pitch_final, yaw_final, mouth_final};
+
+            robotLogger.log("WAIT", DXL_goal_rpy, DXL_goal_position, DXL_present_position, DXL_present_velocity);
             
             std::this_thread::sleep_until(wait_start_time + FRAME_INTERVAL * step);
             step ++;
@@ -1841,6 +1857,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
     server_ready_future.get(); // 서버가 준비될 때까지 대기
     std::cout << "서버 연결 완료!" << std::endl;
 
+    robotLogger.createNewLogDir();
 	std::thread wait_mode_thread;
 
     std::pair<std::string,std::string> play_music;
@@ -1862,10 +1879,13 @@ void robot_main_loop(std::future<void> server_ready_future) {
         SNDFILE* sndfile = nullptr;
         bool is_file_based = false;
         bool responses_only_flag = false;
+        robotLogger.startSession();
+        std::string current_mode_label = "UNKNOWN";
 
         // --- 1. 다음 행동 결정 ---
         if(music_flag) {
             music_flag = 0;
+            current_mode_label = "MUSIC";
             std::cout << "music_flag IN" << std::endl;
             std::string play_song_path = MUSIC_DIR + "/" + play_music.first + "_" + play_music.second + ".wav";
             vocal_file_path = VOCAL_DIR + "/" + play_music.first + "_" + play_music.second + "_" + "vocals" + ".wav";
@@ -1890,11 +1910,17 @@ void robot_main_loop(std::future<void> server_ready_future) {
             std::string type = response.value("type", "error");
             
             if (type == "play_audio") {
-                std::string file_to_play = response.value("file_to_play", "");
+                current_mode_label = "PLAY_AUDIO";
+                // std::string file_to_play = response.value("file_to_play", "");
+                std::string file_to_play = "less_360.wav";
                 sndfile = sf_open(file_to_play.c_str(), SFM_READ, &sfinfo);
                 if (sndfile) is_file_based = true;
+                if (file_to_play.find("sleep") != std::string::npos) {
+                    robotLogger.createNewLogDir();
+                }
             }
             else if (type == "play_music") {
+                current_mode_label = "PLAY_MUSIC";
                 music_flag = 1;
                 std::string file_to_play = response.value("file_to_play", "");
                 play_music = {response.value("title", ""), response.value("artist", "")};
@@ -1904,6 +1930,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
             else if (type == "realtime_stream_start") {
                 is_file_based = false;
                 is_realtime_streaming = true;
+                current_mode_label = "REALTIME"; // 실시간 스트리밍 모드
                 sfinfo.channels = AUDIO_CHANNELS;
                 sfinfo.samplerate = AUDIO_SAMPLE_RATE;
             }
@@ -1911,10 +1938,11 @@ void robot_main_loop(std::future<void> server_ready_future) {
             else if (type == "responses_only") {
                 is_file_based = false;
                 is_realtime_streaming = false;
+                is_responses_streaming = true;
                 responses_only_flag = true;
+                current_mode_label = "RESPONSE"; // 응답 모드
                 sfinfo.channels = AUDIO_CHANNELS;
                 sfinfo.samplerate = AUDIO_SAMPLE_RATE;
-                is_responses_streaming = true;
             }
         }
 
@@ -1938,7 +1966,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
             start_time = std::chrono::high_resolution_clock::now();
             std::thread t1(read_and_split, sndfile, sfinfo, std::ref(soundStream));
             std::thread t2(generate_motion, sfinfo.channels, sfinfo.samplerate);
-            std::thread t3(control_motor, std::ref(soundStream));
+            std::thread t3(control_motor, std::ref(soundStream), current_mode_label);
             t1.join();
             t2.join();
             t3.join();
@@ -1955,13 +1983,14 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 }
 
                 if (!realtime_stream_buffer.empty() && !user_interruption_flag) {
+                    wait_mode_flag = false;
                     if (wait_mode_thread.joinable()) {
                         wait_mode_thread.join();
                     }
                     start_time = std::chrono::high_resolution_clock::now();
                     std::thread t1_realtime(stream_and_split, std::ref(sfinfo), std::ref(soundStream), "realtime");
                     std::thread t2_realtime(generate_motion, sfinfo.channels, sfinfo.samplerate);
-                    std::thread t3_realtime(control_motor, std::ref(soundStream));
+                    std::thread t3_realtime(control_motor, std::ref(soundStream), "REALTIME");
                     
                     t1_realtime.join();
                     t2_realtime.join();
@@ -1969,9 +1998,11 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 }
             }
 
+            // Response 전 중간 대기
 			if (!wait_mode_thread.joinable()) {
                 wait_mode_flag = true;
 				wait_mode_thread = std::thread(wait_control_motor);
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
 			}
             
             // Responses 처리
@@ -2000,6 +2031,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 }
 
                 if (!responses_stream_buffer.empty() && !user_interruption_flag) {
+                    wait_mode_flag = false;
 					if (wait_mode_thread.joinable()) {
 						wait_mode_thread.join();
 					}
@@ -2008,7 +2040,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
                     start_time = std::chrono::high_resolution_clock::now();
                     std::thread t1_responses(stream_and_split, std::ref(sfinfo), std::ref(soundStream_resp), "responses");
                     std::thread t2_responses(generate_motion, sfinfo.channels, sfinfo.samplerate);
-                    std::thread t3_responses(control_motor, std::ref(soundStream_resp));
+                    std::thread t3_responses(control_motor, std::ref(soundStream_resp), "RESPONSES");
 
                     t1_responses.join();
                     t2_responses.join();
@@ -2052,6 +2084,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
             }
         }
 
+        robotLogger.closeSession();
         if (sndfile) sf_close(sndfile);
         playing_music_flag = false;
     }
