@@ -1082,7 +1082,7 @@ int set_feedforward (dynamixel::GroupSyncWrite &groupSyncWriteff1Gain, dynamixel
     return 1; // success
 }
 
-int set_initial_gain (dynamixel::GroupSyncWrite &groupSyncWritePGain, dynamixel::GroupSyncWrite &groupSyncWriteIGain, int *DXL_ID, int profile_acceleration, int velocity_p_gain, int velocity_i_gain)
+int set_velocity_gain (dynamixel::GroupSyncWrite &groupSyncWritePGain, dynamixel::GroupSyncWrite &groupSyncWriteIGain, int *DXL_ID, int profile_acceleration, int velocity_p_gain, int velocity_i_gain)
 {
     groupSyncWritePGain.clearParam();
     groupSyncWriteIGain.clearParam();
@@ -1131,6 +1131,56 @@ int set_initial_gain (dynamixel::GroupSyncWrite &groupSyncWritePGain, dynamixel:
     printf("- Profile Acceleration: %d\n", profile_acceleration);
     printf("- Velocity P Gain: %d\n", velocity_p_gain);
     printf("- Velocity I Gain: %d\n", velocity_i_gain);
+
+    return 1; // success
+}
+
+int set_position_gain (dynamixel::GroupSyncWrite &groupSyncWritePositionPGain, dynamixel::GroupSyncWrite &groupSyncWritePositionIGain, int *DXL_ID, int position_p_gain[], int position_i_gain[])
+{
+    groupSyncWritePositionPGain.clearParam();
+    groupSyncWritePositionIGain.clearParam();
+
+    for (int i = 0; i < DXL_NUM; i++)
+    {
+        uint8_t param_position_p_gain[2];
+        param_position_p_gain[0] = DXL_LOBYTE(position_p_gain[i]);
+        param_position_p_gain[1] = DXL_HIBYTE(position_p_gain[i]);
+
+        if (!groupSyncWritePositionPGain.addParam(DXL_ID[i], param_position_p_gain))
+        {
+            fprintf(stderr, "[ID:%03d] groupSyncWrite for Position P Gain addParam failed\n", DXL_ID[i]);
+            return 0; // fail
+        }
+
+        uint8_t param_position_i_gain[2];
+        param_position_i_gain[0] = DXL_LOBYTE(position_i_gain[i]);
+        param_position_i_gain[1] = DXL_HIBYTE(position_i_gain[i]);
+
+        if (!groupSyncWritePositionIGain.addParam(DXL_ID[i], param_position_i_gain))
+        {
+            fprintf(stderr, "[ID:%03d] groupSyncWrite for Position I Gain addParam failed\n", DXL_ID[i]);
+            return 0; // fail
+        }
+    }
+
+    int dxl_comm_result_p = groupSyncWritePositionPGain.txPacket();
+    int dxl_comm_result_i = groupSyncWritePositionIGain.txPacket();
+
+    if (dxl_comm_result_p != COMM_SUCCESS)
+    {
+        fprintf(stderr, "Failed to set position P gain. Error code: %d\n", dxl_comm_result_p);
+        return 0; // fail
+    }
+    if (dxl_comm_result_i != COMM_SUCCESS)
+    {
+        fprintf(stderr, "Failed to set position I gain. Error code: %d\n", dxl_comm_result_i);
+        return 0; // fail
+    }
+
+    groupSyncWritePositionPGain.clearParam();
+    groupSyncWritePositionIGain.clearParam();
+    printf("Successfully set position P gain for all dynamixels: %d\n", position_p_gain);
+    printf("Successfully set position I gain for all dynamixels: %d\n", position_i_gain);
 
     return 1; // success
 }

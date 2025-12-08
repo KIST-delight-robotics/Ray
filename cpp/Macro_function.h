@@ -54,6 +54,7 @@ using namespace Eigen;
 #define ADDR_PRO_FEEDFORWARD_1ST_GAIN       90
 #define ADDR_PRO_FEEDFORWARD_2ND_GAIN       88
 #define ADDR_PRO_POSITION_P_GAIN            84
+#define ADDR_PRO_POSITION_I_GAIN            82
 #define ADDR_PRO_PROFILE_ACCELERATION       108
 #define ADDR_PRO_DRIVE_MODE                 10
 #define ADDR_PRO_OPERATING_MODE             11
@@ -72,6 +73,7 @@ using namespace Eigen;
 #define LEN_PRO_FEEDFORWARD_1ST_GAIN        2
 #define LEN_PRO_FEEDFORWARD_2ND_GAIN        2
 #define LEN_PRO_POSITION_P_GAIN             2
+#define LEN_PRO_POSITION_I_GAIN             2
 #define LEN_PRO_PROFILE_ACCELERATION        4
 #define LEN_PRO_VELOCITY_I_GAIN             2
 #define LEN_PRO_VELOCITY_P_GAIN             2
@@ -81,9 +83,9 @@ using namespace Eigen;
 #define TORQUE_DISABLE                      0
 
 #define DXL_PROFILE_VELOCITY_HOMING         500
-#define DXL_PROFILE_VELOCITY                60 
+#define DXL_PROFILE_VELOCITY                60
 // #define DXL_PROFILE_VELOCITY_CONFIGCHANGE   70
-#define DXL_PROFILE_ACCELERATION 5 // 적절한 가속도 값 설정
+#define DXL_PROFILE_ACCELERATION 0 // 적절한 가속도 값 설정
 #define GOAL_VELOCITY_CALC_TA 0 // 속도 계산에 사용할 가속 시간 (ms)
 #define DXL_VELOCITY_P_GAIN 100
 #define DXL_VELOCITY_I_GAIN 1920
@@ -201,7 +203,9 @@ int set_return_delay_time(dynamixel::PacketHandler *packetHandler, dynamixel::Po
 
 int set_profile_acceleration(dynamixel::GroupSyncWrite &groupSyncWriteAcceleration, int *DXL_ID, int profile_acceleration);
 
-int set_initial_gain (dynamixel::GroupSyncWrite &groupSyncWritePGain, dynamixel::GroupSyncWrite &groupSyncWriteIGain, int *DXL_ID, int profile_acceleration, int velocity_p_gain, int velocity_i_gain);
+int set_velocity_gain (dynamixel::GroupSyncWrite &groupSyncWritePGain, dynamixel::GroupSyncWrite &groupSyncWriteIGain, int *DXL_ID, int profile_acceleration, int velocity_p_gain, int velocity_i_gain);
+
+int set_position_gain (dynamixel::GroupSyncWrite &groupSyncWritePositionPGain, dynamixel::GroupSyncWrite &groupSyncWritePositionIGain, int *DXL_ID, int position_p_gain[], int position_i_gain[]);
 
 int assignClassWith1DMiddleBoundary(double x, const vector<double>& boundaries);
 

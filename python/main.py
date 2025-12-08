@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import socket
 import websockets
 import json
 from openai import AsyncOpenAI
@@ -8,7 +9,7 @@ from config import OPENAI_API_KEY, AWAKE_FILE, SLEEP_FILE, AWAKE_FILE_SCRIPT, SL
 from prompts import SYSTEM_PROMPT
 from conversation_manager import ConversationManager
 from api_pipeline import unified_active_pipeline, wakeword_detection_loop, save_tts_to_file
-from led import *
+from led import led_set_ring, led_set_bar, led_clear
 
 async def main_logic_loop(websocket):
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -96,7 +97,7 @@ async def main():
         force=True
     )
     
-    server = await websockets.serve(chat_handler, "127.0.0.1", 5000)
+    server = await websockets.serve(chat_handler, "127.0.0.1", 5000, family=socket.AF_INET)
     logging.info("🚀 통합 WebSocket 서버가 127.0.0.1:5000 에서 시작되었습니다.")
     await server.wait_closed()
 
