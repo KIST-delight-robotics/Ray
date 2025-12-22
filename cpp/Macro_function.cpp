@@ -281,7 +281,7 @@ float volume_control(std::deque<float>& recent_samples, size_t window_size, floa
 
 
 
-std::vector<int> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double mouth_f, int mode)
+std::vector<int32_t> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double mouth_f, int mode)
 {
 
   // CHANGE ROLL PITCH YAW MOUTH VALUES TO DXL POSITIONS
@@ -313,7 +313,7 @@ std::vector<int> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double mou
   if(theta <= 0.00001)
     theta = 0.001;
   
-  double r = ROBOT_HEIGHT / theta; // 평면 중심 원격 회전 반경
+  double r = cfg_robot.height / theta; // 평면 중심 원격 회전 반경
   double r_x = r * cos(alpha); // 원격 회전 중심점 x,y
   double r_y = r * sin(alpha);
 
@@ -323,9 +323,9 @@ std::vector<int> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double mou
 
   Eigen::VectorXd P1(2), P2(2), P3(2);
   
-  P1 << ROBOT_HOLE_RADIUS * cos(0), ROBOT_HOLE_RADIUS* sin(0); // 1번 구멍의 바닥위치
-  P2 << ROBOT_HOLE_RADIUS * cos(2 * PI / 3), ROBOT_HOLE_RADIUS* sin(2 * PI / 3); // 2번 구멍의 바닥위치
-  P3 << ROBOT_HOLE_RADIUS * cos(4 * PI / 3), ROBOT_HOLE_RADIUS* sin(4 * PI / 3); // 3번 구멍의 바닥위치
+  P1 << cfg_robot.hole_radius * cos(0), cfg_robot.hole_radius* sin(0); // 1번 구멍의 바닥위치
+  P2 << cfg_robot.hole_radius * cos(2 * PI / 3), cfg_robot.hole_radius* sin(2 * PI / 3); // 2번 구멍의 바닥위치
+  P3 << cfg_robot.hole_radius * cos(4 * PI / 3), cfg_robot.hole_radius* sin(4 * PI / 3); // 3번 구멍의 바닥위치
 
   Eigen::VectorXd RP1(2), RP2(2), RP3(2); // R -> Pi 벡터
   
@@ -343,8 +343,8 @@ std::vector<int> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double mou
   Eigen::VectorXd u_r3(3), p13(3), p23(3);
 
   u_r3 << cos(alpha), sin(alpha), 0;
-  p13 << ROBOT_HOLE_RADIUS * cos(0), ROBOT_HOLE_RADIUS* sin(0), 0;
-  p23 << ROBOT_HOLE_RADIUS * cos(2 * PI / 3), ROBOT_HOLE_RADIUS* sin(2 * PI / 3), 0;
+  p13 << cfg_robot.hole_radius * cos(0), cfg_robot.hole_radius* sin(0), 0;
+  p23 << cfg_robot.hole_radius * cos(2 * PI / 3), cfg_robot.hole_radius* sin(2 * PI / 3), 0;
 
   Eigen::VectorXd n0(3), n1p(3), n2p(3), n01p(3), n02p(3);
 
@@ -388,21 +388,21 @@ std::vector<int> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double mou
           dxl_goal_position_yaw_double   = 0, 
           dxl_goal_position_mouth_double = 0;
 
-  double pitch_diff = (ROBOT_HEIGHT - L1) * (4096 / (PULLY_DIAMETER * PI));
+  double pitch_diff = (cfg_robot.height - L1) * (4096 / (cfg_robot.pulley_diameter * PI));
 
-  dxl_goal_position_pitch_double = DEFAULT_PITCH - pitch_diff;
+  dxl_goal_position_pitch_double = cfg_robot.default_pitch - pitch_diff;
 
-  double delta_mouth = (float)mouth_f * ROBOT_MOUTH_TUNE; // mouth_f는 0 ~ 1 사이(보통 0.1 ~ 0.3), ROBOT_MOUTH_TUNE는 입을 최대로 크게 벌리는 정도
+  double delta_mouth = (float)mouth_f * cfg_robot.mouth_tune; // mouth_f는 0 ~ 1 사이(보통 0.1 ~ 0.3), cfg_robot.mouth_tune은 입을 최대로 크게 벌리는 정도
 
-  dxl_goal_position_mouth_double = DEFAULT_MOUTH - delta_mouth - pitch_diff / ROBOT_MOUTH_PITCH_COMPENSATION;
+  dxl_goal_position_mouth_double = cfg_robot.default_mouth - delta_mouth - pitch_diff / cfg_robot.mouth_pitch_compensation;
 
   if (mode == 0) // mirroring
   {
-    //dxl_goal_position_yaw_double = (-1) * static_cast<double> (yaw_degree) * ROBOT_YAW_GEAR_RATIO * 4096.0 / 360.0 + default_YAW; // 2
-    dxl_goal_position_yaw_double = static_cast<double> (yaw_degree) * 1 * 4096.0 / 360.0 + DEFAULT_YAW; // 2
+    //dxl_goal_position_yaw_double = (-1) * static_cast<double> (yaw_degree) * cfg_robot.yaw_gear_ratio * 4096.0 / 360.0 + cfg_robot.default_yaw; // 2
+    dxl_goal_position_yaw_double = static_cast<double> (yaw_degree) * 1 * 4096.0 / 360.0 + cfg_robot.default_yaw; // 2
 
-    double rollR_diff = (ROBOT_HEIGHT - L2) * (4096 / (PULLY_DIAMETER * PI));
-    double rollL_diff = (ROBOT_HEIGHT - L3) * (4096 / (PULLY_DIAMETER * PI));
+    double rollR_diff = (cfg_robot.height - L2) * (4096 / (cfg_robot.pulley_diameter * PI));
+    double rollL_diff = (cfg_robot.height - L3) * (4096 / (cfg_robot.pulley_diameter * PI));
     if (pitch < 0)
     {
       pitch_diff *= 2;
@@ -417,18 +417,18 @@ std::vector<int> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double mou
     //   if (rollL_diff > 0)
     //     rollL_diff *= 1.3;
     // }
-    dxl_goal_position_rollr_double = DEFAULT_ROLL_R - rollR_diff - (delta_mouth / ROBOT_MOUTH_BACK_COMPENSATION); // 1.5
-    dxl_goal_position_rolll_double = DEFAULT_ROLL_L - rollL_diff - (delta_mouth / ROBOT_MOUTH_BACK_COMPENSATION);
+    dxl_goal_position_rollr_double = cfg_robot.default_roll_r - rollR_diff - (delta_mouth / cfg_robot.mouth_back_compensation); // 1.5
+    dxl_goal_position_rolll_double = cfg_robot.default_roll_l - rollL_diff - (delta_mouth / cfg_robot.mouth_back_compensation);
 
     //// R, L이 너무 기울어졌을 때 입 보상 끄는거
-    //if (dxl_goal_position_rollr_double < 200) dxl_goal_position_rollr_double += delta_mouth / ROBOT_MOUTH_BACK_COMPENSATION;
-    //if (dxl_goal_position_rolll_double < 200) dxl_goal_position_rolll_double += delta_mouth / ROBOT_MOUTH_BACK_COMPENSATION;
+    //if (dxl_goal_position_rollr_double < 200) dxl_goal_position_rollr_double += delta_mouth / cfg_robot.mouth_back_compensation;
+    //if (dxl_goal_position_rolll_double < 200) dxl_goal_position_rolll_double += delta_mouth / cfg_robot.mouth_back_compensation;
   }
   else if (mode == 1) // cloning
   {
-    dxl_goal_position_yaw_double = static_cast<double> (yaw_degree) * ROBOT_YAW_GEAR_RATIO * 4096.0 / 360.0 + DEFAULT_YAW; // 2
-    double rollR_diff = (ROBOT_HEIGHT - L3) * (4096 / (PULLY_DIAMETER * PI));
-    double rollL_diff = (ROBOT_HEIGHT - L2) * (4096 / (PULLY_DIAMETER * PI));
+    dxl_goal_position_yaw_double = static_cast<double> (yaw_degree) * cfg_robot.yaw_gear_ratio * 4096.0 / 360.0 + cfg_robot.default_yaw; // 2
+    double rollR_diff = (cfg_robot.height - L3) * (4096 / (cfg_robot.pulley_diameter * PI));
+    double rollL_diff = (cfg_robot.height - L2) * (4096 / (cfg_robot.pulley_diameter * PI));
     // pitch tension up (220805)
     if (pitch < 0.2) 
     {
@@ -438,25 +438,24 @@ std::vector<int> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double mou
         rollL_diff *= 1.3;
     }
     // R L 변화량 change
-    dxl_goal_position_rollr_double = DEFAULT_ROLL_R - rollR_diff - (delta_mouth / ROBOT_MOUTH_BACK_COMPENSATION);
-    dxl_goal_position_rolll_double = DEFAULT_ROLL_L - rollL_diff - (delta_mouth / ROBOT_MOUTH_BACK_COMPENSATION);
+    dxl_goal_position_rollr_double = cfg_robot.default_roll_r - rollR_diff - (delta_mouth / cfg_robot.mouth_back_compensation);
+    dxl_goal_position_rolll_double = cfg_robot.default_roll_l - rollL_diff - (delta_mouth / cfg_robot.mouth_back_compensation);
   }
   else 
   {
     INFO_STREAM( "RPY2DXL: CHECK MODE NUMBER" );
-    dxl_goal_position_rollr_double = DEFAULT_ROLL_R - (ROBOT_HEIGHT - L2) * (4096 / (PULLY_DIAMETER * PI)) - (delta_mouth / ROBOT_MOUTH_BACK_COMPENSATION); // 1.5
-    dxl_goal_position_rolll_double = DEFAULT_ROLL_L - (ROBOT_HEIGHT - L3) * (4096 / (PULLY_DIAMETER * PI)) - (delta_mouth / ROBOT_MOUTH_BACK_COMPENSATION);
+    dxl_goal_position_rollr_double = cfg_robot.default_roll_r - (cfg_robot.height - L2) * (4096 / (cfg_robot.pulley_diameter * PI)) - (delta_mouth / cfg_robot.mouth_back_compensation); // 1.5
+    dxl_goal_position_rolll_double = cfg_robot.default_roll_l - (cfg_robot.height - L3) * (4096 / (cfg_robot.pulley_diameter * PI)) - (delta_mouth / cfg_robot.mouth_back_compensation);
   }
   
-  std::vector<int> DXL(5);
-  DXL[0] = (int)dxl_goal_position_pitch_double;
-  DXL[1] = (int)dxl_goal_position_rollr_double;
-  DXL[2] = (int)dxl_goal_position_rolll_double;
-  DXL[3] = (int)dxl_goal_position_yaw_double;
-  DXL[4] = (int)dxl_goal_position_mouth_double;
+  std::vector<int32_t> DXL(5);
+  DXL[0] = static_cast<int32_t>(std::lround(dxl_goal_position_pitch_double));
+  DXL[1] = static_cast<int32_t>(std::lround(dxl_goal_position_rollr_double));
+  DXL[2] = static_cast<int32_t>(std::lround(dxl_goal_position_rolll_double));
+  DXL[3] = static_cast<int32_t>(std::lround(dxl_goal_position_yaw_double));
+  DXL[4] = static_cast<int32_t>(std::lround(dxl_goal_position_mouth_double));
   
   return DXL;
-
 }
 
 int calculateDXLGoalVelocity_velocityBased(double current_position, double goal_position, double current_velocity, double profile_acceleration, double control_ms)
@@ -622,166 +621,6 @@ int calculateDXLGoalVelocity_timeBased_ff(double current_position_real, double c
     return static_cast<int>(std::round(Vg * VEL_UNIT_PER_TICK_PER_MIN));
 }
 
-// 다이나믹셀의 현재 위치를 읽는 함수
-bool readDXLPresentPosition(
-    dynamixel::GroupSyncRead& groupSyncReadPosition,
-    int DXL_ID[],
-    int present_position[])
-{
-    groupSyncReadPosition.clearParam();
-    for (int i = 0; i < DXL_NUM; i++) {
-        groupSyncReadPosition.addParam(DXL_ID[i]);
-    }
-    if (groupSyncReadPosition.txRxPacket() != COMM_SUCCESS) {
-        fprintf(stderr, "Failed to read present position\n");
-        return false;
-    }
-    for (int i = 0; i < DXL_NUM; i++) {
-        if (groupSyncReadPosition.isAvailable(DXL_ID[i], ADDR_PRO_PRESENT_POSITION, LEN_PRO_PRESENT_POSITION)) {
-            present_position[i] = groupSyncReadPosition.getData(DXL_ID[i], ADDR_PRO_PRESENT_POSITION, LEN_PRO_PRESENT_POSITION);
-        }
-    }
-    return true;
-}
-
-// 다이나믹셀의 현재 속도를 읽는 함수
-bool readDXLPresentVelocity(
-    dynamixel::GroupSyncRead& groupSyncReadVelocity,
-    int DXL_ID[],
-    int present_velocity[])
-{
-    groupSyncReadVelocity.clearParam();
-    for (int i = 0; i < DXL_NUM; i++) {
-        groupSyncReadVelocity.addParam(DXL_ID[i]);
-    }
-    if (groupSyncReadVelocity.txRxPacket() != COMM_SUCCESS) {
-        fprintf(stderr, "Failed to read present velocity\n");
-        return false;
-    }
-    for (int i = 0; i < DXL_NUM; i++) {
-        if (groupSyncReadVelocity.isAvailable(DXL_ID[i], ADDR_PRO_PRESENT_VELOCITY, LEN_PRO_PRESENT_VELOCITY)) {
-            present_velocity[i] = groupSyncReadVelocity.getData(DXL_ID[i], ADDR_PRO_PRESENT_VELOCITY, LEN_PRO_PRESENT_VELOCITY);
-        }
-    }
-    return true;
-}
-
-// 다이나믹셀의 현재 속도와 위치를 한 번에 읽는 함수
-bool readDXLPresentState(dynamixel::GroupBulkRead &groupBulkRead, int DXL_ID[], int present_velocity[], int present_position[])
-{
-    groupBulkRead.clearParam();
-
-    // 각 다이나믹셀에 대해 현재 속도와 위치를 한 번에 읽도록 파라미터 추가
-    for (int i = 0; i < DXL_NUM; i++) {
-        if (!groupBulkRead.addParam(DXL_ID[i], ADDR_PRO_PRESENT_VELOCITY, LEN_PRO_PRESENT_VELOCITY + LEN_PRO_PRESENT_POSITION)) {
-            fprintf(stderr, "[ID:%03d] groupBulkRead addParam failed\n", DXL_ID[i]);
-            return false;
-        }
-    }
-
-    // BulkRead 패킷 전송 및 수신
-    if (groupBulkRead.txRxPacket() != COMM_SUCCESS) {
-        fprintf(stderr, "Failed to read present state (velocity and position)\n");
-        return false;
-    }
-
-    // 읽어온 데이터 파싱
-    for (int i = 0; i < DXL_NUM; i++) {
-        if (groupBulkRead.isAvailable(DXL_ID[i], ADDR_PRO_PRESENT_VELOCITY, LEN_PRO_PRESENT_VELOCITY + LEN_PRO_PRESENT_POSITION)) {
-            present_velocity[i] = groupBulkRead.getData(DXL_ID[i], ADDR_PRO_PRESENT_VELOCITY, LEN_PRO_PRESENT_VELOCITY);
-            present_position[i] = groupBulkRead.getData(DXL_ID[i], ADDR_PRO_PRESENT_POSITION, LEN_PRO_PRESENT_POSITION);
-        } else {
-            fprintf(stderr, "[ID:%03d] groupBulkRead getData failed\n", DXL_ID[i]);
-            return false;
-        }
-    }
-
-    return true;
-}
-
-// 계산된 목표 속도를 다이나믹셀에 쓰는 함수
-bool moveDXLwithVelocity(
-    dynamixel::GroupSyncWrite& groupSyncWriteVelocity,
-    int DXL_ID[],
-    int goal_velocity[])
-{
-    groupSyncWriteVelocity.clearParam();
-    uint8_t param_goal_velocity[4];
-
-    for (int i = 0; i < DXL_NUM; i++) {
-        trans_int2bin_4(param_goal_velocity, goal_velocity[i]); // int를 4-byte 배열로 변환
-        if (!groupSyncWriteVelocity.addParam(DXL_ID[i], param_goal_velocity)) {
-            fprintf(stderr, "[ID:%03d] groupSyncWriteVelocity addParam failed\n", DXL_ID[i]);
-            return false;
-        }
-    }
-
-    if (groupSyncWriteVelocity.txPacket() != COMM_SUCCESS) {
-        fprintf(stderr, "Failed to send goal velocity values\n");
-        return false;
-    }
-    return true;
-}
-
-// Move 5 DXL to DXL_goal_position with specified velocity and acceleration
-bool moveDXLtoDesiredPosition(
-    dynamixel::GroupSyncWrite& groupSyncWriteVelocity,
-    dynamixel::GroupSyncWrite& groupSyncWritePosition,
-    int DXL_ID[],
-    int goal_position[],
-    int velocity)
-{
-    uint8_t param_profile_velocity[4];
-    //groupSyncWriteVelocity.clearParam();
-    // 속도와 가속도 값을 4바이트 배열로 변환
-    trans_int2bin_4(param_profile_velocity, velocity);
-
-    
-     
-    // 각 모터에 대해 프로파일 속도 값을 SyncWrite에 추가
-    for (int i = 0; i < DXL_NUM; i++)
-    {
-        if (!groupSyncWriteVelocity.addParam(DXL_ID[i], param_profile_velocity))
-        {
-            fprintf(stderr, "[ID:%03d] groupSyncWriteVelocity addParam failed\n", DXL_ID[i]);
-            return false;
-        }
-    }
-
-    int comm_result = groupSyncWriteVelocity.txPacket();
-    // 프로파일 속도 값 전송
-    if (comm_result != COMM_SUCCESS)
-    {
-        fprintf(stderr, "Failed to send profile velocity values. Error code: %d\n", comm_result);
-        return false;
-    }
-    groupSyncWriteVelocity.clearParam();
-    //groupSyncWritePosition.clearParam();
-
-    // 각 모터에 대해 목표 위치 값을 SyncWrite에 추가
-    for (int i = 0; i < DXL_NUM; i++)
-    {
-        uint8_t param_goal_position[4];
-        trans_int2bin_4(param_goal_position, goal_position[i]);
-
-        if (!groupSyncWritePosition.addParam(DXL_ID[i], param_goal_position))
-        {
-            fprintf(stderr, "[ID:%03d] groupSyncWritePosition addParam failed\n", DXL_ID[i]);
-            return false;
-        }
-    }
-
-    // 목표 위치 값 전송
-    if (groupSyncWritePosition.txPacket() != COMM_SUCCESS)
-    {
-        fprintf(stderr, "Failed to send goal position values\n");
-        return false;
-    }
-    groupSyncWritePosition.clearParam();
-    //std::this_thread::sleep_for(std::chrono::milliseconds(9));
-    return true;
-}
-
 // DXL_goal_position update
 void update_DXL_goal_position(int DXL_goal_position[], int DXL_1, int DXL_2, int DXL_3, int DXL_4, int DXL_5)
 {
@@ -790,399 +629,6 @@ void update_DXL_goal_position(int DXL_goal_position[], int DXL_1, int DXL_2, int
     DXL_goal_position[2] = DXL_3;
     DXL_goal_position[3] = DXL_4;
     DXL_goal_position[4] = DXL_5;
-}
-
-//int를 32bit bin로 변경 (little endian)
-void trans_int2bin_4(uint8_t param_goal_position[4], int dxl_goal_position)
-{
-    param_goal_position[0] = DXL_LOBYTE(DXL_LOWORD(dxl_goal_position));
-    param_goal_position[1] = DXL_HIBYTE(DXL_LOWORD(dxl_goal_position));
-    param_goal_position[2] = DXL_LOBYTE(DXL_HIWORD(dxl_goal_position));
-    param_goal_position[3] = DXL_HIBYTE(DXL_HIWORD(dxl_goal_position));
-}
-
-int enable_torque(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error)
-{
-    int dxl_comm_result = COMM_TX_FAIL;
-
-  for(int i = 0; i < DXL_NUM; i++)
-  {
-    dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, DXL_ID[i], ADDR_PRO_TORQUE_ENABLE, TORQUE_ENABLE, &dxl_error);
-    if (dxl_comm_result != COMM_SUCCESS)
-    {
-      printf("%s\n", packetHandler->getTxRxResult(dxl_comm_result));
-    }
-    else if (dxl_error != 0)
-    {
-      printf("%s\n", packetHandler->getRxPacketError(dxl_error));
-    }
-    else
-    {
-      printf("Dynamixel#%d -----> torque ON \n", DXL_ID[i]);
-    }
-  }
-  return 1;
-}
-
-int disable_torque(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error)
-{
-    int dxl_comm_result = COMM_TX_FAIL;
-
-  for(int i = 0; i < DXL_NUM; i++)
-  {
-    dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, DXL_ID[i], ADDR_PRO_TORQUE_ENABLE, TORQUE_DISABLE, &dxl_error);
-    if (dxl_comm_result != COMM_SUCCESS)
-    {
-      printf("%s\n", packetHandler->getTxRxResult(dxl_comm_result));
-    }
-    else if (dxl_error != 0)
-    {
-      printf("%s\n", packetHandler->getRxPacketError(dxl_error));
-    }
-    else
-    {
-      printf("Dynamixel#%d -----> torque OFF \n", DXL_ID[i]);
-    }
-  }
-  return 1;
-}
-
-int set_drive_mode_profile(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error, int drive_mode_profile)
-{
-    const uint16_t PROFILE_BIT_MASK = 0b00000100; // Drive Mode (Addr 10)의 Bit 2
-    int dxl_comm_result = COMM_TX_FAIL;
-
-  for(int i = 0; i < DXL_NUM; i++)
-  {
-    uint8_t current_drive_mode = 0;
-    dxl_comm_result = packetHandler->read1ByteTxRx(portHandler, DXL_ID[i], ADDR_PRO_DRIVE_MODE, &current_drive_mode, &dxl_error);
-    if (dxl_comm_result != COMM_SUCCESS)
-    {
-      printf("%s\n", packetHandler->getTxRxResult(dxl_comm_result));
-    }
-    else if (dxl_error != 0)
-    {
-      printf("%s\n", packetHandler->getRxPacketError(dxl_error));
-    }
-    uint8_t new_drive_mode;
-    if (drive_mode_profile == 0) // velocity based profile
-    {
-      new_drive_mode = current_drive_mode & (~PROFILE_BIT_MASK);
-    }
-    else // time based profile
-    {
-      new_drive_mode = current_drive_mode | PROFILE_BIT_MASK;
-    }
-
-    if (new_drive_mode != current_drive_mode)
-    {
-      dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, DXL_ID[i], ADDR_PRO_DRIVE_MODE, new_drive_mode, &dxl_error);
-      if (dxl_comm_result != COMM_SUCCESS)
-      {
-        printf("%s\n", packetHandler->getTxRxResult(dxl_comm_result));
-      }
-      else if (dxl_error != 0)
-      {
-        printf("%s\n", packetHandler->getRxPacketError(dxl_error));
-      }
-    }
-  }
-  return 1;
-}
-
-int set_operating_mode(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error, int operating_mode)
-{
-    int dxl_comm_result = COMM_TX_FAIL;
-
-  for(int i = 0; i < DXL_NUM; i++)
-  {
-    dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, DXL_ID[i], ADDR_PRO_OPERATING_MODE, operating_mode, &dxl_error);
-    if (dxl_comm_result != COMM_SUCCESS)
-    {
-      printf("%s\n", packetHandler->getTxRxResult(dxl_comm_result));
-    }
-    else if (dxl_error != 0)
-    {
-      printf("%s\n", packetHandler->getRxPacketError(dxl_error));
-    }
-  }
-  printf("Operating mode changed to %d for all dynamixels\n", operating_mode);
-  return 1;
-}
-
-int set_baudrate(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error, int baudrate)
-{
-    int dxl_comm_result = COMM_TX_FAIL;
-    uint8_t new_baudrate_code;
-
-    switch (baudrate)
-    {
-      case 9600:
-        new_baudrate_code = 0;
-        break;
-      case 57600:
-        new_baudrate_code = 1;
-        break;
-      case 115200:
-        new_baudrate_code = 2;
-        break;
-      case 1000000:
-        new_baudrate_code = 3;
-        break;
-      case 2000000:
-        new_baudrate_code = 4;
-        break;
-      case 3000000:
-        new_baudrate_code = 5;
-        break;
-      case 4000000:
-        new_baudrate_code = 6;
-        break;
-      case 4500000:
-        new_baudrate_code = 7;
-        break;
-      default:
-        printf("Baudrate %d is not supported. Supported baudrates: 9600, 57600, 115200, 1000000, 2000000, 3000000\n", baudrate);
-        return 0;
-    }
-
-    printf("Current port baudrate: %d\n", portHandler->getBaudRate());
-
-    if (portHandler->getBaudRate() == baudrate)
-    {
-      printf("Port baudrate is already %d. No changes needed.\n", baudrate);
-      return 1;
-    }
-
-
-  for(int i = 0; i < DXL_NUM; i++)
-  {
-    dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, DXL_ID[i], ADDR_PRO_BAUDRATE, new_baudrate_code, &dxl_error);
-    if (dxl_comm_result != COMM_SUCCESS)
-    {
-      printf("%s\n", packetHandler->getTxRxResult(dxl_comm_result));
-    }
-    else if (dxl_error != 0 || dxl_error != 0)
-    {
-      printf("%s\n", packetHandler->getRxPacketError(dxl_error));
-      return 0;
-    }
-    else
-    {
-      printf("Dynamixel#%d -----> baudrate changed to %d \n", DXL_ID[i], baudrate);
-    }
-  }
-
-  printf("Changing port baudrate to %d\n", baudrate);
-  if (!portHandler->setBaudRate(baudrate))
-  {
-      printf("Failed to change port baudrate to %d\n", baudrate);
-      return 0;
-  }
-  return 1;
-}
-
-int set_return_delay_time(dynamixel::PacketHandler *packetHandler, dynamixel::PortHandler *portHandler, int *DXL_ID, uint8_t dxl_error, int return_delay_time)
-{
-    int dxl_comm_result = COMM_TX_FAIL;
-
-  for(int i = 0; i < DXL_NUM; i++)
-  {
-    dxl_comm_result = packetHandler->write1ByteTxRx(portHandler, DXL_ID[i], ADDR_PRO_RETURN_DELAY_TIME, return_delay_time, &dxl_error);
-    if (dxl_comm_result != COMM_SUCCESS)
-    {
-      printf("%s\n", packetHandler->getTxRxResult(dxl_comm_result));
-    }
-    else if (dxl_error != 0)
-    {
-      printf("%s\n", packetHandler->getRxPacketError(dxl_error));
-    }
-  }
-  printf("Return delay time changed to %d for all dynamixels\n", return_delay_time);
-  return 1;
-}
-
-int set_profile_acceleration(dynamixel::GroupSyncWrite &groupSyncWriteAcceleration, int *DXL_ID, int profile_acceleration)
-{
-    groupSyncWriteAcceleration.clearParam();
-
-    uint8_t param_profile_acceleration[4];
-    trans_int2bin_4(param_profile_acceleration, profile_acceleration);
-
-    for (int i = 0; i < DXL_NUM; i++)
-    {
-        if (!groupSyncWriteAcceleration.addParam(DXL_ID[i], param_profile_acceleration))
-        {
-            fprintf(stderr, "[ID:%03d] groupSyncWrite for Profile Acceleration addParam failed\n", DXL_ID[i]);
-            return 0; // fail
-        }
-    }
-
-    int dxl_comm_result = groupSyncWriteAcceleration.txPacket();
-    if (dxl_comm_result != COMM_SUCCESS)
-    {
-        fprintf(stderr, "Failed to set profile acceleration. Error code: %d\n", dxl_comm_result);
-        return 0; // fail
-    }
-
-    groupSyncWriteAcceleration.clearParam();
-    printf("Profile acceleration for all dynamixels set to %d\n", profile_acceleration);
-
-    return 1; // success
-}
-
-int set_feedforward (dynamixel::GroupSyncWrite &groupSyncWriteff1Gain, dynamixel::GroupSyncWrite &groupSyncWriteff2Gain, int *DXL_ID, int ff1, int ff2)
-{
-    groupSyncWriteff1Gain.clearParam();
-    groupSyncWriteff2Gain.clearParam();
-
-    // Feedforward 1st Gain (2 bytes)
-    uint8_t param_ff1_gain[2];
-    param_ff1_gain[0] = DXL_LOBYTE(ff1);
-    param_ff1_gain[1] = DXL_HIBYTE(ff1);
-
-    // Feedforward 2nd Gain (2 bytes)
-    uint8_t param_ff2_gain[2];
-    param_ff2_gain[0] = DXL_LOBYTE(ff2);
-    param_ff2_gain[1] = DXL_HIBYTE(ff2);
-
-    for (int i = 0; i < DXL_NUM; i++)
-    {
-        if (!groupSyncWriteff1Gain.addParam(DXL_ID[i], param_ff1_gain))
-        {
-            fprintf(stderr, "[ID:%03d] groupSyncWrite for Feedforward 1st Gain addParam failed\n", DXL_ID[i]);
-            return 0; // fail
-        }
-        if (!groupSyncWriteff2Gain.addParam(DXL_ID[i], param_ff2_gain))
-        {
-            fprintf(stderr, "[ID:%03d] groupSyncWrite for Feedforward 2nd Gain addParam failed\n", DXL_ID[i]);
-            return 0; // fail
-        }
-    }
-
-    int dxl_comm_result_ff1 = groupSyncWriteff1Gain.txPacket();
-    int dxl_comm_result_ff2 = groupSyncWriteff2Gain.txPacket();
-
-    if (dxl_comm_result_ff1 != COMM_SUCCESS)
-    {
-        fprintf(stderr, "Failed to set feedforward 1st gain. Error code: %d\n", dxl_comm_result_ff1);
-        return 0; // fail
-    }
-    if (dxl_comm_result_ff2 != COMM_SUCCESS)
-    {
-        fprintf(stderr, "Failed to set feedforward 2nd gain. Error code: %d\n", dxl_comm_result_ff2);
-        return 0; // fail
-    }
-
-    groupSyncWriteff1Gain.clearParam();
-    groupSyncWriteff2Gain.clearParam();
-    printf("Successfully set feedforward gains for all dynamixels:\n");
-    printf("- Feedforward 1st Gain: %d\n", ff1);
-    printf("- Feedforward 2nd Gain: %d\n", ff2);
-    return 1; // success
-}
-
-int set_velocity_gain (dynamixel::GroupSyncWrite &groupSyncWritePGain, dynamixel::GroupSyncWrite &groupSyncWriteIGain, int *DXL_ID, int profile_acceleration, int velocity_p_gain, int velocity_i_gain)
-{
-    groupSyncWritePGain.clearParam();
-    groupSyncWriteIGain.clearParam();
-
-    // Velocity P Gain (2 bytes)
-    uint8_t param_p_gain[2];
-    param_p_gain[0] = DXL_LOBYTE(velocity_p_gain);
-    param_p_gain[1] = DXL_HIBYTE(velocity_p_gain);
-
-    // Velocity I Gain (2 bytes)
-    uint8_t param_i_gain[2];
-    param_i_gain[0] = DXL_LOBYTE(velocity_i_gain);
-    param_i_gain[1] = DXL_HIBYTE(velocity_i_gain);
-
-    for (int i = 0; i < DXL_NUM; i++)
-    {
-        if (!groupSyncWritePGain.addParam(DXL_ID[i], param_p_gain))
-        {
-            fprintf(stderr, "[ID:%03d] groupSyncWrite for Velocity P Gain addParam failed\n", DXL_ID[i]);
-            return 0; // fail
-        }
-        if (!groupSyncWriteIGain.addParam(DXL_ID[i], param_i_gain))
-        {
-            fprintf(stderr, "[ID:%03d] groupSyncWrite for Velocity I Gain addParam failed\n", DXL_ID[i]);
-            return 0; // fail
-        }
-    }
-
-    int dxl_comm_result_p = groupSyncWritePGain.txPacket();
-    int dxl_comm_result_i = groupSyncWriteIGain.txPacket();
-
-    if (dxl_comm_result_p != COMM_SUCCESS)
-    {
-        fprintf(stderr, "Failed to set velocity P gain. Error code: %d\n", dxl_comm_result_p);
-        return 0; // fail
-    }
-    if (dxl_comm_result_i != COMM_SUCCESS)
-    {
-        fprintf(stderr, "Failed to set velocity I gain. Error code: %d\n", dxl_comm_result_i);
-        return 0; // fail
-    }
-
-    groupSyncWritePGain.clearParam();
-    groupSyncWriteIGain.clearParam();
-    printf("Successfully set initial gains for all dynamixels:\n");
-    printf("- Profile Acceleration: %d\n", profile_acceleration);
-    printf("- Velocity P Gain: %d\n", velocity_p_gain);
-    printf("- Velocity I Gain: %d\n", velocity_i_gain);
-
-    return 1; // success
-}
-
-int set_position_gain (dynamixel::GroupSyncWrite &groupSyncWritePositionPGain, dynamixel::GroupSyncWrite &groupSyncWritePositionIGain, int *DXL_ID, int position_p_gain[], int position_i_gain[])
-{
-    groupSyncWritePositionPGain.clearParam();
-    groupSyncWritePositionIGain.clearParam();
-
-    for (int i = 0; i < DXL_NUM; i++)
-    {
-        uint8_t param_position_p_gain[2];
-        param_position_p_gain[0] = DXL_LOBYTE(position_p_gain[i]);
-        param_position_p_gain[1] = DXL_HIBYTE(position_p_gain[i]);
-
-        if (!groupSyncWritePositionPGain.addParam(DXL_ID[i], param_position_p_gain))
-        {
-            fprintf(stderr, "[ID:%03d] groupSyncWrite for Position P Gain addParam failed\n", DXL_ID[i]);
-            return 0; // fail
-        }
-
-        uint8_t param_position_i_gain[2];
-        param_position_i_gain[0] = DXL_LOBYTE(position_i_gain[i]);
-        param_position_i_gain[1] = DXL_HIBYTE(position_i_gain[i]);
-
-        if (!groupSyncWritePositionIGain.addParam(DXL_ID[i], param_position_i_gain))
-        {
-            fprintf(stderr, "[ID:%03d] groupSyncWrite for Position I Gain addParam failed\n", DXL_ID[i]);
-            return 0; // fail
-        }
-    }
-
-    int dxl_comm_result_p = groupSyncWritePositionPGain.txPacket();
-    int dxl_comm_result_i = groupSyncWritePositionIGain.txPacket();
-
-    if (dxl_comm_result_p != COMM_SUCCESS)
-    {
-        fprintf(stderr, "Failed to set position P gain. Error code: %d\n", dxl_comm_result_p);
-        return 0; // fail
-    }
-    if (dxl_comm_result_i != COMM_SUCCESS)
-    {
-        fprintf(stderr, "Failed to set position I gain. Error code: %d\n", dxl_comm_result_i);
-        return 0; // fail
-    }
-
-    groupSyncWritePositionPGain.clearParam();
-    groupSyncWritePositionIGain.clearParam();
-    printf("Successfully set position P gain for all dynamixels: %d\n", position_p_gain);
-    printf("Successfully set position I gain for all dynamixels: %d\n", position_i_gain);
-
-    return 1; // success
 }
 
 // assignClassWith1DMiddleBoundary 함수
@@ -1611,14 +1057,12 @@ std::tuple<float, float, float> lin_fit_fun2(float S, float X_pre, float grad_up
 
     if (S > X_pre) {
         // 증가하는 경우
-        del_grad = 15.0f * (S - X_pre);
-        grad_up_now = del_grad;
+        grad_up_now = del_grad * (S - X_pre);
         grad_down_now = 0.0f;
         X_now = X_pre + grad_up_now * dt;
     } else {
         // 감소하는 경우
-        del_grad = 15.0f * (S - X_pre);
-        grad_down_now = del_grad;
+        grad_down_now = del_grad * (S - X_pre);
         grad_up_now = 0.0f;
         X_now = X_pre + grad_down_now * dt;
     }

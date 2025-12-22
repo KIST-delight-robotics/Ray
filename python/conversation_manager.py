@@ -35,7 +35,7 @@ class ConversationManager:
         """
         self.session_id = str(uuid.uuid4())
         self.session_start_time = datetime.now()
-        self.current_conversation_log = self._create_initial_context(system_prompt, num_recent=0)
+        self.current_conversation_log = self._create_initial_context(system_prompt, num_recent=10)
         logger.info(f"새로운 세션을 시작합니다. (ID: {self.session_id})")
 
     def add_message(self, role: str, content: str):

@@ -1,0 +1,38 @@
+
+
+[dynamixel]
+protocol_version = 2.0
+device_name = "/dev/ttyUSB0"
+
+ids = [1, 2, 3, 4, 5]   # Pitch, Roll_R, Roll_L, Yaw, Mouth
+baudrate = 2000000      # 9600, 57600, 115200, 1000000, 2000000, 3000000, 4000000, 4500000
+is_time_based = true    # true: Time-based, false: Velocity-based
+operating_mode = 4      # 1: Velocity, 3: Position, 4: Extended Position, 16: PWM
+return_delay_time = 0
+
+profile_velocity_homing = 500   # 기기 부팅 시 초기 위치로 이동할 때 속도
+profile_velocity = 60
+profile_acceleration = 0
+
+pos_p_gain = [500, 500, 500, 460, 460]
+pos_i_gain = [0, 0, 0, 0, 0]
+pos_d_gain = [0, 0, 0, 0, 0]
+ff1_gain = [0, 0, 0, 0, 0]
+ff2_gain = [0, 0, 0, 0, 0]
+
+[robot]
+# 모터 초기 위치
+default_pitch   = 1410
+default_roll_r  = 820
+default_roll_l  = 1360
+default_yaw     = 1000
+default_mouth   = 0
+
+#robot parameter
+pulley_diameter = 50
+height = 110                      # 베이스부터 실이 연결된 레이어 까지의 높이 small -> 100,Large -> 180
+hole_radius = 25                  # 로봇 머리 구멍 반지름 small -> 25, Large -> 50
+yaw_gear_ratio = 2                # yaw 모터가 direct하게 머리를 회전시킨다면 1로 설정 아니면 2
+mouth_tune = 40                   # 최대 mouse movement size in DXL dimension -> 최초값에서 입모터 조정해보면서 결정
+mouth_back_compensation = 1.0     # 입 움직임에 대한 뒷쪽 보상 -> TRO 논문 참조  small -> 1.2, Large -> 1.5
+mouth_pitch_compensation = 0.8    # 입 움직임에 따른 pitch 보상

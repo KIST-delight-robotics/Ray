@@ -121,7 +121,7 @@ async def handle_tts_oneshot(response_text: str, client: AsyncOpenAI, websocket,
         await websocket.send(json.dumps({"type": "responses_stream_end"}))
 
 # ==================================================================================
-# Unified API Pipeline (Realtime + Responses)
+# LLM API Pipeline (Realtime + Responses)
 # ==================================================================================
 
 async def run_realtime_task(websocket, realtime_connection, item_ids_to_manage: list, user_text: str, realtime_start_event: asyncio.Event):
@@ -200,11 +200,6 @@ async def run_responses_task(websocket, openai_client: AsyncOpenAI, manager: Con
             reasoning={"effort": "none"},
             text = {"verbosity": "low"},
         )
-        # logging.info(f"🧠 Responses Query: \n{response}")
-        # response_id = response.id
-
-        # response_item = await openai_client.responses.input_items.list(response_id)
-        # print(response_item.data)
 
         response_text = response.output_text.strip()
         logger.info(f"🧠 Responses API 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
@@ -288,8 +283,8 @@ async def wakeword_detection_loop(websocket):
                     return
                 # 테스트용 코드
                 # await asyncio.sleep(1)
-                # await websocket.send(json.dumps({"type": "play_audio", "file_to_play": "test_audio.wav"}))
-                # await websocket.send(json.dumps({"type": "play_music", "title": "가까운 듯 먼 그대여", "artist": "카더가든"}))
+                # await websocket.send(json.dumps({"type": "play_audio", "file_to_play": "assets/audio/대사_test.wav"}))
+                # await websocket.send(json.dumps({"type": "play_music", "title": "나무", "artist": "카더가든"}))
                 # return
     except Exception as e:
         logger.error(f"Wakeword detection loop에서 오류 발생: {e}", exc_info=True)

@@ -3,6 +3,9 @@ import logging
 import socket
 import websockets
 import json
+import signal
+import sys
+import atexit
 from openai import AsyncOpenAI
 
 from config import OPENAI_API_KEY, AWAKE_FILE, SLEEP_FILE, AWAKE_FILE_SCRIPT, SLEEP_FILE_SCRIPT
@@ -10,6 +13,19 @@ from prompts import SYSTEM_PROMPT
 from conversation_manager import ConversationManager
 from api_pipeline import unified_active_pipeline, wakeword_detection_loop, save_tts_to_file
 from led import led_set_ring, led_set_bar, led_clear
+
+# 종료 처리 함수
+def shutdown_handler(signum=None, frame=None):
+    """프로그램 종료 시 실행될 정리 함수"""
+    logging.info(f"종료 신호 감지: {signum if signum else 'Normal Exit'}. 정리 작업을 시작합니다.")
+    led_clear()
+    # 이미 종료 중이 아니라면 강제 종료
+    if signum is not None:
+        sys.exit(0)
+
+atexit.register(shutdown_handler) # 정상 종료시 실행
+signal.signal(signal.SIGTERM, shutdown_handler) # kill 신호시 실행
+
 
 async def main_logic_loop(websocket):
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
@@ -38,6 +54,11 @@ async def main_logic_loop(websocket):
             await conversation_manager.end_session()
 
             logging.info("Active 세션 종료. 다시 Sleep 모드로 전환합니다.")
+
+    except (asyncio.CancelledError, SystemExit, KeyboardInterrupt):
+        logging.info("메인 로직: 종료 신호를 감지하여 루프를 멈춥니다.")
+        return
+    
     except Exception as e:
         logging.error(f"메인 로직 루프 에러: {e}", exc_info=True)
 
@@ -81,15 +102,8 @@ async def chat_handler(websocket):
     
     logging.info(f"🔌 C++ 클라이언트 연결 핸들러 종료: {websocket.remote_address}")
 
-    # except websockets.exceptions.ConnectionClosed:
-    #     logging.warning(f"🔌 C++ 클라이언트 연결 종료됨: {websocket.remote_address}")
-    # except Exception as e:
-    #     logging.error(f"Chat 핸들러에서 예외 발생: {e}", exc_info=True)
-    # finally:
-    #     logging.info(f"🔌 C++ 클라이언트 연결 핸들러 종료: {websocket.remote_address}")
-
 async def main():
-    """서버를 시작하고 로깅을 설정합니다."""
+    # 로깅 설정
     logging.basicConfig(
         level=logging.INFO,
         format='[%(asctime)s.%(msecs)03d] [%(levelname)s] [%(name)s] %(message)s',
@@ -97,6 +111,7 @@ async def main():
         force=True
     )
     
+    # 웹소켓 서버 시작
     server = await websockets.serve(chat_handler, "127.0.0.1", 5000, family=socket.AF_INET)
     logging.info("🚀 통합 WebSocket 서버가 127.0.0.1:5000 에서 시작되었습니다.")
     await server.wait_closed()
@@ -105,5 +120,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        led_clear()
-        logging.info("서버를 종료합니다.")
+        shutdown_handler()
