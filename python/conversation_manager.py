@@ -105,7 +105,7 @@ class ConversationManager:
         try:
             logger.info("📋 세션 요약 API 호출...")
             responses = await self.client.responses.create(
-                model="gpt-5",
+                model="gpt-4.1-mini",
                 input=[{"role": "user", "content": prompt}],
             )
             summary = responses.output_text

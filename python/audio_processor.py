@@ -18,7 +18,11 @@ import onnxruntime as ort
 from transformers import WhisperFeatureExtractor
 
 from config import (
-    SMART_TURN_MODEL_PATH, TURN_END_SILENCE_CHUNKS, MAX_TURN_CHUNKS, SMART_TURN_GRACE_PERIOD_S
+    SMART_TURN_MODEL_PATH,
+    TURN_END_SILENCE_CHUNKS,
+    MAX_TURN_CHUNKS,
+    SMART_TURN_GRACE_PERIOD_S,
+    SMART_TURN_MAX_RETRIES,
 )
 
 
@@ -264,7 +268,7 @@ class GoogleSTTStreamer:
     def run_stt_session(self):
         """단일 STT 세션을 실행하고 최종 결과를 큐에 넣음."""
         logging.info("🚀 STT 세션 스레드 시작.")
-        first_response_received = False
+        # first_response_received = False
 
         accumulated_transcripts = []
         current_interim_transcript = ""
@@ -274,13 +278,13 @@ class GoogleSTTStreamer:
             responses = self.stt_client.streaming_recognize(self.stt_streaming_config, audio_gen)
             
             for response in responses:
-                if not first_response_received:
-                    first_response_received = True
-                    # C++ 클라이언트에게 인터럽션 신호 전송
-                    asyncio.run_coroutine_threadsafe(
-                        self.websocket.send(json.dumps({"type": "user_interruption"})),
-                        self.main_loop
-                    )
+                # if not first_response_received:
+                #     first_response_received = True
+                #     # C++ 클라이언트에게 인터럽션 신호 전송
+                #     asyncio.run_coroutine_threadsafe(
+                #         self.websocket.send(json.dumps({"type": "user_interruption"})),
+                #         self.main_loop
+                #     )
 
                 if not response.results or not response.results[0].alternatives:
                     continue
@@ -404,8 +408,11 @@ class AudioProcessor:
         self.user_is_speaking = False
         self.silent_chunks_count = 0
         self.turn_chunks_count = 0
-        self.in_grace_period = False
-        self.grace_period_start_time = 0.0
+        # SmartTurn 재추론 제어
+        # - _next_smart_turn_time: 다음 SmartTurn 추론을 수행할 시각(None이면 즉시 추론 가능)
+        # - smart_turn_retry_count: '진행중' 판정 후 재추론을 수행한 횟수(무한 반복 방지)
+        self._next_smart_turn_time: float | None = None
+        self.smart_turn_retry_count = 0
 
         self._thread: threading.Thread | None = None
 
@@ -445,9 +452,16 @@ class AudioProcessor:
             self.user_is_speaking = True
             self.silent_chunks_count = 0
             self.turn_chunks_count = 0
-            self.in_grace_period = False
+            self._next_smart_turn_time = None
+            self.smart_turn_retry_count = 0
             self.current_turn_audio.clear()
             self.stt_stop_event.clear()
+
+            # C++ 클라이언트에게 인터럽션 신호 전송
+            asyncio.run_coroutine_threadsafe(
+                self.websocket.send(json.dumps({"type": "user_interruption"})),
+                self.main_loop
+            )
             
             # STT 세션 시작
             threading.Thread(
@@ -475,35 +489,60 @@ class AudioProcessor:
         is_speech_in_chunk = self.vad_processor.process_chunk(chunk)
         if is_speech_in_chunk:
             self.silent_chunks_count = 0
-            if self.in_grace_period:
-                logging.info("⏳ 유예 기간 중 추가 발화 감지. 유예 기간을 취소합니다.")
-                self.in_grace_period = False
+            if self._next_smart_turn_time is not None:
+                logging.info("⏳ SmartTurn 유예/재추론 대기 중 추가 발화 감지. 대기를 취소합니다.")
+                self._next_smart_turn_time = None
+                self.smart_turn_retry_count = 0
         else:
             self.silent_chunks_count += 1
         
         # 종료 조건 확인
         turn_ended = False
 
-        if self.in_grace_period and (time.time() - self.grace_period_start_time) > SMART_TURN_GRACE_PERIOD_S:
-            logging.info("⏳ 유예 기간 종료. 턴을 종료합니다.")
-            turn_ended = True
+        # SmartTurn은 "무음이 충분히 길다"는 조건에서만 동작시키고,
+        # '진행중'이면 일정 시간 기다렸다가 다시 추론(최대 재추론 횟수 제한)
+        if self.silent_chunks_count > TURN_END_SILENCE_CHUNKS:
+            now = time.time()
+            should_run_smart_turn = (self._next_smart_turn_time is None) or (now >= self._next_smart_turn_time)
 
-        elif not self.in_grace_period and self.silent_chunks_count > TURN_END_SILENCE_CHUNKS:
-            concatenated_audio_int16 = np.concatenate([c.flatten() for c in self.current_turn_audio])
-            full_audio_float32 = concatenated_audio_int16.astype(np.float32) / 32768.0
-            
-            start_time = time.time()
-            result = self.smart_turn_processor.predict(full_audio_float32)
-            duration_ms = (time.time() - start_time) * 1000
-            
-            logging.info(f"🤖 SmartTurn 예측: {'종료' if result['prediction'] == 1 else '진행중'} (확률: {result['probability']:.2f}, 소요시간: {duration_ms:.1f}ms)")
-            
-            if result['prediction'] == 1:
-                turn_ended = True
-            else:
-                logging.info(f"⏳ SmartTurn이 '진행중'으로 판단. {SMART_TURN_GRACE_PERIOD_S}초의 유예 시간을 시작합니다.")
-                self.in_grace_period = True
-                self.grace_period_start_time = time.time()
+            if should_run_smart_turn:
+                # 재추론은 무한 반복 방지를 위해 제한
+                if self._next_smart_turn_time is not None and self.smart_turn_retry_count >= SMART_TURN_MAX_RETRIES:
+                    logging.info(f"⏳ SmartTurn 최대 재시도({SMART_TURN_MAX_RETRIES})에 도달. 턴을 종료합니다.")
+                    turn_ended = True
+                else:
+                    concatenated_audio_int16 = np.concatenate([c.flatten() for c in self.current_turn_audio])
+                    full_audio_float32 = concatenated_audio_int16.astype(np.float32) / 32768.0
+
+                    start_time = time.time()
+                    result = self.smart_turn_processor.predict(full_audio_float32)
+                    duration_ms = (time.time() - start_time) * 1000
+
+                    is_retry = self._next_smart_turn_time is not None
+                    if is_retry:
+                        self.smart_turn_retry_count += 1
+                        logging.info(
+                            f"🔁 SmartTurn 재추론 #{self.smart_turn_retry_count}/{SMART_TURN_MAX_RETRIES}: "
+                            f"{'종료' if result['prediction'] == 1 else '진행중'} "
+                            f"(확률: {result['probability']:.2f}, 소요시간: {duration_ms:.1f}ms)"
+                        )
+                    else:
+                        logging.info(
+                            f"🤖 SmartTurn 예측: {'종료' if result['prediction'] == 1 else '진행중'} "
+                            f"(확률: {result['probability']:.2f}, 소요시간: {duration_ms:.1f}ms)"
+                        )
+
+                    if result['prediction'] == 1:
+                        turn_ended = True
+                    else:
+                        # 다음 추론을 "유예시간 후"로 예약
+                        if not is_retry:
+                            self.smart_turn_retry_count = 0
+                        self._next_smart_turn_time = now + SMART_TURN_GRACE_PERIOD_S
+                        logging.info(
+                            f"⏳ SmartTurn이 '진행중'으로 판단. {SMART_TURN_GRACE_PERIOD_S}초 후 재추론 예약 "
+                            f"(최대 {SMART_TURN_MAX_RETRIES}회)"
+                        )
         
         # elif self.turn_chunks_count > MAX_TURN_CHUNKS:
         #     logging.warning(f"최대 발화 길이({MAX_TURN_CHUNKS * 0.032:.1f}초) 초과. 턴을 종료합니다.")
@@ -519,7 +558,8 @@ class AudioProcessor:
         logging.info("🤫 인식 종료. STT 오디오 공급을 중단합니다.")
         self.stt_stop_event.set()
         self.user_is_speaking = False
-        self.in_grace_period = False
+        self._next_smart_turn_time = None
+        self.smart_turn_retry_count = 0
         
         # 남아있을 수 있는 큐를 비워 다음 턴에 영향이 없도록 함
         with self.stt_audio_queue.mutex:

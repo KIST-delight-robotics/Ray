@@ -12,11 +12,12 @@ from openai import AsyncOpenAI
 
 from config import (
     SLEEP_FILE, AWAKE_FILE, ACTIVE_SESSION_TIMEOUT, START_KEYWORD, END_KEYWORDS,
-    TTS_MODEL, VOICE, REALTIME_MODEL, RESPONSES_MODEL, AUDIO_CONFIG
+    TTS_MODEL, VOICE, REALTIME_MODEL, RESPONSES_MODEL, AUDIO_CONFIG, ASSETS_DIR
 )
 from prompts import REALTIME_PROMPT
 from audio_processor import AudioProcessor
 from conversation_manager import ConversationManager
+from offline.offline_motion import offline_motion_generation
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +28,16 @@ logger = logging.getLogger(__name__)
 async def save_tts_to_file(response_text: str, client: AsyncOpenAI, filename: str = "output.mp3"):
     """텍스트를 받아 TTS 오디오 파일로 저장"""
     try:
+        tts_start_time = time.time()
+        # 파일 저장 경로의 디렉토리가 없으면 생성
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+
         async with client.audio.speech.with_streaming_response.create(
             model=TTS_MODEL,
             voice=VOICE,
             input=response_text,
-            instructions="Speak in a positive tone.",
-            response_format="wav" 
+            # instructions="Speak in a positive tone.",
+            response_format="wav"
         ) as tts_response:
             
             logging.info(f"💾 TTS 파일 저장 시작: {filename}")
@@ -41,8 +46,8 @@ async def save_tts_to_file(response_text: str, client: AsyncOpenAI, filename: st
                 async for audio_chunk in tts_response.iter_bytes(chunk_size=4096):
                     if audio_chunk:
                         f.write(audio_chunk)
-                        
-        logging.info("✅ TTS 파일 저장 완료")
+        
+        logging.info(f"✅ TTS 파일 '{filename}' 저장 완료 (소요시간: {time.time() - tts_start_time:.2f}초)")
 
     except asyncio.CancelledError:
         logging.info("🛑 TTS 처리가 중단되었습니다.")
@@ -102,6 +107,7 @@ async def handle_tts_stream(response_stream, client: AsyncOpenAI, websocket, con
 async def handle_tts_oneshot(response_text: str, client: AsyncOpenAI, websocket, realtime_start_event: asyncio.Event):
     """전체 텍스트를 받아 한 번에 TTS 처리하는 함수"""
     try:
+        tts_streaming_start_time = time.time()
         if realtime_start_event.is_set():
             await websocket.send(json.dumps({"type": "responses_stream_start"}))
         else:
@@ -109,11 +115,16 @@ async def handle_tts_oneshot(response_text: str, client: AsyncOpenAI, websocket,
         async with client.audio.speech.with_streaming_response.create(
             model=TTS_MODEL, voice=VOICE, input=response_text, response_format="pcm"
         ) as tts_response:
+            first_chunk = True
             async for audio_chunk in tts_response.iter_bytes(chunk_size=4096):
+                if first_chunk:
+                    first_chunk = False
+                    logger.info(f"TTS 스트리밍 시작... (소요시간: {time.time() - tts_streaming_start_time:.2f}초)")
                 await websocket.send(json.dumps({
-                    "type": "responses_audio_chunk", 
+                    "type": "responses_audio_chunk",
                     "data": base64.b64encode(audio_chunk).decode('utf-8')
                 }))
+        logger.info(f"TTS 스트리밍 완료 (소요시간: {time.time() - tts_streaming_start_time:.2f}초)")
     except asyncio.CancelledError:
         logger.info("TTS 처리가 중단되었습니다.")
         raise
@@ -204,7 +215,16 @@ async def run_responses_task(websocket, openai_client: AsyncOpenAI, manager: Con
         response_text = response.output_text.strip()
         logger.info(f"🧠 Responses API 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
 
-        await handle_tts_oneshot(response_text, openai_client, websocket, realtime_start_event)
+        # await handle_tts_oneshot(response_text, openai_client, websocket, realtime_start_event)
+        # await save_tts_to_file(response_text, openai_client, filename="output/audio/responses.wav")
+        # await websocket.send(json.dumps({"type": "play_audio", "file_to_play": "output/audio/responses.wav"}))
+
+        audio_name = "responses"
+        tts_wav_path = os.path.join(ASSETS_DIR, "audio", f"{audio_name}.wav")
+        await save_tts_to_file(response_text, openai_client, filename=tts_wav_path)
+        await asyncio.to_thread(offline_motion_generation, audio_name)
+        await websocket.send(json.dumps({"type": "play_audio_csv", "audio_name": audio_name}))
+
         manager.add_message("assistant", response_text)
 
     except asyncio.CancelledError:
@@ -243,13 +263,15 @@ async def unified_active_pipeline(websocket, openai_client: AsyncOpenAI, manager
 
                         manager.add_message("user", user_text)
 
-                        realtime_task = asyncio.create_task(
-                            run_realtime_task(websocket, realtime_connection, realtime_item_ids_to_manage, user_text, realtime_start_event)
-                        )
+                        active_response_tasks = []
+                        # realtime_task = asyncio.create_task(
+                        #     run_realtime_task(websocket, realtime_connection, realtime_item_ids_to_manage, user_text, realtime_start_event)
+                        # )
+                        # active_response_tasks.append(realtime_task)
                         responses_task = asyncio.create_task(
                             run_responses_task(websocket, openai_client, manager, realtime_start_event)
                         )
-                        active_response_tasks = [responses_task, realtime_task]
+                        active_response_tasks.append(responses_task)
                         
                     except asyncio.TimeoutError:
                         logger.info(f"⏰ {ACTIVE_SESSION_TIMEOUT}초 동안 입력이 없어 Active 세션을 종료합니다.")

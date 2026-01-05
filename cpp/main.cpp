@@ -45,8 +45,6 @@ static constexpr int AUDIO_SAMPLE_RATE = 24000;
 static constexpr int AUDIO_CHANNELS = 1;
 static constexpr int MPU6050_ADDR = 0x68;
 
-sf::Music music;
-
 // 파일 경로 설정
 const std::string ASSETS_DIR = "assets";
 const std::string DATA_DIR = "data";
@@ -634,7 +632,6 @@ void generate_motion(int channels, int samplerate) {
             }
             if (start_frame_mouth >= audio_buffer.size() / channels) {
                 // 마지막 구간이므로 더 이상 처리할 오디오가 없음
-                // break 또는 return 등을 통해 해당 루프/함수를 빠져나감
                 std::cout << "stop flag : " << stop_flag << ", audio queue size : " << audio_queue.size() << std::endl;
                 break; 
             }
@@ -716,9 +713,9 @@ void generate_motion(int channels, int samplerate) {
             exx_v1_max_sc_avg = ex_v1_max_sc_avg;
             ex_v1_max_sc_avg = max_sample;
 
-            //cout << "final_result : " << final_result << '\n';
+            cout << "final_result : " << final_result << '\n';
             float calculate_result = calculate_mouth(final_result, MAX_MOUTH, MIN_MOUTH);
-            //cout<< "calculate result : " << calculate_result << '\n';   
+            cout<< "calculate result : " << calculate_result << '\n';   
 
             motion_results.push_back(calculate_result);
             
@@ -920,23 +917,17 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
             // 모터 제어 로직 구현
             float motor_value = motion_data.second;
             double roll_final = current_motion_data[i][0];
-            double pitch_final = current_motion_data[i][1]/2;
+            double pitch_final = current_motion_data[i][1];
             double yaw_final = current_motion_data[i][2];
-            double mouth_final = motor_value / 60;
+            double mouth_final = motor_value;
+
+            double ratio = 1.4;
 
             if (mode_label == "MUSIC") {
-                double ratio = 2.0;
-                roll_final *= ratio;
-                pitch_final *= ratio;
-                yaw_final *= ratio;
+                ratio = 2.0;
             }
 
-            // roll_final = 0.0;
-            // pitch_final = 0.0;
-            // yaw_final = 0.0;
-            mouth_final *= 3;
-
-            target_position = RPY2DXL(roll_final, pitch_final, yaw_final, mouth_final, 0);
+            target_position = RPY2DXL(roll_final * ratio, pitch_final * ratio, yaw_final * ratio, mouth_final, 0);
 
             #ifdef MOTOR_ENABLED
 
@@ -1169,7 +1160,7 @@ void wait_control_motor(){
 }
 
 // 모션 csv 파일 읽어서 재생하는 함수 (테스트용)
-void csv_control_motor(std::string headFile, std::string mouthFile) {
+void csv_control_motor(std::string audioName) {
     while(!mouth_motion_queue.empty()) mouth_motion_queue.pop();
     while(!head_motion_queue.empty()) head_motion_queue.pop();
 
@@ -1184,42 +1175,110 @@ void csv_control_motor(std::string headFile, std::string mouthFile) {
     std::cout << "[DUMMY MOTOR] 모션 CSV 재생 모드 (csv_control_motor) 시작." << std::endl;
     #endif
 
-    auto wait_start_time = std::chrono::high_resolution_clock::now();
+    sf::Music music;
 
+    std::string headMotionFilePath = "assets/headMotion/" + audioName + ".csv";
+    std::string mouthMotionFilePath = "assets/mouthMotion/" + audioName + "-delta-big.csv";
+    std::string audioFilePath = "assets/audio/" + audioName + ".wav";
+
+    if (!music.openFromFile(audioFilePath)) {
+        std::cerr << "Error: Could not load audio file: " << audioFilePath << std::endl;
+        return;
+    }
+
+    auto csv_start_time = std::chrono::high_resolution_clock::now();
+    int step = 0;
     constexpr auto FRAME_INTERVAL = std::chrono::milliseconds(40);
-    std::string line;
+
     while(true){
         #ifdef MOTOR_ENABLED
-        std::ifstream headGesture(headFile);
+        std::ifstream headGesture(headMotionFilePath);
         if (!headGesture) {
-            std::cerr << "Empty HeadGesture File not found." << std::endl;
+            std::cerr << "HeadGesture File not found." << std::endl;
             return;
         }
-        std::ifstream MouthGesture(mouthFile);
+        std::ifstream MouthGesture(mouthMotionFilePath);
         if (!MouthGesture) {
-            std::cerr << "Empty MouthGesture File not found." << std::endl;
+            std::cerr << "MouthGesture File not found." << std::endl;
             return;
         }
-        int step = 0;
-        while(headGesture.good()){
+
+        // 초기 프레임 궤적 보간
+        int SKIP_FRAMES = 20;
+        std::vector<std::vector<double>> targetTraj;
+
+        for (int i = 0; i < SKIP_FRAMES; i++) {
+            if (!headGesture.good() || !MouthGesture.good()) break;
+            auto headRow = csv_read_row(headGesture, ',');
+            auto mouthRow = csv_read_row(MouthGesture, ',');
+            float roll_s = std::stof(headRow[0]);
+            float pitch_s = std::stof(headRow[1]);
+            float yaw_s = std::stof(headRow[2]);
+            float mouth_s = std::stof(mouthRow[0]);
+
+            float ratiooo = std::stof(mouthRow[1]) * 1.4;
+
+            targetTraj.push_back({roll_s * ratiooo, pitch_s * ratiooo, yaw_s * ratiooo, mouth_s});
+        }
+
+        std::vector<double> startPose;
+        {
+            std::lock_guard<std::mutex> lock(prev_values_mutex);
+            startPose = prevValues.back();
+        }
+
+        std::cout << "Original trajectory:" << std::endl;
+        for (const auto& pose : targetTraj) {
+            std::cout << pose[0] << ", ";
+        }
+        std::cout << std::endl;
+
+		targetTraj = applyOffsetDecay(startPose, targetTraj, SKIP_FRAMES);
+        
+        std::cout << "Interpolated trajectory:" << std::endl;
+        for (const auto& pose : targetTraj) {
+            std::cout << pose[0] << ", ";
+        }
+        std::cout << std::endl;
+
+        // 모션 재생
+        while(headGesture.good() && MouthGesture.good()){
+            if (user_interruption_flag) {
+                std::cout << "Interruption detected in csv_control_motor." << std::endl;
+                music.stop();
+                return;
+            }
+
             if (music.getStatus() != sf::Music::Playing) {
                 music.play();
             }
-            auto headRow = csv_read_row(headGesture, ',');
-            auto mouthRow = csv_read_row(MouthGesture, ',');
-            
-            float roll_s = std::stof(headRow[0]);
-            float pitch_s = std::stof(headRow[1]);
-            float yaw_s = std::stof(headRow[2]) * 0;
-            // float mouth_s = std::stof(headRow[3]);
-            float mouth_s = std::stof(mouthRow[0]);
-            
-            // float mouth_s = 0;
 
-            // double ratiooo = 1.0;
-            float ratiooo = std::stof(mouthRow[1]) * 1.4;
+            double roll_final, pitch_final, yaw_final, mouth_final;
 
-            target_position = RPY2DXL(roll_s * ratiooo , pitch_s *ratiooo, yaw_s * ratiooo, mouth_s / 60, 0);
+            if (step < SKIP_FRAMES) {
+                roll_final = targetTraj[step][0];
+                pitch_final = targetTraj[step][1];
+                yaw_final = targetTraj[step][2];
+                mouth_final = targetTraj[step][3];
+            }
+            else {
+                auto headRow = csv_read_row(headGesture, ',');
+                auto mouthRow = csv_read_row(MouthGesture, ',');
+                
+                float roll_s = std::stof(headRow[0]);
+                float pitch_s = std::stof(headRow[1]);
+                float yaw_s = std::stof(headRow[2]);
+                float mouth_s = std::stof(mouthRow[0]);
+
+                float ratiooo = std::stof(mouthRow[1]) * 1.4;
+
+                roll_final = roll_s * ratiooo;
+                pitch_final = pitch_s * ratiooo;
+                yaw_final = yaw_s * ratiooo;
+                mouth_final = mouth_s;
+            }
+
+            target_position = RPY2DXL(roll_final , pitch_final, yaw_final, mouth_final, 0);
             
             // 상태 읽기
             dxl_driver->readAllState(current_state);
@@ -1240,20 +1299,18 @@ void csv_control_motor(std::string headFile, std::string mouthFile) {
 
             // 과거 위치 업데이트
             past_position = target_position;
-            updatePrevValues(roll_s * ratiooo , pitch_s *ratiooo, yaw_s * ratiooo, mouth_s);
+            updatePrevValues(roll_final , pitch_final, yaw_final, mouth_final);
 
             // 로깅
-            double DXL_goal_rpy[4] = {roll_s * ratiooo, pitch_s * ratiooo, yaw_s * ratiooo, mouth_s};
-            motion_logger.log("WAIT", DXL_goal_rpy, target_position, current_state);
+            double DXL_goal_rpy[4] = {roll_final, pitch_final, yaw_final, mouth_final};
+            motion_logger.log("PLAY_AUDIO_CSV", DXL_goal_rpy, target_position, current_state);
             
             // 동작과 소리 싱크 확인
-            sf::Int32 music_sec = music.getPlayingOffset().asSeconds();
-            // if (music_sec >= 18) {
-            //     music.stop();
-            //     return;
-            // }
+            // sf::Int32 music_ms = music.getPlayingOffset().asMilliseconds();
             // std::cout << "Step: " << step << ", Motor ms: " << timestamp.count() << ", Music ms: " << music_ms << ", Diff: " << (timestamp.count() - music_ms) << "ms" << std::endl;
-            std::this_thread::sleep_until(wait_start_time + FRAME_INTERVAL * step);
+            
+            // 제어 주기 맞추기
+            std::this_thread::sleep_until(csv_start_time + FRAME_INTERVAL * step);
             step ++;
         }
         #else
@@ -1667,7 +1724,9 @@ void robot_main_loop(std::future<void> server_ready_future) {
         SF_INFO sfinfo;
         SNDFILE* sndfile = nullptr;
         bool is_file_based = false;
+        bool is_csv_based = false;
         bool responses_only_flag = false;
+        std::string csv_audio_name = "";
         std::string current_mode_label = "UNKNOWN";
 
         // --- 1. 다음 행동 결정 ---
@@ -1714,26 +1773,26 @@ void robot_main_loop(std::future<void> server_ready_future) {
             else if (type == "realtime_stream_start") {
                 is_file_based = false;
                 is_realtime_streaming = true;
-                current_mode_label = "REALTIME"; // 실시간 스트리밍 모드
+                current_mode_label = "REALTIME";
                 sfinfo.channels = AUDIO_CHANNELS;
                 sfinfo.samplerate = AUDIO_SAMPLE_RATE;
             }
-
             else if (type == "responses_only") {
                 is_file_based = false;
                 is_realtime_streaming = false;
                 is_responses_streaming = true;
                 responses_only_flag = true;
-                current_mode_label = "RESPONSE"; // 응답 모드
+                current_mode_label = "RESPONSE";
                 sfinfo.channels = AUDIO_CHANNELS;
                 sfinfo.samplerate = AUDIO_SAMPLE_RATE;
             }
-        }
-
-        if (!is_file_based && !is_realtime_streaming && !responses_only_flag) {
-            std::cerr << "Error: No valid audio source." << std::endl;
-            if (sndfile) sf_close(sndfile);
-            continue;
+            else if (type == "play_audio_csv") {
+                is_csv_based = true;
+                csv_audio_name = response.value("audio_name", "");
+            }
+            else {
+                std::cerr << "Error: Unknown command type received from server." << std::endl;
+            }
         }
 
         CustomSoundStream soundStream(sfinfo.channels, sfinfo.samplerate);
@@ -1742,7 +1801,14 @@ void robot_main_loop(std::future<void> server_ready_future) {
         // --- 2. 스레드 시작 ---
         is_speaking = true;
         
-        if (is_file_based) {
+        if (is_csv_based) {
+            wait_mode_flag = false;
+			if (wait_mode_thread.joinable()) {
+				wait_mode_thread.join();
+			}
+            csv_control_motor(csv_audio_name);
+        }
+        else if (is_file_based) {
 			wait_mode_flag = false;
 			if (wait_mode_thread.joinable()) {
 				wait_mode_thread.join();
@@ -1754,7 +1820,8 @@ void robot_main_loop(std::future<void> server_ready_future) {
             t1.join();
             t2.join();
             t3.join();
-        } else { // realtime or responses
+        } 
+        else { // realtime or responses
             const size_t bytes_per_interval = sfinfo.samplerate * sfinfo.channels * sizeof(sf::Int16) * INTERVAL_MS / 1000;
 
 			// Realtime 처리
@@ -1851,9 +1918,9 @@ void robot_main_loop(std::future<void> server_ready_future) {
             std::queue<std::vector<std::vector<double>>> empty_head_q;
             std::swap(head_motion_queue, empty_head_q);
 
-            if (sndfile) sf_close(sndfile);
-            playing_music_flag = false;
-            continue; // 메인 루프의 처음으로 돌아가 다음 명령을 기다림
+            // if (sndfile) sf_close(sndfile);
+            // playing_music_flag = false;
+            // continue; // 메인 루프의 처음으로 돌아가 다음 명령을 기다림
         }
 
 
@@ -1903,37 +1970,17 @@ int main() {
     tuning_logger = new HighFreqLogger(dxl_driver);
     #endif
 
-    /*
+    
     // == 테스트 오디오 재생 코드 ==
-    std::string audioName = "대사_test";
-    std::string audioFilePath = "assets/audio/" + audioName + ".wav"; // 재생할 오디오 파일 경로
-    if (!music.openFromFile(audioFilePath)) {
-        std::cerr << "Error: Could not load audio file: " << audioFilePath << std::endl;
-        return -1;
-    }
-    std::cout << "Audio: File loaded. Duration: " << music.getDuration().asSeconds() << " seconds" << std::endl;
-    float volume = 100.0f; // 볼륨 설정 (0.0f ~ 100.0f)
-    music.setVolume(volume);
-    std::cout << "Audio: Ready! Waiting for start signal..." << std::endl;
+    // std::string audioName = "responses";
 
-    auto log_start_time = std::chrono::high_resolution_clock::now();
-    std::string log_dir = create_log_directory("output/motion_log/1217_pid_tune_test/");
-    motion_logger.start(log_start_time, log_dir);
-    tuning_logger->start(log_start_time, log_dir);
+    // std::thread test_thread(csv_control_motor, audioName);
+    // test_thread.join();
 
-    std::string headMotionFilePath = "assets/headMotion/" + audioName + ".csv";
-    std::string mouthMotionFilePath = "assets/mouthMotion/" + audioName + "-delta-big.csv";
-
-    // std::thread test_thread(csv_control_motor, "assets/실시간 생성.csv", "assets/대사_test-mouth-delta.csv");
-    std::thread test_thread(csv_control_motor, headMotionFilePath, mouthMotionFilePath);
-    test_thread.join();
-
-    motion_logger.stop();
-    tuning_logger->stop();
-    cleanup_dynamixel();
-    return 0;
+    // cleanup_dynamixel();
+    // return 0;
     // ===== 테스트 코드 끝 =====
-    */
+    
 
 
     // 웹소켓 서버 준비
@@ -1954,10 +2001,12 @@ int main() {
                     std::lock_guard<std::mutex> lock(realtime_stream_buffer_mutex);
                     realtime_stream_buffer.insert(realtime_stream_buffer.end(), decoded_data.begin(), decoded_data.end());
                     realtime_stream_buffer_cv.notify_one();
-                } else if (type == "realtime_stream_end") {
+                } 
+                else if (type == "realtime_stream_end") {
                     is_realtime_streaming = false;
                     realtime_stream_buffer_cv.notify_one();
-                } else if (type == "responses_audio_chunk") {
+                } 
+                else if (type == "responses_audio_chunk") {
                     if (user_interruption_flag) return;
                     std::string b64_data = response.value("data", "");
                     std::string decoded_data;
@@ -1965,17 +2014,21 @@ int main() {
                     std::lock_guard<std::mutex> lock(responses_stream_buffer_mutex);
                     responses_stream_buffer.insert(responses_stream_buffer.end(), decoded_data.begin(), decoded_data.end());
                     responses_stream_buffer_cv.notify_one();
-                } else if (type == "responses_stream_start") {
+                } 
+                else if (type == "responses_stream_start") {
                     is_responses_streaming = true;
                     responses_stream_buffer_cv.notify_one();
-                } else if (type == "responses_stream_end") {
+                } 
+                else if (type == "responses_stream_end") {
                     is_responses_streaming = false;
                     responses_stream_buffer_cv.notify_one();
-                } else if (type == "stt_done") {
+                } 
+                else if (type == "stt_done") {
                     if (response.contains("stt_done_time")) {
                         STT_DONE_TIME = response["stt_done_time"].get<double>();
                     }
-                } else if (type == "user_interruption") {
+                } 
+                else if (type == "user_interruption") {
                     if (is_speaking) {
                         std::cout << "[WebSocket] User interruption received." << std::endl;
                         user_interruption_flag = true;
@@ -1984,9 +2037,10 @@ int main() {
                         audio_queue_cv.notify_all();
                         mouth_motion_queue_cv.notify_all();
                     }
-                } else { // audio_chunk가 아닌 다른 모든 메시지(gpt_streaming_start, play_audio 등)는 메인 루프가 처리하도록 큐에 넣음
+                } 
+                else { // audio_chunk가 아닌 다른 모든 메시지(gpt_streaming_start, play_audio 등)는 메인 루프가 처리하도록 큐에 넣음
                     // 새로운 재생 시작을 알리는 모든 메시지 유형에 대해 인터럽트 플래그를 즉시 리셋
-                    if (type == "realtime_stream_start" || type == "play_audio" || type == "play_music" || type == "responses_only") {
+                    if (type == "realtime_stream_start" || type == "play_audio" || type == "play_music" || type == "responses_only" || type == "play_audio_csv") {
                         user_interruption_flag = false;
                     }
                     std::lock_guard<std::mutex> lock(server_message_queue_mutex);

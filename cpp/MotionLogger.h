@@ -38,7 +38,7 @@ public:
              const std::vector<MotorState>& states);
 };
 
-// --- 2. 고속 로거 (1ms 주기) ---
+// --- 2. 고속 로거 (5ms 주기) ---
 struct HighFreqData {
     double timestamp_ms;
     std::vector<MotorState> states;

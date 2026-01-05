@@ -36,7 +36,7 @@ using namespace Eigen;
 #define CHUNK_SIZE          1024
 
 #define MAX_MOUTH           0 // 예시로 임의의 값 설정
-#define MIN_MOUTH           300 // 예시로 임의의 값 설정
+#define MIN_MOUTH           250 // 예시로 임의의 값 설정
 
 #define DXL_NUM             5
 

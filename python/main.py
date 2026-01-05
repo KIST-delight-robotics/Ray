@@ -9,7 +9,7 @@ import atexit
 from openai import AsyncOpenAI
 
 from config import OPENAI_API_KEY, AWAKE_FILE, SLEEP_FILE, AWAKE_FILE_SCRIPT, SLEEP_FILE_SCRIPT
-from prompts import SYSTEM_PROMPT
+from prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_RESP_ONLY
 from conversation_manager import ConversationManager
 from api_pipeline import unified_active_pipeline, wakeword_detection_loop, save_tts_to_file
 from led import led_set_ring, led_set_bar, led_clear
@@ -45,7 +45,7 @@ async def main_logic_loop(websocket):
             await wakeword_detection_loop(websocket)
             
             # 2. 새 세션 시작
-            conversation_manager.start_new_session(system_prompt=SYSTEM_PROMPT)
+            conversation_manager.start_new_session(system_prompt=SYSTEM_PROMPT_RESP_ONLY)
             
             # 3. Active 모드 실행
             await unified_active_pipeline(websocket, openai_client, conversation_manager)

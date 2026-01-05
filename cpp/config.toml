@@ -14,8 +14,8 @@ profile_velocity_homing = 500   # 기기 부팅 시 초기 위치로 이동할 �
 profile_velocity = 60
 profile_acceleration = 0
 
-pos_p_gain = [500, 500, 500, 460, 460]
-pos_i_gain = [0, 0, 0, 0, 0]
+pos_p_gain = [500, 3000, 3000, 500, 500]
+pos_i_gain = [0, 1000, 1000, 0, 0]
 pos_d_gain = [0, 0, 0, 0, 0]
 ff1_gain = [0, 0, 0, 0, 0]
 ff2_gain = [0, 0, 0, 0, 0]
@@ -26,13 +26,13 @@ default_pitch   = 1410
 default_roll_r  = 820
 default_roll_l  = 1360
 default_yaw     = 1000
-default_mouth   = 0
+default_mouth   = 4000
 
 #robot parameter
-pulley_diameter = 50
+pulley_diameter = 40
 height = 110                      # 베이스부터 실이 연결된 레이어 까지의 높이 small -> 100,Large -> 180
 hole_radius = 25                  # 로봇 머리 구멍 반지름 small -> 25, Large -> 50
 yaw_gear_ratio = 2                # yaw 모터가 direct하게 머리를 회전시킨다면 1로 설정 아니면 2
 mouth_tune = 40                   # 최대 mouse movement size in DXL dimension -> 최초값에서 입모터 조정해보면서 결정
-mouth_back_compensation = 1.0     # 입 움직임에 대한 뒷쪽 보상 -> TRO 논문 참조  small -> 1.2, Large -> 1.5
-mouth_pitch_compensation = 0.8    # 입 움직임에 따른 pitch 보상
+mouth_back_compensation = 0.8     # 입 움직임에 대한 뒷쪽 보상 -> TRO 논문 참조  small -> 1.2, Large -> 1.5
+mouth_pitch_compensation = 1.0    # 입 움직임에 따른 pitch 보상
