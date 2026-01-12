@@ -12,12 +12,12 @@ from openai import AsyncOpenAI
 
 from config import (
     SLEEP_FILE, AWAKE_FILE, ACTIVE_SESSION_TIMEOUT, START_KEYWORD, END_KEYWORDS,
-    TTS_MODEL, VOICE, REALTIME_MODEL, RESPONSES_MODEL, AUDIO_CONFIG, ASSETS_DIR
+    TTS_MODEL, VOICE, REALTIME_MODEL, RESPONSES_MODEL, RESPONSES_PRESETS, AUDIO_CONFIG, ASSETS_DIR
 )
 from prompts import REALTIME_PROMPT
 from audio_processor import AudioProcessor
 from conversation_manager import ConversationManager
-from offline.offline_motion import offline_motion_generation
+from offline_motion import offline_motion_generation
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +131,50 @@ async def handle_tts_oneshot(response_text: str, client: AsyncOpenAI, websocket,
     finally:
         await websocket.send(json.dumps({"type": "responses_stream_end"}))
 
+
+# ==================================================================================
+# LLM tools
+# =================================================================================
+import re
+
+# 음악 재생
+with open('assets/songs_db.json', 'r') as f:
+    SONG_DB = json.load(f)
+
+def normalize_string(input_str):
+    return re.sub(r'\s+', '', input_str).lower()
+
+song_candidates = []
+for song in SONG_DB:
+    song_processed = song.copy()
+    song_processed['norm_title'] = normalize_string(song['title'])
+    song_processed['norm_artist'] = normalize_string(song['artist'])
+    song_candidates.append(song_processed)
+
+def play_music(song_title: str = "", artist_name: str = ""):
+    """
+    LLM이 호출하는 함수
+    사용자가 요청한 조건에 맞는 노래를 DB에서 검색하여 재생
+    """
+    target_title = normalize_string(song_title)
+    target_artist = normalize_string(artist_name)
+
+    candidates = song_candidates
+
+    if song_title:
+        candidates = [s for s in candidates if target_title in s['norm_title']]
+
+    if artist_name:
+        candidates = [s for s in candidates if target_artist in s['norm_artist']]
+
+    if candidates:
+        selected_song = candidates[0]
+        logging.info(f"재생할 노래 찾음: '{selected_song['title']}' by {selected_song['artist']}")
+        return selected_song['file_path'], f"Found and playing '{selected_song['title']}' by {selected_song['artist']}."
+    else:
+        logging.info("재생할 노래를 찾지 못함.")
+        return None, "노래를 찾을 수 없습니다."
+
 # ==================================================================================
 # LLM API Pipeline (Realtime + Responses)
 # ==================================================================================
@@ -196,36 +240,95 @@ async def run_responses_task(websocket, openai_client: AsyncOpenAI, manager: Con
     current_log = manager.get_current_log()
 
     try:
-        response = await openai_client.responses.create(
-            model=RESPONSES_MODEL,
-            input=current_log,
-            tools=[
-                {
-                    "type": "web_search",
-                    "user_location": {
-                        "type": "approximate",
-                        "country": "KR",
-                    }
+        tools = [
+            {
+                "type": "web_search",
+                "user_location": {"type": "approximate", "country": "KR"},
+            },
+            {
+                "type": "function",
+                "name": "play_music",
+                "description": "사용자가 요청한 조건에 맞는 노래를 검색하여 재생합니다. 저장된 DB에 있는 노래만 재생 가능합니다.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "song_title": {
+                            "type": "string",
+                            "description": "사용자가 요청한 노래 제목 (예: 밤편지)"
+                        },
+                        "artist_name": {
+                            "type": "string",
+                            "description": "사용자가 요청한 가수 이름 (예: 아이유)"
+                        },
+                    },
+                    "required": ["song_title", "artist_name"] 
                 }
-            ],
-            reasoning={"effort": "none"},
-            text = {"verbosity": "low"},
-        )
+            }
+        ]
 
-        response_text = response.output_text.strip()
-        logger.info(f"🧠 Responses API 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
+        params = {
+            **RESPONSES_PRESETS.get(RESPONSES_MODEL, {}),
+            "input": current_log,
+            "tools": tools,
+        }
+        response = await openai_client.responses.create(**params)
 
-        # await handle_tts_oneshot(response_text, openai_client, websocket, realtime_start_event)
-        # await save_tts_to_file(response_text, openai_client, filename="output/audio/responses.wav")
-        # await websocket.send(json.dumps({"type": "play_audio", "file_to_play": "output/audio/responses.wav"}))
+        for item in response.output:
+            if item.type == "function_call":
+                if item.name == "play_music":
+                    print(item)
+                    args = json.loads(item.arguments)
+                    song_title = args.get("song_title", "")
+                    artist_name = args.get("artist_name", "")
+                    file_path, message = play_music(song_title, artist_name)
 
-        audio_name = "responses"
-        tts_wav_path = os.path.join(ASSETS_DIR, "audio", f"{audio_name}.wav")
-        await save_tts_to_file(response_text, openai_client, filename=tts_wav_path)
-        await asyncio.to_thread(offline_motion_generation, audio_name)
-        await websocket.send(json.dumps({"type": "play_audio_csv", "audio_name": audio_name}))
+                    if file_path:
+                        audio_name = f"{song_title}_{artist_name}"
+                        # assets/headMotion 폴더에 audio_name.csv 파일이 있는지 확인
+                        if not os.path.exists(os.path.join(ASSETS_DIR, "headMotion", f"{audio_name}.csv")):
+                            await asyncio.to_thread(offline_motion_generation, audio_name)
+                    
+                    # current_log를 카피하여 함수 호출 결과를 추가
+                    current_log_copy = current_log.copy()
+                    current_log_copy.append(item)
+                    current_log_copy.append({
+                        "type": "function_call_output",
+                        "call_id": item.call_id,
+                        "output": json.dumps({
+                            "status": "success" if file_path else "failure",
+                            "message": message
+                        })
+                    })
 
-        manager.add_message("assistant", response_text)
+                    params = {
+                        **RESPONSES_PRESETS.get(RESPONSES_MODEL, {}),
+                        "input": current_log_copy,
+                        "tools": tools,
+                    }
+                    response = await openai_client.responses.create(**params)
+
+                    response_text = response.output[0].content[0].text.strip()
+                    logger.info(f"🧠 Responses API 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
+
+                    await handle_tts_oneshot(response_text, openai_client, websocket, realtime_start_event)
+                    if file_path: await websocket.send(json.dumps({"type": "play_audio_csv", "audio_name": f"{song_title}_{artist_name}"}))
+
+                    manager.add_message("assistant", response_text)
+                    break
+
+            elif item.type == "message":
+                response_text = item.content[0].text.strip()
+                logger.info(f"🧠 Responses API 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
+
+                await handle_tts_oneshot(response_text, openai_client, websocket, realtime_start_event)
+
+                # audio_name = "responses"
+                # tts_wav_path = os.path.join(ASSETS_DIR, "audio", f"{audio_name}.wav")
+                # await save_tts_to_file(response_text, openai_client, filename=tts_wav_path)
+                # await asyncio.to_thread(offline_motion_generation, audio_name)
+                # await websocket.send(json.dumps({"type": "play_audio_csv", "audio_name": audio_name}))
+
+                manager.add_message("assistant", response_text)
 
     except asyncio.CancelledError:
         logger.info("🧠 Responses Task가 외부에서 중단되었습니다.")
@@ -312,3 +415,8 @@ async def wakeword_detection_loop(websocket):
         logger.error(f"Wakeword detection loop에서 오류 발생: {e}", exc_info=True)
     finally:
         logger.info("💤 Sleep 모드 종료.")
+
+
+if __name__ == "__main__":
+    from config import OPENAI_API_KEY
+    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)

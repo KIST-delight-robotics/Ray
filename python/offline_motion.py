@@ -90,7 +90,7 @@ def offline_motion_generation(audioname):
     
     currentpath = os.path.abspath(os.getcwd())
     # currentpath = os.path.dirname(os.path.abspath(__file__))
-    audiofilepath = currentpath+'/assets/audio/'+audioname+'.wav'
+    audiofilepath = currentpath+'/assets/audio/vocal/'+audioname+'_vocals.wav'
     headcsvfilepath = currentpath+'/assets/headMotion/'+audioname+'.csv'
     mouthcsvfilepath = currentpath+'/assets/mouthMotion/'+audioname+'-delta-big.csv'
     # audiofilepath = audioname+'.wav'

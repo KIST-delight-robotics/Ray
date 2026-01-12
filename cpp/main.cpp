@@ -1179,7 +1179,7 @@ void csv_control_motor(std::string audioName) {
 
     std::string headMotionFilePath = "assets/headMotion/" + audioName + ".csv";
     std::string mouthMotionFilePath = "assets/mouthMotion/" + audioName + "-delta-big.csv";
-    std::string audioFilePath = "assets/audio/" + audioName + ".wav";
+    std::string audioFilePath = "assets/audio/music/" + audioName + ".wav";
 
     if (!music.openFromFile(audioFilePath)) {
         std::cerr << "Error: Could not load audio file: " << audioFilePath << std::endl;
@@ -1664,7 +1664,7 @@ void initialize_robot_posture() {
     g_home.home_roll_l = target_position[2];
     g_home.home_yaw    = target_position[3];
     g_home.home_mouth  = target_position[4];
-    
+
     finish_adjust_ready = true;
 }
 
@@ -2054,7 +2054,7 @@ int main() {
                 } 
                 else { // audio_chunk가 아닌 다른 모든 메시지(gpt_streaming_start, play_audio 등)는 메인 루프가 처리하도록 큐에 넣음
                     // 새로운 재생 시작을 알리는 모든 메시지 유형에 대해 인터럽트 플래그를 즉시 리셋
-                    if (type == "realtime_stream_start" || type == "play_audio" || type == "play_music" || type == "responses_only" || type == "play_audio_csv") {
+                    if (type == "realtime_stream_start" || type == "play_audio" || type == "play_music" || type == "responses_only") {
                         user_interruption_flag = false;
                     }
                     std::lock_guard<std::mutex> lock(server_message_queue_mutex);

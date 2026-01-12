@@ -1,0 +1,18 @@
+[
+  {
+    "id": "song_001",
+    "title": "나무",
+    "artist": "카더가든",
+    "genre": "ballad",
+    "tags": ["잔잔한", "새벽", "감성"],
+    "file_path": "/music/나무_카더가든.wav"
+  },
+  {
+    "id": "song_002",
+    "title": "서울의 달",
+    "artist": "김건모",
+    "genre": "R&B",
+    "tags": ["신나는", "드라이브"],
+    "file_path": "/music/서울의 달_김건모.wav"
+  }
+]

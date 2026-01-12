@@ -2,6 +2,8 @@ import os
 import sys
 from pathlib import Path
 
+from typing import Any, Dict
+
 # --- 기본 설정 ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
@@ -14,6 +16,22 @@ VOICE = "coral"
 REALTIME_MODEL = "gpt-4o-mini-realtime-preview"
 # REALTIME_MODEL = "gpt-realtime-mini"
 RESPONSES_MODEL = "gpt-5.1"
+RESPONSES_PRESETS = {
+    "gpt-5.1": {
+        "model": "gpt-5.1",
+        "reasoning": {"effort": "none"},
+        "text": {"verbosity": "low"},
+    },
+    "gpt-5-mini": {
+        "model": "gpt-5-mini",
+        "reasoning": {"effort": "low"},
+        "text": {"verbosity": "low"},
+    },
+    "gpt-4.1-mini": {
+        "model": "gpt-4.1-mini",
+    },
+}
+
 
 # --- 경로 설정 ---
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
