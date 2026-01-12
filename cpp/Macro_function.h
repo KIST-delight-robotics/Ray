@@ -36,7 +36,7 @@ using namespace Eigen;
 #define CHUNK_SIZE          1024
 
 #define MAX_MOUTH           0 // 예시로 임의의 값 설정
-#define MIN_MOUTH           250 // 예시로 임의의 값 설정
+#define MIN_MOUTH           300 // 예시로 임의의 값 설정
 
 #define DXL_NUM             5
 
@@ -48,6 +48,17 @@ using namespace Eigen;
 //stream
 #define INFO_STREAM( stream ) 
 //std::cout << stream <<std::endl
+
+
+struct RobotHomePose {
+    int32_t home_pitch;
+    int32_t home_roll_r;
+    int32_t home_roll_l;
+    int32_t home_yaw;
+    int32_t home_mouth;
+};
+
+inline RobotHomePose g_home;
 
 
 //파일 경로 생성

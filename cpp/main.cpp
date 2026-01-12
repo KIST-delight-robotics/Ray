@@ -294,7 +294,7 @@ std::vector<std::vector<double>> applyOffsetDecay(
 void move_to_initial_position_posctrl() {
     if (!dxl_driver) return;
 
-    std::vector<int32_t> DXL_initial_position = { cfg_robot.default_pitch, cfg_robot.default_roll_r, cfg_robot.default_roll_l, cfg_robot.default_yaw, cfg_robot.default_mouth };
+    std::vector<int32_t> DXL_initial_position = { g_home.home_pitch, g_home.home_roll_r, g_home.home_roll_l, g_home.home_yaw, g_home.home_mouth };
 
     dxl_driver->writeGoalPosition(DXL_initial_position);
 }
@@ -303,7 +303,7 @@ void move_to_initial_position_posctrl() {
 void move_to_initial_position_velctrl() {
     if (!dxl_driver) return;
 
-    std::vector<int32_t> DXL_initial_position = { cfg_robot.default_pitch, cfg_robot.default_roll_r, cfg_robot.default_roll_l, cfg_robot.default_yaw, cfg_robot.default_mouth };
+    std::vector<int32_t> DXL_initial_position = { g_home.home_pitch, g_home.home_roll_r, g_home.home_roll_l, g_home.home_yaw, g_home.home_mouth };
 
     const int POSITION_TOLERANCE = 20; // 목표 위치 도달로 간주할 허용 오차
     const double P_GAIN = 0.2; // 비례 제어 상수 (이 값을 조절하여 감속 강도 변경)
@@ -713,9 +713,9 @@ void generate_motion(int channels, int samplerate) {
             exx_v1_max_sc_avg = ex_v1_max_sc_avg;
             ex_v1_max_sc_avg = max_sample;
 
-            cout << "final_result : " << final_result << '\n';
+            // cout << "final_result : " << final_result << '\n';
             float calculate_result = calculate_mouth(final_result, MAX_MOUTH, MIN_MOUTH);
-            cout<< "calculate result : " << calculate_result << '\n';   
+            // cout<< "calculate result : " << calculate_result << '\n';   
 
             motion_results.push_back(calculate_result);
             
@@ -776,7 +776,7 @@ void generate_motion(int channels, int samplerate) {
 
             cnpy::NpyArray segment = cnpy::npy_load(SEGMENTS_DIR + "/" + filePath);
 
-            for (int j = 0; j < 3; j++){
+            for (int j = 0; j < 3; j++) {
                 prevEnd[j] = prevSegment[prevSegment.size() -1][j]; // prevSegment의 마지막 데이터 값
                 prevEndOneBefore[j] = prevSegment[prevSegment.size() -2][j];
             }
@@ -1361,7 +1361,7 @@ void gyro_test() {
     int mouth_adjust_flag = 0;
 
     const float current_threshold_mA = -20;   // 목표 전류 임계값 (mA)
-    const int adjustment_increment = 20;       // 모터 위치 조정 증분 (펄스)
+    const int adjustment_increment = 1;       // 모터 위치 조정 증분 (펄스)
     bool tension_satisfied = false;
     const int sample_count = 3;
 
@@ -1402,14 +1402,14 @@ void initialize_robot_posture() {
     mpu6050_init(fd);
     std::cout << "MPU6050 데이터 수집 시작..." << std::endl;
 
-    std::vector<int32_t> target_position = {cfg_robot.default_pitch , cfg_robot.default_roll_r, cfg_robot.default_roll_l, cfg_robot.default_yaw, cfg_robot.default_mouth};
+    std::vector<int32_t> target_position = {g_home.home_pitch , g_home.home_roll_r, g_home.home_roll_l, g_home.home_yaw, g_home.home_mouth};
     bool Roll_L_adjust_flag = 0;
     bool Roll_R_adjust_flag = 0;
     bool Pitch_adjust_flag = 0;
     bool mouth_adjust_flag = 0;
 
     const float current_threshold_mA = -20;   // 목표 전류 임계값 (mA)
-    const int adjustment_increment = 20;       // 모터 위치 조정 증분 (펄스)
+    const int adjustment_increment = 1;       // 모터 위치 조정 증분 (펄스)
     bool tension_satisfied = false;
     const int sample_count = 3;
 
@@ -1658,6 +1658,12 @@ void initialize_robot_posture() {
             mouth_adjust_flag = 0;
         }
     }
+    
+    g_home.home_pitch  = target_position[0];
+    g_home.home_roll_r = target_position[1];
+    g_home.home_roll_l = target_position[2];
+    g_home.home_yaw    = target_position[3];
+    g_home.home_mouth  = target_position[4];
     
     finish_adjust_ready = true;
 }
@@ -1945,6 +1951,12 @@ int main() {
 
     LoadConfig("cpp/config.toml");
 
+    g_home.home_pitch  = cfg_robot.default_pitch;
+    g_home.home_roll_r = cfg_robot.default_roll_r;
+    g_home.home_roll_l = cfg_robot.default_roll_l;
+    g_home.home_yaw    = cfg_robot.default_yaw;
+    g_home.home_mouth  = cfg_robot.default_mouth;
+
     #ifdef MOTOR_ENABLED
     if (!initialize_dynamixel()) {
         std::cerr << "모터 초기화 실패!" << std::endl;
@@ -1963,7 +1975,9 @@ int main() {
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // 자이로센서를 이용한 로봇 초기자세 설정
+    // dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
     // initialize_robot_posture();
+    // dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
 
     // gyro_test();
 

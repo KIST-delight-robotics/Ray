@@ -390,17 +390,17 @@ std::vector<int32_t> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double
 
   double pitch_diff = (cfg_robot.height - L1) * (4096 / (cfg_robot.pulley_diameter * PI));
 
-  dxl_goal_position_pitch_double = cfg_robot.default_pitch - pitch_diff;
+  dxl_goal_position_pitch_double = g_home.home_pitch - pitch_diff;
 
 //double delta_mouth = (float)mouth_f * cfg_robot.mouth_tune; // mouth_f는 0 ~ 1 사이(보통 0.1 ~ 0.3), cfg_robot.mouth_tune은 입을 최대로 크게 벌리는 정도
   double delta_mouth = (float)mouth_f;
 
-  dxl_goal_position_mouth_double = cfg_robot.default_mouth - delta_mouth - pitch_diff / cfg_robot.mouth_pitch_compensation;
+  dxl_goal_position_mouth_double = g_home.home_mouth - delta_mouth - pitch_diff / cfg_robot.mouth_pitch_compensation;
 
   if (mode == 0) // mirroring
   {
-    dxl_goal_position_yaw_double = (-1) * static_cast<double> (yaw_degree) * cfg_robot.yaw_gear_ratio * 4096.0 / 360.0 + cfg_robot.default_yaw; // 2
-    // dxl_goal_position_yaw_double = static_cast<double> (yaw_degree) * 1 * 4096.0 / 360.0 + cfg_robot.default_yaw; // 2
+    dxl_goal_position_yaw_double = (-1) * static_cast<double> (yaw_degree) * cfg_robot.yaw_gear_ratio * 4096.0 / 360.0 + g_home.home_yaw; // 2
+    // dxl_goal_position_yaw_double = static_cast<double> (yaw_degree) * 1 * 4096.0 / 360.0 + g_home.home_yaw; // 2
 
     double rollR_diff = (cfg_robot.height - L2) * (4096 / (cfg_robot.pulley_diameter * PI));
     double rollL_diff = (cfg_robot.height - L3) * (4096 / (cfg_robot.pulley_diameter * PI));
@@ -418,8 +418,8 @@ std::vector<int32_t> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double
     //   if (rollL_diff > 0)
     //     rollL_diff *= 1.3;
     // }
-    dxl_goal_position_rollr_double = cfg_robot.default_roll_r - rollR_diff - (delta_mouth / cfg_robot.mouth_back_compensation); // 1.5
-    dxl_goal_position_rolll_double = cfg_robot.default_roll_l - rollL_diff - (delta_mouth / cfg_robot.mouth_back_compensation);
+    dxl_goal_position_rollr_double = g_home.home_roll_r - rollR_diff - (delta_mouth / cfg_robot.mouth_back_compensation); // 1.5
+    dxl_goal_position_rolll_double = g_home.home_roll_l - rollL_diff - (delta_mouth / cfg_robot.mouth_back_compensation);
 
     //// R, L이 너무 기울어졌을 때 입 보상 끄는거
     //if (dxl_goal_position_rollr_double < 200) dxl_goal_position_rollr_double += delta_mouth / cfg_robot.mouth_back_compensation;
@@ -427,7 +427,7 @@ std::vector<int32_t> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double
   }
   else if (mode == 1) // cloning
   {
-    dxl_goal_position_yaw_double = static_cast<double> (yaw_degree) * cfg_robot.yaw_gear_ratio * 4096.0 / 360.0 + cfg_robot.default_yaw; // 2
+    dxl_goal_position_yaw_double = static_cast<double> (yaw_degree) * cfg_robot.yaw_gear_ratio * 4096.0 / 360.0 + g_home.home_yaw; // 2
     double rollR_diff = (cfg_robot.height - L3) * (4096 / (cfg_robot.pulley_diameter * PI));
     double rollL_diff = (cfg_robot.height - L2) * (4096 / (cfg_robot.pulley_diameter * PI));
     // pitch tension up (220805)
@@ -439,14 +439,14 @@ std::vector<int32_t> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double
         rollL_diff *= 1.3;
     }
     // R L 변화량 change
-    dxl_goal_position_rollr_double = cfg_robot.default_roll_r - rollR_diff - (delta_mouth / cfg_robot.mouth_back_compensation);
-    dxl_goal_position_rolll_double = cfg_robot.default_roll_l - rollL_diff - (delta_mouth / cfg_robot.mouth_back_compensation);
+    dxl_goal_position_rollr_double = g_home.home_roll_r - rollR_diff - (delta_mouth / cfg_robot.mouth_back_compensation);
+    dxl_goal_position_rolll_double = g_home.home_roll_l - rollL_diff - (delta_mouth / cfg_robot.mouth_back_compensation);
   }
   else 
   {
     INFO_STREAM( "RPY2DXL: CHECK MODE NUMBER" );
-    dxl_goal_position_rollr_double = cfg_robot.default_roll_r - (cfg_robot.height - L2) * (4096 / (cfg_robot.pulley_diameter * PI)) - (delta_mouth / cfg_robot.mouth_back_compensation); // 1.5
-    dxl_goal_position_rolll_double = cfg_robot.default_roll_l - (cfg_robot.height - L3) * (4096 / (cfg_robot.pulley_diameter * PI)) - (delta_mouth / cfg_robot.mouth_back_compensation);
+    dxl_goal_position_rollr_double = g_home.home_roll_r - (cfg_robot.height - L2) * (4096 / (cfg_robot.pulley_diameter * PI)) - (delta_mouth / cfg_robot.mouth_back_compensation); // 1.5
+    dxl_goal_position_rolll_double = g_home.home_roll_l - (cfg_robot.height - L3) * (4096 / (cfg_robot.pulley_diameter * PI)) - (delta_mouth / cfg_robot.mouth_back_compensation);
   }
   
   std::vector<int32_t> DXL(5);
