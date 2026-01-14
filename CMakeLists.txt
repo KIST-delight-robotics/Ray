@@ -37,14 +37,13 @@ FetchContent_Declare(
 
 # 4. SFML (오디오 및 그래픽 라이브러리)
 # 오디오 처리 및 재생에 사용
+set(SFML_BUILD_GRAPHICS OFF)
+set(SFML_BUILD_WINDOW OFF)
+set(SFML_BUILD_NETWORK OFF)
 FetchContent_Declare(
   SFML
   GIT_REPOSITORY https://github.com/SFML/SFML.git
   GIT_TAG        2.6.1 # 특정 버전 고정
-  CMAKE_ARGS -DSFML_BUILD_AUDIO=ON      # 오디오 모듈만 사용
-             -DSFML_BUILD_GRAPHICS=OFF  # 그래픽 모듈 비활성화
-             -DSFML_BUILD_WINDOW=OFF    # 윈도우 모듈 비활성화
-             -DSFML_BUILD_NETWORK=OFF   # 네트워크 모듈 비활성화
 )
 
 # 5. ixwebsocket (웹소켓 통신)
@@ -55,30 +54,47 @@ FetchContent_Declare(
              -DUSE_TLS=OFF # TLS(OpenSSL) 지원 비활성화 (필요 시 ON)
 )
 
+# 6. toml++ (설정 파일)
+FetchContent_Declare(
+    tomlplusplus
+    GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+    GIT_TAG        v3.4.0
+)
+
 # 선언된 모든 의존성을 다운로드하고 빌드하여 사용 가능하게 만듭니다.
-FetchContent_MakeAvailable(json cnpy Eigen3 SFML ixwebsocket)
+FetchContent_MakeAvailable(json cnpy Eigen3 SFML ixwebsocket tomlplusplus)
+
+# ==================================================================
+# 시스템 라이브러리 찾기
+# ==================================================================
+
+find_library(WIRINGPI_LIBRARY NAMES wiringPi)
+find_path(WIRINGPI_INCLUDE_DIR NAMES wiringPi.h)
 
 # ==================================================================
 # 프로젝트 소스 코드 및 실행 파일 정의
 # ==================================================================
 
 # 실행 파일 생성 위치 설정
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 # 실행 파일 생성
 add_executable(Ray
-    src/main.cpp
-    src/Macro_function.cpp
+    cpp/main.cpp
+    cpp/Macro_function.cpp
+    cpp/DynamixelDriver.cpp
+    cpp/MotionLogger.cpp
     # 여기에 다른 .cpp 파일들을 추가하세요.
-    # 예: src/audio_processing.cpp
-    #    src/robot_control.cpp
+    # 예: cpp/audio_processing.cpp
+    #    cpp/robot_control.cpp
 )
 
 # 헤더 파일 검색 경로 추가
 target_include_directories(Ray PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cpp"
     ${cnpy_SOURCE_DIR}
     third_party/DynamixelSDK-3.7.31/c++/include/dynamixel_sdk
+    ${WIRINGPI_INCLUDE_DIR}
 )
 
 target_link_directories(Ray PRIVATE
@@ -88,10 +104,12 @@ target_link_directories(Ray PRIVATE
 # 실행 파일에 라이브러리 링크
 target_link_libraries(Ray PRIVATE
     nlohmann_json::nlohmann_json
+    tomlplusplus::tomlplusplus
     cnpy
     Eigen3::Eigen
     sfml-audio
     dxl_x64_cpp
     ixwebsocket
     sndfile
+    ${WIRINGPI_LIBRARY}
 )
