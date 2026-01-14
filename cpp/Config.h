@@ -38,6 +38,10 @@ struct RobotConfig {
     double mouth_tune;
     double mouth_back_compensation;
     double mouth_pitch_compensation;
+
+    bool generate_head_motion;
+    double wait_mode_rpy_ratio;
+    double control_motor_rpy_ratio;
 };
 
 // 전역 인스턴스
@@ -135,6 +139,10 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
     ok &= REQ(robot_node, "mouth_tune",      cfg_robot.mouth_tune);
     ok &= REQ(robot_node, "mouth_back_compensation",  cfg_robot.mouth_back_compensation);
     ok &= REQ(robot_node, "mouth_pitch_compensation", cfg_robot.mouth_pitch_compensation);
+
+    ok &= REQ(robot_node, "generate_head_motion",    cfg_robot.generate_head_motion);
+    ok &= REQ(robot_node, "wait_mode_rpy_ratio",     cfg_robot.wait_mode_rpy_ratio);
+    ok &= REQ(robot_node, "control_motor_rpy_ratio",  cfg_robot.control_motor_rpy_ratio);
 
     if (!ok) return false;
 

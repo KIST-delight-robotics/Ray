@@ -30,6 +30,9 @@ if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
     export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
 fi
 
+# 시작 전에 혹시 남아있는 파이썬 서버 정리
+pkill -f "python.*main.py" 2>/dev/null
+
 # 0. 오디오 서비스 재시작
 echo "Restarting audio services..."
 systemctl --user restart pipewire wireplumber pipewire-pulse

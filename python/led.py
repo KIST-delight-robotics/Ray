@@ -61,6 +61,6 @@ def led_clear():
 if __name__ == "__main__":
     import time
     print("Testing LED...")
-    led_set_all(255, 0, 0) # 빨강
+    led_set_all(233, 233, 50)
     time.sleep(1)
     led_clear()
