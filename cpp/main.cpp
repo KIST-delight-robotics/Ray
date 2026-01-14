@@ -1407,7 +1407,7 @@ void gyro_test() {
     int mouth_adjust_flag = 0;
 
     const float current_threshold_mA = -20;   // 목표 전류 임계값 (mA)
-    const int adjustment_increment = 1;       // 모터 위치 조정 증분 (펄스)
+    const int adjustment_increment = 3;       // 모터 위치 조정 증분 (펄스)
     bool tension_satisfied = false;
     const int sample_count = 3;
 
@@ -1434,6 +1434,10 @@ void gyro_test() {
     }
 }
 
+#include <fstream>
+#include <filesystem>
+
+
 void initialize_robot_posture() {
     // MPU6050 초기화
     if (wiringPiSetup() == -1) {
@@ -1448,14 +1452,14 @@ void initialize_robot_posture() {
     mpu6050_init(fd);
     std::cout << "MPU6050 데이터 수집 시작..." << std::endl;
 
-    std::vector<int32_t> target_position = {g_home.home_pitch , g_home.home_roll_r, g_home.home_roll_l, g_home.home_yaw, g_home.home_mouth};
+    std::vector<int32_t> target_position = {g_home.home_pitch, g_home.home_roll_r, g_home.home_roll_l, g_home.home_yaw, g_home.home_mouth};
     bool Roll_L_adjust_flag = 0;
     bool Roll_R_adjust_flag = 0;
     bool Pitch_adjust_flag = 0;
     bool mouth_adjust_flag = 0;
 
     const float current_threshold_mA = -20;   // 목표 전류 임계값 (mA)
-    const int adjustment_increment = 1;       // 모터 위치 조정 증분 (펄스)
+    const int adjustment_increment = 3;       // 모터 위치 조정 증분 (펄스)
     bool tension_satisfied = false;
     const int sample_count = 3;
 
@@ -1662,49 +1666,173 @@ void initialize_robot_posture() {
         }
     }
     
-    std::cout << "Mouth 조정" << std::endl;
+    // =============================
+    // Mouth 조정 (ΔI_raw(LSB) 기반 + MAD 자동 임계값 학습)
+    // - 목적: 초기 캘리브레이션 단계에서 "전류 급변" 감지 시 즉시 멈춤(Backoff)
+    // =============================
 
-    std::vector<int16_t> current;
-    
-    while(!mouth_adjust_flag){
-        target_position[4] -= adjustment_increment;
-        dxl_driver->writeGoalPosition(target_position);
+    // DataLogger MouthLogger
 
-        int16_t present_current = 0; // signed 16-bit
-        int16_t sum_current = 0;
+    // std::string log_dir = create_log_directory("output/cail_log/");
+    // auto log_start_time = std::chrono::high_resolution_clock::now();
+    // MouthLogger.start(log_start_time, log_dir);
 
-        for(int i = 0; i< 5; i++) {
-            if (dxl_driver->readPresentCurrent(current)) {
-                present_current = current[4]; // Mouth 모터는 5번째 (index 4)
+    // =============================
+    // Mouth 조정 (ΔI_raw(LSB) 기반 + MAD 자동 임계값 학습)
+    // - 목적: 초기 캘리브레이션 단계에서 "전류 급변" 감지 시 즉시 멈춤(Backoff)
+    // - present position 읽기 기능 없이(goal 기반) 동작
+    // =============================
 
-                // XM430 기준 1 LSB ≈ 2.69 mA
-                // ex) present_current = -50 -> 약 -134.5 mA
-                std::cout << "[ID:" << cfg_dxl.ids[i] << "] Present Current (LSB) = "
-                        << present_current << " => 약 "
-                        << present_current * 2.69 << " mA" << std::endl;
-             }
-            sum_current += present_current;
-            delay(20);
-        }
-        sum_current /= 5;
+    std::cout << "Mouth 조정 (delta-current LSB + MAD auto threshold)" << std::endl;
 
-        // 텐션 판별 예시
-        if (sum_current < 0) {
-            std::cout << " → 음수 전류: 반대 방향으로 텐션이 걸려 있음" << std::endl;
-        } else if (sum_current > 0) {
-            std::cout << " → 양수 전류: 해당 방향 텐션" << std::endl;
-        } else {
-            std::cout << " → 전류=0, 텐션이 없다" << std::endl;
-        }
-
-        
-        if (sum_current < 0) {
-            mouth_adjust_flag = 1;
-        } else {
-            mouth_adjust_flag = 0;
-        }
+    std::filesystem::create_directories("data");
+    std::ofstream logf("data/log_only_mouth.csv", std::ios::out | std::ios::trunc);
+    if (!logf.is_open()) {
+        std::cerr << "CSV 열기 실패: data/log_only_mouth.csv\n";
+        return;
     }
-    
+    logf.setf(std::ios::unitbuf);
+    logf << "t_ms,mouth_goal,raw_current_LSB,current_mA,abs_delta_raw_LSB,abs_delta_mA,thr_raw_LSB\n";
+
+    // ---- 설정값 ----
+    const float mA_per_LSB   = 2.69f;
+    const int   N_CUR        = 3;
+    const int   CUR_DELAY_MS = 10;
+    const int   SETTLE_MS    = 30;
+    const int   MAX_STEPS    = 600;
+
+    const int   MOUTH_STEP_TICK    = 3;
+    const int   MOUTH_BACKOFF_TICK = 15;
+
+    // 자동학습 파라미터
+    const int   LEARN_STEPS      = 25;
+    const float THR_MAD_K        = 8.0f;   // 6~10 권장
+    const int   THR_MIN_RAW_LSB  = 2;
+    const int   THR_MAX_RAW_LSB  = 20;
+
+    // 연속 조건
+    const int   HIT_COUNT = 1;
+
+    // ---- 전류 raw(LSB) 읽기 (평균) ----
+    std::vector<int16_t> current(5, 0);
+    auto read_mouth_current_raw = [&]() -> int {
+        long sum = 0;
+        int got = 0;
+        for (int k = 0; k < N_CUR; k++) {
+            if (dxl_driver->readPresentCurrent(current)) {
+                sum += current[4]; // mouth index 4
+                got++;
+            }
+            delay(CUR_DELAY_MS);
+        }
+        if (got == 0) return 0;
+        return (int)std::lround((double)sum / (double)got);
+    };
+
+    // ---- median / MAD 유틸 ----
+    auto median_int = [](std::vector<int> v) -> int {
+        if (v.empty()) return 0;
+        size_t mid = v.size() / 2;
+        std::nth_element(v.begin(), v.begin() + mid, v.end());
+        int m = v[mid];
+        if (v.size() % 2 == 0) {
+            std::nth_element(v.begin(), v.begin() + mid - 1, v.end());
+            m = (m + v[mid - 1]) / 2;
+        }
+        return m;
+    };
+
+    auto mad_int = [&](const std::vector<int>& v, int med) -> int {
+        std::vector<int> dev;
+        dev.reserve(v.size());
+        for (int x : v) dev.push_back(std::abs(x - med));
+        return median_int(std::move(dev));
+    };
+
+    // ---- 초기값 ----
+    int prev_raw = read_mouth_current_raw();
+    int thr_raw  = THR_MIN_RAW_LSB;
+    int hit      = 0;
+
+    // ---- 1) 임계값 자동 학습 ----
+    std::vector<int> deltas;
+    deltas.reserve(LEARN_STEPS);
+
+    for (int i = 0; i < LEARN_STEPS; i++) {
+        target_position[4] -= MOUTH_STEP_TICK;
+        dxl_driver->writeGoalPosition(target_position);
+        delay(SETTLE_MS);
+
+        int cur_raw = read_mouth_current_raw();
+        int d_raw   = std::abs(cur_raw - prev_raw);
+        deltas.push_back(d_raw);
+
+        float cur_mA = cur_raw * mA_per_LSB;
+        float d_mA   = d_raw   * mA_per_LSB;
+
+        // 학습 중 thr 미확정이므로 -1 기록
+        logf << millis() << "," << target_position[4] << ","
+            << cur_raw << "," << cur_mA << ","
+            << d_raw << "," << d_mA << ","
+            << -1 << "\n";
+
+        prev_raw = cur_raw;
+    }
+
+    // MAD 기반 임계값
+    int med = median_int(deltas);
+    int mad = mad_int(deltas, med);
+
+    int auto_thr = (int)std::ceil((double)med + (double)THR_MAD_K * (double)mad);
+    thr_raw = std::max(auto_thr, THR_MIN_RAW_LSB);
+    thr_raw = std::min(thr_raw, THR_MAX_RAW_LSB);
+
+    std::cout << "[Mouth] learned thr_raw=" << thr_raw
+            << " (median=" << med << ", mad=" << mad << ")\n";
+
+    // ---- 2) 본 탐색 ----
+    mouth_adjust_flag = false;
+    hit = 0;
+
+    for (int step = 0; step < MAX_STEPS && !mouth_adjust_flag; step++) {
+        target_position[4] -= MOUTH_STEP_TICK;
+        dxl_driver->writeGoalPosition(target_position);
+        delay(SETTLE_MS);
+
+        int cur_raw = read_mouth_current_raw();
+        int d_raw   = std::abs(cur_raw - prev_raw);
+
+        float cur_mA = cur_raw * mA_per_LSB;
+        float d_mA   = d_raw   * mA_per_LSB;
+
+        logf << millis() << "," << target_position[4] << ","
+            << cur_raw << "," << cur_mA << ","
+            << d_raw << "," << d_mA << ","
+            << thr_raw << "\n";
+
+        if (d_raw >= thr_raw) {
+            hit++;
+        } else {
+            hit = 0;
+        }
+
+        if (hit >= HIT_COUNT) {
+            // goal 기준 backoff (present 없으니 기존 방식)
+            target_position[4] += MOUTH_BACKOFF_TICK;
+            dxl_driver->writeGoalPosition(target_position);
+            delay(150);
+
+            mouth_adjust_flag = true;
+            break;
+        }
+
+        prev_raw = cur_raw;
+    }
+
+    logf.flush();
+    logf.close();
+
+    // 결과 저장
     g_home.home_pitch  = target_position[0];
     g_home.home_roll_r = target_position[1];
     g_home.home_roll_l = target_position[2];
@@ -1712,6 +1840,7 @@ void initialize_robot_posture() {
     g_home.home_mouth  = target_position[4];
 
     finish_adjust_ready = true;
+
 }
 
 void cleanup_dynamixel() {
@@ -2016,20 +2145,20 @@ int main() {
     }
 
     // 초기 자세로 이동
-    if (cfg_dxl.operating_mode == 1)
-        move_to_initial_position_velctrl();
-    else {
-        dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
-        move_to_initial_position_posctrl();
-        dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
-    }
+    // if (cfg_dxl.operating_mode == 1)
+    //     move_to_initial_position_velctrl();
+    // else {
+    //     dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
+    //     move_to_initial_position_posctrl();
+    //     dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
+    // }
 
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // 자이로센서를 이용한 로봇 초기자세 설정
-    // dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
-    // initialize_robot_posture();
-    // dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
+    dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
+    initialize_robot_posture();
+    dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
 
     // gyro_test();
 
