@@ -33,9 +33,11 @@ pulley_diameter = 40
 height = 110                        # 베이스부터 실이 연결된 레이어 까지의 높이 small -> 100,Large -> 180
 hole_radius = 25                    # 로봇 머리 구멍 반지름 small -> 25, Large -> 50
 yaw_gear_ratio = 1                  # yaw 모터가 direct하게 머리를 회전시킨다면 1로 설정 아니면 2
-mouth_tune = 40                     # 최대 mouse movement size in DXL dimension -> 최초값에서 입모터 조정해보면서 결정
 mouth_back_compensation = 0.8       # 입 움직임에 대한 뒷쪽 보상 -> TRO 논문 참조  small -> 1.2, Large -> 1.5
 mouth_pitch_compensation = 1.0      # 입 움직임에 따른 pitch 보상
+
+max_mouth = 0
+min_mouth = 350                     # 최대 mouth movement size in DXL dimension
 
 # motion generation
 generate_head_motion = false        # 헤드 모션 온라인 생성 여부

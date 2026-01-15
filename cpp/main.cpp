@@ -820,7 +820,7 @@ void generate_motion(int channels, int samplerate) {
             ex_v1_max_sc_avg = max_sample;
 
             // cout << "final_result : " << final_result << '\n';
-            float calculate_result = calculate_mouth(final_result, MAX_MOUTH, MIN_MOUTH);
+            float calculate_result = calculate_mouth(final_result, cfg_robot.max_mouth, cfg_robot.min_mouth);
             // cout<< "calculate result : " << calculate_result << '\n';   
 
             motion_results.push_back(calculate_result);
@@ -2084,39 +2084,26 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 }
             }
         }
-        
-        is_speaking = false;
 
         if (user_interruption_flag) {
             std::cout << "Interruption handling: Cleaning up resources." << std::endl;
-            soundStream.stop();
-            soundStream.clearBuffer();
-            
-            if (is_responses_streaming || !responses_stream_buffer.empty()) {
-                soundStream_resp.stop();
-                soundStream_resp.clearBuffer();
-            }
-            
-            clear_queues();
-
-            // if (sndfile) sf_close(sndfile);
-            // playing_music_flag = false;
-            // continue; // 메인 루프의 처음으로 돌아가 다음 명령을 기다림
         }
 
-
-        // 오디오 재생이 끝날 때까지 대기
-        // while (soundStream.getStatus() == sf::Sound::Playing) {
-        //     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        // }
-        // if (is_responses_streaming || !responses_stream_buffer.empty()) {
-        //     while (soundStream_resp.getStatus() == sf::Sound::Playing) {
-        //         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        //     }
-        // }
-
+        // 리소스 정리
+        soundStream.stop();
+        soundStream.clearBuffer();
+        
+        if (is_responses_streaming || !responses_stream_buffer.empty()) {
+            soundStream_resp.stop();
+            soundStream_resp.clearBuffer();
+        }
+        
+        clear_queues();
+        
         if (sndfile) sf_close(sndfile);
         playing_music_flag = false;
+
+        is_speaking = false;
     }
 }
 
