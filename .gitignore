@@ -26,5 +26,5 @@ core
 # Python cache
 __pycache__/
 
-# venv
-ray/
+# testing files
+*_test.py

@@ -39,7 +39,8 @@ systemctl --user restart pipewire wireplumber pipewire-pulse
 sleep 2 
 echo "Audio services restarted."
 
-# Python venv 환경 활성화
+
+# 1. Python venv 환경 활성화
 VENV_DIR="ray" # 가상환경 디렉토리 이름 설정
 
 if [ -f "$VENV_DIR/bin/activate" ]; then
@@ -50,17 +51,20 @@ else
     exit 1
 fi
 
-# 1. 파이썬 서버를 백그라운드에서 실행
+
+# 2. 파이썬 서버를 백그라운드에서 실행
 echo "Starting Python server..."
 python python/main.py &
 
-# 2. 파이썬 서버의 프로세스 ID를 저장 (종료 시 사용)
+
+# 3. 파이썬 서버의 프로세스 ID를 저장 (종료 시 사용)
 PYTHON_PID=$!
 
-sleep 3  # 서버가 시작될 때까지 잠시 대기
+sleep 1  # 서버가 시작될 때까지 잠시 대기
 
-# 3. C++ 클라이언트 실행
+
+# 4. C++ 클라이언트 실행
 echo "Starting C++ client..."
-./Ray
+./build/Ray
 
 echo "All processes finished."

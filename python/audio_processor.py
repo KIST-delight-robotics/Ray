@@ -405,6 +405,7 @@ class AudioProcessor:
 
         # 상태 관리
         self._is_running = threading.Event()
+        self._is_paused = threading.Event()
         self.user_is_speaking = False
         self.silent_chunks_count = 0
         self.turn_chunks_count = 0
@@ -415,6 +416,30 @@ class AudioProcessor:
         self.smart_turn_retry_count = 0
 
         self._thread: threading.Thread | None = None
+    
+    def pause_processing(self):
+        """[추가] 오디오 처리(VAD/STT)를 일시 중단합니다."""
+        if not self._is_paused.is_set():
+            logging.info("⏸️ AudioProcessor: PAUSED")
+            self._is_paused.set()
+            
+            # 현재 진행 중인 턴이 있다면 강제 종료
+            if self.user_is_speaking:
+                self._end_turn()
+
+    def resume_processing(self):
+        """[추가] 오디오 처리를 재개합니다."""
+        if self._is_paused.is_set():
+            logging.info("▶️ AudioProcessor: RESUMED")
+            
+            # 재개 시 VAD 상태 초기화 (퍼즈 기간 동안의 데이터로 오작동 방지)
+            self.vad_processor.reset()
+            
+            # 쌓여있는 마이크 큐 비우기 (오래된 오디오 처리 방지)
+            with self.mic_audio_queue.mutex:
+                self.mic_audio_queue.queue.clear()
+                
+            self._is_paused.clear()
 
     def _processing_loop(self):
         """
@@ -435,6 +460,10 @@ class AudioProcessor:
                     self._end_turn()
                 continue
             
+            # 퍼즈 상태일 때는 처리 건너뛰기
+            if self._is_paused.is_set():
+                continue
+
             if not self.user_is_speaking:
                 self._handle_silence_state(chunk)
             else:

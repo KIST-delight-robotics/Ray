@@ -19,7 +19,87 @@ from audio_processor import AudioProcessor
 from conversation_manager import ConversationManager
 from offline_motion import offline_motion_generation
 
+from rpi5_ws2812.ws2812 import Color
+from led import led_set_ring, strip
+import math
+
 logger = logging.getLogger(__name__)
+
+
+async def run_thinking_led_breathing():
+    """
+    LLM 생각 중 표시를 위한 비동기 LED 애니메이션 (숨쉬기 효과).
+    """
+    try:
+        t = 0
+        while True:
+            # 파란색(Blue) 계열로 부드럽게 숨쉬는(Breathing) 효과
+            # sin 함수를 이용해 최소 밝기(min_brightness) 이상에서 부드럽게 오르내림
+            min_brightness = 20
+            max_brightness = 255
+            brightness = int(((math.sin(t) + 1) / 2) * (max_brightness - min_brightness) + min_brightness)
+
+            # Blue channel만 사용 (R, G, B)
+            led_set_ring(0, 0, brightness)
+            
+            t += 0.2
+            await asyncio.sleep(0.05) # 50ms 대기 (취소 포인트)
+            
+    except asyncio.CancelledError:
+        # 태스크 취소 시 LED 끄기
+        led_set_ring(0, 0, 0)
+        raise
+
+async def run_thinking_led_spin(r, g, b, speed=4.0, focus=10.0):
+    """
+    LLM 생각 중 표시를 위한 비동기 LED 애니메이션 (원형 회전).
+    """
+    if not strip:
+        return
+    
+    ring_size = 8
+    top_offset = 8
+    bottom_offset = 16
+    start_shift = 4 # 12번 위치로 시작하기 위한 오프셋
+
+    try:
+        while True:
+            t = time.time() * speed
+            
+            for i in range(ring_size):
+                # 1. 각도 계산
+                angle = ((i - start_shift) / ring_size) * 2 * math.pi
+                
+                # 2. 사인파 계산 (-1 ~ 1)
+                wave = math.sin(t + angle)
+                
+                # 3. 밝기 변환 (0 ~ 1) 및 집중도(Focus) 적용
+                brightness = (wave + 1) / 2
+                brightness = math.pow(brightness, focus)
+                
+                # 4. 색상 적용
+                cr = int(r * brightness)
+                cg = int(g * brightness)
+                cb = int(b * brightness)
+                
+                final_color = Color(cr, cg, cb)
+                
+                # 위/아래 링 동시 적용 (Batch Update)
+                strip.set_pixel_color(top_offset + i, final_color)
+                strip.set_pixel_color(bottom_offset + i, final_color)
+            
+            # 5. 한 번에 출력 (Efficient)
+            strip.show()
+            
+            # 6. 비동기 대기 (Non-blocking)
+            await asyncio.sleep(0.02) # 약 50 FPS
+            
+    except asyncio.CancelledError:
+        # 태스크 취소 시 LED 끄기
+        if strip:
+            strip.clear()
+            strip.show()
+        raise
 
 # ==================================================================================
 # TTS 관련
@@ -104,14 +184,12 @@ async def handle_tts_stream(response_stream, client: AsyncOpenAI, websocket, con
         if full_response_text:
             conversation_log.append({"role": "assistant", "content": full_response_text})
 
-async def handle_tts_oneshot(response_text: str, client: AsyncOpenAI, websocket, realtime_start_event: asyncio.Event):
+async def handle_tts_oneshot(response_text: str, client: AsyncOpenAI, websocket, tts_start_event: asyncio.Event):
     """전체 텍스트를 받아 한 번에 TTS 처리하는 함수"""
     try:
         tts_streaming_start_time = time.time()
-        if realtime_start_event.is_set():
-            await websocket.send(json.dumps({"type": "responses_stream_start"}))
-        else:
-            await websocket.send(json.dumps({"type": "responses_only"}))
+
+        await websocket.send(json.dumps({"type": "responses_only"}))
         async with client.audio.speech.with_streaming_response.create(
             model=TTS_MODEL, voice=VOICE, input=response_text, response_format="pcm"
         ) as tts_response:
@@ -119,6 +197,7 @@ async def handle_tts_oneshot(response_text: str, client: AsyncOpenAI, websocket,
             async for audio_chunk in tts_response.iter_bytes(chunk_size=4096):
                 if first_chunk:
                     first_chunk = False
+                    tts_start_event.set()
                     logger.info(f"TTS 스트리밍 시작... (소요시간: {time.time() - tts_streaming_start_time:.2f}초)")
                 await websocket.send(json.dumps({
                     "type": "responses_audio_chunk",
@@ -130,6 +209,8 @@ async def handle_tts_oneshot(response_text: str, client: AsyncOpenAI, websocket,
         raise
     finally:
         await websocket.send(json.dumps({"type": "responses_stream_end"}))
+        if not tts_start_event.is_set():
+            tts_start_event.set()
 
 
 # ==================================================================================
@@ -233,11 +314,14 @@ async def run_realtime_task(websocket, realtime_connection, item_ids_to_manage: 
     finally:
         logger.info("⚡️ Realtime Task 종료.")
 
-async def run_responses_task(websocket, openai_client: AsyncOpenAI, manager: ConversationManager, realtime_start_event: asyncio.Event):
-    """(Task 2) Responses API를 호출하고, TTS를 스트리밍합니다."""
+async def run_responses_task(openai_client: AsyncOpenAI, manager: ConversationManager):
+    """(Task 2) Responses API를 호출하여 텍스트 응답과 수행할 액션을 반환합니다."""
     logger.info("🧠 Responses Task 시작...")
     responses_start_time = time.time()
     current_log = manager.get_current_log()
+
+    response_text = ""
+    music_action = None
 
     try:
         tools = [
@@ -275,8 +359,8 @@ async def run_responses_task(websocket, openai_client: AsyncOpenAI, manager: Con
 
         for item in response.output:
             if item.type == "function_call":
+                logger.info(f"🧠 Function call: {item.name}")
                 if item.name == "play_music":
-                    print(item)
                     args = json.loads(item.arguments)
                     song_title = args.get("song_title", "")
                     artist_name = args.get("artist_name", "")
@@ -287,8 +371,9 @@ async def run_responses_task(websocket, openai_client: AsyncOpenAI, manager: Con
                         # assets/headMotion 폴더에 audio_name.csv 파일이 있는지 확인
                         if not os.path.exists(os.path.join(ASSETS_DIR, "headMotion", f"{audio_name}.csv")):
                             await asyncio.to_thread(offline_motion_generation, audio_name)
+                        music_action = {"song_title": song_title, "artist_name": artist_name}
                     
-                    # current_log를 카피하여 함수 호출 결과를 추가
+                    # 함수 호출 결과 추가 및 재요청
                     current_log_copy = current_log.copy()
                     current_log_copy.append(item)
                     current_log_copy.append({
@@ -306,87 +391,144 @@ async def run_responses_task(websocket, openai_client: AsyncOpenAI, manager: Con
                         "tools": tools,
                     }
                     response = await openai_client.responses.create(**params)
-
                     response_text = response.output[0].content[0].text.strip()
-                    logger.info(f"🧠 Responses API 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
 
-                    await handle_tts_oneshot(response_text, openai_client, websocket, realtime_start_event)
-                    if file_path: await websocket.send(json.dumps({"type": "play_audio_csv", "audio_name": f"{song_title}_{artist_name}"}))
+                    # logger.info(f"🧠 Responses API 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
 
-                    manager.add_message("assistant", response_text)
+                    # await handle_tts_oneshot(response_text, openai_client, websocket, realtime_start_event)
+                    # if file_path: await websocket.send(json.dumps({"type": "play_audio_csv", "audio_name": f"{song_title}_{artist_name}"}))
+
+                    # manager.add_message("assistant", response_text)
                     break
 
             elif item.type == "message":
                 response_text = item.content[0].text.strip()
-                logger.info(f"🧠 Responses API 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
+                # logger.info(f"🧠 Responses API 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
+                # await handle_tts_oneshot(response_text, openai_client, websocket, realtime_start_event)
+                # manager.add_message("assistant", response_text)
+                break
 
-                await handle_tts_oneshot(response_text, openai_client, websocket, realtime_start_event)
+        logger.info(f"🧠 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
+        return response_text, music_action
 
-                # audio_name = "responses"
-                # tts_wav_path = os.path.join(ASSETS_DIR, "audio", f"{audio_name}.wav")
-                # await save_tts_to_file(response_text, openai_client, filename=tts_wav_path)
-                # await asyncio.to_thread(offline_motion_generation, audio_name)
-                # await websocket.send(json.dumps({"type": "play_audio_csv", "audio_name": audio_name}))
-
-                manager.add_message("assistant", response_text)
-
-    except asyncio.CancelledError:
-        logger.info("🧠 Responses Task가 외부에서 중단되었습니다.")
     except Exception as e:
         logger.error(f"🧠 Responses Task 실행 중 오류: {e}", exc_info=True)
-    finally:
-        logger.info("🧠 Responses Task 종료.")
+        return None, None
+
+async def run_tts_action_task(websocket, openai_client: AsyncOpenAI, response_text: str, music_action: dict, tts_start_event: asyncio.Event):
+    """(Task) 텍스트를 받아 TTS를 스트리밍하고 액션을 수행합니다. (취소 가능)"""
+    try:
+        # TTS 스트리밍
+        if response_text:
+            await handle_tts_oneshot(response_text, openai_client, websocket, tts_start_event)
+        else:
+            # 막히지 않도록 이벤트 설정
+            tts_start_event.set()
+
+        # 음악 재생 액션
+        if music_action:
+            song_title = music_action['song_title']
+            artist_name = music_action['artist_name']
+            await websocket.send(json.dumps({"type": "play_audio_csv", "audio_name": f"{song_title}_{artist_name}"}))
+
+    except asyncio.CancelledError:
+        logger.info("🔇 TTS/Action Task가 새 입력에 의해 중단되었습니다.")
+        # TTS 중단 시그널 전송 등을 여기에 추가할 수 있습니다.
+    except Exception as e:
+        logger.error(f"TTS/Action Task 실행 중 오류: {e}", exc_info=True)
+        if not tts_start_event.is_set():
+            tts_start_event.set()
 
 async def unified_active_pipeline(websocket, openai_client: AsyncOpenAI, manager: ConversationManager):
     """사용자 입력에 대해 Realtime API와 Responses API를 동시에 호출하여 순차적으로 응답하는 통합 파이프라인"""
     logger.info("🤖 Unified Active Pipeline 시작...")
-    active_response_tasks = []
+
+    current_tts_task = None
     stt_result_queue = asyncio.Queue()
     main_loop = asyncio.get_running_loop()
 
-    async with openai_client.realtime.connect(model=REALTIME_MODEL) as realtime_connection:
-        realtime_item_ids_to_manage = []
-        try:
-            with AudioProcessor(stt_result_queue, main_loop, websocket, config=AUDIO_CONFIG) as audio_processor:
-                while True:
-                    try:
-                        user_text = await asyncio.wait_for(stt_result_queue.get(), timeout=ACTIVE_SESSION_TIMEOUT)
-                        realtime_start_event = asyncio.Event()
+    try:
+        with AudioProcessor(stt_result_queue, main_loop, websocket, config=AUDIO_CONFIG) as audio_processor:
+            while True:
+                try:
+                    # 1. 사용자 입력 대기 (TTS가 실행 중이어도 듣고 있음)
+                    user_text = await asyncio.wait_for(stt_result_queue.get(), timeout=ACTIVE_SESSION_TIMEOUT)
 
-                        if active_response_tasks:
-                            logger.info(f"사용자 인터럽션 감지: '{user_text}'. 이전 응답 태스크를 중단합니다.")
-                            for task in active_response_tasks: task.cancel()
-                            await asyncio.gather(*active_response_tasks, return_exceptions=True)
-                            active_response_tasks = []
+                    # 2. 입력 감지 시 말하고 있던 TTS 취소
+                    if current_tts_task and not current_tts_task.done():
+                        logger.info(f"사용자 인터럽션 감지: '{user_text}'. 이전 발화(TTS)를 중단합니다.")
+                        current_tts_task.cancel()
+                        await asyncio.gather(current_tts_task, return_exceptions=True)
+                        current_tts_task = None
 
-                        if any(kw in user_text for kw in END_KEYWORDS):
-                            await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(SLEEP_FILE)}))
-                            logger.info(f"종료 키워드 감지: '{user_text}' - 세션을 종료합니다.")
-                            break
-
-                        manager.add_message("user", user_text)
-
-                        active_response_tasks = []
-                        # realtime_task = asyncio.create_task(
-                        #     run_realtime_task(websocket, realtime_connection, realtime_item_ids_to_manage, user_text, realtime_start_event)
-                        # )
-                        # active_response_tasks.append(realtime_task)
-                        responses_task = asyncio.create_task(
-                            run_responses_task(websocket, openai_client, manager, realtime_start_event)
-                        )
-                        active_response_tasks.append(responses_task)
-                        
-                    except asyncio.TimeoutError:
-                        logger.info(f"⏰ {ACTIVE_SESSION_TIMEOUT}초 동안 입력이 없어 Active 세션을 종료합니다.")
+                    if any(kw in user_text for kw in END_KEYWORDS):
                         await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(SLEEP_FILE)}))
+                        logger.info(f"종료 키워드 감지: '{user_text}' - 세션을 종료합니다.")
                         break
-        except Exception as e:
-            logger.error(f"Unified Active Pipeline에서 오류 발생: {e}", exc_info=True)
-        finally:
-            if active_response_tasks:
-                for task in active_response_tasks: task.cancel()
-                await asyncio.gather(*active_response_tasks, return_exceptions=True)
-            logger.info("🤖 Unified Active Pipeline 종료.")
+
+                    manager.add_message("user", user_text)
+
+                    # 3. 답변 생성
+                    # VAD/STT 일시 중단
+                    audio_processor.pause_processing()
+
+                    # LED로 생각 중 표시
+                    thinking_led_task = asyncio.create_task(run_thinking_led_spin(50, 50, 233, speed=4.0, focus=10.0))
+                    # thinking_led_task = asyncio.create_task(run_thinking_led_breathing())
+
+                    # LLM 응답 생성 (Block)
+                    response_text, music_action = await run_responses_task(openai_client, manager)
+                    
+
+                    # 4. TTS 및 액션 수행 (취소 가능)
+                    if response_text:
+                        manager.add_message("assistant", response_text)
+                        
+                        tts_start_event = asyncio.Event()
+
+                        current_tts_task = asyncio.create_task(
+                            run_tts_action_task(websocket, openai_client, response_text, music_action, tts_start_event)
+                        )
+
+                        # TTS가 실제로 시작될 때까지 대기 (최대 5초)
+                        try:
+                            await asyncio.wait_for(tts_start_event.wait(), timeout=5.0)
+                        except asyncio.TimeoutError:
+                            logger.warning("⚠️ TTS 시작 이벤트 타임아웃. 그냥 진행합니다.")
+                     
+                        # "답변 생성 중 ~ TTS 준비 중" 사이에 들어온 모든 입력 삭제
+                        ignored_count = 0
+                        while not stt_result_queue.empty():
+                            try:
+                                stt_result_queue.get_nowait()
+                                ignored_count += 1
+                            except asyncio.QueueEmpty:
+                                break
+                        if ignored_count > 0:
+                            logger.info(f"🧹 TTS 시작 전 들어온 {ignored_count}개의 입력을 무시했습니다.")
+                        
+                        # 로딩 LED 끄기
+                        if not thinking_led_task.done():
+                            thinking_led_task.cancel()
+                            await asyncio.gather(thinking_led_task, return_exceptions=True)
+                        led_set_ring(50, 50, 233)  # 답변 준비 완료 표시
+
+                        # VAD/STT 재개
+                        audio_processor.resume_processing()
+                    else:
+                        # 답변이 없는 경우 (오류 등) 바로 듣기 재개
+                        audio_processor.resume_processing()
+                    
+                except asyncio.TimeoutError:
+                    logger.info(f"⏰ {ACTIVE_SESSION_TIMEOUT}초 동안 입력이 없어 Active 세션을 종료합니다.")
+                    await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(SLEEP_FILE)}))
+                    break
+    except Exception as e:
+        logger.error(f"Unified Active Pipeline에서 오류 발생: {e}", exc_info=True)
+    finally:
+        if current_tts_task and not current_tts_task.done():
+            current_tts_task.cancel()
+        logger.info("🤖 Unified Active Pipeline 종료.")
 
 # ==================================================================================
 # Sleep 모드
