@@ -1434,7 +1434,7 @@ void gyro_test() {
     }
 }
 
-#include <fstream>
+
 #include <filesystem>
 
 
@@ -1671,173 +1671,211 @@ void initialize_robot_posture() {
     // - 목적: 초기 캘리브레이션 단계에서 "전류 급변" 감지 시 즉시 멈춤(Backoff)
     // =============================
 
-    // DataLogger MouthLogger
+//     DataLogger MouthLogger;
 
-    // std::string log_dir = create_log_directory("output/cail_log/");
-    // auto log_start_time = std::chrono::high_resolution_clock::now();
-    // MouthLogger.start(log_start_time, log_dir);
+//     std::string log_dir = create_log_directory("output/cail_log/");
+//     auto log_start_time = std::chrono::high_resolution_clock::now();
+//     MouthLogger.start(log_start_time, log_dir);
 
-    // =============================
-    // Mouth 조정 (ΔI_raw(LSB) 기반 + MAD 자동 임계값 학습)
-    // - 목적: 초기 캘리브레이션 단계에서 "전류 급변" 감지 시 즉시 멈춤(Backoff)
-    // - present position 읽기 기능 없이(goal 기반) 동작
-    // =============================
+//     // =============================
+//     // Mouth 조정 (ΔI_raw(LSB) 기반 + MAD 자동 임계값 학습)
+//     // - 목적: 초기 캘리브레이션 단계에서 "전류 급변" 감지 시 즉시 멈춤(Backoff)
+//     // - present position 읽기 기능 없이(goal 기반) 동작
+//     // =============================
 
-    std::cout << "Mouth 조정 (delta-current LSB + MAD auto threshold)" << std::endl;
+//     std::cout << "Mouth 조정 (delta-current LSB + MAD auto threshold)" << std::endl;
 
-    std::filesystem::create_directories("data");
-    std::ofstream logf("data/log_only_mouth.csv", std::ios::out | std::ios::trunc);
-    if (!logf.is_open()) {
-        std::cerr << "CSV 열기 실패: data/log_only_mouth.csv\n";
-        return;
-    }
-    logf.setf(std::ios::unitbuf);
-    logf << "t_ms,mouth_goal,raw_current_LSB,current_mA,abs_delta_raw_LSB,abs_delta_mA,thr_raw_LSB\n";
+//     std::filesystem::create_directories("data");
+//     std::ofstream logf("data/log_only_mouth.csv", std::ios::out | std::ios::trunc);
+//     if (!logf.is_open()) {
+//         std::cerr << "CSV 열기 실패: data/log_only_mouth.csv\n";
+//         return;
+//     }
+//     logf.setf(std::ios::unitbuf);
+//     logf << "t_ms,goal_tick,present_tick,raw_current_LSB,current_mA,delta_raw_LSB,delta_mA,thr_raw_LSB\n";
 
-    // ---- 설정값 ----
-    const float mA_per_LSB   = 2.69f;
-    const int   N_CUR        = 3;
-    const int   CUR_DELAY_MS = 10;
-    const int   SETTLE_MS    = 30;
-    const int   MAX_STEPS    = 600;
 
-    const int   MOUTH_STEP_TICK    = 3;
-    const int   MOUTH_BACKOFF_TICK = 15;
 
-    // 자동학습 파라미터
-    const int   LEARN_STEPS      = 25;
-    const float THR_MAD_K        = 8.0f;   // 6~10 권장
-    const int   THR_MIN_RAW_LSB  = 2;
-    const int   THR_MAX_RAW_LSB  = 20;
+//     // ---- 설정값 ----
+//     const float mA_per_LSB   = 2.69f;
+//     const int   N_CUR        = 3;
+//     const int   CUR_DELAY_MS = 10;
+//     const int   SETTLE_MS    = 30;
+//     const int   MAX_STEPS    = 600;
 
-    // 연속 조건
-    const int   HIT_COUNT = 1;
+//     const int   MOUTH_STEP_TICK    = 3;
+//     const int   MOUTH_BACKOFF_TICK = 15;
 
-    // ---- 전류 raw(LSB) 읽기 (평균) ----
-    std::vector<int16_t> current(5, 0);
-    auto read_mouth_current_raw = [&]() -> int {
-        long sum = 0;
-        int got = 0;
-        for (int k = 0; k < N_CUR; k++) {
-            if (dxl_driver->readPresentCurrent(current)) {
-                sum += current[4]; // mouth index 4
-                got++;
-            }
-            delay(CUR_DELAY_MS);
-        }
-        if (got == 0) return 0;
-        return (int)std::lround((double)sum / (double)got);
-    };
+//     // 자동학습 파라미터
+//     const int   LEARN_STEPS      = 25;
+//     const float THR_MAD_K        = 8.0f;   // 6~10 권장
+//     const int   THR_MIN_RAW_LSB  = 2;
+//     const int   THR_MAX_RAW_LSB  = 20;
 
-    // ---- median / MAD 유틸 ----
-    auto median_int = [](std::vector<int> v) -> int {
-        if (v.empty()) return 0;
-        size_t mid = v.size() / 2;
-        std::nth_element(v.begin(), v.begin() + mid, v.end());
-        int m = v[mid];
-        if (v.size() % 2 == 0) {
-            std::nth_element(v.begin(), v.begin() + mid - 1, v.end());
-            m = (m + v[mid - 1]) / 2;
-        }
-        return m;
-    };
+//     // 연속 조건
+//     const int   HIT_COUNT = 1;
 
-    auto mad_int = [&](const std::vector<int>& v, int med) -> int {
-        std::vector<int> dev;
-        dev.reserve(v.size());
-        for (int x : v) dev.push_back(std::abs(x - med));
-        return median_int(std::move(dev));
-    };
+//     // ---- 전류 raw(LSB) 읽기 (평균) ----
+//   // ---- 전류 raw(LSB) + present position 읽기 (평균) ----
+// std::vector<MotorState> current_state(DXL_NUM);
 
-    // ---- 초기값 ----
-    int prev_raw = read_mouth_current_raw();
-    int thr_raw  = THR_MIN_RAW_LSB;
-    int hit      = 0;
+// // out_pos: mouth present position tick을 돌려줌
+// auto read_mouth_current_raw = [&](int& out_pos) -> int {
+//     long sum_curr = 0;
+//     long sum_pos  = 0;
+//     int got = 0;
 
-    // ---- 1) 임계값 자동 학습 ----
-    std::vector<int> deltas;
-    deltas.reserve(LEARN_STEPS);
+//     for (int k = 0; k < N_CUR; k++) {
+//         if (dxl_driver->readAllState(current_state)) {
+//             // mouth index 4
+//             sum_curr += current_state[4].current;
+//             sum_pos  += current_state[4].position;   // ✅ present position 같이 누적
+//             got++;
+//         }
+//         delay(CUR_DELAY_MS);
+//     }
 
-    for (int i = 0; i < LEARN_STEPS; i++) {
-        target_position[4] -= MOUTH_STEP_TICK;
-        dxl_driver->writeGoalPosition(target_position);
-        delay(SETTLE_MS);
+//     if (got == 0) {
+//         out_pos = 0;
+//         return 0;
+//     }
 
-        int cur_raw = read_mouth_current_raw();
-        int d_raw   = std::abs(cur_raw - prev_raw);
-        deltas.push_back(d_raw);
+//     out_pos = (int)std::lround((double)sum_pos / (double)got);
+//     return (int)std::lround((double)sum_curr / (double)got);
+// };
 
-        float cur_mA = cur_raw * mA_per_LSB;
-        float d_mA   = d_raw   * mA_per_LSB;
+// // ---- median / MAD 유틸 ----
+// auto median_int = [](std::vector<int> v) -> int {
+//     if (v.empty()) return 0;
+//     size_t mid = v.size() / 2;
+//     std::nth_element(v.begin(), v.begin() + mid, v.end());
+//     int m = v[mid];
+//     if (v.size() % 2 == 0) {
+//         std::nth_element(v.begin(), v.begin() + mid - 1, v.end());
+//         m = (m + v[mid - 1]) / 2;
+//     }
+//     return m;
+// };
 
-        // 학습 중 thr 미확정이므로 -1 기록
-        logf << millis() << "," << target_position[4] << ","
-            << cur_raw << "," << cur_mA << ","
-            << d_raw << "," << d_mA << ","
-            << -1 << "\n";
+// auto mad_int = [&](const std::vector<int>& v, int med) -> int {
+//     std::vector<int> dev;
+//     dev.reserve(v.size());
+//     for (int x : v) dev.push_back(std::abs(x - med));
+//     return median_int(std::move(dev));
+// };
 
-        prev_raw = cur_raw;
-    }
+// // ---- 초기값 ----
+// int prev_pos = 0;
+// int prev_raw = read_mouth_current_raw(prev_pos);
 
-    // MAD 기반 임계값
-    int med = median_int(deltas);
-    int mad = mad_int(deltas, med);
+// int thr_raw  = THR_MIN_RAW_LSB;
+// int hit      = 0;
 
-    int auto_thr = (int)std::ceil((double)med + (double)THR_MAD_K * (double)mad);
-    thr_raw = std::max(auto_thr, THR_MIN_RAW_LSB);
-    thr_raw = std::min(thr_raw, THR_MAX_RAW_LSB);
+// // ---- 1) 임계값 자동 학습 ----
+// std::vector<int> deltas;
+// deltas.reserve(LEARN_STEPS);
 
-    std::cout << "[Mouth] learned thr_raw=" << thr_raw
-            << " (median=" << med << ", mad=" << mad << ")\n";
+// for (int i = 0; i < LEARN_STEPS; i++) {
+//     target_position[4] -= MOUTH_STEP_TICK;
+//     dxl_driver->writeGoalPosition(target_position);
+//     delay(SETTLE_MS);
 
-    // ---- 2) 본 탐색 ----
-    mouth_adjust_flag = false;
-    hit = 0;
+//     int cur_pos = 0;
+//     int cur_raw = read_mouth_current_raw(cur_pos);
 
-    for (int step = 0; step < MAX_STEPS && !mouth_adjust_flag; step++) {
-        target_position[4] -= MOUTH_STEP_TICK;
-        dxl_driver->writeGoalPosition(target_position);
-        delay(SETTLE_MS);
+//     int d_raw   = std::abs(cur_raw - prev_raw);
+//     deltas.push_back(d_raw);
 
-        int cur_raw = read_mouth_current_raw();
-        int d_raw   = std::abs(cur_raw - prev_raw);
+//     float cur_mA = cur_raw * mA_per_LSB;
+//     float d_mA   = d_raw   * mA_per_LSB;
 
-        float cur_mA = cur_raw * mA_per_LSB;
-        float d_mA   = d_raw   * mA_per_LSB;
+//     // ✅ 로그 포맷 변경: present position(cur_pos) 추가
+//     // 예: t_ms,goal_pos,present_pos,cur_raw,cur_mA,d_raw,d_mA,thr_raw
+//     logf << millis() << "," << target_position[4] << ","
+//          << cur_pos << ","
+//          << cur_raw << "," << cur_mA << ","
+//          << d_raw << "," << d_mA << ","
+//          << -1 << "\n";
 
-        logf << millis() << "," << target_position[4] << ","
-            << cur_raw << "," << cur_mA << ","
-            << d_raw << "," << d_mA << ","
-            << thr_raw << "\n";
+//     prev_raw = cur_raw;
+//     prev_pos = cur_pos;
+// }
 
-        if (d_raw >= thr_raw) {
-            hit++;
-        } else {
-            hit = 0;
-        }
 
-        if (hit >= HIT_COUNT) {
-            // goal 기준 backoff (present 없으니 기존 방식)
-            target_position[4] += MOUTH_BACKOFF_TICK;
-            dxl_driver->writeGoalPosition(target_position);
-            delay(150);
+//     // MAD 기반 임계값
+//     int med = median_int(deltas);
+//     int mad = mad_int(deltas, med);
 
-            mouth_adjust_flag = true;
-            break;
-        }
+//     int auto_thr = (int)std::ceil((double)med + (double)THR_MAD_K * (double)mad);
+//     thr_raw = std::max(auto_thr, THR_MIN_RAW_LSB);
+//     thr_raw = std::min(thr_raw, THR_MAX_RAW_LSB);
 
-        prev_raw = cur_raw;
-    }
+//     std::cout << "[Mouth] learned thr_raw=" << thr_raw
+//             << " (median=" << med << ", mad=" << mad << ")\n";
 
-    logf.flush();
-    logf.close();
+//     // ---- 2) 본 탐색 ----
+//    // ---- 2) 본 탐색 ----
+// mouth_adjust_flag = false;
+// hit = 0;
+
+// // (선택) 본 탐색 시작 전에 prev_raw/prev_pos를 최신으로 한 번 갱신해도 안정적임
+// // int tmp_pos = 0;
+// // prev_raw = read_mouth_current_raw(tmp_pos);
+// // prev_pos = tmp_pos;
+
+// for (int step = 0; step < MAX_STEPS && !mouth_adjust_flag; step++) {
+//     target_position[4] -= MOUTH_STEP_TICK;
+//     dxl_driver->writeGoalPosition(target_position);
+//     delay(SETTLE_MS);
+
+//     int cur_pos = 0;
+//     int cur_raw = read_mouth_current_raw(cur_pos);   // ✅ 인자 있는 호출로 수정
+//     int d_raw   = std::abs(cur_raw - prev_raw);
+
+//     float cur_mA = cur_raw * mA_per_LSB;
+//     float d_mA   = d_raw   * mA_per_LSB;
+
+//     // ✅ 학습 구간과 동일 포맷 유지:
+//     // t_ms,goal_pos,present_pos,cur_raw,cur_mA,d_raw,d_mA,thr_raw
+//     logf << millis() << "," << target_position[4] << ","
+//          << cur_pos << ","
+//          << cur_raw << "," << cur_mA << ","
+//          << d_raw << "," << d_mA << ","
+//          << thr_raw << "\n";
+
+//     if (d_raw >= thr_raw) hit++;
+//     else hit = 0;
+
+//     if (hit >= HIT_COUNT) {
+//         // ✅ (선택1) 기존 방식: goal 기준 backoff
+//         target_position[4] += MOUTH_BACKOFF_TICK;
+//         dxl_driver->writeGoalPosition(target_position);
+//         delay(150);
+
+//         // ✅ (선택2) present 기준 backoff를 하고 싶으면(정확도↑) 아래로 교체 가능
+//         // int backoff_goal = cur_pos + MOUTH_BACKOFF_TICK;
+//         // target_position[4] = backoff_goal;
+//         // dxl_driver->writeGoalPosition(target_position);
+//         // delay(150);
+
+//         mouth_adjust_flag = true;
+//         break;
+//     }
+
+//     prev_raw = cur_raw;
+//     prev_pos = cur_pos;  // ✅ 같이 갱신
+// }
+
+
+//     logf.flush();
+//     logf.close();
 
     // 결과 저장
     g_home.home_pitch  = target_position[0];
     g_home.home_roll_r = target_position[1];
     g_home.home_roll_l = target_position[2];
     g_home.home_yaw    = target_position[3];
-    g_home.home_mouth  = target_position[4];
+    // g_home.home_mouth  = target_position[4];
 
     finish_adjust_ready = true;
 
@@ -2119,6 +2157,143 @@ void robot_main_loop(std::future<void> server_ready_future) {
         playing_music_flag = false;
     }
 }
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <thread>
+#include <chrono>
+#include <iomanip>
+#include <cmath>
+#include <filesystem>
+#include <sstream>
+
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <thread>
+#include <chrono>
+#include <iomanip>
+#include <cmath>
+#include <filesystem>
+#include <sstream>
+
+// 퍼센트별 hysteresis(이력곡선) 실험
+//  - 1 tick씩 연속 구동
+//  - BASE(883) -> percent별 min tick -> BASE
+//  - percent 하나당 CSV 하나 생성
+//  - CSV 경로를 절대경로로 출력 (Ctrl+클릭 가능)
+void runMouthHysteresisByPercent(DynamixelDriver* dxl_driver,
+                                 int mouth_index,
+                                 int loop_dt_ms,
+                                 const std::string& log_dir)
+{
+    const int DEFAULT_DT_MS = 20;
+    const int dt_ms = (loop_dt_ms > 0) ? loop_dt_ms : DEFAULT_DT_MS;
+
+    const int BASE_TICK     = 883;
+    const int FULL_MIN_TICK = 645;
+    const int FULL_STROKE   = BASE_TICK - FULL_MIN_TICK; // 238
+
+    // 퍼센트 목록
+    const std::vector<int> PERCENTS = {100, 85, 60, 45, 30, 15};
+
+    std::vector<MotorState> states(5);
+
+    if (!dxl_driver->readAllState(states)) {
+        std::cerr << "[Hyst] readAllState failed (init)\n";
+        return;
+    }
+
+    // 다른 모터는 고정, mouth만 제어
+    std::vector<int32_t> target_position(5);
+    for (int i = 0; i < 5; ++i)
+        target_position[i] = states[i].position;
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    for (int percent : PERCENTS) {
+        // ---- CSV 파일 열기 ----
+        std::ostringstream oss;
+        oss << log_dir << "/mouth_hyst_" << percent << ".csv";
+        std::ofstream logf(oss.str());
+
+        if (!logf.is_open()) {
+            std::cerr << "[Hyst] failed to open " << oss.str() << "\n";
+            continue;
+        }
+
+        logf << "percent,t_ms,goal_tick,present_tick,present_load\n";
+        logf << std::fixed << std::setprecision(3);
+
+        // ---- 퍼센트에 따른 min tick 계산 ----
+        int stroke   = static_cast<int>(std::round(FULL_STROKE * percent / 100.0));
+        int min_tick = BASE_TICK - stroke;
+        if (min_tick < FULL_MIN_TICK)
+            min_tick = FULL_MIN_TICK;
+
+        int32_t goal = BASE_TICK;
+
+        // 시작 위치 명확히 맞추기
+        target_position[mouth_index] = goal;
+        dxl_driver->writeGoalPosition(target_position);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        // ---- 내려가기 (BASE -> min) ----
+        while (goal >= min_tick) {
+            target_position[mouth_index] = goal;
+            dxl_driver->writeGoalPosition(target_position);
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(dt_ms));
+            dxl_driver->readAllState(states);
+
+            auto now = std::chrono::high_resolution_clock::now();
+            double t_ms = std::chrono::duration<double, std::milli>(now - t0).count();
+
+            logf << percent << ","
+                 << t_ms << ","
+                 << goal << ","
+                 << states[mouth_index].position << ","
+                 << states[mouth_index].current << "\n";
+
+            goal -= 1;
+        }
+
+        if (goal < min_tick)
+            goal = min_tick;
+
+        // ---- 올라오기 (min -> BASE) ----
+        while (goal <= BASE_TICK) {
+            target_position[mouth_index] = goal;
+            dxl_driver->writeGoalPosition(target_position);
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(dt_ms));
+            dxl_driver->readAllState(states);
+
+            auto now = std::chrono::high_resolution_clock::now();
+            double t_ms = std::chrono::duration<double, std::milli>(now - t0).count();
+
+            logf << percent << ","
+                 << t_ms << ","
+                 << goal << ","
+                 << states[mouth_index].position << ","
+                 << states[mouth_index].current << "\n";
+
+            goal += 1;
+        }
+
+        logf.flush();
+        logf.close();
+
+        // ---- Ctrl+클릭 가능한 절대경로 출력 ----
+        try {
+            std::filesystem::path abs_path = std::filesystem::absolute(oss.str());
+            std::cout << "[Hyst] saved: " << abs_path.string() << std::endl;
+        } catch (...) {
+            std::cout << "[Hyst] saved: " << oss.str() << std::endl;
+        }
+    }
+}
+
 
 int main() {
     signal(SIGINT, signal_handler);
@@ -2159,6 +2334,26 @@ int main() {
     dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
     initialize_robot_posture();
     dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
+
+    
+    std::string log_dir = create_log_directory("output/cali_log");
+    // auto log_start_time = std::chrono::high_resolution_clock::now();
+
+    // HighFreqLogger* mouth_logger = new HighFreqLogger(dxl_driver);
+    // mouth_logger->start(log_start_time,log_dir);
+
+    const int LOOP_DT_MS = 20;
+    const int MOUTH_INDEX = 4;  // 네 프로젝트 기준 mouth 모터 인덱스
+
+    runMouthHysteresisByPercent(
+        dxl_driver,   // DynamixelDriver*
+        MOUTH_INDEX,  // mouth_index
+        LOOP_DT_MS,   // loop_dt_ms
+        log_dir       // CSV 저장 디렉토리
+    );
+    std::cout << "[MAIN] Mouth hysteresis experiment finished.\n";
+    
+    // mouth_logger->stop();
 
     // gyro_test();
 
