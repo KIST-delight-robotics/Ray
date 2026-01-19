@@ -67,6 +67,7 @@ class SmartTurnProcessor:
         """
         if not self.session:
             # 모델 로드 실패 시, 항상 '진행 중'으로 판단하여 대화가 끊기지 않도록 함
+            logging.warning("⚠️ Smart Turn 모델이 로드되지 않았습니다. 항상 '진행 중'으로 반환합니다.")
             return {"prediction": 0, "probability": 0.0}
 
         audio_array = self._truncate_or_pad_audio(audio_array_f32, n_seconds=8)
@@ -172,7 +173,7 @@ class VADProcessor:
         self.consecutive_speech_chunks = 0
         self.vad_detection_start_time = time.time()
     
-    def process_chunk(self, audio_chunk_int16: np.ndarray) -> bool:
+    def process(self, audio_chunk_int16: np.ndarray) -> bool:
         """
         오디오 청크를 처리하고 음성 감지 여부를 반환합니다.
         
@@ -181,7 +182,7 @@ class VADProcessor:
         """
         if self.vad_model is None:
             return False
-        
+
         # float32로 변환 (Silero VAD 요구사항)
         audio_chunk_float32 = audio_chunk_int16.astype(np.float32) / 32768.0
         audio_tensor = torch.from_numpy(audio_chunk_float32.flatten())
@@ -258,11 +259,21 @@ class GoogleSTTStreamer:
     def _stt_audio_generator(self):
         """STT API에 오디오를 공급하는 제너레이터."""
         while not self.stt_stop_event.is_set():
-            try:
-                chunk = self.stt_audio_queue.get(timeout=0.1)
-                yield speech.StreamingRecognizeRequest(audio_content=chunk.tobytes())
-            except queue.Empty:
-                continue
+            chunk = self.stt_audio_queue.get()
+            if chunk is None:
+                return
+            data = [chunk.tobytes()]
+
+            while True:
+                try:
+                    chunk = self.stt_audio_queue.get(block=False)
+                    if chunk is None:
+                        return
+                    data.append(chunk.tobytes())
+                except queue.Empty:
+                    break
+            
+            yield b''.join(data)
         logging.info("STT 오디오 공급 중단됨.")
 
     def run_stt_session(self):
@@ -300,8 +311,10 @@ class GoogleSTTStreamer:
                     current_interim_transcript = transcript
                     logging.info(f"🟩 STT 중간 결과: '{transcript}'")
                 
-                if self.stt_stop_event.is_set():
-                    break
+                # if self.stt_stop_event.is_set():
+                #     break
+
+
 
                 # if result.is_final and self.stt_stop_event.is_set():
                 #     final_text = transcript.strip()
@@ -338,11 +351,12 @@ class GoogleSTTStreamer:
                 self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
 
                 # C++ 클라이언트에 STT 완료 신호 전송
-                stt_completion_time = int(time.time() * 1000)
-                asyncio.run_coroutine_threadsafe(
-                    self.websocket.send(json.dumps({"type": "stt_done", "stt_done_time": stt_completion_time})),
-                    self.main_loop
-                )
+                if self.websocket:
+                    stt_completion_time = int(time.time() * 1000)
+                    asyncio.run_coroutine_threadsafe(
+                        self.websocket.send(json.dumps({"type": "stt_done", "stt_done_time": stt_completion_time})),
+                        self.main_loop
+                    )
             else:
                 logging.info("❎ STT 인식 결과가 없습니다.")
             logging.info("🚀 STT 세션 스레드 종료.")
@@ -395,9 +409,9 @@ class AudioProcessor:
         self.smart_turn_processor = SmartTurnProcessor(SMART_TURN_MODEL_PATH)
         self.stt_stop_event = threading.Event()
         self.stt_streamer = GoogleSTTStreamer(
-            stt_result_queue=stt_result_queue,
-            main_loop=main_loop,
-            websocket=websocket,
+            stt_result_queue=self.stt_result_queue,
+            main_loop=self.main_loop,
+            websocket=self.websocket,
             sample_rate=self.sample_rate,
             stt_audio_queue=self.stt_audio_queue,
             stt_stop_event=self.stt_stop_event
@@ -405,6 +419,7 @@ class AudioProcessor:
 
         # 상태 관리
         self._is_running = threading.Event()
+        self._is_paused = threading.Event()
         self.user_is_speaking = False
         self.silent_chunks_count = 0
         self.turn_chunks_count = 0
@@ -415,6 +430,31 @@ class AudioProcessor:
         self.smart_turn_retry_count = 0
 
         self._thread: threading.Thread | None = None
+        self.stt_thread: threading.Thread | None = None
+    
+    def pause_processing(self):
+        """[추가] 오디오 처리(VAD/STT)를 일시 중단합니다."""
+        if not self._is_paused.is_set():
+            logging.info("⏸️ AudioProcessor: PAUSED")
+            self._is_paused.set()
+            
+            # 현재 진행 중인 턴이 있다면 강제 종료
+            if self.user_is_speaking:
+                self._end_turn()
+
+    def resume_processing(self):
+        """[추가] 오디오 처리를 재개합니다."""
+        if self._is_paused.is_set():
+            logging.info("▶️ AudioProcessor: RESUMED")
+            
+            # 재개 시 VAD 상태 초기화 (퍼즈 기간 동안의 데이터로 오작동 방지)
+            self.vad_processor.reset()
+            
+            # 쌓여있는 마이크 큐 비우기 (오래된 오디오 처리 방지)
+            with self.mic_audio_queue.mutex:
+                self.mic_audio_queue.queue.clear()
+                
+            self._is_paused.clear()
 
     def _processing_loop(self):
         """
@@ -435,6 +475,10 @@ class AudioProcessor:
                     self._end_turn()
                 continue
             
+            # 퍼즈 상태일 때는 처리 건너뛰기
+            if self._is_paused.is_set():
+                continue
+
             if not self.user_is_speaking:
                 self._handle_silence_state(chunk)
             else:
@@ -445,9 +489,9 @@ class AudioProcessor:
     def _handle_silence_state(self, chunk: np.ndarray):
         """사용자가 말하고 있지 않을 때의 로직 (발화 시작 감지)"""
         self.stt_pre_buffer.append(chunk)
-        self.vad_processor.reset_if_inactive()
+        # self.vad_processor.reset_if_inactive()
         
-        if self.vad_processor.process_chunk(chunk):
+        if self.vad_processor.process(chunk):
             logging.info("🗣️ 사용자 발화 시작 감지!")
             self.user_is_speaking = True
             self.silent_chunks_count = 0
@@ -458,16 +502,25 @@ class AudioProcessor:
             self.stt_stop_event.clear()
 
             # C++ 클라이언트에게 인터럽션 신호 전송
-            asyncio.run_coroutine_threadsafe(
-                self.websocket.send(json.dumps({"type": "user_interruption"})),
-                self.main_loop
-            )
+            if self.websocket:
+                asyncio.run_coroutine_threadsafe(
+                    self.websocket.send(json.dumps({"type": "user_interruption"})),
+                    self.main_loop
+                )
+
+            # 이전 STT 세션이 아직 정리되지 않았다면 대기 (순차 실행 보장)
+            if self.stt_thread and self.stt_thread.is_alive():
+                logging.warning("⚠️ 이전 STT 스레드가 아직 실행 중입니다. 종료를 대기합니다...")
+                self.stt_thread.join(timeout=2.0)
+                if self.stt_thread.is_alive():
+                    logging.error("❌ 이전 STT 스레드가 종료되지 않았습니다. 강제로 진행합니다.")
             
             # STT 세션 시작
-            threading.Thread(
+            self.stt_thread = threading.Thread(
                 target=self.stt_streamer.run_stt_session,
                 name="STTSessionThread"
-            ).start()
+            )
+            self.stt_thread.start()
             
             # 사전 버퍼를 STT 큐로 전송
             for pre_chunk in self.stt_pre_buffer:
@@ -486,7 +539,7 @@ class AudioProcessor:
         self.turn_chunks_count += 1
 
         # VAD로 무음 감지
-        is_speech_in_chunk = self.vad_processor.process_chunk(chunk)
+        is_speech_in_chunk = self.vad_processor.process(chunk)
         if is_speech_in_chunk:
             self.silent_chunks_count = 0
             if self._next_smart_turn_time is not None:
@@ -511,10 +564,10 @@ class AudioProcessor:
                     logging.info(f"⏳ SmartTurn 최대 재시도({SMART_TURN_MAX_RETRIES})에 도달. 턴을 종료합니다.")
                     turn_ended = True
                 else:
+                    start_time = time.time()
                     concatenated_audio_int16 = np.concatenate([c.flatten() for c in self.current_turn_audio])
                     full_audio_float32 = concatenated_audio_int16.astype(np.float32) / 32768.0
 
-                    start_time = time.time()
                     result = self.smart_turn_processor.predict(full_audio_float32)
                     duration_ms = (time.time() - start_time) * 1000
 
@@ -591,3 +644,14 @@ class AudioProcessor:
         self.mic_stream.stop()
         
         logging.info("AudioProcessor가 성공적으로 종료되었습니다.")
+
+
+if __name__ == "__main__":
+    from config import AUDIO_CONFIG
+
+    with AudioProcessor(stt_result_queue=asyncio.Queue(), main_loop=asyncio.get_event_loop(), websocket=None, config=AUDIO_CONFIG) as audio_processor:
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logging.info("키보드 인터럽트로 종료 중...")

@@ -35,9 +35,10 @@ struct RobotConfig {
     double height;
     double hole_radius;
     double yaw_gear_ratio;
-    double mouth_tune;
     double mouth_back_compensation;
     double mouth_pitch_compensation;
+    double max_mouth;
+    double min_mouth;
 
     bool generate_head_motion;
     double wait_mode_rpy_ratio;
@@ -136,9 +137,10 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
     ok &= REQ(robot_node, "height",          cfg_robot.height);
     ok &= REQ(robot_node, "hole_radius",     cfg_robot.hole_radius);
     ok &= REQ(robot_node, "yaw_gear_ratio",  cfg_robot.yaw_gear_ratio);
-    ok &= REQ(robot_node, "mouth_tune",      cfg_robot.mouth_tune);
     ok &= REQ(robot_node, "mouth_back_compensation",  cfg_robot.mouth_back_compensation);
     ok &= REQ(robot_node, "mouth_pitch_compensation", cfg_robot.mouth_pitch_compensation);
+    ok &= REQ(robot_node, "max_mouth",      cfg_robot.max_mouth);
+    ok &= REQ(robot_node, "min_mouth",      cfg_robot.min_mouth);
 
     ok &= REQ(robot_node, "generate_head_motion",    cfg_robot.generate_head_motion);
     ok &= REQ(robot_node, "wait_mode_rpy_ratio",     cfg_robot.wait_mode_rpy_ratio);

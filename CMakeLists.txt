@@ -76,7 +76,7 @@ find_path(WIRINGPI_INCLUDE_DIR NAMES wiringPi.h)
 # ==================================================================
 
 # 실행 파일 생성 위치 설정
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/build)
 
 # 실행 파일 생성
 add_executable(Ray
