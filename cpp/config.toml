@@ -22,11 +22,12 @@ ff2_gain = [0, 0, 0, 0, 0]
 
 [robot]
 # 모터 초기 위치
-default_pitch   = 2000
-default_roll_r  = 288 
-default_roll_l  = 1020
-default_yaw     = 2017
-default_mouth   = 885
+# 1호기
+default_pitch   = 3520
+default_roll_r  = 1980
+default_roll_l  = 1350
+default_yaw     = 1000
+default_mouth   = 3100
 
 #robot parameter
 pulley_diameter = 40

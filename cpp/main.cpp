@@ -2177,9 +2177,9 @@ void runMouthHysteresisByPercent(DynamixelDriver* dxl_driver,
     const int DEFAULT_DT_MS = 20;
     const int dt_ms = (loop_dt_ms > 0) ? loop_dt_ms : DEFAULT_DT_MS;
 
-    const int BASE_TICK     = 883;
-    const int FULL_MIN_TICK = 645;
-    const int FULL_STROKE   = BASE_TICK - FULL_MIN_TICK; // 238
+    const int BASE_TICK     = 3100;
+    const int FULL_MIN_TICK = 2700;
+    const int FULL_STROKE   = BASE_TICK - FULL_MIN_TICK; // 380
 
     // 퍼센트 목록
     const std::vector<int> PERCENTS = {100, 85, 60, 45, 30, 15};
@@ -2322,7 +2322,7 @@ int main() {
     initialize_robot_posture();
     dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
 
-    
+   
     std::string log_dir = create_log_directory("output/cali_log");
     // auto log_start_time = std::chrono::high_resolution_clock::now();
 
