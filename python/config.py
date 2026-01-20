@@ -67,5 +67,8 @@ ACTIVE_SESSION_TIMEOUT = 120.0 # 사용자 응답 없이 Active 모드가 유지
 SMART_TURN_MODEL_PATH = "smart-turn-v3.0.onnx"
 TURN_END_SILENCE_CHUNKS = 15        # 무음으로 판단하기 위한 연속 청크 수. 15 chunks * 32ms/chunk ≈ 480ms
 MAX_TURN_CHUNKS = 5625              # 사용자 입력 최대 길이. 5625 chunks * 32ms/chunk ≈ 3분 (google stt 최대 길이 한도는 약 5분)
-SMART_TURN_GRACE_PERIOD_S = 0.3     # Smart Turn이 '진행중'으로 판단 시 유예 시간 (초)
+SMART_TURN_GRACE_PERIOD = 0.3       # Smart Turn이 '진행중'으로 판단 시 유예 시간 (초)
 SMART_TURN_MAX_RETRIES = 3          # '진행중'일 때 재추론 최대 횟수 (무한 반복 방지)
+
+
+STT_WAIT_TIMEOUT_SECONDS = 10.0     # STT 결과 대기 최대 시간 (초)

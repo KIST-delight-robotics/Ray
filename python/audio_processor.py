@@ -289,14 +289,6 @@ class GoogleSTTStreamer:
             responses = self.stt_client.streaming_recognize(self.stt_streaming_config, audio_gen)
             
             for response in responses:
-                # if not first_response_received:
-                #     first_response_received = True
-                #     # C++ 클라이언트에게 인터럽션 신호 전송
-                #     asyncio.run_coroutine_threadsafe(
-                #         self.websocket.send(json.dumps({"type": "user_interruption"})),
-                #         self.main_loop
-                #     )
-
                 if not response.results or not response.results[0].alternatives:
                     continue
 
@@ -313,25 +305,6 @@ class GoogleSTTStreamer:
                 
                 # if self.stt_stop_event.is_set():
                 #     break
-
-
-
-                # if result.is_final and self.stt_stop_event.is_set():
-                #     final_text = transcript.strip()
-                #     logging.info(f"✅ STT 최종 결과: '{final_text}'")
-                #     if final_text:
-                #         # 메인 스레드로 결과 전송
-                #         self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
-                    
-                #     # C++ 클라이언트에 STT 완료 신호 전송
-                #     stt_completion_time = int(time.time() * 1000)
-                #     asyncio.run_coroutine_threadsafe(
-                #         self.websocket.send(json.dumps({"type": "stt_done", "stt_done_time": stt_completion_time})),
-                #         self.main_loop
-                #     )
-                #     break # 최종 결과를 받으면 루프 종료
-                # else:
-                #     logging.info(f"✅ STT 중간 결과: '{transcript}'")
                     
         except exceptions.DeadlineExceeded as e:
             logging.warning(f"STT 세션 타임아웃(DeadlineExceeded): {e}")
@@ -359,6 +332,8 @@ class GoogleSTTStreamer:
                     )
             else:
                 logging.info("❎ STT 인식 결과가 없습니다.")
+                self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, None)
+                
             logging.info("🚀 STT 세션 스레드 종료.")
 
 # ==================================================================================
