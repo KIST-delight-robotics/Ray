@@ -71,4 +71,4 @@ SMART_TURN_GRACE_PERIOD = 0.3       # Smart Turn이 '진행중'으로 판단 시
 SMART_TURN_MAX_RETRIES = 3          # '진행중'일 때 재추론 최대 횟수 (무한 반복 방지)
 
 
-STT_WAIT_TIMEOUT_SECONDS = 10.0     # STT 결과 대기 최대 시간 (초)
+STT_WAIT_TIMEOUT_SECONDS = 5.0     # STT 결과 대기 최대 시간 (초)

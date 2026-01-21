@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any
 
-from openai import AsyncOpenAI
+from openai import OpenAI
 
 from config import OUTPUT_LOG_DIR
 from prompts import SUMMARY_PROMPT_TEMPLATE
@@ -17,14 +17,14 @@ logger = logging.getLogger(__name__)
 class ConversationManager:
     """대화 세션의 상태, 기록, 요약을 관리하는 클래스."""
 
-    def __init__(self, client: AsyncOpenAI):
+    def __init__(self, openai_api_key):
         """
         ConversationManager를 초기화합니다.
 
         Args:
-            client (AsyncOpenAI): OpenAI API와 통신하기 위한 비동기 클라이언트.
+            client (OpenAI): OpenAI API와 통신하기 위한 클라이언트.
         """
-        self.client = client
+        self.client = OpenAI(api_key=openai_api_key)
         self.session_id: str | None = None
         self.session_start_time: datetime | None = None
         self.current_conversation_log: List[Dict[str, Any]] = []
@@ -55,7 +55,7 @@ class ConversationManager:
         """
         return self.current_conversation_log
 
-    async def end_session(self):
+    def end_session(self):
         """
         현재 세션을 종료하고, 대화 내용을 요약하여 파일로 저장합니다.
         """
@@ -65,7 +65,7 @@ class ConversationManager:
             self._reset_session()
             return
 
-        summary = await self._summarize_session()
+        summary = self._summarize_session()
 
         session_data = {
             "session_id": self.session_id,
@@ -93,7 +93,7 @@ class ConversationManager:
         self.session_start_time = None
         self.current_conversation_log = []
 
-    async def _summarize_session(self) -> str:
+    def _summarize_session(self) -> str:
         """OpenAI API를 호출하여 현재 세션의 대화를 요약합니다."""
         log_for_summary = [msg for msg in self.current_conversation_log if msg.get("role") != "system"]
         if not log_for_summary:
@@ -104,7 +104,7 @@ class ConversationManager:
 
         try:
             logger.info("📋 세션 요약 API 호출...")
-            responses = await self.client.responses.create(
+            responses = self.client.responses.create(
                 model="gpt-4.1-mini",
                 input=[{"role": "user", "content": prompt}],
             )
@@ -168,10 +168,9 @@ async def main_test():
         logger.error("OPENAI_API_KEY가 설정되지 않았습니다. 테스트를 종료합니다.")
         return
         
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
     
     # --- ConversationManager 사용 ---
-    manager = ConversationManager(client=client)
+    manager = ConversationManager(openai_api_key=OPENAI_API_KEY)
 
     # 1. 새 세션 시작
     manager.start_new_session(system_prompt=SYSTEM_PROMPT)

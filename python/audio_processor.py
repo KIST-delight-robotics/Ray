@@ -21,7 +21,7 @@ from config import (
     SMART_TURN_MODEL_PATH,
     TURN_END_SILENCE_CHUNKS,
     MAX_TURN_CHUNKS,
-    SMART_TURN_GRACE_PERIOD_S,
+    SMART_TURN_GRACE_PERIOD,
     SMART_TURN_MAX_RETRIES,
 )
 
@@ -273,7 +273,7 @@ class GoogleSTTStreamer:
                 except queue.Empty:
                     break
             
-            yield b''.join(data)
+            yield speech.StreamingRecognizeRequest(audio_content=b''.join(data))
         logging.info("STT 오디오 공급 중단됨.")
 
     def run_stt_session(self):
@@ -566,9 +566,9 @@ class AudioProcessor:
                         # 다음 추론을 "유예시간 후"로 예약
                         if not is_retry:
                             self.smart_turn_retry_count = 0
-                        self._next_smart_turn_time = now + SMART_TURN_GRACE_PERIOD_S
+                        self._next_smart_turn_time = now + SMART_TURN_GRACE_PERIOD
                         logging.info(
-                            f"⏳ SmartTurn이 '진행중'으로 판단. {SMART_TURN_GRACE_PERIOD_S}초 후 재추론 예약 "
+                            f"⏳ SmartTurn이 '진행중'으로 판단. {SMART_TURN_GRACE_PERIOD}초 후 재추론 예약 "
                             f"(최대 {SMART_TURN_MAX_RETRIES}회)"
                         )
         
