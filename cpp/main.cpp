@@ -966,13 +966,6 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
         int num_motor_updates = INTERVAL_MS / 40;
 
         if (cycle_num == 0) {
-            json led_msg;
-            led_msg["cmd"] = "led_ring";
-            led_msg["r"] = 50;
-            led_msg["g"] = 50;
-            led_msg["b"] = 233;
-            webSocket.sendText(led_msg.dump());
-
             start_time = std::chrono::high_resolution_clock::now();
             soundStream.play(); // 첫 사이클에서 오디오 재생
             // 로그 출력
@@ -1098,13 +1091,6 @@ void wait_control_motor(){
     std::vector<int32_t> target_position(DXL_NUM);
     std::vector<int32_t> target_velocity(DXL_NUM);
     std::vector<MotorState> current_state(DXL_NUM);
-
-    json led_msg;
-    led_msg["cmd"] = "led_ring";
-    led_msg["r"] = 233;
-    led_msg["g"] = 233;
-    led_msg["b"] = 50;
-    webSocket.sendText(led_msg.dump());
 
     std::cout << "대기 모드 (wait_control_motor) 시작: " << get_time_str() << std::endl;
     #else
@@ -2018,6 +2004,10 @@ void robot_main_loop(std::future<void> server_ready_future) {
             t1.join();
             t2.join();
             t3.join();
+
+            json finished_msg;
+            finished_msg["type"] = "speaking_finished";
+            webSocket.sendText(finished_msg.dump());
         } 
         else { // realtime or responses
             const size_t bytes_per_interval = sfinfo.samplerate * sfinfo.channels * sizeof(sf::Int16) * INTERVAL_MS / 1000;
@@ -2044,6 +2034,10 @@ void robot_main_loop(std::future<void> server_ready_future) {
                     t1_realtime.join();
                     t2_realtime.join();
                     t3_realtime.join();
+
+                    json finished_msg;
+                    finished_msg["type"] = "speaking_finished";
+                    webSocket.sendText(finished_msg.dump());
                 }
             }
 
@@ -2081,6 +2075,10 @@ void robot_main_loop(std::future<void> server_ready_future) {
                     t1_responses.join();
                     t2_responses.join();
                     t3_responses.join();
+
+                    json finished_msg;
+                    finished_msg["type"] = "speaking_finished";
+                    webSocket.sendText(finished_msg.dump());
                 }
             }
         }
@@ -2132,20 +2130,20 @@ int main() {
     }
 
     // 초기 자세로 이동
-    // if (cfg_dxl.operating_mode == 1)
-    //     move_to_initial_position_velctrl();
-    // else {
-    //     dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
-    //     move_to_initial_position_posctrl();
-    //     dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
-    // }
+    if (cfg_dxl.operating_mode == 1)
+        move_to_initial_position_velctrl();
+    else {
+        dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
+        move_to_initial_position_posctrl();
+        dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
+    }
 
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // 자이로센서를 이용한 로봇 초기자세 설정
-    dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
-    initialize_robot_posture();
-    dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
+    // dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
+    // initialize_robot_posture();
+    // dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
 
     // gyro_test();
 

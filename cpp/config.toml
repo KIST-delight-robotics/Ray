@@ -14,19 +14,27 @@ profile_velocity_homing = 500   # 기기 부팅 시 초기 위치로 이동할 �
 profile_velocity = 60
 profile_acceleration = 0
 
-pos_p_gain = [500, 3000, 3000, 500, 500]
-pos_i_gain = [0, 1000, 1000, 0, 0]
+pos_p_gain = [500, 500, 500, 500, 500]
+pos_i_gain = [0, 0, 0, 0, 0]
 pos_d_gain = [0, 0, 0, 0, 0]
 ff1_gain = [0, 0, 0, 0, 0]
 ff2_gain = [0, 0, 0, 0, 0]
 
 [robot]
 # 모터 초기 위치
-default_pitch   = 1410
-default_roll_r  = 900
-default_roll_l  = 1300
-default_yaw     = 1000
-default_mouth   = 4000
+# 1호기
+# default_pitch   = 1410
+# default_roll_r  = 900
+# default_roll_l  = 1300
+# default_yaw     = 1000
+# default_mouth   = 4000
+
+# 2호기
+default_pitch   = 2000
+default_roll_r  = 288
+default_roll_l  = 1020
+default_yaw     = 2017
+default_mouth   = 885
 
 #robot parameter
 pulley_diameter = 40

@@ -318,10 +318,11 @@ class GoogleSTTStreamer:
             final_text = " ".join(final_text_parts).strip()
 
             if final_text:
-                logging.info(f"✅ STT 최종 결과: '{final_text}'")
+                logging.info(f"✅ STT 최종 결과 전송: '{final_text}'")
 
                 # 메인 스레드로 결과 전송
-                self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
+                # self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
+                self.stt_result_queue.put(final_text)
 
                 # C++ 클라이언트에 STT 완료 신호 전송
                 if self.websocket:
@@ -331,8 +332,9 @@ class GoogleSTTStreamer:
                         self.main_loop
                     )
             else:
-                logging.info("❎ STT 인식 결과가 없습니다.")
-                self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, None)
+                logging.info("❎ STT 결과 없음 (빈 텍스트) -> 실패 신호 전송")
+                # self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, None)
+                self.stt_result_queue.put(None)
                 
             logging.info("🚀 STT 세션 스레드 종료.")
 
