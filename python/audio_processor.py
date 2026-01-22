@@ -273,7 +273,7 @@ class GoogleSTTStreamer:
                 except queue.Empty:
                     break
             
-            yield b''.join(data)
+            yield speech.StreamingRecognizeRequest(audio_content=b''.join(data))
         logging.info("STT 오디오 공급 중단됨.")
 
     def run_stt_session(self):
@@ -289,13 +289,6 @@ class GoogleSTTStreamer:
             responses = self.stt_client.streaming_recognize(self.stt_streaming_config, audio_gen)
             
             for response in responses:
-                # if not first_response_received:
-                #     first_response_received = True
-                #     # C++ 클라이언트에게 인터럽션 신호 전송
-                #     asyncio.run_coroutine_threadsafe(
-                #         self.websocket.send(json.dumps({"type": "user_interruption"})),
-                #         self.main_loop
-                #     )
 
                 if not response.results or not response.results[0].alternatives:
                     continue
@@ -311,28 +304,6 @@ class GoogleSTTStreamer:
                     current_interim_transcript = transcript
                     logging.info(f"🟩 STT 중간 결과: '{transcript}'")
                 
-                # if self.stt_stop_event.is_set():
-                #     break
-
-
-
-                # if result.is_final and self.stt_stop_event.is_set():
-                #     final_text = transcript.strip()
-                #     logging.info(f"✅ STT 최종 결과: '{final_text}'")
-                #     if final_text:
-                #         # 메인 스레드로 결과 전송
-                #         self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
-                    
-                #     # C++ 클라이언트에 STT 완료 신호 전송
-                #     stt_completion_time = int(time.time() * 1000)
-                #     asyncio.run_coroutine_threadsafe(
-                #         self.websocket.send(json.dumps({"type": "stt_done", "stt_done_time": stt_completion_time})),
-                #         self.main_loop
-                #     )
-                #     break # 최종 결과를 받으면 루프 종료
-                # else:
-                #     logging.info(f"✅ STT 중간 결과: '{transcript}'")
-                    
         except exceptions.DeadlineExceeded as e:
             logging.warning(f"STT 세션 타임아웃(DeadlineExceeded): {e}")
         except Exception as e:
@@ -610,6 +581,7 @@ class AudioProcessor:
         
         logging.info("🤫 인식 종료. STT 오디오 공급을 중단합니다.")
         self.stt_stop_event.set()
+        self.stt_audio_queue.put(None)
         self.user_is_speaking = False
         self._next_smart_turn_time = None
         self.smart_turn_retry_count = 0
@@ -635,6 +607,7 @@ class AudioProcessor:
         # 1. 처리 루프 스레드에 종료 신호 전송
         self._is_running.clear()
         self.stt_stop_event.set() # 대기 중인 스레드를 깨움
+        self.stt_audio_queue.put(None) # STT 오디오 제너레이터 종료 신호
         
         # 2. 처리 루프 스레드 종료 대기
         if self._thread and self._thread.is_alive():
