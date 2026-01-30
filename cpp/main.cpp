@@ -893,20 +893,13 @@ void generate_motion(int channels, int samplerate) {
                 deliverSegment = multExpToSegment(energy, deliverSegment, 0.01, 10);
                 
                 // 말하는 동안 고개를 들기 위한 Pitch 오프셋 추가
-                double pitch_offset = -0.08; // 음수: 위쪽 방향
-                for(auto& frame : deliverSegment) {
-                    frame[1] += pitch_offset; // frame[1]은 Pitch
-                }
+                // double pitch_offset = -0.08; // 음수: 위쪽 방향
+                // for(auto& frame : deliverSegment) {
+                //     frame[1] += pitch_offset; // frame[1]은 Pitch
+                // }
 
                 // 이전 세그먼트의 마지막 프레임과 현재 세그먼트의 첫 프레임을 부드럽게 연결
                 deliverSegment = connectTwoSegments(prevSegment, deliverSegment, 3, 3, 3);
-
-                // segment에 ratio 곱해주기
-                // for (auto& frame : deliverSegment) {
-                //     for (auto& value : frame) {
-                //         value *= cfg_robot.control_motor_rpy_ratio;
-                //     }
-                // }
 
                 // 현재 세그먼트를 다음 반복을 위해 저장
                 prevSegment = deliverSegment;
@@ -2172,17 +2165,6 @@ int main() {
 
     tuning_logger = new HighFreqLogger(dxl_driver);
     #endif
-
-    
-    // == 테스트 오디오 재생 코드 ==
-    // std::string audioName = "responses";
-
-    // std::thread test_thread(csv_control_motor, audioName);
-    // test_thread.join();
-
-    // cleanup_dynamixel();
-    // return 0;
-    // ===== 테스트 코드 끝 =====
     
 
 
