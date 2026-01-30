@@ -968,13 +968,13 @@ vector<vector<double>> connectTwoSegments(
         vector<double> x_interpolate, y_interpolate;
 
         // prevSegment의 끝점과 nextSegment의 시작점이 일치하도록 nextSegment 전체를 평행 이동
-        double last_val_prev = prevSegment.back()[d];
-        double first_val_next = nextSegment[0][d];
-        double interval = last_val_prev - first_val_next;
+        // double last_val_prev = prevSegment.back()[d];
+        // double first_val_next = nextSegment[0][d];
+        // double interval = last_val_prev - first_val_next;
 
-        for (size_t i = 0; i < nextSegment.size(); ++i) {
-            interpolatedSegment[i][d] += interval;
-        }
+        // for (size_t i = 0; i < nextSegment.size(); ++i) {
+        //     interpolatedSegment[i][d] += interval;
+        // }
 
         // --- 앵커 포인트(제어점) 설정 ---
         // 과거 앵커: prevSegment의 끝에서 n_anchor_past개의 포인트를 가져옴

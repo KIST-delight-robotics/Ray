@@ -12,9 +12,8 @@ from openai import AsyncOpenAI
 
 from config import (
     SLEEP_FILE, AWAKE_FILE, ACTIVE_SESSION_TIMEOUT, START_KEYWORD, END_KEYWORDS,
-    TTS_MODEL, VOICE, REALTIME_MODEL, RESPONSES_MODEL, RESPONSES_PRESETS, AUDIO_CONFIG, ASSETS_DIR
+    TTS_MODEL, VOICE, RESPONSES_MODEL, RESPONSES_PRESETS, AUDIO_CONFIG, ASSETS_DIR
 )
-from prompts import REALTIME_PROMPT
 from audio_processor import AudioProcessor
 from conversation_manager import ConversationManager
 from offline_motion import offline_motion_generation
@@ -257,65 +256,11 @@ def play_music(song_title: str = "", artist_name: str = ""):
         return None, "노래를 찾을 수 없습니다."
 
 # ==================================================================================
-# LLM API Pipeline (Realtime + Responses)
+# LLM API Pipeline
 # ==================================================================================
 
-async def run_realtime_task(websocket, realtime_connection, item_ids_to_manage: list, user_text: str, realtime_start_event: asyncio.Event):
-    """(Task 1) Realtime API를 호출하고 오디오를 스트리밍합니다."""
-    logger.info("⚡️ Realtime Task 시작...")
-    try:
-        if item_ids_to_manage:
-            logger.info(f"이전 Realtime 대화 아이템 {len(item_ids_to_manage)}개 삭제 중...")
-            delete_tasks = [realtime_connection.conversation.item.delete(item_id=item_id) for item_id in item_ids_to_manage]
-            await asyncio.gather(*delete_tasks, return_exceptions=True)
-            item_ids_to_manage.clear()
-
-        await realtime_connection.session.update(session={"type": "realtime", "instructions": REALTIME_PROMPT, "audio": {"output": {"voice": VOICE}}})
-        await realtime_connection.conversation.item.create(
-            item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": user_text}]}
-        )
-
-        realtime_start_time = time.time()
-        await realtime_connection.response.create()
-
-        with wave.open("output/audio/realtime.wav", "wb") as wf:
-            wf.setnchannels(AUDIO_CONFIG['CHANNELS'])
-            wf.setsampwidth(2)
-            wf.setframerate(AUDIO_CONFIG['SAMPLE_RATE'])
-
-            async for event in realtime_connection:
-
-                if event.type == "conversation.item.added":
-                    item_ids_to_manage.append(event.item.id)
-
-                elif event.type == "response.output_audio.delta":
-                    await websocket.send(json.dumps({"type": "realtime_audio_chunk", "data": event.delta}))
-                    bytes_data = base64.b64decode(event.delta)
-                    wf.writeframes(bytes_data)
-
-                elif event.type == "response.created":
-                    realtime_start_event.set()
-                    await websocket.send(json.dumps({"type": "realtime_stream_start"}))
-
-                elif event.type == "response.done":
-                    await websocket.send(json.dumps({"type": "realtime_stream_end"}))
-                    transcript = event.response.output[0].content[0].transcript if event.response.output[0].content[0].type != "text" else "[Realtime 응답 없음]"
-                    logger.info(f"⚡️ Realtime API 답변 완료: '{transcript}' (소요시간: {time.time() - realtime_start_time:.2f}초)")
-                    wf.close()
-                    break
-
-                elif event.type == "error":
-                    logger.error(f"Realtime API 오류 이벤트: {event}")
-    
-    except asyncio.CancelledError:
-        logger.info("⚡️ Realtime Task가 외부에서 중단되었습니다.")
-    except Exception as e:
-        logger.error(f"⚡️ Realtime Task 실행 중 오류: {e}", exc_info=True)
-    finally:
-        logger.info("⚡️ Realtime Task 종료.")
-
 async def run_responses_task(openai_client: AsyncOpenAI, manager: ConversationManager):
-    """(Task 2) Responses API를 호출하여 텍스트 응답과 수행할 액션을 반환합니다."""
+    """Responses API를 호출하여 텍스트 응답과 수행할 액션을 반환합니다."""
     logger.info("🧠 Responses Task 시작...")
     responses_start_time = time.time()
     current_log = manager.get_current_log()
@@ -392,20 +337,10 @@ async def run_responses_task(openai_client: AsyncOpenAI, manager: ConversationMa
                     }
                     response = await openai_client.responses.create(**params)
                     response_text = response.output[0].content[0].text.strip()
-
-                    # logger.info(f"🧠 Responses API 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
-
-                    # await handle_tts_oneshot(response_text, openai_client, websocket, realtime_start_event)
-                    # if file_path: await websocket.send(json.dumps({"type": "play_audio_csv", "audio_name": f"{song_title}_{artist_name}"}))
-
-                    # manager.add_message("assistant", response_text)
                     break
 
             elif item.type == "message":
                 response_text = item.content[0].text.strip()
-                # logger.info(f"🧠 Responses API 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
-                # await handle_tts_oneshot(response_text, openai_client, websocket, realtime_start_event)
-                # manager.add_message("assistant", response_text)
                 break
 
         logger.info(f"🧠 답변 생성 완료: '{response_text}' (소요시간: {time.time() - responses_start_time:.2f}초)")
@@ -416,7 +351,7 @@ async def run_responses_task(openai_client: AsyncOpenAI, manager: ConversationMa
         return None, None
 
 async def run_tts_action_task(websocket, openai_client: AsyncOpenAI, response_text: str, music_action: dict, tts_start_event: asyncio.Event):
-    """(Task) 텍스트를 받아 TTS를 스트리밍하고 액션을 수행합니다. (취소 가능)"""
+    """텍스트를 받아 TTS를 스트리밍하고 액션을 수행합니다. (취소 가능)"""
     try:
         # TTS 스트리밍
         if response_text:
@@ -433,14 +368,14 @@ async def run_tts_action_task(websocket, openai_client: AsyncOpenAI, response_te
 
     except asyncio.CancelledError:
         logger.info("🔇 TTS/Action Task가 새 입력에 의해 중단되었습니다.")
-        # TTS 중단 시그널 전송 등을 여기에 추가할 수 있습니다.
+        # TTS 중단 시그널 전송 등 추가 가능
     except Exception as e:
         logger.error(f"TTS/Action Task 실행 중 오류: {e}", exc_info=True)
         if not tts_start_event.is_set():
             tts_start_event.set()
 
 async def unified_active_pipeline(websocket, openai_client: AsyncOpenAI, manager: ConversationManager):
-    """사용자 입력에 대해 Realtime API와 Responses API를 동시에 호출하여 순차적으로 응답하는 통합 파이프라인"""
+    """사용자 입력에 대해 Responses API를 호출하여 답변을 생성하고 TTS 및 액션을 수행하는 통합 파이프라인"""
     logger.info("🤖 Unified Active Pipeline 시작...")
 
     current_tts_task = None
@@ -474,7 +409,6 @@ async def unified_active_pipeline(websocket, openai_client: AsyncOpenAI, manager
 
                     # LED로 생각 중 표시
                     thinking_led_task = asyncio.create_task(run_thinking_led_spin(50, 50, 233, speed=4.0, focus=10.0))
-                    # thinking_led_task = asyncio.create_task(run_thinking_led_breathing())
 
                     # LLM 응답 생성 (Block)
                     response_text, music_action = await run_responses_task(openai_client, manager)
@@ -548,17 +482,17 @@ async def wakeword_detection_loop(websocket):
                 if START_KEYWORD in stt_result:
                     await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(AWAKE_FILE)}))
                     return
-                # 테스트용 코드
-                # await asyncio.sleep(1)
-                # await websocket.send(json.dumps({"type": "play_audio", "file_to_play": "assets/audio/대사_test.wav"}))
-                # await websocket.send(json.dumps({"type": "play_music", "title": "나무", "artist": "카더가든"}))
-                # return
     except Exception as e:
         logger.error(f"Wakeword detection loop에서 오류 발생: {e}", exc_info=True)
     finally:
         logger.info("💤 Sleep 모드 종료.")
 
 
-if __name__ == "__main__":
-    from config import OPENAI_API_KEY
+from config import OPENAI_API_KEY
+
+async def test():
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    await save_tts_to_file("이것은 Openai TTS 실행 속도 테스트 오디오입니다.", openai_client, "output/output.mp3")
+
+if __name__ == "__main__":
+    asyncio.run(test())    

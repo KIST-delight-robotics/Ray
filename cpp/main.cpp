@@ -545,13 +545,13 @@ void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream, con
         }
         audio_queue_cv.notify_one();
 
-        {
-            auto now = std::chrono::high_resolution_clock::now();
-            std::lock_guard<std::mutex> lock(cout_mutex);
-            std::cout << "Stream and split cycle " << cycle_num << " at "
-                      << std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count()
-                      << " ms" << std::endl;
-        }
+        // {
+        //     auto now = std::chrono::high_resolution_clock::now();
+        //     std::lock_guard<std::mutex> lock(cout_mutex);
+        //     std::cout << "Stream and split cycle " << cycle_num << " at "
+        //               << std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count()
+        //               << " ms" << std::endl;
+        // }
     }
 
     // --- 4. 종료 처리 ---
@@ -629,13 +629,13 @@ void read_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& 
 
         position += frames_per_interval;
 
-        {
-            auto now = std::chrono::high_resolution_clock::now();
-            std::lock_guard<std::mutex> lock(cout_mutex);
-            std::cout << "Read and split cycle " << cycle_num << " at "
-                      << std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count()
-                      << " ms" << std::endl;
-        }
+        // {
+        //     auto now = std::chrono::high_resolution_clock::now();
+        //     std::lock_guard<std::mutex> lock(cout_mutex);
+        //     std::cout << "Read and split cycle " << cycle_num << " at "
+        //               << std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count()
+        //               << " ms" << std::endl;
+        // }
     }
 
     // --- 4. 종료 처리 ---
@@ -891,14 +891,36 @@ void generate_motion(int channels, int samplerate) {
 
                 // segment 보정 (무성구간에 따라서 값 보정)
                 deliverSegment = multExpToSegment(energy, deliverSegment, 0.01, 10);
+                
+                // 말하는 동안 고개를 들기 위한 Pitch 오프셋 추가
+                double pitch_offset = -0.08; // 음수: 위쪽 방향
+                for(auto& frame : deliverSegment) {
+                    frame[1] += pitch_offset; // frame[1]은 Pitch
+                }
 
+                // 이전 세그먼트의 마지막 프레임과 현재 세그먼트의 첫 프레임을 부드럽게 연결
                 deliverSegment = connectTwoSegments(prevSegment, deliverSegment, 3, 3, 3);
+
+                // segment에 ratio 곱해주기
+                // for (auto& frame : deliverSegment) {
+                //     for (auto& value : frame) {
+                //         value *= cfg_robot.control_motor_rpy_ratio;
+                //     }
+                // }
 
                 // 현재 세그먼트를 다음 반복을 위해 저장
                 prevSegment = deliverSegment;
             } 
             else {
+                std::cout << "Idle motion 사용 중..." << std::endl;
                 deliverSegment = IdleMotionManager::getInstance().getNextSegment(energy.size(), cfg_robot.control_motor_rpy_ratio);
+                
+                // 말하는 동안 고개를 들기 위한 Pitch 오프셋 추가
+                double pitch_offset = -0.08; // 음수: 위쪽 방향
+                for(auto& frame : deliverSegment) {
+                    frame[1] += pitch_offset;
+                }
+
                 if (first_segment_flag == 1) {
                     // 이전 세그먼트의 마지막 프레임과 현재 세그먼트의 첫 프레임을 부드럽게 연결
                     deliverSegment = connectTwoSegments(prevSegment, deliverSegment, 5, 3, 3);
@@ -916,13 +938,13 @@ void generate_motion(int channels, int samplerate) {
         }
         mouth_motion_queue_cv.notify_one();
 
-        {
-            auto now = std::chrono::high_resolution_clock::now();
-            std::lock_guard<std::mutex> lock(cout_mutex);
-            std::cout << "Generate motion cycle " << cycle_num << " at "
-                      << std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count()
-                      << " ms" << std::endl;
-        }
+        // {
+        //     auto now = std::chrono::high_resolution_clock::now();
+        //     std::lock_guard<std::mutex> lock(cout_mutex);
+        //     std::cout << "Generate motion cycle " << cycle_num << " at "
+        //               << std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count()
+        //               << " ms" << std::endl;
+        // }
     }
 }
 
@@ -966,13 +988,6 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
         int num_motor_updates = INTERVAL_MS / 40;
 
         if (cycle_num == 0) {
-            json led_msg;
-            led_msg["cmd"] = "led_ring";
-            led_msg["r"] = 50;
-            led_msg["g"] = 50;
-            led_msg["b"] = 233;
-            webSocket.sendText(led_msg.dump());
-
             start_time = std::chrono::high_resolution_clock::now();
             soundStream.play(); // 첫 사이클에서 오디오 재생
             // 로그 출력
@@ -1059,25 +1074,25 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
             double DXL_goal_rpy[4] = {roll, pitch, yaw, mouth};
             motion_logger.log(mode_label, DXL_goal_rpy, target_position, current_state);
 
-            if (i == 0 and cycle_num % 10 == 0) {
-                auto expected_playback_ms = (cycle_num) * INTERVAL_MS;
-                float actual_playback_ms = 0.0f;
-                if (soundStream.getStatus() == sf::Sound::Playing) {
-                    actual_playback_ms = soundStream.getPlayingOffset().asMilliseconds();
-                }
-                float playback_diff_ms = actual_playback_ms - expected_playback_ms;
+            // if (i == 0 and cycle_num % 10 == 0) {
+            //     auto expected_playback_ms = (cycle_num) * INTERVAL_MS;
+            //     float actual_playback_ms = 0.0f;
+            //     if (soundStream.getStatus() == sf::Sound::Playing) {
+            //         actual_playback_ms = soundStream.getPlayingOffset().asMilliseconds();
+            //     }
+            //     float playback_diff_ms = actual_playback_ms - expected_playback_ms;
                 
-                auto now = std::chrono::high_resolution_clock::now();
-                auto motion_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time);
-                auto expected_motion = cycle_num * INTERVAL_MS;
+            //     auto now = std::chrono::high_resolution_clock::now();
+            //     auto motion_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time);
+            //     auto expected_motion = cycle_num * INTERVAL_MS;
 
-                std::cout << "Cycle " << cycle_num << ": motion_elapsed=" << motion_elapsed.count()
-                            << "ms, expected=" << expected_motion
-                            << "ms, diff=" << (motion_elapsed.count() - expected_motion) << "ms" << std::endl;
-                std::cout << "Cycle " << cycle_num << ": playback_elapsed=" << actual_playback_ms
-                            << "ms, expected=" << expected_playback_ms
-                            << "ms, diff=" << playback_diff_ms << "ms" << std::endl;
-            }
+            //     std::cout << "Cycle " << cycle_num << ": motion_elapsed=" << motion_elapsed.count()
+            //                 << "ms, expected=" << expected_motion
+            //                 << "ms, diff=" << (motion_elapsed.count() - expected_motion) << "ms" << std::endl;
+            //     std::cout << "Cycle " << cycle_num << ": playback_elapsed=" << actual_playback_ms
+            //                 << "ms, expected=" << expected_playback_ms
+            //                 << "ms, diff=" << playback_diff_ms << "ms" << std::endl;
+            // }
             #endif
 
             // 필요한 경우 대기 시간 추가
@@ -1098,13 +1113,6 @@ void wait_control_motor(){
     std::vector<int32_t> target_position(DXL_NUM);
     std::vector<int32_t> target_velocity(DXL_NUM);
     std::vector<MotorState> current_state(DXL_NUM);
-
-    json led_msg;
-    led_msg["cmd"] = "led_ring";
-    led_msg["r"] = 233;
-    led_msg["g"] = 233;
-    led_msg["b"] = 50;
-    webSocket.sendText(led_msg.dump());
 
     std::cout << "대기 모드 (wait_control_motor) 시작: " << get_time_str() << std::endl;
     #else
@@ -1193,6 +1201,7 @@ void wait_control_motor(){
         
         step ++;
         std::this_thread::sleep_until(wait_start_time + FRAME_INTERVAL * step);
+        // std::this_thread::sleep_for(std::chrono::milliseconds(34));
         
         #else
         // --- 가짜 모터 대기 동작 ---
@@ -2018,6 +2027,10 @@ void robot_main_loop(std::future<void> server_ready_future) {
             t1.join();
             t2.join();
             t3.join();
+
+            json finished_msg;
+            finished_msg["type"] = "speaking_finished";
+            webSocket.sendText(finished_msg.dump());
         } 
         else { // realtime or responses
             const size_t bytes_per_interval = sfinfo.samplerate * sfinfo.channels * sizeof(sf::Int16) * INTERVAL_MS / 1000;
@@ -2044,6 +2057,10 @@ void robot_main_loop(std::future<void> server_ready_future) {
                     t1_realtime.join();
                     t2_realtime.join();
                     t3_realtime.join();
+
+                    json finished_msg;
+                    finished_msg["type"] = "speaking_finished";
+                    webSocket.sendText(finished_msg.dump());
                 }
             }
 
@@ -2081,6 +2098,10 @@ void robot_main_loop(std::future<void> server_ready_future) {
                     t1_responses.join();
                     t2_responses.join();
                     t3_responses.join();
+
+                    json finished_msg;
+                    finished_msg["type"] = "speaking_finished";
+                    webSocket.sendText(finished_msg.dump());
                 }
             }
         }
@@ -2132,20 +2153,20 @@ int main() {
     }
 
     // 초기 자세로 이동
-    // if (cfg_dxl.operating_mode == 1)
-    //     move_to_initial_position_velctrl();
-    // else {
-    //     dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
-    //     move_to_initial_position_posctrl();
-    //     dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
-    // }
+    if (cfg_dxl.operating_mode == 1)
+        move_to_initial_position_velctrl();
+    else {
+        dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
+        move_to_initial_position_posctrl();
+        dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
+    }
 
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // 자이로센서를 이용한 로봇 초기자세 설정
-    dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
-    initialize_robot_posture();
-    dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
+    // dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
+    // initialize_robot_posture();
+    // dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
 
     // gyro_test();
 

@@ -14,8 +14,8 @@ if not OPENAI_API_KEY:
 TTS_MODEL = "gpt-4o-mini-tts"
 VOICE = "coral"
 REALTIME_MODEL = "gpt-4o-mini-realtime-preview"
-# REALTIME_MODEL = "gpt-realtime-mini"
-RESPONSES_MODEL = "gpt-5.1"
+RESPONSES_MODEL = "gpt-4.1-mini"
+SUMMARY_MODEL = "gpt-4.1-mini"
 RESPONSES_PRESETS = {
     "gpt-5.1": {
         "model": "gpt-5.1",
@@ -24,6 +24,11 @@ RESPONSES_PRESETS = {
     },
     "gpt-5-mini": {
         "model": "gpt-5-mini",
+        "reasoning": {"effort": "low"},
+        "text": {"verbosity": "low"},
+    },
+    "gpt-5-nano": {
+        "model": "gpt-5-nano",
         "reasoning": {"effort": "low"},
         "text": {"verbosity": "low"},
     },
@@ -61,11 +66,14 @@ AUDIO_CONFIG = {
 # --- 키워드 및 타임아웃 설정 ---
 START_KEYWORD = "레이"
 END_KEYWORDS = ["종료", "쉬어"]
-ACTIVE_SESSION_TIMEOUT = 120.0 # 사용자 응답 없이 Active 모드가 유지되는 최대 시간 (초)
+ACTIVE_SESSION_TIMEOUT = 30.0 # 사용자 응답 없이 Active 모드가 유지되는 최대 시간 (초)
 
 # --- Smart Turn 모델 설정 ---
 SMART_TURN_MODEL_PATH = "smart-turn-v3.0.onnx"
 TURN_END_SILENCE_CHUNKS = 15        # 무음으로 판단하기 위한 연속 청크 수. 15 chunks * 32ms/chunk ≈ 480ms
 MAX_TURN_CHUNKS = 5625              # 사용자 입력 최대 길이. 5625 chunks * 32ms/chunk ≈ 3분 (google stt 최대 길이 한도는 약 5분)
-SMART_TURN_GRACE_PERIOD_S = 0.3     # Smart Turn이 '진행중'으로 판단 시 유예 시간 (초)
+SMART_TURN_GRACE_PERIOD = 0.3       # Smart Turn이 '진행중'으로 판단 시 유예 시간 (초)
 SMART_TURN_MAX_RETRIES = 3          # '진행중'일 때 재추론 최대 횟수 (무한 반복 방지)
+
+
+STT_WAIT_TIMEOUT_SECONDS = 5.0     # STT 결과 대기 최대 시간 (초)

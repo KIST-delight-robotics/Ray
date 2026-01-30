@@ -11,8 +11,12 @@ from openai import AsyncOpenAI
 from config import OPENAI_API_KEY, AWAKE_FILE, SLEEP_FILE, AWAKE_FILE_SCRIPT, SLEEP_FILE_SCRIPT
 from prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_RESP_ONLY
 from conversation_manager import ConversationManager
-from api_pipeline import unified_active_pipeline, wakeword_detection_loop, save_tts_to_file
+from api_pipeline import save_tts_to_file
 from led import led_set_ring, led_set_bar, led_clear
+from state_manager import ConversationEngine
+
+# 전역 엔진 변수 (Listening Loop에서 접근)
+conversation_engine = None
 
 # 종료 처리 함수
 def shutdown_handler(signum=None, frame=None):
@@ -28,8 +32,8 @@ signal.signal(signal.SIGTERM, shutdown_handler) # kill 신호시 실행
 
 
 async def main_logic_loop(websocket):
+    global conversation_engine
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-    conversation_manager = ConversationManager(client=openai_client)
 
     if not AWAKE_FILE.exists():
         logging.info(f"음성 파일 생성 중: {AWAKE_FILE}")
@@ -40,46 +44,35 @@ async def main_logic_loop(websocket):
         await save_tts_to_file(SLEEP_FILE_SCRIPT, openai_client, SLEEP_FILE)
         
     try:
-        while True:
-            # 1. Sleep 모드: 키워드 감지 대기
-            await wakeword_detection_loop(websocket)
-            
-            # 2. 새 세션 시작
-            conversation_manager.start_new_session(system_prompt=SYSTEM_PROMPT_RESP_ONLY)
-            
-            # 3. Active 모드 실행
-            await unified_active_pipeline(websocket, openai_client, conversation_manager)
-
-            # 4. Active 모드 종료 후 세션 정리
-            await conversation_manager.end_session()
-
-            logging.info("Active 세션 종료. 다시 Sleep 모드로 전환합니다.")
+        logging.info("🚀 StateMachine 엔진 초기화 및 시작")
+        conversation_engine = ConversationEngine(websocket, asyncio.get_running_loop())
+        await conversation_engine.start()
 
     except (asyncio.CancelledError, SystemExit, KeyboardInterrupt):
         logging.info("메인 로직: 종료 신호를 감지하여 루프를 멈춥니다.")
+        if conversation_engine:
+            conversation_engine.stop()
         return
     
     except Exception as e:
         logging.error(f"메인 로직 루프 에러: {e}", exc_info=True)
+        if conversation_engine:
+            conversation_engine.stop()
 
 async def background_listener(websocket):
     """백그라운드에서 클라이언트로부터 메시지를 수신합니다."""
+    global conversation_engine
     try:
         async for message in websocket:
             data = json.loads(message)
-            cmd = data.get("cmd")
-            if cmd == "led_all":
-                r, g, b = data["r"], data["g"], data["b"]
-                led_set_ring(r, g, b)
             
-            if cmd == "led_ring":
-                r, g, b = data["r"], data["g"], data["b"]
-                led_set_ring(r, g, b)
-                logging.info(f"LED on")
-            
-            if cmd == "led_bar":
-                r, g, b = data["r"], data["g"], data["b"]
-                led_set_bar(r, g, b)
+            # C++ 로봇 동작 완료 신호 ("speaking_finished")
+            if data.get("type") == "speaking_finished":
+                logging.info("Signal: speaking_finished received from C++")
+                if conversation_engine:
+                    conversation_engine.on_robot_finished()
+                continue
+
     except websockets.exceptions.ConnectionClosed:
         logging.warning("Listener: 연결 종료")
     except Exception as e:

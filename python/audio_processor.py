@@ -21,7 +21,7 @@ from config import (
     SMART_TURN_MODEL_PATH,
     TURN_END_SILENCE_CHUNKS,
     MAX_TURN_CHUNKS,
-    SMART_TURN_GRACE_PERIOD_S,
+    SMART_TURN_GRACE_PERIOD,
     SMART_TURN_MAX_RETRIES,
 )
 
@@ -289,7 +289,6 @@ class GoogleSTTStreamer:
             responses = self.stt_client.streaming_recognize(self.stt_streaming_config, audio_gen)
             
             for response in responses:
-
                 if not response.results or not response.results[0].alternatives:
                     continue
 
@@ -316,10 +315,11 @@ class GoogleSTTStreamer:
             final_text = " ".join(final_text_parts).strip()
 
             if final_text:
-                logging.info(f"✅ STT 최종 결과: '{final_text}'")
+                logging.info(f"✅ STT 최종 결과 전송: '{final_text}'")
 
                 # 메인 스레드로 결과 전송
-                self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
+                # self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, final_text)
+                self.stt_result_queue.put(final_text)
 
                 # C++ 클라이언트에 STT 완료 신호 전송
                 if self.websocket:
@@ -329,7 +329,10 @@ class GoogleSTTStreamer:
                         self.main_loop
                     )
             else:
-                logging.info("❎ STT 인식 결과가 없습니다.")
+                logging.info("❎ STT 결과 없음 (빈 텍스트) -> 실패 신호 전송")
+                # self.main_loop.call_soon_threadsafe(self.stt_result_queue.put_nowait, None)
+                self.stt_result_queue.put(None)
+                
             logging.info("🚀 STT 세션 스레드 종료.")
 
 # ==================================================================================
@@ -562,9 +565,9 @@ class AudioProcessor:
                         # 다음 추론을 "유예시간 후"로 예약
                         if not is_retry:
                             self.smart_turn_retry_count = 0
-                        self._next_smart_turn_time = now + SMART_TURN_GRACE_PERIOD_S
+                        self._next_smart_turn_time = now + SMART_TURN_GRACE_PERIOD
                         logging.info(
-                            f"⏳ SmartTurn이 '진행중'으로 판단. {SMART_TURN_GRACE_PERIOD_S}초 후 재추론 예약 "
+                            f"⏳ SmartTurn이 '진행중'으로 판단. {SMART_TURN_GRACE_PERIOD}초 후 재추론 예약 "
                             f"(최대 {SMART_TURN_MAX_RETRIES}회)"
                         )
         
