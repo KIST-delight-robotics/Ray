@@ -53,6 +53,25 @@ def led_set_bar(r, g, b):
             strip.set_pixel_color(i, Color(r, g, b))
         strip.show()
 
+def led_set_dual(bar_color, ring_color):
+    """
+    바(0~7)와 링(8~23)의 색상을 동시에 설정하고 업데이트합니다.
+    (r, g, b) 튜플을 인자로 받습니다.
+    """
+    if strip:
+        if bar_color:
+            br, bg, bb = bar_color
+            for i in range(0, 8):
+                strip.set_pixel_color(i, Color(br, bg, bb))
+        
+        if ring_color:
+            rr, rg, rb = ring_color
+            for i in range(8, 24):
+                strip.set_pixel_color(i, Color(rr, rg, rb))
+                
+        strip.show()
+
+
 def led_clear():
     """LED 끄기"""
     if strip:
@@ -175,14 +194,4 @@ def led_breathing(r, g, b, duration=0.01, repeat=3):
 if __name__ == "__main__":
     import time
     print("Testing LED...")
-    led_set_ring(200, 200, 200)
-    time.sleep(1)
-    
-    # for i in range(16, 24):
-    #     strip.set_pixel_color(i, Color(255//2, 255//2, 50//2))
-    # strip.show()
-        
-    # led_smooth_wave(255, 255, 50, speed=4.0, focus=15.0)
-    # led_breathing(50, 50, 233, duration=0.01, repeat=5)
-    time.sleep(10)
-    # led_clear()
+    led_set_ring(60, 60, 20)

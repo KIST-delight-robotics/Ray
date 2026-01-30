@@ -30,24 +30,28 @@ ff2_gain = [0, 0, 0, 0, 0]
 # default_mouth   = 4000
 
 # 2호기
-default_pitch   = 2000
-default_roll_r  = 288
-default_roll_l  = 1020
-default_yaw     = 2017
-default_mouth   = 885
+default_pitch   = 1186
+default_roll_r  = 2933
+default_roll_l  = 4040
+default_yaw     = 2085
+default_mouth   = 2211
 
 #robot parameter
 pulley_diameter = 40
 height = 110                        # 베이스부터 실이 연결된 레이어 까지의 높이 small -> 100,Large -> 180
 hole_radius = 25                    # 로봇 머리 구멍 반지름 small -> 25, Large -> 50
 yaw_gear_ratio = 1                  # yaw 모터가 direct하게 머리를 회전시킨다면 1로 설정 아니면 2
-mouth_back_compensation = 0.8       # 입 움직임에 대한 뒷쪽 보상 -> TRO 논문 참조  small -> 1.2, Large -> 1.5
-mouth_pitch_compensation = 1.0      # 입 움직임에 따른 pitch 보상
+mouth_back_compensation = 1.3       # 입 움직임에 대한 뒷쪽 보상 -> TRO 논문 참조  small -> 1.2, Large -> 1.5
+mouth_pitch_compensation = 1.7      # pitch 에 따른 입 움직임 보상
 
 max_mouth = 0
-min_mouth = 350                     # 최대 mouth movement size in DXL dimension
+min_mouth = 400                     # 최대 mouth movement size in DXL dimension
+
+# 머리 올릴 시: back 1.3, pitch 1.7, min 400
+# 안 올릴 시: back 1.0, pitch 1.0, min 350
+
 
 # motion generation
 generate_head_motion = false        # 헤드 모션 온라인 생성 여부
 wait_mode_rpy_ratio = 2.0           # 대기모드에서 최종 roll, pitch, yaw 값에 곱해지는 비율
-control_motor_rpy_ratio = 5.0       # 온라인 생성 시 최종 roll, pitch, yaw 값에 곱해지는 비율
+control_motor_rpy_ratio = 2.0       # 온라인 생성 시 최종 roll, pitch, yaw 값에 곱해지는 비율

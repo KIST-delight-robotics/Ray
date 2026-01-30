@@ -486,3 +486,13 @@ async def wakeword_detection_loop(websocket):
         logger.error(f"Wakeword detection loop에서 오류 발생: {e}", exc_info=True)
     finally:
         logger.info("💤 Sleep 모드 종료.")
+
+
+from config import OPENAI_API_KEY
+
+async def test():
+    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    await save_tts_to_file("이것은 Openai TTS 실행 속도 테스트 오디오입니다.", openai_client, "output/output.mp3")
+
+if __name__ == "__main__":
+    asyncio.run(test())    

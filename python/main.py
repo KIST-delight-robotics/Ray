@@ -73,19 +73,6 @@ async def background_listener(websocket):
                     conversation_engine.on_robot_finished()
                 continue
 
-            cmd = data.get("cmd")
-            if cmd == "led_all":
-                r, g, b = data["r"], data["g"], data["b"]
-                led_set_ring(r, g, b)
-            
-            if cmd == "led_ring":
-                r, g, b = data["r"], data["g"], data["b"]
-                led_set_ring(r, g, b)
-                logging.info(f"LED on")
-            
-            if cmd == "led_bar":
-                r, g, b = data["r"], data["g"], data["b"]
-                led_set_bar(r, g, b)
     except websockets.exceptions.ConnectionClosed:
         logging.warning("Listener: 연결 종료")
     except Exception as e:

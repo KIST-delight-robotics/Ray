@@ -12,7 +12,9 @@ import threading
 import numpy as np
 from abc import ABC, abstractmethod
 
-from led import led_set_ring
+from led import strip, led_set_dual
+from rpi5_ws2812.ws2812 import Color
+
 from conversation_manager import ConversationManager
 from offline_motion import offline_motion_generation
 
@@ -39,6 +41,44 @@ logging.basicConfig(
     force=True
 )
 
+
+# LED 애니메이션
+
+async def run_scanning_led_bar(r, g, b, speed=0.08):
+    """
+    바 LED(0~7)가 좌우로 왕복하는 스캔 애니메이션 (Knight Rider 효과).
+    """
+    if not strip:
+        return
+
+    pos = 0
+    direction = 1
+
+    try:
+        while True:
+            for i in range(8):
+                if i == pos:
+                    # 메인 픽셀 (밝음)
+                    strip.set_pixel_color(i, Color(r, g, b))
+                elif i == pos - direction and 0 <= i <= 7:
+                    # 꼬리 잔상 (약함)
+                    strip.set_pixel_color(i, Color(r // 5, g // 5, b // 5))
+                else:
+                    # 나머지 꺼짐
+                    strip.set_pixel_color(i, Color(0, 0, 0))
+            
+            strip.show()
+            
+            pos += direction
+            if pos >= 7:
+                direction = -1
+            elif pos <= 0:
+                direction = 1
+                
+            await asyncio.sleep(speed)
+            
+    except asyncio.CancelledError:
+        raise
 
 async def run_thinking_led_spin(r, g, b, speed=4.0, focus=10.0):
     """
@@ -81,12 +121,6 @@ async def run_thinking_led_spin(r, g, b, speed=4.0, focus=10.0):
             await asyncio.sleep(0.02) # 약 50 FPS
             
     except asyncio.CancelledError:
-        # 태스크 취소 시 해당 링 끄기 (또는 기본 색으로 복귀)
-        # 여기서는 안전하게 끄는 것으로 처리
-        for i in range(ring_size):
-             strip.set_pixel_color(top_offset + i, Color(0,0,0))
-             strip.set_pixel_color(bottom_offset + i, Color(0,0,0))
-        strip.show()
         raise
 
 # ==================================================================================
@@ -134,7 +168,7 @@ def play_music(song_title: str = "", artist_name: str = ""):
 
 
 # ==================================================================================
-# 0. 매니저 클래스 (LLM/TTS 스레드 관리용 - 새로 추가 필요)
+# 0. 매니저 클래스 (LLM/TTS 스레드 관리용)
 # ==================================================================================
 class LLMManager:
     def __init__(self, openai_api_key, conversation_manager, main_loop, websocket):
@@ -165,7 +199,7 @@ class LLMManager:
         self._thread = threading.Thread(
             target=self._run_generation,
             args=(user_text, request_id),
-            name="LLMThread",
+            name=f"LLMThread-{request_id}",
             daemon=True
         )
         self._thread.start()
@@ -177,11 +211,13 @@ class LLMManager:
 
     def _run_generation(self, user_text, request_id):
         try:
+            llm_start_time = time.time()
+
             # ID 검증
             if self.current_request_id != request_id: return
 
             # 1. 사용자 메시지 기록
-            self.history_manager.add_message("user", user_text)
+            self.history_manager.add_message({"role": "user", "content": user_text, "type": "message"})
             current_log = self.history_manager.get_current_log()
             
             # 2. 도구 정의
@@ -223,8 +259,13 @@ class LLMManager:
             for item in response.output:
                 if self._stop_event.is_set() or self.current_request_id != request_id: return
 
-                if item.type == "function_call":
+                if item.type == "message":
+                    final_text = item.content[0].text.strip()
+                    break
+
+                elif item.type == "function_call":
                     logging.info(f"🧠 Function call: {item.name}")
+                    self.history_manager.add_message(item)
 
                     if item.name == "play_music":
                         args = json.loads(item.arguments)
@@ -247,37 +288,39 @@ class LLMManager:
                                     motion_thread = threading.Thread(
                                         target=offline_motion_generation,
                                         args=(audio_name,),
-                                        name="MotionGenThread"
+                                        name=f"MotionGenThread-{audio_name}"
                                     )
                                     motion_thread.start()
                             
                             # 액션 정보 저장
                             music_action = {"audio_name": audio_name, "motion_thread": motion_thread}
                         
-                        # (3) 결과 히스토리 업데이트 (재요청을 위해)
-                        current_log_copy = current_log.copy()
-                        current_log_copy.append(item)
-                        current_log_copy.append({
+                        # (3) 함수 호출 결과 기록
+                        function_call_output = {
                             "type": "function_call_output",
                             "call_id": item.call_id,
                             "output": json.dumps({"status": status, "message": message})
-                        })
+                        }
+                        self.history_manager.add_message(function_call_output)
 
                         # (4) 2차 Responses API 호출 (결과 멘트 생성)
-                        params["input"] = current_log_copy
                         response_2 = self.client.responses.create(**params)
-                        final_text = response_2.output[0].content[0].text.strip()
+
+                        if response_2.output:
+                            for item in response_2.output:
+                                if item.type == "message" and item.content:
+                                    final_text = item.content[0].text.strip()
+                                    break
                         break
-
-                elif item.type == "message":
-                    final_text = item.content[0].text.strip()
-                    break
-
 
             # 5. 결과 반환
             if self._stop_event.is_set() or self.current_request_id != request_id: return
 
-            logging.info(f"🧠 답변 생성 완료: {final_text}")
+            if final_text:
+                self.history_manager.add_message({"role": "assistant", "content": final_text, "type": "message"})
+
+            logging.info(f"🧠 답변 생성 완료: {final_text} (소요 시간: {time.time() - llm_start_time:.2f}초)")
+
             result_package = {"text": final_text, "action": music_action}
 
             if self.current_request_id == request_id:
@@ -301,7 +344,7 @@ class LLMManager:
         self._thread = threading.Thread(
             target=self._run_hesitation,
             args=(request_id,),
-            name="HesitationLLMThread",
+            name=f"HesitationLLMThread-{request_id}",
             daemon=True
         )
         self._thread.start()
@@ -321,10 +364,10 @@ class LLMManager:
             system_instruction = {
                 "role": "system",
                 "content": (
-                    "상황: 사용자가 로봇의 말을 끊고 무언가 말하려 했으나, 로봇이 제대로 알아듣지 못했습니다(STT 실패/침묵). "
-                    "지침: 사용자가 다시 말하도록 자연스럽게 유도하는 짧은 문장을 생성하세요. "
-                    "예시: '죄송해요, 방금 말씀을 놓쳤어요.', '네? 다시 말씀해 주시겠어요?' '이어서 말해도 될까요?' "
-                    "주의: 아주 짧고 정중하게, 15자 이내로."
+                    "상황: 사용자가 로봇의 말을 끊고 무언가 말하려 했으나, 로봇이 제대로 알아듣지 못했습니다(STT 실패/침묵). 이후 약 3초간 사용자의 추가 발화가 없습니다."
+                    "지침: 상황에 맞게, 사용자가 다시 말하도록 자연스럽게 유도하는 짧은 문장을 생성하거나 침묵 상태를 인지하고 적절히 대응하는 문장을 생성하세요."
+                    "예시: '죄송해요, 방금 말씀을 놓쳤어요.', '혹시 무언가 말씀을 하셨나요?' '이어서 말해도 될까요?' "
+                    "주의: 너무 길지 않게, 간결하고 자연스럽게 상황에 맞게 답변하세요."
                 )
             }
             temp_log.append(system_instruction)
@@ -341,16 +384,19 @@ class LLMManager:
 
             response = self.client.responses.create(**params)
             
-            final_text = response.output[0].content[0].text.strip()
+            final_text = ""
+            if response.output:
+                for item in response.output:
+                    if item.type == "message" and item.content:
+                        final_text = item.content[0].text.strip()
+                        break
 
             # 4. 결과 처리
             if not self._stop_event.is_set() and final_text and self.current_request_id == request_id:
                 logging.info(f"🤔 복구 멘트 생성: {final_text}")
                 
                 # 여기서는 History에 추가하지 않음.
-                # 나중에 SpeakingState로 넘어갈 때(확정될 때) 추가하거나,
-                # 아니면 그냥 시스템 멘트니까 History에 안 남기는 게 깔끔할 수 있음.
-                # (보통 "네?" 같은 추임새는 안 남기는 게 모델 성능에 좋음)
+                # 나중에 SpeakingState로 넘어갈 때(확정될 때) 추가
                 
                 # 결과 패키지 (Action 없음)
                 result_package = {
@@ -407,6 +453,7 @@ class TTSManager:
     def _run_tts(self, text):
         try:
             # 1. 스트리밍 시작 알림 (C++ 모션 준비 등)
+            tts_start_time = time.time()
             if self.websocket:
                 asyncio.run_coroutine_threadsafe(
                     self.websocket.send(json.dumps({"type": "responses_only"})),
@@ -449,6 +496,8 @@ class TTSManager:
                         self.websocket.send(json.dumps({"type": "responses_stream_end"})),
                         self.main_loop
                     )
+
+            logging.info(f"TTS 스트리밍 완료 (소요시간: {time.time() - tts_start_time:.2f}초)")
 
         except Exception as e:
             logging.error(f"❌ TTS 스트리밍 오류: {e}", exc_info=True)
@@ -493,8 +542,10 @@ class SleepState(ConversationState):
     시작 키워드만 기다리는 대기 상태.
     """
     def on_enter(self):
-        logging.info("STATE: [Sleep] 시작 키워드 대기 중... (ZZZ)")
+        logging.info("--- STATE: [Sleep] 시작 키워드 대기 중... ---")
         # LED Off or Dimmed
+        # Ring: Warm White, Bar: Off
+        led_set_dual(bar_color=(0, 0, 0), ring_color=(100, 100, 30))
         self.engine.vad_processor.reset()
         
         # 큐 비우기
@@ -521,8 +572,8 @@ class SleepState(ConversationState):
 
 class IdleState(ConversationState):
     def on_enter(self):
-        logging.info("STATE: [Idle] 대기 시작")
-        led_set_ring(233, 233, 50)
+        logging.info("--- STATE: [Idle] 발화 대기 중... ---")
+        led_set_dual((233, 233, 50), (233, 233, 50))
 
         # VAD 상태 리셋 (이전 잡음 영향 제거)
         self.engine.vad_processor.reset()
@@ -547,7 +598,11 @@ class IdleState(ConversationState):
                     self.engine.websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(SLEEP_FILE)})),
                     self.engine.main_loop
                 )
+            
+            # 별도 스레드에서 세션 초기화 및 요약 작업 수행
             self.engine.history_manager.end_session()
+
+            # Sleep 상태로 전환
             return SleepState(self.engine)
         
         return None
@@ -574,11 +629,12 @@ class ListeningState(ConversationState):
         self.stt_thread = None
 
     def on_enter(self):
-        logging.info(f"STATE: [Listening] (Interruption={self.is_interruption})")
+        logging.info(f"--- STATE: [Listening] 사용자 입력 받는 중... (Interruption={self.is_interruption}) ---")
 
         # LED
         if self.mode == "NORMAL":
-            led_set_ring(233,233,50)
+            # Bar: Red, Ring: Yellow (Explicit refresh)
+            led_set_dual((233, 50, 50), (233, 233, 50))
 
         # 1. 큐 초기화 (이전 턴의 잔여 데이터 제거)
         with self.engine.stt_audio_queue.mutex:
@@ -604,7 +660,7 @@ class ListeningState(ConversationState):
                 self.audio_buffer.append(chunk)
             self.engine.stt_pre_buffer.clear() # 처리 했으니 비움
         
-        # 4. 인터럽션 신호 전송
+        # 4. 인터럽션 처리
         if self.is_interruption and self.engine.websocket:
             # C++로 인터럽션 신호 전송
             asyncio.run_coroutine_threadsafe(
@@ -689,8 +745,11 @@ class SttResultWaitingState(ConversationState):
         self.start_time = 0.0
 
     def on_enter(self):
-        logging.info("STATE: [SttResultWaiting] STT 결과 대기중...")
+        logging.info("--- STATE: [SttResultWaiting] STT 결과 대기중... ---")
         self.start_time = time.time()
+        if self.mode == "NORMAL":
+            # Bar: Yellow, Ring: Yellow
+            led_set_dual((233, 233, 50), (233, 233, 50))
 
     def update(self, chunk):
         # 오디오 청크는 무시
@@ -784,7 +843,7 @@ class HesitatingState(ConversationState):
         self.generated_text = None
 
     def on_enter(self):
-        logging.info("STATE: [Hesitating] 눈치 보는 중... (복구 멘트 생성 시작)")
+        logging.info("--- STATE: [Hesitating] 눈치 보는 중... ---")
         self.start_time = time.time()
         
         # 1. LLM에 "네?" 같은 복구 멘트 생성 요청
@@ -819,10 +878,10 @@ class HesitatingState(ConversationState):
         
         if elapsed > 2.0:
             if self.has_llm_result:
-                # 멘트가 준비됐으면 -> Speaking으로 넘어가서 말함
-                # 이때 History에 추가할지 말지는 정책 결정 (여기선 안 함)
+                # 멘트가 준비됐으면 -> SpeakingState로 전환
                 logging.info("⏳ 침묵 지속 -> 복구 멘트 발화")
-                
+
+                self.engine.history_manager.add_message({"role": "assistant", "content": self.generated_text, "type": "message"})
                 return ThinkingState(self.engine, pre_generated_text=self.generated_text)
             
             elif elapsed > 10.0:
@@ -840,7 +899,7 @@ class HesitatingState(ConversationState):
 class ThinkingState(ConversationState):
     """
     LLM 생성 ~ TTS 버퍼링 ~ 재생 시작 직전까지.
-    끼어들기 불가 (VAD 무시)
+    끼어들기 가능
     """
     def __init__(self, engine, query_text=None, pre_generated_text=None):
         super().__init__(engine)
@@ -850,7 +909,7 @@ class ThinkingState(ConversationState):
         self.led_task = None
 
     def on_enter(self):
-        logging.info("STATE: [Thinking] 답변 생성 및 준비")
+        logging.info("--- STATE: [Thinking] 답변 생성 중... ---")
         if self.pre_generated_text:
             # 1. 이미 텍스트가 있으면 LLM 생략하고 바로 TTS
             logging.info(f"🚀 미리 생성된 텍스트 사용: {self.pre_generated_text}")
@@ -860,11 +919,18 @@ class ThinkingState(ConversationState):
         else:
             if self.engine.main_loop:
                 # LED: Thinking Effect On
-                self.led_task = self.engine.main_loop.create_task(run_thinking_led_spin(233, 233, 50))
+                self.led_task = self.engine.main_loop.create_task(run_scanning_led_bar(233, 233, 50))
             self.engine.llm_manager.request_generation(self.query_text)
 
     def update(self, chunk):
-        # 오디오 청크 무시 (인터럽션 불가)
+        # 끼어들기 감지
+        if chunk is not None:
+            self.engine.stt_pre_buffer.append(chunk) # 버퍼링 추가
+            if self.engine.vad_processor.process(chunk):
+                logging.info("⚡ Thinking 중 끼어들기 발생!")
+                self.engine.tts_manager.stop()
+                self.engine.llm_manager.cancel()
+                return ListeningState(self.engine, is_interruption=True)
 
         if self.step == "LLM":
             try:
@@ -910,11 +976,12 @@ class SpeakingState(ConversationState):
     def __init__(self, engine, post_action=None):
         super().__init__(engine)
         self.post_action = post_action
+        self.speaking_mode = "NORMAL" # NORMAL | MUSIC
     
     def on_enter(self):
-        logging.info("STATE: [Speaking] 발화 중...")
-        # LED: 발화 중 이펙트
-        led_set_ring(50, 50, 233)
+        logging.info("--- STATE: [Speaking] 발화 중... ---")
+        # LED: 발화 중 이펙트 (Bar/Ring Yellow)
+        led_set_dual((233, 233, 50), (233, 233, 50))
         self.engine.vad_processor.reset()
         self.engine.robot_finished_speaking = False
 
@@ -923,8 +990,9 @@ class SpeakingState(ConversationState):
         if chunk is not None:
             self.engine.stt_pre_buffer.append(chunk) # 버퍼링 추가
             if self.engine.vad_processor.process(chunk):
-                logging.info("⚡ 끼어들기 발생!")
+                logging.info("⚡ Speaking 중 끼어들기 발생!")
                 self.engine.tts_manager.stop()
+                self.engine.history_manager.add_message({"role": "system", "content": "끼어들기 감지. 발화 중단.", "type": "message"})
                 return ListeningState(self.engine, is_interruption=True)
 
         # 2. 로봇 동작 종료 확인 (C++ 시그널)
@@ -933,8 +1001,10 @@ class SpeakingState(ConversationState):
             self.engine.robot_finished_speaking = False
 
             # 후속 액션(노래)이 있다면 처리
-            if self.post_action:
-                return self._handle_post_action()
+            if self.post_action and self.speaking_mode == "NORMAL":
+                self._handle_post_action()
+                self.speaking_mode = "MUSIC"
+                return None # 음악 재생 중에는 계속 이 상태 유지
             
             return IdleState(self.engine)
 
@@ -960,10 +1030,6 @@ class SpeakingState(ConversationState):
                     self.engine.main_loop
                 )
             logging.info(f"🚀 음악 재생 명령 전송: {audio_name}")
-
-        # 3. 노래를 틀었으니 대기로 복귀
-        # (만약 노래 끝날 때까지 기다려야 한다면 'MusicPlayingState' 같은 상태 필요)
-        return IdleState(self.engine)
 
     def on_exit(self):
         pass

@@ -14,8 +14,8 @@ if not OPENAI_API_KEY:
 TTS_MODEL = "gpt-4o-mini-tts"
 VOICE = "coral"
 REALTIME_MODEL = "gpt-4o-mini-realtime-preview"
-# REALTIME_MODEL = "gpt-realtime-mini"
-RESPONSES_MODEL = "gpt-5.1"
+RESPONSES_MODEL = "gpt-4.1-mini"
+SUMMARY_MODEL = "gpt-4.1-mini"
 RESPONSES_PRESETS = {
     "gpt-5.1": {
         "model": "gpt-5.1",
@@ -24,6 +24,11 @@ RESPONSES_PRESETS = {
     },
     "gpt-5-mini": {
         "model": "gpt-5-mini",
+        "reasoning": {"effort": "low"},
+        "text": {"verbosity": "low"},
+    },
+    "gpt-5-nano": {
+        "model": "gpt-5-nano",
         "reasoning": {"effort": "low"},
         "text": {"verbosity": "low"},
     },
@@ -61,7 +66,7 @@ AUDIO_CONFIG = {
 # --- 키워드 및 타임아웃 설정 ---
 START_KEYWORD = "레이"
 END_KEYWORDS = ["종료", "쉬어"]
-ACTIVE_SESSION_TIMEOUT = 120.0 # 사용자 응답 없이 Active 모드가 유지되는 최대 시간 (초)
+ACTIVE_SESSION_TIMEOUT = 30.0 # 사용자 응답 없이 Active 모드가 유지되는 최대 시간 (초)
 
 # --- Smart Turn 모델 설정 ---
 SMART_TURN_MODEL_PATH = "smart-turn-v3.0.onnx"
