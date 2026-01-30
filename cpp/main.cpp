@@ -1666,220 +1666,340 @@ void initialize_robot_posture() {
         }
     }
     
-    // =============================
-    // Mouth 조정 (ΔI_raw(LSB) 기반 + MAD 자동 임계값 학습)
-    // - 목적: 초기 캘리브레이션 단계에서 "전류 급변" 감지 시 즉시 멈춤(Backoff)
-    // =============================
 
-//     DataLogger MouthLogger;
-
-//     std::string log_dir = create_log_directory("output/cail_log/");
-//     auto log_start_time = std::chrono::high_resolution_clock::now();
-//     MouthLogger.start(log_start_time, log_dir);
-
-//     // =============================
-//     // Mouth 조정 (ΔI_raw(LSB) 기반 + MAD 자동 임계값 학습)
-//     // - 목적: 초기 캘리브레이션 단계에서 "전류 급변" 감지 시 즉시 멈춤(Backoff)
-//     // - present position 읽기 기능 없이(goal 기반) 동작
-//     // =============================
-
-//     std::cout << "Mouth 조정 (delta-current LSB + MAD auto threshold)" << std::endl;
-
-//     std::filesystem::create_directories("data");
-//     std::ofstream logf("data/log_only_mouth.csv", std::ios::out | std::ios::trunc);
-//     if (!logf.is_open()) {
-//         std::cerr << "CSV 열기 실패: data/log_only_mouth.csv\n";
-//         return;
-//     }
-//     logf.setf(std::ios::unitbuf);
-//     logf << "t_ms,goal_tick,present_tick,raw_current_LSB,current_mA,delta_raw_LSB,delta_mA,thr_raw_LSB\n";
-
-
-
-//     // ---- 설정값 ----
-//     const float mA_per_LSB   = 2.69f;
-//     const int   N_CUR        = 3;
-//     const int   CUR_DELAY_MS = 10;
-//     const int   SETTLE_MS    = 30;
-//     const int   MAX_STEPS    = 600;
-
-//     const int   MOUTH_STEP_TICK    = 3;
-//     const int   MOUTH_BACKOFF_TICK = 15;
-
-//     // 자동학습 파라미터
-//     const int   LEARN_STEPS      = 25;
-//     const float THR_MAD_K        = 8.0f;   // 6~10 권장
-//     const int   THR_MIN_RAW_LSB  = 2;
-//     const int   THR_MAX_RAW_LSB  = 20;
-
-//     // 연속 조건
-//     const int   HIT_COUNT = 1;
-
-//     // ---- 전류 raw(LSB) 읽기 (평균) ----
-//   // ---- 전류 raw(LSB) + present position 읽기 (평균) ----
-// std::vector<MotorState> current_state(DXL_NUM);
-
-// // out_pos: mouth present position tick을 돌려줌
-// auto read_mouth_current_raw = [&](int& out_pos) -> int {
-//     long sum_curr = 0;
-//     long sum_pos  = 0;
-//     int got = 0;
-
-//     for (int k = 0; k < N_CUR; k++) {
-//         if (dxl_driver->readAllState(current_state)) {
-//             // mouth index 4
-//             sum_curr += current_state[4].current;
-//             sum_pos  += current_state[4].position;   // ✅ present position 같이 누적
-//             got++;
-//         }
-//         delay(CUR_DELAY_MS);
-//     }
-
-//     if (got == 0) {
-//         out_pos = 0;
-//         return 0;
-//     }
-
-//     out_pos = (int)std::lround((double)sum_pos / (double)got);
-//     return (int)std::lround((double)sum_curr / (double)got);
-// };
-
-// // ---- median / MAD 유틸 ----
-// auto median_int = [](std::vector<int> v) -> int {
-//     if (v.empty()) return 0;
-//     size_t mid = v.size() / 2;
-//     std::nth_element(v.begin(), v.begin() + mid, v.end());
-//     int m = v[mid];
-//     if (v.size() % 2 == 0) {
-//         std::nth_element(v.begin(), v.begin() + mid - 1, v.end());
-//         m = (m + v[mid - 1]) / 2;
-//     }
-//     return m;
-// };
-
-// auto mad_int = [&](const std::vector<int>& v, int med) -> int {
-//     std::vector<int> dev;
-//     dev.reserve(v.size());
-//     for (int x : v) dev.push_back(std::abs(x - med));
-//     return median_int(std::move(dev));
-// };
-
-// // ---- 초기값 ----
-// int prev_pos = 0;
-// int prev_raw = read_mouth_current_raw(prev_pos);
-
-// int thr_raw  = THR_MIN_RAW_LSB;
-// int hit      = 0;
-
-// // ---- 1) 임계값 자동 학습 ----
-// std::vector<int> deltas;
-// deltas.reserve(LEARN_STEPS);
-
-// for (int i = 0; i < LEARN_STEPS; i++) {
-//     target_position[4] -= MOUTH_STEP_TICK;
-//     dxl_driver->writeGoalPosition(target_position);
-//     delay(SETTLE_MS);
-
-//     int cur_pos = 0;
-//     int cur_raw = read_mouth_current_raw(cur_pos);
-
-//     int d_raw   = std::abs(cur_raw - prev_raw);
-//     deltas.push_back(d_raw);
-
-//     float cur_mA = cur_raw * mA_per_LSB;
-//     float d_mA   = d_raw   * mA_per_LSB;
-
-//     // ✅ 로그 포맷 변경: present position(cur_pos) 추가
-//     // 예: t_ms,goal_pos,present_pos,cur_raw,cur_mA,d_raw,d_mA,thr_raw
-//     logf << millis() << "," << target_position[4] << ","
-//          << cur_pos << ","
-//          << cur_raw << "," << cur_mA << ","
-//          << d_raw << "," << d_mA << ","
-//          << -1 << "\n";
-
-//     prev_raw = cur_raw;
-//     prev_pos = cur_pos;
-// }
-
-
-//     // MAD 기반 임계값
-//     int med = median_int(deltas);
-//     int mad = mad_int(deltas, med);
-
-//     int auto_thr = (int)std::ceil((double)med + (double)THR_MAD_K * (double)mad);
-//     thr_raw = std::max(auto_thr, THR_MIN_RAW_LSB);
-//     thr_raw = std::min(thr_raw, THR_MAX_RAW_LSB);
-
-//     std::cout << "[Mouth] learned thr_raw=" << thr_raw
-//             << " (median=" << med << ", mad=" << mad << ")\n";
-
-//     // ---- 2) 본 탐색 ----
-//    // ---- 2) 본 탐색 ----
-// mouth_adjust_flag = false;
-// hit = 0;
-
-// // (선택) 본 탐색 시작 전에 prev_raw/prev_pos를 최신으로 한 번 갱신해도 안정적임
-// // int tmp_pos = 0;
-// // prev_raw = read_mouth_current_raw(tmp_pos);
-// // prev_pos = tmp_pos;
-
-// for (int step = 0; step < MAX_STEPS && !mouth_adjust_flag; step++) {
-//     target_position[4] -= MOUTH_STEP_TICK;
-//     dxl_driver->writeGoalPosition(target_position);
-//     delay(SETTLE_MS);
-
-//     int cur_pos = 0;
-//     int cur_raw = read_mouth_current_raw(cur_pos);   // ✅ 인자 있는 호출로 수정
-//     int d_raw   = std::abs(cur_raw - prev_raw);
-
-//     float cur_mA = cur_raw * mA_per_LSB;
-//     float d_mA   = d_raw   * mA_per_LSB;
-
-//     // ✅ 학습 구간과 동일 포맷 유지:
-//     // t_ms,goal_pos,present_pos,cur_raw,cur_mA,d_raw,d_mA,thr_raw
-//     logf << millis() << "," << target_position[4] << ","
-//          << cur_pos << ","
-//          << cur_raw << "," << cur_mA << ","
-//          << d_raw << "," << d_mA << ","
-//          << thr_raw << "\n";
-
-//     if (d_raw >= thr_raw) hit++;
-//     else hit = 0;
-
-//     if (hit >= HIT_COUNT) {
-//         // ✅ (선택1) 기존 방식: goal 기준 backoff
-//         target_position[4] += MOUTH_BACKOFF_TICK;
-//         dxl_driver->writeGoalPosition(target_position);
-//         delay(150);
-
-//         // ✅ (선택2) present 기준 backoff를 하고 싶으면(정확도↑) 아래로 교체 가능
-//         // int backoff_goal = cur_pos + MOUTH_BACKOFF_TICK;
-//         // target_position[4] = backoff_goal;
-//         // dxl_driver->writeGoalPosition(target_position);
-//         // delay(150);
-
-//         mouth_adjust_flag = true;
-//         break;
-//     }
-
-//     prev_raw = cur_raw;
-//     prev_pos = cur_pos;  // ✅ 같이 갱신
-// }
-
-
-//     logf.flush();
-//     logf.close();
-
-    // 결과 저장
     g_home.home_pitch  = target_position[0];
     g_home.home_roll_r = target_position[1];
     g_home.home_roll_l = target_position[2];
     g_home.home_yaw    = target_position[3];
-    // g_home.home_mouth  = target_position[4];
+    g_home.home_mouth  = target_position[4];
 
     finish_adjust_ready = true;
 
 }
+
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <algorithm>
+
+// 퍼센트 100% 전용 hysteresis 실험 + median/MAD + linear fitting
+// - BASE(3100) → FULL_MIN(2700) 방향으로 1 tick씩 이동
+// - Δcurrent 기반 median+MAD 로 tension onset 감지
+// - onset 지점 기준으로 뒤로 40개 샘플로 (present_tick, current) 선형 회귀
+// - baseline(current)과의 교점 tick을 구하고, 거기서 +100 tick backoff
+// - 로그 포맷은 기존 hysteresis와 동일:
+//   percent,t_ms,goal_tick,present_tick,present_load
+void runMouthHysteresisMedianFit(DynamixelDriver* dxl_driver, int mouth_index, int loop_dt_ms, const std::string& log_dir)
+ {
+    // ---- 기본 설정 ----
+    const int   DEFAULT_DT_MS   = 20;
+    const int   dt_ms           = (loop_dt_ms > 0) ? loop_dt_ms : DEFAULT_DT_MS;
+
+    const int   BASE_TICK       = 3100;
+    const int   FULL_MIN_TICK   = 2700;
+    const int   FULL_STROKE     = BASE_TICK - FULL_MIN_TICK; // 400 근처
+
+    const int   PERCENT         = 100; // 이 함수는 100%만
+
+    // MAD 기반 Δcurrent threshold 파라미터
+    const int   LEARN_STEPS     = 25;     // 초기 25 step은 학습용
+    const float THR_MAD_K       = 8.0f;
+    const int   THR_MIN_RAW     = 2;
+    const int   THR_MAX_RAW     = 20;
+    const int   HIT_COUNT       = 1;
+
+    const int   FIT_SAMPLES     = 15;     // onset 기준 뒤로 20개
+    const int   BASELINE_SAMPLES= 25;     // baseline 전류 계산용 샘플 수
+    const int   BACKOFF_TICK    = 70;    // 교점 기준 backoff 크기
+
+    const float mA_per_LSB      = 2.69f;
+
+    // ---- 현재 상태 읽기 ----
+    std::vector<MotorState> states(5);
+    if (!dxl_driver->readAllState(states)) {
+        std::cerr << "[HystFit] readAllState failed (init)\n";
+        return;
+    }
+
+    // 다른 모터는 고정, mouth만 제어
+    std::vector<int32_t> target_position(5);
+    for (int i = 0; i < 5; ++i)
+        target_position[i] = states[i].position;
+
+    // BASE 위치로 명확히 맞추고 시작
+    target_position[mouth_index] = BASE_TICK;
+    dxl_driver->writeGoalPosition(target_position);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    if (!dxl_driver->readAllState(states)) {
+        std::cerr << "[HystFit] readAllState failed (after BASE set)\n";
+        return;
+    }
+
+    int32_t present_start = states[mouth_index].position;
+    std::cout << "[HystFit] start present tick = " << present_start << "\n";
+
+    // ---- CSV 파일 열기 ----
+    std::filesystem::create_directories(log_dir);
+    std::ostringstream oss;
+    oss << log_dir << "/mouth_hyst_100_mfit.csv";
+    std::ofstream logf(oss.str());
+    if (!logf.is_open()) {
+        std::cerr << "[HystFit] failed to open " << oss.str() << "\n";
+        return;
+    }
+
+    logf << "percent,t_ms,goal_tick,present_tick,present_load\n";
+    logf << std::fixed << std::setprecision(3);
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    // ---- 히스토리 저장 (회귀/threshold용) ----
+    std::vector<int32_t> hist_goal;
+    std::vector<int32_t> hist_present;
+    std::vector<int>     hist_current;   // raw LSB
+    std::vector<int>     hist_delta;     // |Δcurrent|
+
+    hist_goal.reserve(1000);
+    hist_present.reserve(1000);
+    hist_current.reserve(1000);
+    hist_delta.reserve(1000);
+
+    // ---- Δcurrent threshold 학습용 초기값 ----
+    if (!dxl_driver->readAllState(states)) {
+        std::cerr << "[HystFit] readAllState failed (before loop)\n";
+        return;
+    }
+    int prev_raw = states[mouth_index].current;
+
+    // ---- 내려가기 (BASE -> FULL_MIN_TICK, 중간에 median 로직으로 멈춤) ----
+    int32_t goal = BASE_TICK;
+    int    step  = 0;
+
+    int    thr_raw        = THR_MIN_RAW;
+    bool   thr_learned    = false;
+    bool   tension_detect = false;
+    int    onset_index    = -1;
+
+    while (goal >= FULL_MIN_TICK) {
+        // 목표 위치 갱신
+        target_position[mouth_index] = goal;
+        dxl_driver->writeGoalPosition(target_position);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(dt_ms));
+        if (!dxl_driver->readAllState(states)) {
+            std::cerr << "[HystFit] readAllState failed (loop)\n";
+            break;
+        }
+
+        auto   now   = std::chrono::high_resolution_clock::now();
+        double t_ms  = std::chrono::duration<double, std::milli>(now - t0).count();
+        int32_t pres = states[mouth_index].position;
+        int     cur  = states[mouth_index].current;
+        int     draw = std::abs(cur - prev_raw);
+
+        // 히스토리 저장
+        hist_goal.push_back(goal);
+        hist_present.push_back(pres);
+        hist_current.push_back(cur);
+        hist_delta.push_back(draw);
+
+        // CSV 로깅 (기존 포맷 유지)
+        logf << PERCENT << ","
+             << t_ms << ","
+             << goal << ","
+             << pres << ","
+             << cur  << "\n";
+
+        // ---- MAD 기반 임계값 학습 ----
+        if (step < LEARN_STEPS) {
+            if (step == LEARN_STEPS - 1) {
+                // median / MAD from 초기 LEARN_STEPS 개의 Δcurrent
+                std::vector<int> deltas(hist_delta.begin(),
+                                        hist_delta.begin() + LEARN_STEPS);
+
+                auto median_int = [](std::vector<int> v) -> int {
+                    if (v.empty()) return 0;
+                    size_t mid = v.size() / 2;
+                    std::nth_element(v.begin(), v.begin() + mid, v.end());
+                    int m = v[mid];
+                    if (v.size() % 2 == 0) {
+                        std::nth_element(v.begin(), v.begin() + mid - 1, v.end());
+                        m = (m + v[mid - 1]) / 2;
+                    }
+                    return m;
+                };
+
+                auto mad_int = [&](const std::vector<int>& v, int med) -> int {
+                    std::vector<int> dev;
+                    dev.reserve(v.size());
+                    for (int x : v) dev.push_back(std::abs(x - med));
+                    return median_int(std::move(dev));
+                };
+
+                int med = median_int(deltas);
+                int mad = mad_int(deltas, med);
+                int auto_thr = (int)std::ceil(med + THR_MAD_K * mad);
+                thr_raw = std::max(THR_MIN_RAW, std::min(auto_thr, THR_MAX_RAW));
+                thr_learned = true;
+
+                std::cout << "[HystFit] learned thr_raw=" << thr_raw
+                          << " (median=" << med << ", mad=" << mad << ")\n";
+            }
+        } else if (thr_learned) {
+            // ---- 감지 구간: Δcurrent >= thr_raw 가 나오면 onset ----
+            static int hit = 0;
+            if (draw >= thr_raw) hit++;
+            else hit = 0;
+
+            if (hit >= HIT_COUNT) {
+                tension_detect = true;
+                onset_index    = step;
+                std::cout << "[HystFit] tension onset at step=" << step
+                          << ", goal=" << goal
+                          << ", present=" << pres
+                          << ", d_raw=" << draw << "\n";
+                break;
+            }
+        }
+
+        prev_raw = cur;
+        goal    -= 1;    // 1 tick씩 내려감
+        step++;
+    }
+
+    // ⚠️ 여기서 logf.close() 하지 말고, 끝까지 열어둔다.
+    // logf.flush();
+    // logf.close();
+
+    // tension 감지 못하면 그냥 FULL_MIN까지 간 걸로 취급
+    if (!tension_detect) {
+        onset_index = (int)hist_goal.size() - 1;
+        std::cout << "[HystFit] NO clear onset, onset_index fallback = "
+                  << onset_index << "\n";
+    }
+
+    if (onset_index <= 0) {
+        std::cerr << "[HystFit] onset_index invalid: " << onset_index << "\n";
+        logf.flush();
+        logf.close();
+        return;
+    }
+
+    // ---- baseline current 계산 (초기 BASELINE_SAMPLES 구간) ----
+    int baseline_samples = std::min(BASELINE_SAMPLES, (int)hist_current.size());
+    std::vector<int> base_vec(hist_current.begin(),
+                              hist_current.begin() + baseline_samples);
+
+    auto median_int_simple = [](std::vector<int> v) -> int {
+        if (v.empty()) return 0;
+        size_t mid = v.size() / 2;
+        std::nth_element(v.begin(), v.begin() + mid, v.end());
+        int m = v[mid];
+        if (v.size() % 2 == 0) {
+            std::nth_element(v.begin(), v.begin() + mid - 1, v.end());
+            m = (m + v[mid - 1]) / 2;
+        }
+        return m;
+    };
+
+    int baseline_curr = median_int_simple(base_vec);  // LSB 기준 baseline
+
+    // ---- onset 기준 뒤로 40개로 선형 회귀 (x=present_tick, y=current_LSB) ----
+    int fit_end   = onset_index;
+    int fit_start = std::max(0, onset_index - FIT_SAMPLES + 1);
+    int fit_n     = fit_end - fit_start + 1;
+
+    if (fit_n < 2) {
+        std::cerr << "[HystFit] not enough points for linear fit (n=" << fit_n << ")\n";
+        logf.flush();
+        logf.close();
+        return;
+    }
+
+    double sum_x  = 0.0;
+    double sum_y  = 0.0;
+    double sum_xy = 0.0;
+    double sum_x2 = 0.0;
+
+    for (int i = fit_start; i <= fit_end; ++i) {
+        double x = (double)hist_present[i];
+        double y = (double)hist_current[i];
+        sum_x  += x;
+        sum_y  += y;
+        sum_xy += x * y;
+        sum_x2 += x * x;
+    }
+
+    double n    = (double)fit_n;
+    double denom = (n * sum_x2 - sum_x * sum_x);
+
+    if (std::abs(denom) < 1e-6) {
+        std::cerr << "[HystFit] linear fit denom too small\n";
+        logf.flush();
+        logf.close();
+        return;
+    }
+
+    double a = (n * sum_xy - sum_x * sum_y) / denom;      // slope
+    double b = (sum_y - a * sum_x) / n;                   // intercept
+
+    // baseline과의 교점: baseline_curr = a * x + b → x = (baseline_curr - b)/a
+    if (std::abs(a) < 1e-6) {
+        std::cerr << "[HystFit] slope ~ 0, cannot find intersection\n";
+        logf.flush();
+        logf.close();
+        return;
+    }
+
+    double x_cross = ((double)baseline_curr - b) / a;     // tick 단위 교점
+    int    cross_tick = (int)std::lround(x_cross);
+
+    // 교점에서 BACKOFF_TICK 만큼 present tick 증가 (닫히는 방향)
+    int final_tick = cross_tick + BACKOFF_TICK;
+
+    // 안전하게 범위 클램프
+    if (final_tick > BASE_TICK)      final_tick = BASE_TICK;
+    if (final_tick < FULL_MIN_TICK)  final_tick = FULL_MIN_TICK;
+
+    std::cout << "[HystFit] baseline_curr=" << baseline_curr
+              << ", a=" << a << ", b=" << b
+              << ", cross_tick=" << cross_tick
+              << ", final_tick=" << final_tick << "\n";
+
+    // ---- 최종 목표 tick으로 이동 ----
+    target_position[mouth_index] = final_tick;
+    dxl_driver->writeGoalPosition(target_position);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // ✅ 여기서 "최종 present position"을 한 번 더 로깅한다
+    if (dxl_driver->readAllState(states)) {
+        auto   now2   = std::chrono::high_resolution_clock::now();
+        double t_ms2  = std::chrono::duration<double, std::milli>(now2 - t0).count();
+        int32_t pres2 = states[mouth_index].position;
+        int     cur2  = states[mouth_index].current;
+
+        // percent=100 그대로 쓰되, 마지막 상태를 한 번 더 기록
+        logf << PERCENT << ","
+             << t_ms2 << ","
+             << final_tick << ","
+             << pres2 << ","
+             << cur2  << "\n";
+    }
+
+    // ---- CSV 닫기 ----
+    logf.flush();
+    logf.close();
+
+    // ---- Ctrl+클릭 가능한 절대경로 출력 ----
+    try {
+        std::filesystem::path abs_path = std::filesystem::absolute(oss.str());
+        std::cout << "[HystFit] log saved: " << abs_path.string() << std::endl;
+    } catch (...) {
+        std::cout << "[HystFit] log saved: " << oss.str() << std::endl;
+    }
+}
+
 
 void cleanup_dynamixel() {
     #ifdef MOTOR_ENABLED
@@ -2144,142 +2264,122 @@ void robot_main_loop(std::future<void> server_ready_future) {
         is_speaking = false;
     }
 }
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <thread>
-#include <chrono>
-#include <iomanip>
-#include <cmath>
-#include <filesystem>
-#include <sstream>
 
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <thread>
-#include <chrono>
-#include <iomanip>
-#include <cmath>
-#include <filesystem>
-#include <sstream>
 
 // 퍼센트별 hysteresis(이력곡선) 실험
 //  - 1 tick씩 연속 구동
 //  - BASE(883) -> percent별 min tick -> BASE
 //  - percent 하나당 CSV 하나 생성
 //  - CSV 경로를 절대경로로 출력 (Ctrl+클릭 가능)
-void runMouthHysteresisByPercent(DynamixelDriver* dxl_driver,
-                                 int mouth_index,
-                                 int loop_dt_ms,
-                                 const std::string& log_dir)
-{
-    const int DEFAULT_DT_MS = 20;
-    const int dt_ms = (loop_dt_ms > 0) ? loop_dt_ms : DEFAULT_DT_MS;
 
-    const int BASE_TICK     = 3100;
-    const int FULL_MIN_TICK = 2700;
-    const int FULL_STROKE   = BASE_TICK - FULL_MIN_TICK; // 380
+// void runMouthHysteresisByPercent(DynamixelDriver* dxl_driver, int mouth_index, int loop_dt_ms, const std::string& log_dir)
+// {
+//     const int DEFAULT_DT_MS = 20;
+//     const int dt_ms = (loop_dt_ms > 0) ? loop_dt_ms : DEFAULT_DT_MS;
 
-    // 퍼센트 목록
-    const std::vector<int> PERCENTS = {100, 85, 60, 45, 30, 15};
+//     const int BASE_TICK     = 3100;
+//     const int FULL_MIN_TICK = 2700;
+//     const int FULL_STROKE   = BASE_TICK - FULL_MIN_TICK; // 380
 
-    std::vector<MotorState> states(5);
+//     // 퍼센트 목록
+//     const std::vector<int> PERCENTS = {100, 85, 60, 45, 30, 15};
 
-    if (!dxl_driver->readAllState(states)) {
-        std::cerr << "[Hyst] readAllState failed (init)\n";
-        return;
-    }
+//     std::vector<MotorState> states(5);
 
-    // 다른 모터는 고정, mouth만 제어
-    std::vector<int32_t> target_position(5);
-    for (int i = 0; i < 5; ++i)
-        target_position[i] = states[i].position;
+//     if (!dxl_driver->readAllState(states)) {
+//         std::cerr << "[Hyst] readAllState failed (init)\n";
+//         return;
+//     }
 
-    auto t0 = std::chrono::high_resolution_clock::now();
+//     // 다른 모터는 고정, mouth만 제어
+//     std::vector<int32_t> target_position(5);
+//     for (int i = 0; i < 5; ++i)
+//         target_position[i] = states[i].position;
 
-    for (int percent : PERCENTS) {
-        // ---- CSV 파일 열기 ----
-        std::ostringstream oss;
-        oss << log_dir << "/mouth_hyst_" << percent << ".csv";
-        std::ofstream logf(oss.str());
+//     auto t0 = std::chrono::high_resolution_clock::now();
 
-        if (!logf.is_open()) {
-            std::cerr << "[Hyst] failed to open " << oss.str() << "\n";
-            continue;
-        }
+//     for (int percent : PERCENTS) {
+//         // ---- CSV 파일 열기 ----
+//         std::ostringstream oss;
+//         oss << log_dir << "/mouth_hyst_" << percent << ".csv";
+//         std::ofstream logf(oss.str());
 
-        logf << "percent,t_ms,goal_tick,present_tick,present_load\n";
-        logf << std::fixed << std::setprecision(3);
+//         if (!logf.is_open()) {
+//             std::cerr << "[Hyst] failed to open " << oss.str() << "\n";
+//             continue;
+//         }
 
-        // ---- 퍼센트에 따른 min tick 계산 ----
-        int stroke   = static_cast<int>(std::round(FULL_STROKE * percent / 100.0));
-        int min_tick = BASE_TICK - stroke;
-        if (min_tick < FULL_MIN_TICK)
-            min_tick = FULL_MIN_TICK;
+//         logf << "percent,t_ms,goal_tick,present_tick,present_load\n";
+//         logf << std::fixed << std::setprecision(3);
 
-        int32_t goal = BASE_TICK;
+//         // ---- 퍼센트에 따른 min tick 계산 ----
+//         int stroke   = static_cast<int>(std::round(FULL_STROKE * percent / 100.0));
+//         int min_tick = BASE_TICK - stroke;
+//         if (min_tick < FULL_MIN_TICK)
+//             min_tick = FULL_MIN_TICK;
 
-        // 시작 위치 명확히 맞추기
-        target_position[mouth_index] = goal;
-        dxl_driver->writeGoalPosition(target_position);
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+//         int32_t goal = BASE_TICK;
 
-        // ---- 내려가기 (BASE -> min) ----
-        while (goal >= min_tick) {
-            target_position[mouth_index] = goal;
-            dxl_driver->writeGoalPosition(target_position);
+//         // 시작 위치 명확히 맞추기
+//         target_position[mouth_index] = goal;
+//         dxl_driver->writeGoalPosition(target_position);
+//         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(dt_ms));
-            dxl_driver->readAllState(states);
+//         // ---- 내려가기 (BASE -> min) ----
+//         while (goal >= min_tick) {
+//             target_position[mouth_index] = goal;
+//             dxl_driver->writeGoalPosition(target_position);
 
-            auto now = std::chrono::high_resolution_clock::now();
-            double t_ms = std::chrono::duration<double, std::milli>(now - t0).count();
+//             std::this_thread::sleep_for(std::chrono::milliseconds(dt_ms));
+//             dxl_driver->readAllState(states);
 
-            logf << percent << ","
-                 << t_ms << ","
-                 << goal << ","
-                 << states[mouth_index].position << ","
-                 << states[mouth_index].current << "\n";
+//             auto now = std::chrono::high_resolution_clock::now();
+//             double t_ms = std::chrono::duration<double, std::milli>(now - t0).count();
 
-            goal -= 1;
-        }
+//             logf << percent << ","
+//                  << t_ms << ","
+//                  << goal << ","
+//                  << states[mouth_index].position << ","
+//                  << states[mouth_index].current << "\n";
 
-        if (goal < min_tick)
-            goal = min_tick;
+//             goal -= 1;
+//         }
 
-        // ---- 올라오기 (min -> BASE) ----
-        while (goal <= BASE_TICK) {
-            target_position[mouth_index] = goal;
-            dxl_driver->writeGoalPosition(target_position);
+//         if (goal < min_tick)
+//             goal = min_tick;
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(dt_ms));
-            dxl_driver->readAllState(states);
+//         // ---- 올라오기 (min -> BASE) ----
+//         while (goal <= BASE_TICK) {
+//             target_position[mouth_index] = goal;
+//             dxl_driver->writeGoalPosition(target_position);
 
-            auto now = std::chrono::high_resolution_clock::now();
-            double t_ms = std::chrono::duration<double, std::milli>(now - t0).count();
+//             std::this_thread::sleep_for(std::chrono::milliseconds(dt_ms));
+//             dxl_driver->readAllState(states);
 
-            logf << percent << ","
-                 << t_ms << ","
-                 << goal << ","
-                 << states[mouth_index].position << ","
-                 << states[mouth_index].current << "\n";
+//             auto now = std::chrono::high_resolution_clock::now();
+//             double t_ms = std::chrono::duration<double, std::milli>(now - t0).count();
 
-            goal += 1;
-        }
+//             logf << percent << ","
+//                  << t_ms << ","
+//                  << goal << ","
+//                  << states[mouth_index].position << ","
+//                  << states[mouth_index].current << "\n";
 
-        logf.flush();
-        logf.close();
+//             goal += 1;
+//         }
 
-        // ---- Ctrl+클릭 가능한 절대경로 출력 ----
-        try {
-            std::filesystem::path abs_path = std::filesystem::absolute(oss.str());
-            std::cout << "[Hyst] saved: " << abs_path.string() << std::endl;
-        } catch (...) {
-            std::cout << "[Hyst] saved: " << oss.str() << std::endl;
-        }
-    }
-}
+//         logf.flush();
+//         logf.close();
+
+//         // ---- Ctrl+클릭 가능한 절대경로 출력 ----
+//         try {
+//             std::filesystem::path abs_path = std::filesystem::absolute(oss.str());
+//             std::cout << "[Hyst] saved: " << abs_path.string() << std::endl;
+//         } catch (...) {
+//             std::cout << "[Hyst] saved: " << oss.str() << std::endl;
+//         }
+//     }
+// }
 
 
 int main() {
@@ -2321,24 +2421,28 @@ int main() {
     dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
     initialize_robot_posture();
     dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
-
-   
-    std::string log_dir = create_log_directory("output/cali_log");
+ 
+    runMouthHysteresisMedianFit(dxl_driver,
+                                /*mouth_index=*/4,
+                                /*loop_dt_ms=*/20,
+                                /*log_dir=*/"data");
+   return 0;
+    // std::string log_dir = create_log_directory("output/cali_log");
     // auto log_start_time = std::chrono::high_resolution_clock::now();
 
     // HighFreqLogger* mouth_logger = new HighFreqLogger(dxl_driver);
     // mouth_logger->start(log_start_time,log_dir);
 
-    const int LOOP_DT_MS = 20;
-    const int MOUTH_INDEX = 4;  // 네 프로젝트 기준 mouth 모터 인덱스
+    // const int LOOP_DT_MS = 20;
+    // const int MOUTH_INDEX = 4;  // mouth 모터 인덱스
 
-    runMouthHysteresisByPercent(
-        dxl_driver,   // DynamixelDriver*
-        MOUTH_INDEX,  // mouth_index
-        LOOP_DT_MS,   // loop_dt_ms
-        log_dir       // CSV 저장 디렉토리
-    );
-    std::cout << "[MAIN] Mouth hysteresis experiment finished.\n";
+    // runMouthHysteresisByPercent(
+    //     dxl_driver,   // DynamixelDriver*
+    //     MOUTH_INDEX,  // mouth_index
+    //     LOOP_DT_MS,   // loop_dt_ms
+    //     log_dir       // CSV 저장 디렉토리
+    // );
+    // std::cout << "[MAIN] Mouth hysteresis experiment finished.\n";
     
     // mouth_logger->stop();
 
@@ -2357,7 +2461,7 @@ int main() {
     // cleanup_dynamixel();
     // return 0;
     // ===== 테스트 코드 끝 =====
-    
+
 
 
     // 웹소켓 서버 준비
