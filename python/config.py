@@ -46,7 +46,7 @@ OUTPUT_LOG_DIR = OUTPUT_DIR / "logs"
 OUTPUT_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # 재생용 오디오 파일
-AWAKE_FILE = ASSETS_DIR / "audio" / f"awake_{VOICE}.wav"
+AWAKE_FILE = ASSETS_DIR / "audio" / "vocal.wav"
 SLEEP_FILE = ASSETS_DIR / "audio" / f"sleep_{VOICE}.wav"
 AWAKE_FILE_SCRIPT = "네, 부르셨어요?"
 SLEEP_FILE_SCRIPT = "다음에 또 불러주세요."

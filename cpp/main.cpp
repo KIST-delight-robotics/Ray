@@ -53,6 +53,8 @@ const std::string VOCAL_DIR = ASSETS_DIR + "/audio/vocal";
 const std::string SEGMENTS_DIR = DATA_DIR + "/segments";
 const std::string IDLE_MOTION_FILE = DATA_DIR + "/empty_10min.csv";
 
+const std::string AWAKE_VOCAL_FILE = VOCAL_DIR + "/vocal/wav";
+
 // 전역 변수 및 동기화 도구
 std::string vocal_file_path;
 
