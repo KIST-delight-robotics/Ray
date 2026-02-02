@@ -72,12 +72,6 @@ void save_audio_file(const std::string& filename, const float* audiodata, sf_cou
 
 std::pair<float, size_t> find_peak(const std::vector<float>& audio_buffer);
 
-float calculate_mouth(float env_01, float max_MOUTH, float min_MOUTH) {
-    // env_01: 0~1
-    return min_MOUTH + env_01 * (max_MOUTH - min_MOUTH);
-}
-
-
 void save_audio_segment(const std::string& outputFilePath, const std::vector<float>& audioData, size_t dataSize);
 
 std::vector<float> divide_channel(const std::vector<float>& audio_data, int channels, int frames);
@@ -137,6 +131,8 @@ struct MouthEnvARState {
     double env_prev;
     bool   talking;
 };
+
+float calculate_mouth(float up2mouth, float max_MOUTH, float min_MOUTH);
 
 // 초기화
 void initMouthEnvAR(MouthEnvARState& st,

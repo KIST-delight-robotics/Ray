@@ -10,7 +10,7 @@ is_time_based = true    # true: Time-based, false: Velocity-based
 operating_mode = 4      # 1: Velocity, 3: Position, 4: Extended Position, 16: PWM
 return_delay_time = 0
 
-profile_velocity_homing = 500   # 기기 부팅 시 초기 위치로 이동할 때 속도
+profile_velocity_homing = 2000   # 기기 부팅 시 초기 위치로 이동할 때 속도
 profile_velocity = 60
 profile_acceleration = 0
 
@@ -23,18 +23,18 @@ ff2_gain = [0, 0, 0, 0, 0]
 [robot]
 # 모터 초기 위치
 # 1호기
-# default_pitch   = 1410
-# default_roll_r  = 900
-# default_roll_l  = 1300
-# default_yaw     = 1000
-# default_mouth   = 4000
+default_pitch   = 3480      #before default_pitch:  1410
+default_roll_r  = 1985      #before default_roll_r: 900
+default_roll_l  = 1370      #before default_roll_l: 1300
+default_yaw     = 1000      #before default_yaw:    1000
+default_mouth   = 3100      #before default_mouth:  4000
 
 # 2호기
-default_pitch   = 1186
-default_roll_r  = 2933
-default_roll_l  = 4040
-default_yaw     = 2085
-default_mouth   = 2211
+#default_pitch   = 1186
+#default_roll_r  = 2933
+#default_roll_l  = 4040
+#default_yaw     = 2085
+#default_mouth   = 2211
 
 #robot parameter
 pulley_diameter = 40
