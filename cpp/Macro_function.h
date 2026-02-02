@@ -72,7 +72,11 @@ void save_audio_file(const std::string& filename, const float* audiodata, sf_cou
 
 std::pair<float, size_t> find_peak(const std::vector<float>& audio_buffer);
 
-float calculate_mouth(float up2mouth, float max_MOUTH, float min_MOUTH);
+float calculate_mouth(float env_01, float max_MOUTH, float min_MOUTH) {
+    // env_01: 0~1
+    return min_MOUTH + env_01 * (max_MOUTH - min_MOUTH);
+}
+
 
 void save_audio_segment(const std::string& outputFilePath, const std::vector<float>& audioData, size_t dataSize);
 
@@ -114,3 +118,35 @@ float AM_fun(float min_open, float B, float r_k, float r_k_1, float r_k_2, float
 
 std::tuple<float, float, float> lin_fit_fun2(float S, float X_pre, float grad_up_pre, float grad_down_pre, float del_grad, float dt);
 
+// === Mouth Attack-Release Envelope 상태 ===
+struct MouthEnvARState {
+    double fs;
+    double hpf_fc;
+    double attack_ms;
+    double release_ms;
+    double T_open;
+    double T_close;
+    double gain;
+
+    double a_hpf;
+    double a_att;
+    double a_rel;
+
+    double prev_x;
+    double prev_y;
+    double env_prev;
+    bool   talking;
+};
+
+// 초기화
+void initMouthEnvAR(MouthEnvARState& st,
+                    double fs,
+                    double hpf_fc    = 90.0,
+                    double attack_ms = 20.0,
+                    double release_ms= 120.0,
+                    double T_open    = 0.03,
+                    double T_close   = 0.02,
+                    double gain      = 10.0);
+
+// 샘플 한 개 처리 → 0~1 mouth scaler
+float processMouthEnvAR(MouthEnvARState& st, float x_in);
