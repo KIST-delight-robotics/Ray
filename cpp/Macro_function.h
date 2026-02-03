@@ -112,37 +112,44 @@ float AM_fun(float min_open, float B, float r_k, float r_k_1, float r_k_2, float
 
 std::tuple<float, float, float> lin_fit_fun2(float S, float X_pre, float grad_up_pre, float grad_down_pre, float del_grad, float dt);
 
-// === Mouth Attack-Release Envelope 상태 ===
-struct MouthEnvARState {
-    double fs;
-    double hpf_fc;
-    double attack_ms;
-    double release_ms;
-    double T_open;
-    double T_close;
-    double gain;
 
-    double a_hpf;
-    double a_att;
-    double a_rel;
+#pragma once
+#include <cmath>
 
-    double prev_x;
-    double prev_y;
-    double env_prev;
-    bool   talking;
+// =======================
+//  순수 Attack-Release Envelope
+// =======================
+
+// =======================
+//  순수 Attack-Release Envelope
+// =======================
+
+struct MouthEnvARState
+{
+    float env;       // 현재 envelope 값
+    float attack_a;  // attack coefficient (0~1)
+    float release_a; // release coefficient (0~1)
 };
 
-float calculate_mouth(float up2mouth, float max_MOUTH, float min_MOUTH);
-
-// 초기화
+// 순수 AR 초기화 (실제 로직)
+//   fs         : 샘플레이트 [Hz]
+//   attack_ms  : Attack 시간 [ms]
+//   release_ms : Release 시간 [ms]
 void initMouthEnvAR(MouthEnvARState& st,
                     double fs,
-                    double hpf_fc    = 90.0,
-                    double attack_ms = 20.0,
-                    double release_ms= 120.0,
-                    double T_open    = 0.03,
-                    double T_close   = 0.02,
-                    double gain      = 10.0);
+                    double attack_ms,
+                    double release_ms);
 
-// 샘플 한 개 처리 → 0~1 mouth scaler
+// 한 샘플에 대해 Attack-Release 한 스텝 진행
+//   x_in  : 입력 음성 샘플 (-1~1 가정)
+//   return: env 값 (0 ~ 입력 절대값 범위)
 float processMouthEnvAR(MouthEnvARState& st, float x_in);
+
+// env(0~1 근처) → 로봇 입 모터 tick 범위로 매핑
+//   env       : Attack-Release 출력 (0~1 스케일 가정)
+//   max_MOUTH : 입 최소/최대 위치 중 "더 닫힌 쪽" tick
+//   min_MOUTH : 입 최소/최대 위치 중 "더 열린 쪽" tick
+float calculate_mouth(float env, float mouth_closed, float mouth_open);
+
+
+

@@ -1,4 +1,91 @@
 #include "Macro_function.h"
+#include <algorithm>  // std::max, std::min
+
+#include "Macro_function.h"
+// 다른 include 들 ...
+
+// =======================
+//  순수 Attack-Release Envelope 구현
+// =======================
+
+// =======================
+//  순수 Attack-Release Envelope 구현
+// =======================
+
+// 순수 AR 초기화 (실제 로직)
+//   fs         : 샘플레이트 [Hz]
+//   attack_ms  : Attack 시간 [ms]
+//   release_ms : Release 시간 [ms]
+void initMouthEnvAR(MouthEnvARState& st,
+                    double fs,
+                    double attack_ms,
+                    double release_ms)
+{
+    if (fs <= 0.0)
+        fs = 24000.0;  // 기본값 방어
+
+    if (attack_ms  <= 0.0) attack_ms  = 1.0;
+    if (release_ms <= 0.0) release_ms = 1.0;
+
+    double attack_T  = attack_ms  * 0.001; // [s]
+    double release_T = release_ms * 0.001; // [s]
+
+    // a = exp(-1/(τ fs)) → env_new = a * env_old + (1 - a) * x
+    double a_att = std::exp(-1.0 / (attack_T  * fs));
+    double a_rel = std::exp(-1.0 / (release_T * fs));
+
+    st.attack_a  = static_cast<float>(a_att);
+    st.release_a = static_cast<float>(a_rel);
+    st.env       = 0.0f;
+}
+
+// 한 샘플에 대해 Attack-Release 한 스텝 진행
+//   x_in : 입력 음성 샘플 (-1~1 가정)
+//   return : env 값
+float processMouthEnvAR(MouthEnvARState& st, float x_in)
+{
+    // MATLAB처럼 abs(x) 기준으로 envelope 계산
+    float x = std::fabs(x_in);
+
+    if (x > st.env)
+    {
+        // Attack: 빠르게 따라감
+        // env_new = attack_a * env_old + (1 - attack_a) * x
+        st.env = st.attack_a * st.env + (1.0f - st.attack_a) * x;
+    }
+    else
+    {
+        // Release: 천천히 떨어짐
+        // env_new = release_a * env_old + (1 - release_a) * x
+        st.env = st.release_a * st.env + (1.0f - st.release_a) * x;
+    }
+
+    return st.env;
+}
+
+
+// env: 0~1 스케일의 엔벨롭 값
+// mouth_closed: env=0일 때 모터 위치 (입 닫힘)
+// mouth_open  : env=1일 때 모터 위치 (입 열림, 더 작을 수도 있음)
+float calculate_mouth(float env, float mouth_closed, float mouth_open)
+{
+    // 1) env [0, 1]로 클램프
+    if (env < 0.0f) env = 0.0f;
+    if (env > 1.0f) env = 1.0f;
+
+    // 2) 선형 보간 (env=0 → mouth_closed, env=1 → mouth_open)
+    //    mouth_open < mouth_closed 이면 env ↑ 할수록 틱 ↓ (시계방향)
+    float mouth = mouth_closed + env * (mouth_open - mouth_closed);
+
+    // 3) 다이나믹셀 범위 클램프
+    if (mouth < 0.0f)    mouth = 0.0f;
+    if (mouth > 4095.0f) mouth = 4095.0f;
+
+    return mouth;
+}
+
+
+
 
 
 //파일 경로 생성
@@ -77,11 +164,6 @@ std::pair<float, size_t> find_peak(const std::vector<float>& audio_buffer) {
     return {max_sample, max_index};
 }
 
-float calculate_mouth(float up2mouth, float max_MOUTH, float min_MOUTH) {
-
-    float mouth = max_MOUTH * up2mouth - up2mouth * (max_MOUTH - min_MOUTH)/0.7;
-    return mouth;
-}
 
 void save_audio_segment(const std::string& outputFilePath, const std::vector<float>& audioData, size_t dataSize) {
     // Open the output file
