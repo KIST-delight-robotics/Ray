@@ -755,11 +755,10 @@ void generate_motion(int channels, int samplerate) {
             for (float sample : channel_divided_mouth) {
                 mouth_env_value = processMouthEnvAR(mouth_env, sample);
             }
-
-             float mouth_value = calculate_mouth(
-            mouth_env_value,        // 0~1 엔벨롭
-            cfg_robot.max_mouth,    // env=0 → 닫힘 (큰 tick)
-            cfg_robot.min_mouth     // env=1 → 열림 (작은 tick)
+            float mouth_value = calculate_mouth(
+                mouth_env_value,      // env (0~1 Attack-Release 결과)
+                cfg_robot.max_mouth,  // 3100 (닫힘 위치)
+                cfg_robot.min_mouth   // 550 (최대 이동량)
             );
 
             motion_results.push_back(mouth_value);
@@ -944,9 +943,9 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
             double ratio = cfg_robot.control_motor_rpy_ratio;
 
             float motor_value = motion_data.second;
-            double roll = 0; // current_motion_data[0][0];
-            double pitch = 0; // current_motion_data[i][1];
-            double yaw = 0; // current_motion_data[i][2];
+            double roll =  current_motion_data[0][0];
+            double pitch =  current_motion_data[i][1];
+            double yaw =  current_motion_data[i][2];
             double mouth = motor_value;
 
             target_position = RPY2DXL(roll, pitch, yaw, mouth, 0);

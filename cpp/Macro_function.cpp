@@ -64,24 +64,19 @@ float processMouthEnvAR(MouthEnvARState& st, float x_in)
 }
 
 
-// env: 0~1 스케일의 엔벨롭 값
-// mouth_closed: env=0일 때 모터 위치 (입 닫힘)
-// mouth_open  : env=1일 때 모터 위치 (입 열림, 더 작을 수도 있음)
-float calculate_mouth(float env, float mouth_closed, float mouth_open)
+
+// env: 0~1 엔벨롭 (0=완전 닫힘, 1=최대 벌림)
+// max_MOUTH: (지금은 안 씀, 시그니처 맞추려고 남겨둠)
+// min_MOUTH: "최대 이동량" (예: 550틱)
+float calculate_mouth(float env, float max_MOUTH, float min_MOUTH)
 {
-    // 1) env [0, 1]로 클램프
+    // 0~1 클램프
     if (env < 0.0f) env = 0.0f;
     if (env > 1.0f) env = 1.0f;
 
-    // 2) 선형 보간 (env=0 → mouth_closed, env=1 → mouth_open)
-    //    mouth_open < mouth_closed 이면 env ↑ 할수록 틱 ↓ (시계방향)
-    float mouth = mouth_closed + env * (mouth_open - mouth_closed);
-
-    // 3) 다이나믹셀 범위 클램프
-    if (mouth < 0.0f)    mouth = 0.0f;
-    if (mouth > 4095.0f) mouth = 4095.0f;
-
-    return mouth;
+    // ✨ 이제는 절대 위치가 아니라
+    //   "홈에서 얼마나 뺄지" = 0 ~ min_MOUTH 만 리턴
+    return env * min_MOUTH;   // 0 ~ 550
 }
 
 

@@ -149,7 +149,6 @@ float processMouthEnvAR(MouthEnvARState& st, float x_in);
 //   env       : Attack-Release 출력 (0~1 스케일 가정)
 //   max_MOUTH : 입 최소/최대 위치 중 "더 닫힌 쪽" tick
 //   min_MOUTH : 입 최소/최대 위치 중 "더 열린 쪽" tick
-float calculate_mouth(float env, float mouth_closed, float mouth_open);
-
+float calculate_mouth(float env, float max_MOUTH, float min_MOUTH);
 
 
