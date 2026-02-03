@@ -82,16 +82,26 @@ async def chat_handler(websocket):
     """웹소켓 클라이언트 연결을 처리하고 전체 대화 사이클을 관리합니다."""
     logging.info(f"✅ C++ 클라이언트 연결됨: {websocket.remote_address}")
     
-    listener_task = asyncio.create_task(background_listener(websocket))
-    main_logic_task = asyncio.create_task(main_logic_loop(websocket))
+    # listener_task = asyncio.create_task(background_listener(websocket))
+    # main_logic_task = asyncio.create_task(main_logic_loop(websocket))
 
-    done, pending = await asyncio.wait(
-        [listener_task, main_logic_task],
-        return_when=asyncio.FIRST_COMPLETED
-    )
+    # done, pending = await asyncio.wait(
+    #     [listener_task, main_logic_task],
+    #     return_when=asyncio.FIRST_COMPLETED
+    # )
 
-    for task in pending:
-        task.cancel()
+    # for task in pending:
+    #     task.cancel()
+
+    await websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(AWAKE_FILE)}))
+
+    while True:
+        await asyncio.sleep(1)
+
+    # asyncio.run_coroutine_threadsafe(
+    #     websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(AWAKE_FILE)})),
+    #     asyncio.get_running_loop()
+    # )
     
     logging.info(f"🔌 C++ 클라이언트 연결 핸들러 종료: {websocket.remote_address}")
 
