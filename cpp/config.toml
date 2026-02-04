@@ -53,5 +53,5 @@ min_mouth = 400                     # 최대 mouth movement size in DXL dimensio
 
 # motion generation
 generate_head_motion = false        # 헤드 모션 온라인 생성 여부
-wait_mode_rpy_ratio = 2.0           # 대기모드에서 최종 roll, pitch, yaw 값에 곱해지는 비율
-control_motor_rpy_ratio = 2.0       # 온라인 생성 시 최종 roll, pitch, yaw 값에 곱해지는 비율
+wait_mode_rpy_ratio = 1.0           # 대기모드에서 최종 roll, pitch, yaw 값에 곱해지는 비율
+control_motor_rpy_ratio = 1.0       # 온라인 생성 시 최종 roll, pitch, yaw 값에 곱해지는 비율

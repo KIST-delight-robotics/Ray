@@ -1124,7 +1124,7 @@ void wait_control_motor(){
 
     auto wait_start_time = std::chrono::high_resolution_clock::now();
     int step = 0;
-    constexpr auto FRAME_INTERVAL = std::chrono::milliseconds(35);
+    constexpr auto FRAME_INTERVAL = std::chrono::milliseconds(40);
 
     // -- 보간용 데이터 준비 --
     double ratio = cfg_robot.wait_mode_rpy_ratio;
