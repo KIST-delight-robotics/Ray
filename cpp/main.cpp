@@ -658,7 +658,7 @@ void generate_motion(int channels, int samplerate) {
         mouth_env,
         static_cast<double>(samplerate),            // fs
         20,                                         // attack_ms
-        120                                          // release_ms
+        80                                          // release_ms
     );
 
     int frames_per_update = samplerate * 40 / 1000; // 40ms에 해당하는 프레임 수
@@ -943,9 +943,9 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
             double ratio = cfg_robot.control_motor_rpy_ratio;
 
             float motor_value = motion_data.second;
-            double roll =  current_motion_data[0][0];
-            double pitch =  current_motion_data[i][1];
-            double yaw =  current_motion_data[i][2];
+            double roll = 0; // current_motion_data[0][0];
+            double pitch = 0; // current_motion_data[i][1];
+            double yaw =  0; // current_motion_data[i][2];
             double mouth = motor_value;
 
             target_position = RPY2DXL(roll, pitch, yaw, mouth, 0);
