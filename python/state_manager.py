@@ -287,9 +287,9 @@ class LLMManager:
 
                 elif item.type == "function_call":
                     logging.info(f"🧠 Function call: {item.name}")
-                    self.history_manager.add_message(item)
-
+                    
                     if item.name == "play_music":
+                        self.history_manager.add_message(item)
                         args = json.loads(item.arguments)
                         song_title = args.get("song_title", "")
                         artist_name = args.get("artist_name", "")
