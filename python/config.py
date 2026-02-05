@@ -45,6 +45,14 @@ OUTPUT_DIR = PROJECT_ROOT / "output"
 OUTPUT_LOG_DIR = OUTPUT_DIR / "logs"
 OUTPUT_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+# --- RAG 설정 ---
+RAG_PERSIST_DIR = PROJECT_ROOT / "data" / "chroma_db"
+RAG_COLLECTION_NAME = "movie_archive"
+RAG_EMBEDDING_MODEL = "text-embedding-3-small"
+RAG_CHUNK_SIZE = 700        # 한국어 최적화
+RAG_CHUNK_OVERLAP = 100
+RAG_TOP_K = 3               # 검색 결과 수
+
 # 재생용 오디오 파일
 AWAKE_FILE = ASSETS_DIR / "audio" / f"awake_{VOICE}.wav"
 SLEEP_FILE = ASSETS_DIR / "audio" / f"sleep_{VOICE}.wav"

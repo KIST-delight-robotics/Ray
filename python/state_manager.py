@@ -27,9 +27,11 @@ from config import (
     SMART_TURN_GRACE_PERIOD,
     STT_WAIT_TIMEOUT_SECONDS,
     SLEEP_FILE, AWAKE_FILE, ACTIVE_SESSION_TIMEOUT, START_KEYWORD, END_KEYWORDS,
-    TTS_MODEL, VOICE, RESPONSES_MODEL, RESPONSES_PRESETS, AUDIO_CONFIG, ASSETS_DIR, OPENAI_API_KEY
+    TTS_MODEL, VOICE, RESPONSES_MODEL, RESPONSES_PRESETS, AUDIO_CONFIG, ASSETS_DIR, OPENAI_API_KEY,
+    RAG_PERSIST_DIR, RAG_TOP_K
 )
 from prompts import SYSTEM_PROMPT_RESP_ONLY
+from rag import init_db, search_archive
 
 from openai import OpenAI
 
@@ -238,6 +240,26 @@ class LLMManager:
                         },
                         "required": ["song_title", "artist_name"] 
                     }
+                },
+                {
+                    "type": "function",
+                    "name": "consult_archive",
+                    "description": "영화/음악에 대한 정보를 찾거나, 사용자의 기분/상황에 맞는 작품을 연상할 때 사용합니다. 사실 확인, 위로, 공감, 추천이 필요할 때 적극적으로 사용하세요.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "검색할 키워드 또는 문장 (예: '비 오는 날의 우울함', '헤어질 결심 해석')"
+                            },
+                            "intent": {
+                                "type": "string",
+                                "enum": ["fact", "vibe", "critique"],
+                                "description": "fact=사실정보(감독/출연진), vibe=분위기/추천, critique=평론/해석"
+                            }
+                        },
+                        "required": ["query", "intent"]
+                    }
                 }
             ]
 
@@ -310,6 +332,46 @@ class LLMManager:
                             for item in response_2.output:
                                 if item.type == "message" and item.content:
                                     final_text = item.content[0].text.strip()
+                                    break
+                        break
+                    
+                    elif item.name == "consult_archive":
+                        # RAG 검색 - 휘발성 기억 패턴 (temp_log 사용)
+                        args = json.loads(item.arguments)
+                        query = args.get("query", "")
+                        intent = args.get("intent", "vibe")
+                        
+                        logging.info(f"📚 RAG 검색: query='{query}', intent='{intent}'")
+                        
+                        # 검색 수행
+                        search_result = search_archive(query, intent, top_k=RAG_TOP_K)
+                        
+                        # 임시 로그 생성 (휘발성 - 저장하지 않음)
+                        temp_log = current_log.copy()
+                        temp_log.append({
+                            "type": "function_call",
+                            "name": item.name,
+                            "call_id": item.call_id,
+                            "arguments": item.arguments
+                        })
+                        temp_log.append({
+                            "type": "function_call_output",
+                            "call_id": item.call_id,
+                            "output": search_result
+                        })
+                        
+                        # 2차 Responses API 호출 (검색 결과 기반 답변 생성)
+                        params_with_context = {
+                            **RESPONSES_PRESETS.get(RESPONSES_MODEL, {}),
+                            "input": temp_log,
+                            "tools": tools,
+                        }
+                        response_2 = self.client.responses.create(**params_with_context)
+                        
+                        if response_2.output:
+                            for resp_item in response_2.output:
+                                if resp_item.type == "message" and resp_item.content:
+                                    final_text = resp_item.content[0].text.strip()
                                     break
                         break
 
