@@ -8,12 +8,13 @@ import sys
 import atexit
 from openai import AsyncOpenAI
 
-from config import OPENAI_API_KEY, AWAKE_FILE, SLEEP_FILE, AWAKE_FILE_SCRIPT, SLEEP_FILE_SCRIPT
+from config import OPENAI_API_KEY, AWAKE_FILE, SLEEP_FILE, AWAKE_FILE_SCRIPT, SLEEP_FILE_SCRIPT, RAG_PERSIST_DIR
 from prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_RESP_ONLY
 from conversation_manager import ConversationManager
 from api_pipeline import save_tts_to_file
 from led import led_set_ring, led_set_bar, led_clear
 from state_manager import ConversationEngine
+from rag import init_db
 
 # 전역 엔진 변수 (Listening Loop에서 접근)
 conversation_engine = None
@@ -42,6 +43,14 @@ async def main_logic_loop(websocket):
     if not SLEEP_FILE.exists():
         logging.info(f"음성 파일 생성 중: {SLEEP_FILE}")
         await save_tts_to_file(SLEEP_FILE_SCRIPT, openai_client, SLEEP_FILE)
+    
+    # RAG DB 초기화
+    try:
+        logging.info("📚 RAG DB 초기화 중...")
+        init_db(str(RAG_PERSIST_DIR), OPENAI_API_KEY)
+        logging.info("✅ RAG DB 준비 완료!")
+    except Exception as e:
+        logging.warning(f"⚠️ RAG DB 초기화 실패 (RAG 기능 비활성화): {e}")
         
     try:
         logging.info("🚀 StateMachine 엔진 초기화 및 시작")
