@@ -98,12 +98,6 @@ async def chat_handler(websocket):
     while True:
         await asyncio.sleep(1)
 
-    # asyncio.run_coroutine_threadsafe(
-    #     websocket.send(json.dumps({"type": "play_audio", "file_to_play": str(AWAKE_FILE)})),
-    #     asyncio.get_running_loop()
-    # )
-    
-    logging.info(f"🔌 C++ 클라이언트 연결 핸들러 종료: {websocket.remote_address}")
 
 async def main():
     # 로깅 설정

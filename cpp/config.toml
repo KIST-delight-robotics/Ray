@@ -23,18 +23,18 @@ ff2_gain = [0, 0, 0, 0, 0]
 [robot]
 # 모터 초기 위치
 # 1호기
-default_pitch   = 3480      #before default_pitch:  1410
-default_roll_r  = 1985      #before default_roll_r: 900
-default_roll_l  = 1370      #before default_roll_l: 1300
-default_yaw     = 1000      #before default_yaw:    1000
-default_mouth   = 3100      #before default_mouth:  4000
+#default_pitch   = 3480      #before default_pitch:  1410
+#default_roll_r  = 1985      #before default_roll_r: 900
+#default_roll_l  = 1370      #before default_roll_l: 1300
+#default_yaw     = 1000      #before default_yaw:    1000
+#default_mouth   = 3100      #before default_mouth:  4000
 
 # 2호기
-#default_pitch   = 1186
-#default_roll_r  = 2933
-#default_roll_l  = 4040
-#default_yaw     = 2085
-#default_mouth   = 2211
+default_pitch   = 1186
+default_roll_r  = 2933
+default_roll_l  = 4040
+default_yaw     = 2085
+default_mouth   = 2211
 
 #robot parameter
 pulley_diameter = 40
@@ -45,7 +45,7 @@ mouth_back_compensation = 1.0       # 입 움직임에 대한 뒷쪽 보상 -> T
 mouth_pitch_compensation = 1.0      # pitch 에 따른 입 움직임 보상
 
 max_mouth = 0
-min_mouth = 700            # 최대 mouth movement size in DXL dimension
+min_mouth = 450       # 최대 mouth movement size in DXL dimension
 
 
 # 머리 올릴 시: back 1.3, pitch 1.7, min 400
