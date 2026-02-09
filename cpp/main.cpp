@@ -658,7 +658,15 @@ void generate_motion(int channels, int samplerate) {
         mouth_env,
         static_cast<double>(samplerate),            // fs
         20,                                         // attack_ms
-        120                                   // release_ms
+        120                                 // release_ms
+    );
+
+// 🔴 입 신호용 1차 HPF 상태 초기화 (예: 90 Hz 컷오프)
+    MouthHPFState mouth_hpf;
+    initMouthHPF(
+        mouth_hpf,
+        static_cast<double>(samplerate),    // fs
+        90.0                                // cutoff_hz (80~120 중에서 튜닝 가능)
     );
 
     int frames_per_update = samplerate * 40 / 1000; // 40ms에 해당하는 프레임 수
@@ -668,6 +676,7 @@ void generate_motion(int channels, int samplerate) {
     std::vector<std::vector<double>> deliverSegment;
     std::vector<std::vector<double>> prevSegment;
     std::vector<double> boundaries = {0.01623224, 0.02907711, 0.04192197};
+
 
     int first_segment_flag = 1;
 
@@ -747,20 +756,28 @@ void generate_motion(int channels, int samplerate) {
             std::vector<float> channel_divided_mouth =
                 divide_channel(current_audio_mouth, channels, end_frame_mouth - start_frame_mouth);
 
-        // 🔴 순수 Attack–Release 기반 mouth 궤적 생성 (샘플 단위 AR 그대로 사용)
-            float mouth_env_value = 0.0f;
+       // 🔴 순수 Attack–Release + HPF 기반 mouth 궤적 생성
+        float mouth_env_value = 0.0f;
 
-            // 샘플 단위 Attack–Release를 그대로 따라가고,
-            // 프레임 끝에서의 env 값만 사용
-            for (float sample : channel_divided_mouth) {
-                mouth_env_value = processMouthEnvAR(mouth_env, sample);
-            }
-          float mouth_value = calculate_mouth(
-                mouth_env_value,                 // 🔴 여기 raw env 넣기
-                0.0f,                    // max_MOUTH (지금은 안 씀)
-                cfg_robot.min_mouth     // min_MOUTH: 최대 이동량(예: 550틱)
-            );
-            motion_results.push_back(mouth_value);
+        // 샘플 단위로:
+        //   원 샘플 → HPF → AR → 마지막 env만 mouth_env_value에 남김
+        for (float sample : channel_divided_mouth) {
+            // 1) 고역통과 필터 (저주파/브레스/럼블 정리)
+            float sample_hpf = processMouthHPF(mouth_hpf, sample);
+
+            // 2) Attack–Release 엔벨롭 업데이트
+            mouth_env_value = processMouthEnvAR(mouth_env, sample_hpf);
+        }
+
+        // 3) 프레임 끝 env 를 모터 스케일로 매핑
+        float mouth_value = calculate_mouth(
+            mouth_env_value,                 // HPF + AR 결과
+            cfg_robot.max_mouth,             // 더 닫힌 쪽
+            cfg_robot.min_mouth              // 더 열린 쪽
+        );
+
+        motion_results.push_back(mouth_value);
+
 
             // -- 헤드 모션 생성을 위한 energy 저장 --
             double rms_value = calculateRMS(channel_divided, 0, end_frame - start_frame);

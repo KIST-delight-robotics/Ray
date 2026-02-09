@@ -28,6 +28,8 @@
 
 #include "cnpy.h"
 #include "Config.h"
+#pragma once
+
 
 using namespace std;
 using namespace Eigen;
@@ -113,8 +115,6 @@ float AM_fun(float min_open, float B, float r_k, float r_k_1, float r_k_2, float
 std::tuple<float, float, float> lin_fit_fun2(float S, float X_pre, float grad_up_pre, float grad_down_pre, float del_grad, float dt);
 
 
-#pragma once
-#include <cmath>
 
 // =======================
 //  순수 Attack-Release Envelope
@@ -151,4 +151,16 @@ float processMouthEnvAR(MouthEnvARState& st, float x_in);
 //   min_MOUTH : 입 최소/최대 위치 중 "더 열린 쪽" tick
 float calculate_mouth(float env, float max_MOUTH, float min_MOUTH);
 
+struct MouthHPFState
+{
+    float lp;     // 로우패스 값 (누적)
+    float alpha;  // 로우패스 계수 (0~1)
+};
+
+void initMouthHPF(MouthHPFState& st,
+                  double fs,
+                  double cutoff_hz);
+
+// HPF 처리 (샘플 단위)
+float processMouthHPF(MouthHPFState& st, float x_in);
 

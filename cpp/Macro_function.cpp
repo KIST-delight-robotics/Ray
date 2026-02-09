@@ -63,32 +63,48 @@ float processMouthEnvAR(MouthEnvARState& st, float x_in)
     return st.env;
 }
 
+// =====================================
+//  단순 1차 HPF (x - lowpass(x)) 방식
+// =====================================
 
 
-// env: 0~1 엔벨롭 (0=완전 닫힘, 1=최대 벌림)
-// max_MOUTH: (지금은 안 씀, 시그니처 맞추려고 남겨둠)
-// min_MOUTH: "최대 이동량" (예: 550틱)
-#include <cmath>
+// fs : 샘플레이트(Hz), cutoff_hz : HPF 컷오프(예: 80~120 Hz 권장)
+void initMouthHPF(MouthHPFState& st,
+                  double fs,
+                  double cutoff_hz)
+{
+    st.lp = 0.0f;
 
-#include <cmath>
+    const float PI_F = 3.14159265f;
 
-// env      : AR 엔벨롭 결과 (vocal / vocals 공통)
-// max_MOUTH: 지금은 안 씀 (시그니처 유지용)
-// min_MOUTH: 최대 당김량 틱 (예: 550)  → rope를 이만큼 당기면 최대 벌림
+    float dt = 1.0f / static_cast<float>(fs);
+    float RC = 1.0f / (2.0f * PI_F * static_cast<float>(cutoff_hz));
+
+    // 1차 low-pass 계수
+    st.alpha = dt / (RC + dt);
+}
+
+// HPF 출력 = x - lowpass(x)
+float processMouthHPF(MouthHPFState& st, float x_in)
+{
+    st.lp += st.alpha * (x_in - st.lp);  // 로우패스 업데이트
+    float y = x_in - st.lp;              // HPF = 원신호 - 로우패스
+    return y;
+}
+
 float calculate_mouth(float env, float max_MOUTH, float min_MOUTH)
 {
-    // 1) AR 결과 절댓값
     float x = std::fabs(env);
 
-    // 완전 무음 근처는 바로 0 (노이즈 방지)
+    // 1) 노이즈 컷
     const float EPS = 1e-7f;
     if (x < EPS)
         return 0.0f;
 
-    // 2) 이 스트림의 "평균적인 엔벨롭 크기" 추적 (AGC 느낌)
+    // 상태 변수 (실시간 누적)
     static bool  initialized = false;
-    static float ref_level   = 0.0f;   // 평균 레벨
-    static float mouth_state = 0.0f;   // 입 상태(0~1), 여닫기 속도 제어용
+    static float ref_level   = 0.0f;   // AGC 기준 레벨
+    static float mouth_state = 0.0f;   // 입 상태 (0~1)
 
     if (!initialized)
     {
@@ -97,81 +113,75 @@ float calculate_mouth(float env, float max_MOUTH, float min_MOUTH)
         initialized = true;
     }
 
-    // 🔹 ref_level: 느리게 env를 따라가는 평균 (TTS/노래 둘 다 자동 적응)
-    // 40 ms 주기 기준, alpha_ref=0.01 → 대략 1~2초 단위로 평균 갱신
+    // 2) AGC: 과거 평균 레벨 추적 (가중평균)
     const float alpha_ref = 0.01f;
     ref_level = (1.0f - alpha_ref) * ref_level + alpha_ref * x;
-    if (ref_level < 1e-4f) ref_level = 1e-4f;
 
-    // 3) 평균 대비 현재 크기 (0 ~ 여러 배)
+    // AGC 바닥값 (무음 후 폭주 방지)
+    const float REF_FLOOR = 0.05f;
+    if (ref_level < REF_FLOOR)
+        ref_level = REF_FLOOR;
+
+    // 3) 현재 레벨 / 평균 레벨
     float rel = x / ref_level;
 
-    // 4) rel을 0~1 사이로 부드럽게 압축
-    //    rel=0 → 0, rel=1 → 0.5, rel→∞ → 1
-    float env_norm = rel / (1.0f + rel);   // 0~1
+    // 4) 0~1로 부드러운 압축
+    float env_norm = rel / (1.0f + rel);
 
-    // 5) "진짜 조용한 구간"에서는 변화량이 있어도 입 거의 안 벌리기
-    //    quiet_ratio: ref_level 대비 어느 정도 이하여야 "조용"으로 볼지
-    float ratio = x / ref_level;           // 0~∞
-    const float quiet_ratio = 0.4f;        // ref_level의 40% 미만 → 조용한 영역
-    float quiet_weight = (ratio - quiet_ratio) / (1.0f - quiet_ratio);
+    // 5) quiet 억제
+    const float quiet_ratio = 0.3f;
+    float quiet_weight = (rel - quiet_ratio) / (1.0f - quiet_ratio);
+
+    const float QUIET_ABS_FLOOR = 0.01f;
+    if (x < QUIET_ABS_FLOOR)
+        quiet_weight = 0.0f;
+
     if (quiet_weight < 0.0f) quiet_weight = 0.0f;
     if (quiet_weight > 1.0f) quiet_weight = 1.0f;
 
-    // 조용한 구간에서는 env_norm이 더 줄어들게 만들기
-    env_norm *= quiet_weight;              // 작은 소리 + 변화량 → 과민 반응 방지
+    env_norm *= quiet_weight;
 
-    // 6) 사람 입 느낌 곡선 (gamma): 중간 구간 조금 더 살리기
-    const float gamma = 0.9f;              // 1.0이면 직선, <1이면 중간 강조
+    // 6) 감마 보정
+    const float gamma = 0.9f;
     if (env_norm > 0.0f)
         env_norm = std::pow(env_norm, gamma);
 
-    // 7) 여닫기 속도 제어 (mouth_state)
-    //    - target: 이번 프레임에서 "이 정도 열려야 한다" (0~1)
-    //    - mouth_state: 실제 모터에 적용할 상태 (0~1), 여닫기 속도 분리
+    // 7) 여닫기 속도 분리 (비대칭)
     float target = env_norm;
 
-   // 🔹 기본 속도
-    float open_alpha_base  = 0.5f;   // 벌릴 때 기본 속도 (조금 더 빠르게)
-    float close_alpha_base = 0.7f;   // 닫을 때 기본 속도 (조금 더 빠르게)
+    const float open_alpha_base  = 0.5f;  // 열릴 때
+    const float close_alpha_base = 0.7f;  // 닫힐 때
 
-    // 🔹 추가: "입 꽉 닫기" 트리거
-    //    target가 아주 낮으면(= 거의 소리 없음) 확실히 닫히도록 더 세게 끌어내리기
-    const float close_hard_threshold = 0.2f;  // target이 0.2보다 작으면 "닫아야 하는" 구간
-    const float close_hard_extra     = 0.3f;  // 추가로 더 빠르게 닫는 비율
+    const float close_hard_threshold = 0.2f;
+    const float close_hard_extra     = 0.3f;
 
     if (target > mouth_state)
     {
-        // 입 벌리기: 조금 더 빠르게, 하지만 너무 튀지 않게
-        float alpha = open_alpha_base;
-        mouth_state += alpha * (target - mouth_state);
+        // opening
+        mouth_state += open_alpha_base * (target - mouth_state);
     }
     else
     {
-        // 입 닫기: 기본은 빨리 닫되,
-        // target이 아주 작으면(거의 무음) 더 과감하게 닫아 버림
+        // closing
         float alpha = close_alpha_base;
-
         if (target < close_hard_threshold)
         {
-            alpha += close_hard_extra;  // 예: 0.6 + 0.3 = 0.9
-            if (alpha > 1.0f) alpha = 1.0f; // 안전
+            alpha += close_hard_extra;
+            if (alpha > 1.0f) alpha = 1.0f;
         }
-
         mouth_state += alpha * (target - mouth_state);
     }
-    // 안전 클램프
+
     if (mouth_state < 0.0f) mouth_state = 0.0f;
     if (mouth_state > 1.0f) mouth_state = 1.0f;
 
-    // 8) 기구 한계 보호: 최대 오픈을 90%까지만 사용 (풀리 끝까지 안 가게)
-    const float max_open_ratio = 0.9f;
+    // 8) 최대 개방 제한
+    const float max_open_ratio = 0.95f;
     float final_norm = mouth_state * max_open_ratio;
 
-    // 9) 최종: 0 ~ min_MOUTH 틱으로 변환 (rope 당김량)
+    // 9) 모터 스케일 변환
     return final_norm * min_MOUTH;
 }
-
 
 
 
