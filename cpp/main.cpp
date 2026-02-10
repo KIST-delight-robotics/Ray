@@ -893,10 +893,10 @@ void generate_motion(int channels, int samplerate) {
                 deliverSegment = multExpToSegment(energy, deliverSegment, 0.01, 10);
                 
                 // 말하는 동안 고개를 들기 위한 Pitch 오프셋 추가
-                double pitch_offset = -0.08; // 음수: 위쪽 방향
-                for(auto& frame : deliverSegment) {
-                    frame[1] += pitch_offset; // frame[1]은 Pitch
-                }
+                // double pitch_offset = -0.08; // 음수: 위쪽 방향
+                // for(auto& frame : deliverSegment) {
+                //     frame[1] += pitch_offset; // frame[1]은 Pitch
+                // }
 
                 // 이전 세그먼트의 마지막 프레임과 현재 세그먼트의 첫 프레임을 부드럽게 연결
                 deliverSegment = connectTwoSegments(prevSegment, deliverSegment, 3, 3, 3);
@@ -916,10 +916,10 @@ void generate_motion(int channels, int samplerate) {
                 deliverSegment = IdleMotionManager::getInstance().getNextSegment(energy.size(), cfg_robot.control_motor_rpy_ratio);
                 
                 // 말하는 동안 고개를 들기 위한 Pitch 오프셋 추가
-                double pitch_offset = -0.08; // 음수: 위쪽 방향
-                for(auto& frame : deliverSegment) {
-                    frame[1] += pitch_offset;
-                }
+                // double pitch_offset = -0.08; // 음수: 위쪽 방향
+                // for(auto& frame : deliverSegment) {
+                //     frame[1] += pitch_offset;
+                // }
 
                 if (first_segment_flag == 1) {
                     // 이전 세그먼트의 마지막 프레임과 현재 세그먼트의 첫 프레임을 부드럽게 연결
