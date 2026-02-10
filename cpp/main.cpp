@@ -656,27 +656,26 @@ void generate_motion(int channels, int samplerate) {
    
     initMouthEnvAR(
         mouth_env,
-        static_cast<double>(samplerate),            // fs
-        20,                                         // attack_ms
-        120                                 // release_ms
+        static_cast<double>(samplerate),   // fs
+        20,                                // attack_ms
+        120                                // release_ms
     );
 
-// 🔴 입 신호용 1차 HPF 상태 초기화 (예: 90 Hz 컷오프)
+    // 🔴 입 신호용 1차 HPF 상태 초기화 (예: 90 Hz 컷오프)
     MouthHPFState mouth_hpf;
     initMouthHPF(
         mouth_hpf,
-        static_cast<double>(samplerate),    // fs
-        90.0                                // cutoff_hz (80~120 중에서 튜닝 가능)
+        static_cast<double>(samplerate),   // fs
+        90.0                               // cutoff_hz (80~120 중에서 튜닝 가능)
     );
 
     int frames_per_update = samplerate * 40 / 1000; // 40ms에 해당하는 프레임 수
 
     std::vector<double> prevEndOneBefore = {0.0, 0.0, 0.0};
-    std::vector<double> prevEnd = {0.0, 0.0, 0.0};
+    std::vector<double> prevEnd          = {0.0, 0.0, 0.0};
     std::vector<std::vector<double>> deliverSegment;
     std::vector<std::vector<double>> prevSegment;
     std::vector<double> boundaries = {0.01623224, 0.02907711, 0.04192197};
-
 
     int first_segment_flag = 1;
 
@@ -741,12 +740,12 @@ void generate_motion(int channels, int samplerate) {
             // 현재 업데이트에 해당하는 오디오 데이터 추출
             std::vector<float> current_audio(
                 audio_buffer.begin() + start_frame * channels,
-                audio_buffer.begin() + end_frame * channels
+                audio_buffer.begin() + end_frame   * channels
             );
 
             std::vector<float> current_audio_mouth(
                 audio_buffer.begin() + start_frame_mouth * channels,
-                audio_buffer.begin() + end_frame_mouth * channels
+                audio_buffer.begin() + end_frame_mouth   * channels
             );
 
             // 채널 분리
@@ -756,28 +755,44 @@ void generate_motion(int channels, int samplerate) {
             std::vector<float> channel_divided_mouth =
                 divide_channel(current_audio_mouth, channels, end_frame_mouth - start_frame_mouth);
 
-       // 🔴 순수 Attack–Release + HPF 기반 mouth 궤적 생성
-        float mouth_env_value = 0.0f;
+            // 🔴 HPF + AR + 프레임 스코프 게이트 기반 mouth 엔벨롭 생성
+            float mouth_env_value = 0.0f;
+            float frame_peak_abs  = 0.0f;   // 이 40ms 안에서의 최대 |sample_hpf|
 
-        // 샘플 단위로:
-        //   원 샘플 → HPF → AR → 마지막 env만 mouth_env_value에 남김
-        for (float sample : channel_divided_mouth) {
-            // 1) 고역통과 필터 (저주파/브레스/럼블 정리)
-            float sample_hpf = processMouthHPF(mouth_hpf, sample);
+            for (float sample : channel_divided_mouth) {
+                // 1) 입용 고역통과 필터 (저주파/브레스/럼블 제거)
+                float sample_hpf = processMouthHPF(mouth_hpf, sample);
 
-            // 2) Attack–Release 엔벨롭 업데이트
-            mouth_env_value = processMouthEnvAR(mouth_env, sample_hpf);
-        }
+                float abs_hpf = std::fabs(sample_hpf);
+                if (abs_hpf > frame_peak_abs)
+                    frame_peak_abs = abs_hpf;
 
-        // 3) 프레임 끝 env 를 모터 스케일로 매핑
-        float mouth_value = calculate_mouth(
-            mouth_env_value,                 // HPF + AR 결과
-            cfg_robot.max_mouth,             // 더 닫힌 쪽
-            cfg_robot.min_mouth              // 더 열린 쪽
-        );
+                // 2) Attack–Release 엔벨롭 업데이트
+                mouth_env_value = processMouthEnvAR(mouth_env, sample_hpf);
+            }
 
-        motion_results.push_back(mouth_value);
+            // 🔒 프레임 스코프 내 보안책:
+            //    - 완전 무음 프레임: frame_peak_abs가 아주 작으면 아예 입 안 움직임
+            //    - 그렇지 않으면 frame_peak_abs의 10%를 게이트 기준으로 사용
+            const float FRAME_SILENCE_FLOOR = 1e-5f;  // 이 이하면 "실질적 무음 프레임"
+            if (frame_peak_abs < FRAME_SILENCE_FLOOR) {
+                // 통째로 무음 → env=0으로 처리
+                mouth_env_value = 0.0f;
+            } else {
+                // 프레임 내 최대값의 10%를 기준으로, 그보다 작은 env는 무시
+                float gate_th = frame_peak_abs * 0.1f;  // 너가 말한 "최대값의 10%"
+                if (mouth_env_value < gate_th)
+                    mouth_env_value = 0.0f;
+            }
 
+            // 3) 프레임 끝 env 를 모터 스케일로 매핑 (AGC + 입 상태는 calculate_mouth에서 처리)
+            float mouth_value = calculate_mouth(
+                mouth_env_value,         // HPF + AR + 프레임 게이트 결과
+                cfg_robot.max_mouth,     // 더 닫힌 쪽
+                cfg_robot.min_mouth      // 더 열린 쪽
+            );
+
+            motion_results.push_back(mouth_value);
 
             // -- 헤드 모션 생성을 위한 energy 저장 --
             double rms_value = calculateRMS(channel_divided, 0, end_frame - start_frame);
@@ -873,6 +888,7 @@ void generate_motion(int channels, int samplerate) {
         mouth_motion_queue_cv.notify_one();
     }
 }
+
 
 
 
