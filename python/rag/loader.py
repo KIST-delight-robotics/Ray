@@ -97,6 +97,10 @@ def load_movie_data(
         # 선택적 메타데이터
         if "director" in item:
             metadata["director"] = item["director"]
+        if "author" in item:
+            metadata["author"] = item["author"]
+        if "source" in item:
+            metadata["source"] = item["source"]
         
         # 청킹 (basic_info는 통째로, 나머지는 분할)
         if item.get("category") == "basic_info":

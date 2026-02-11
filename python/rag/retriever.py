@@ -115,6 +115,7 @@ def _enrich_and_format(docs: list) -> str:
     
     # 2. 기본 정보 조회 (보강)
     basic_info_docs = []
+    found_movie_ids = set()
     if movie_ids and _vectorstore:
         for mid in movie_ids:
             try:
@@ -126,9 +127,11 @@ def _enrich_and_format(docs: list) -> str:
                         {"category": "basic_info"}
                     ]}
                 )
-                basic_info_docs.extend(results)
+                if results:
+                    basic_info_docs.extend(results)
+                    found_movie_ids.add(mid)
             except Exception as e:
-                logger.warning(f"기본 정보 조회 실패 (movie_id={mid}): {e}")
+                logger.debug(f"기본 정보 조회 실패 (movie_id={mid}): {e}")
     
     # 3. 결과 포맷팅
     result_parts = []
@@ -143,6 +146,11 @@ def _enrich_and_format(docs: list) -> str:
                 seen_titles.add(title)
                 result_parts.append(f"### {title}")
                 result_parts.append(doc.page_content)
+    
+    # 기본 정보 없는 영화 표시
+    missing_ids = movie_ids - found_movie_ids
+    if missing_ids:
+        result_parts.append(f"\n(기본정보 없음: {len(missing_ids)}편)")
     
     # 심층 정보 섹션
     result_parts.append("\n## 관련 평론/인터뷰")
@@ -218,7 +226,9 @@ def search_archive_debug(query: str, intent: str, top_k: int = 3) -> tuple:
                 "title": doc.metadata.get("title", "제목 없음"),
                 "category": doc.metadata.get("category", ""),
                 "movie_id": doc.metadata.get("movie_id", ""),
-                "content_preview": doc.page_content[:150] + "..." if len(doc.page_content) > 150 else doc.page_content
+                "author": doc.metadata.get("author", ""),
+                "chunk_index": doc.metadata.get("chunk_index"),
+                "content_preview": doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content
             })
         
         # 포맷된 결과
