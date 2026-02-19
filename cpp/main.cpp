@@ -19,31 +19,36 @@
 #include <algorithm>
 #include <tuple>
 #include <sstream>
-#include <wiringPiI2C.h>
-#include <wiringPi.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 #include <csignal>
 #include "cnpy.h"
 #include "Macro_function.h"
-#include "DynamixelDriver.h"
 #include "MotionLogger.h"
 #include "Config.h"
+
+// 하드웨어 전용 헤더 (MOTOR_ENABLED 시에만 포함)
+#ifdef MOTOR_ENABLED
+#include <wiringPiI2C.h>
+#include <wiringPi.h>
+#include "DynamixelDriver.h"
+#endif
 
 // WebSocket 및 JSON 관련 헤더
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocket.h>
-#include <ixwebsocket/IXBase64.h> // Base64 디코딩을 위해 추가
+#include <ixwebsocket/IXBase64.h>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
 
-#define MOTOR_ENABLED // 모터 연결 없이 테스트하려면 주석 처리
+// MOTOR_ENABLED는 CMake에서 제어 (cmake -DMOTOR_ENABLED=OFF ..)
 
 static constexpr int INTERVAL_MS = 360; // 시퀀스 1개 당 시간
 static constexpr int CONTROL_MS = 40; // 모터 제어 주기
 static constexpr int AUDIO_SAMPLE_RATE = 24000;
 static constexpr int AUDIO_CHANNELS = 1;
-static constexpr int MPU6050_ADDR = 0x68;
 
 // 파일 경로 설정
 const std::string ASSETS_DIR = "assets";
@@ -62,6 +67,7 @@ double STT_DONE_TIME = 0.0; // STT 완료 시간 (사용자 입력 완료 후 �
 std::atomic<bool> stop_flag(false);
 std::atomic<bool> user_interruption_flag(false);
 std::atomic<bool> is_speaking(false);
+std::atomic<int> current_turn_id(0);
 
 int first_move_flag = 1;
 float final_result = 0.0f;
@@ -77,9 +83,11 @@ std::condition_variable mouth_motion_queue_cv;
 
 
 
+#ifdef MOTOR_ENABLED
 DynamixelDriver* dxl_driver = nullptr;
 DataLogger motion_logger;
 HighFreqLogger* tuning_logger = nullptr;
+#endif
 
 
 // 모션 보간을 위한 이전 값 저장
@@ -104,11 +112,6 @@ std::condition_variable server_message_queue_cv;
 std::promise<void> server_ready_promise;
 
 // 스트리밍 데이터 처리를 위한 전역 변수
-std::atomic<bool> is_realtime_streaming(false);
-std::vector<uint8_t> realtime_stream_buffer;
-std::mutex realtime_stream_buffer_mutex;
-std::condition_variable realtime_stream_buffer_cv;
-
 std::atomic<bool> is_responses_streaming(false);
 std::vector<uint8_t> responses_stream_buffer;
 std::mutex responses_stream_buffer_mutex;
@@ -297,44 +300,6 @@ private:
     IdleMotionManager& operator=(const IdleMotionManager&) = delete;
 };
 
-
-bool initialize_dynamixel() {
-    // 1. 드라이버 생성
-    dxl_driver = new DynamixelDriver(cfg_dxl.device_name, cfg_dxl.protocol_version, cfg_dxl.ids);
-
-
-    // 2. 연결 (Baudrate 설정 포함)
-    if (!dxl_driver->connect(cfg_dxl.baudrate)) {
-        std::cerr << "Failed to connect to Dynamixel!" << std::endl;
-        return false;
-    }
-
-
-    // 3. 기본 설정 (Torque Off 후 진행)
-    dxl_driver->setTorque(false);
-
-
-    if (!dxl_driver->setOperatingMode(cfg_dxl.operating_mode)) return false;
-    if (!dxl_driver->setDriveMode(cfg_dxl.is_time_based)) return false;
-    if (!dxl_driver->setReturnDelayTime(cfg_dxl.return_delay_time)) return false;
-
-
-    // 4. PID 및 프로파일 설정
-    if (!dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration)) return false;
-    if (!dxl_driver->setPositionPID(cfg_dxl.pos_p_gain, cfg_dxl.pos_i_gain, cfg_dxl.pos_d_gain)) return false;
-
-
-    // 5. 토크 켜기
-    if (!dxl_driver->setTorque(true)) {
-        std::cerr << "Failed to enable torque!" << std::endl;
-        return false;
-    }
-
-    printf("Motors initialized (Port Open, Torque On).\n");
-    return true;
-}
-
-
 void updatePrevValues(double roll, double pitch, double yaw, double mouth) {
     // 이 함수에 들어오면 자물쇠를 잠금 (다른 쓰레드 대기)
     std::lock_guard<std::mutex> lock(prev_values_mutex);
@@ -393,6 +358,42 @@ std::vector<std::vector<double>> applyOffsetDecay(
     return targetTraj;
 }
 
+#ifdef MOTOR_ENABLED
+bool initialize_dynamixel() {
+    // 1. 드라이버 생성
+    dxl_driver = new DynamixelDriver(cfg_dxl.device_name, cfg_dxl.protocol_version, cfg_dxl.ids);
+
+
+    // 2. 연결 (Baudrate 설정 포함)
+    if (!dxl_driver->connect(cfg_dxl.baudrate)) {
+        std::cerr << "Failed to connect to Dynamixel!" << std::endl;
+        return false;
+    }
+
+
+    // 3. 기본 설정 (Torque Off 후 진행)
+    dxl_driver->setTorque(false);
+
+
+    if (!dxl_driver->setOperatingMode(cfg_dxl.operating_mode)) return false;
+    if (!dxl_driver->setDriveMode(cfg_dxl.is_time_based)) return false;
+    if (!dxl_driver->setReturnDelayTime(cfg_dxl.return_delay_time)) return false;
+
+
+    // 4. PID 및 프로파일 설정
+    if (!dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration)) return false;
+    if (!dxl_driver->setPositionPID(cfg_dxl.pos_p_gain, cfg_dxl.pos_i_gain, cfg_dxl.pos_d_gain)) return false;
+
+
+    // 5. 토크 켜기
+    if (!dxl_driver->setTorque(true)) {
+        std::cerr << "Failed to enable torque!" << std::endl;
+        return false;
+    }
+
+    printf("Motors initialized (Port Open, Torque On).\n");
+    return true;
+}
 
 void move_to_initial_position_posctrl() {
     if (!dxl_driver) return;
@@ -473,26 +474,14 @@ void move_to_initial_position_velctrl() {
 
     dxl_driver->writeGoalVelocity(goal_velocity);
 }
+#endif // MOTOR_ENABLED
 
 // 첫 번째 쓰레드: 오디오 스트림을 받아 분할합니다.
-void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream, const std::string& stream_type) {
-    // --- 스트림 타입에 따라 사용할 버퍼와 동기화 객체 선택 ---
-    std::vector<uint8_t>* buffer;
-    std::mutex* buffer_mutex;
-    std::condition_variable* buffer_cv;
-    std::atomic<bool>* is_streaming_flag;
-
-    if (stream_type == "realtime") {
-        buffer = &realtime_stream_buffer;
-        buffer_mutex = &realtime_stream_buffer_mutex;
-        buffer_cv = &realtime_stream_buffer_cv;
-        is_streaming_flag = &is_realtime_streaming;
-    } else { // "responses"
-        buffer = &responses_stream_buffer;
-        buffer_mutex = &responses_stream_buffer_mutex;
-        buffer_cv = &responses_stream_buffer_cv;
-        is_streaming_flag = &is_responses_streaming;
-    }
+void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream) {
+    std::vector<uint8_t>* buffer = &responses_stream_buffer;
+    std::mutex* buffer_mutex = &responses_stream_buffer_mutex;
+    std::condition_variable* buffer_cv = &responses_stream_buffer_cv;
+    std::atomic<bool>* is_streaming_flag = &is_responses_streaming;
 
     // --- 초기 설정 ---
     int channels = sfinfo.channels;
@@ -1029,17 +1018,14 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
 
             
             // 모터 제어 로직 구현
-            double ratio = cfg_robot.control_motor_rpy_ratio;
-
             float motor_value = motion_data.second;
             double roll = current_motion_data[i][0];
             double pitch = current_motion_data[i][1];
             double yaw = current_motion_data[i][2];
             double mouth = motor_value;
 
-            target_position = RPY2DXL(roll, pitch, yaw, mouth, 0);
-
             #ifdef MOTOR_ENABLED
+            target_position = RPY2DXL(roll, pitch, yaw, mouth, 0);
 
             if (first_move_flag == 1) {
                 first_move_flag = 0;
@@ -1048,7 +1034,6 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
                     target_position[k] = (past_position[k] + target_position[k]) / 2;
                 }
             }
-
 
             // 상태 읽기
             dxl_driver->readAllState(current_state);
@@ -1065,7 +1050,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
                 // 위치제어 모드
                 dxl_driver->writeGoalPosition(target_position);
             }
-            
+
             // 과거 위치 업데이트
             past_position = target_position;
             updatePrevValues(roll, pitch, yaw, mouth);
@@ -1073,26 +1058,8 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
             // 로깅
             double DXL_goal_rpy[4] = {roll, pitch, yaw, mouth};
             motion_logger.log(mode_label, DXL_goal_rpy, target_position, current_state);
-
-            // if (i == 0 and cycle_num % 10 == 0) {
-            //     auto expected_playback_ms = (cycle_num) * INTERVAL_MS;
-            //     float actual_playback_ms = 0.0f;
-            //     if (soundStream.getStatus() == sf::Sound::Playing) {
-            //         actual_playback_ms = soundStream.getPlayingOffset().asMilliseconds();
-            //     }
-            //     float playback_diff_ms = actual_playback_ms - expected_playback_ms;
-                
-            //     auto now = std::chrono::high_resolution_clock::now();
-            //     auto motion_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time);
-            //     auto expected_motion = cycle_num * INTERVAL_MS;
-
-            //     std::cout << "Cycle " << cycle_num << ": motion_elapsed=" << motion_elapsed.count()
-            //                 << "ms, expected=" << expected_motion
-            //                 << "ms, diff=" << (motion_elapsed.count() - expected_motion) << "ms" << std::endl;
-            //     std::cout << "Cycle " << cycle_num << ": playback_elapsed=" << actual_playback_ms
-            //                 << "ms, expected=" << expected_playback_ms
-            //                 << "ms, diff=" << playback_diff_ms << "ms" << std::endl;
-            // }
+            #else
+            updatePrevValues(roll, pitch, yaw, mouth);
             #endif
 
             // 필요한 경우 대기 시간 추가
@@ -1377,6 +1344,9 @@ void csv_control_motor(std::string audioName) {
     }
 }
 
+
+#ifdef MOTOR_ENABLED
+static constexpr int MPU6050_ADDR = 0x68;
 
 // MPU6050 초기화
 void mpu6050_init(int fd) {
@@ -1853,14 +1823,13 @@ void initialize_robot_posture() {
 }
 
 void cleanup_dynamixel() {
-    #ifdef MOTOR_ENABLED
     std::cout << "토크를 끄고 포트를 닫습니다..." << std::endl;
     if (dxl_driver) {
         delete dxl_driver;
         dxl_driver = nullptr;
     }
-    #endif
 }
+#endif // MOTOR_ENABLED
 
 void signal_handler(int signum) {
     std::cout << "종료 신호 (" << signum << ") 수신. 프로그램을 정리합니다." << std::endl;
@@ -1872,14 +1841,15 @@ void signal_handler(int signum) {
     server_message_queue_cv.notify_all();
     audio_queue_cv.notify_all();
     mouth_motion_queue_cv.notify_all();
-    realtime_stream_buffer_cv.notify_all();
     responses_stream_buffer_cv.notify_all();
 
-    webSocket.stop(); 
+    webSocket.stop();
 
+    #ifdef MOTOR_ENABLED
     if (tuning_logger) tuning_logger->stop();
     motion_logger.stop();
     cleanup_dynamixel();
+    #endif
 
     std::_Exit(signum);
 }
@@ -1905,10 +1875,12 @@ void robot_main_loop(std::future<void> server_ready_future) {
     server_ready_future.get(); // 서버가 준비될 때까지 대기
     std::cout << "서버 연결 완료!" << std::endl;
 
+    #ifdef MOTOR_ENABLED
     std::string log_dir = create_log_directory();
     auto log_start_time = std::chrono::high_resolution_clock::now();
     motion_logger.start(log_start_time, log_dir);
     if (tuning_logger) tuning_logger->start(log_start_time, log_dir);
+    #endif
 
 	std::thread wait_mode_thread;
 
@@ -1916,12 +1888,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
     while (true) {
         // --- 루프 시작 시 상태 초기화 ---
         stop_flag = false;
-        is_realtime_streaming = false;
         is_responses_streaming = false;
-        {
-            std::lock_guard<std::mutex> lock(realtime_stream_buffer_mutex);
-            realtime_stream_buffer.clear();
-        }
         {
             std::lock_guard<std::mutex> lock(responses_stream_buffer_mutex);
             responses_stream_buffer.clear();
@@ -1931,7 +1898,6 @@ void robot_main_loop(std::future<void> server_ready_future) {
         SNDFILE* sndfile = nullptr;
         bool is_file_based = false;
         bool is_csv_based = false;
-        bool responses_only_flag = false;
         std::string csv_audio_name = "";
         std::string current_mode_label = "UNKNOWN";
 
@@ -1976,18 +1942,8 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 sndfile = sf_open(file_to_play.c_str(), SFM_READ, &sfinfo);
                 if (sndfile) is_file_based = true;
             }
-            else if (type == "realtime_stream_start") {
-                is_file_based = false;
-                is_realtime_streaming = true;
-                current_mode_label = "REALTIME";
-                sfinfo.channels = AUDIO_CHANNELS;
-                sfinfo.samplerate = AUDIO_SAMPLE_RATE;
-            }
             else if (type == "responses_only") {
                 is_file_based = false;
-                is_realtime_streaming = false;
-                is_responses_streaming = true;
-                responses_only_flag = true;
                 current_mode_label = "RESPONSE";
                 sfinfo.channels = AUDIO_CHANNELS;
                 sfinfo.samplerate = AUDIO_SAMPLE_RATE;
@@ -2002,7 +1958,6 @@ void robot_main_loop(std::future<void> server_ready_future) {
         }
 
         CustomSoundStream soundStream(sfinfo.channels, sfinfo.samplerate);
-        CustomSoundStream soundStream_resp(sfinfo.channels, sfinfo.samplerate); // Responses용 사운드 스트림
 
         // --- 2. 스레드 시작 ---
         is_speaking = true;
@@ -2014,6 +1969,14 @@ void robot_main_loop(std::future<void> server_ready_future) {
 				wait_mode_thread.join();
 			}
             csv_control_motor(csv_audio_name);
+
+            // 정상 종료 시 speaking_finished 전송 (인터럽션 시에는 전송하지 않음)
+            if (!user_interruption_flag) {
+                json finished_msg;
+                finished_msg["type"] = "speaking_finished";
+                finished_msg["turn_id"] = current_turn_id.load();
+                webSocket.sendText(finished_msg.dump());
+            }
         }
         else if (is_file_based) {
 			wait_mode_flag = false;
@@ -2030,57 +1993,18 @@ void robot_main_loop(std::future<void> server_ready_future) {
 
             json finished_msg;
             finished_msg["type"] = "speaking_finished";
+            finished_msg["turn_id"] = current_turn_id.load();
             webSocket.sendText(finished_msg.dump());
         } 
-        else { // realtime or responses
+        else { // responses 스트리밍
             const size_t bytes_per_interval = sfinfo.samplerate * sfinfo.channels * sizeof(sf::Int16) * INTERVAL_MS / 1000;
 
-			// Realtime 처리
-            if (!responses_only_flag) {
-                // 데이터가 들어올 때까지 대기
-                {
-                    std::unique_lock<std::mutex> lock(realtime_stream_buffer_mutex);
-					// 버퍼 사이즈가 한 사이클(17280 bytes) 이상 차거나, 전체 응답이 한 사이클 분량보다 짧거나, 사용자 끼어들기 신호가 있을 경우 해제
-                    realtime_stream_buffer_cv.wait(lock, [&]{ return realtime_stream_buffer.size() >= bytes_per_interval || (!is_realtime_streaming && !realtime_stream_buffer.empty()) || user_interruption_flag; });
-                }
-
-                if (!realtime_stream_buffer.empty() && !user_interruption_flag) {
-                    wait_mode_flag = false;
-                    if (wait_mode_thread.joinable()) {
-                        wait_mode_thread.join();
-                    }
-                    start_time = std::chrono::high_resolution_clock::now();
-                    std::thread t1_realtime(stream_and_split, std::ref(sfinfo), std::ref(soundStream), "realtime");
-                    std::thread t2_realtime(generate_motion, sfinfo.channels, sfinfo.samplerate);
-                    std::thread t3_realtime(control_motor, std::ref(soundStream), "REALTIME");
-                    
-                    t1_realtime.join();
-                    t2_realtime.join();
-                    t3_realtime.join();
-
-                    json finished_msg;
-                    finished_msg["type"] = "speaking_finished";
-                    webSocket.sendText(finished_msg.dump());
-                }
-            }
-
-            // Response 전 중간 대기
-			if (!wait_mode_thread.joinable()) {
-                wait_mode_flag = true;
-				wait_mode_thread = std::thread(wait_control_motor);
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-			}
-            
             // Responses 처리
             if (!user_interruption_flag) {
-                
-                // 스레드 큐 초기화
-                clear_queues();
-
                 // Responses 스트림이 시작되고 데이터가 들어올 때까지 대기
                 {
                     std::unique_lock<std::mutex> lock(responses_stream_buffer_mutex);
-                    responses_stream_buffer_cv.wait(lock, [&]{ return responses_stream_buffer.size() >= bytes_per_interval || (!is_responses_streaming && !responses_stream_buffer.empty()) || user_interruption_flag; });
+                    responses_stream_buffer_cv.wait(lock, [&]{ return responses_stream_buffer.size() >= bytes_per_interval || !is_responses_streaming || user_interruption_flag; });
                 }
 
                 if (!responses_stream_buffer.empty() && !user_interruption_flag) {
@@ -2089,11 +2013,11 @@ void robot_main_loop(std::future<void> server_ready_future) {
 						wait_mode_thread.join();
 					}
 
-                    stop_flag = false; // 다음 재생을 위해 stop_flag 리셋
+                    stop_flag = false;
                     start_time = std::chrono::high_resolution_clock::now();
-                    std::thread t1_responses(stream_and_split, std::ref(sfinfo), std::ref(soundStream_resp), "responses");
+                    std::thread t1_responses(stream_and_split, std::ref(sfinfo), std::ref(soundStream));
                     std::thread t2_responses(generate_motion, sfinfo.channels, sfinfo.samplerate);
-                    std::thread t3_responses(control_motor, std::ref(soundStream_resp), "RESPONSES");
+                    std::thread t3_responses(control_motor, std::ref(soundStream), "RESPONSES");
 
                     t1_responses.join();
                     t2_responses.join();
@@ -2101,6 +2025,14 @@ void robot_main_loop(std::future<void> server_ready_future) {
 
                     json finished_msg;
                     finished_msg["type"] = "speaking_finished";
+                    finished_msg["turn_id"] = current_turn_id.load();
+                    webSocket.sendText(finished_msg.dump());
+                }
+                else if (!user_interruption_flag) {
+                    // 빈 스트림 (TTS 오류 등) -> speaking_finished 전송하여 Python 교착 방지
+                    json finished_msg;
+                    finished_msg["type"] = "speaking_finished";
+                    finished_msg["turn_id"] = current_turn_id.load();
                     webSocket.sendText(finished_msg.dump());
                 }
             }
@@ -2113,12 +2045,6 @@ void robot_main_loop(std::future<void> server_ready_future) {
         // 리소스 정리
         soundStream.stop();
         soundStream.clearBuffer();
-        
-        if (is_responses_streaming || !responses_stream_buffer.empty()) {
-            soundStream_resp.stop();
-            soundStream_resp.clearBuffer();
-        }
-        
         clear_queues();
         
         if (sndfile) sf_close(sndfile);
@@ -2196,33 +2122,24 @@ int main() {
                 json response = json::parse(msg->str);
                 std::string type = response.value("type", "");
 
-                if (type == "realtime_audio_chunk") {
+                if (type == "responses_audio_chunk") {
                     if (user_interruption_flag) return;
-                    std::string b64_data = response.value("data", "");
-                    std::string decoded_data;
-                    macaron::Base64::Decode(b64_data, decoded_data);
-                    std::lock_guard<std::mutex> lock(realtime_stream_buffer_mutex);
-                    realtime_stream_buffer.insert(realtime_stream_buffer.end(), decoded_data.begin(), decoded_data.end());
-                    realtime_stream_buffer_cv.notify_one();
-                } 
-                else if (type == "realtime_stream_end") {
-                    is_realtime_streaming = false;
-                    realtime_stream_buffer_cv.notify_one();
-                } 
-                else if (type == "responses_audio_chunk") {
-                    if (user_interruption_flag) return;
+                    int chunk_turn_id = response.value("turn_id", -1);
+                    if (chunk_turn_id != current_turn_id.load()) return; // stale 청크 폐기
                     std::string b64_data = response.value("data", "");
                     std::string decoded_data;
                     macaron::Base64::Decode(b64_data, decoded_data);
                     std::lock_guard<std::mutex> lock(responses_stream_buffer_mutex);
                     responses_stream_buffer.insert(responses_stream_buffer.end(), decoded_data.begin(), decoded_data.end());
                     responses_stream_buffer_cv.notify_one();
-                } 
+                }
                 else if (type == "responses_stream_start") {
                     is_responses_streaming = true;
                     responses_stream_buffer_cv.notify_one();
-                } 
+                }
                 else if (type == "responses_stream_end") {
+                    int end_turn_id = response.value("turn_id", -1);
+                    if (end_turn_id != current_turn_id.load()) return; // stale 종료 신호 무시
                     is_responses_streaming = false;
                     responses_stream_buffer_cv.notify_one();
                 } 
@@ -2235,7 +2152,6 @@ int main() {
                     if (is_speaking) {
                         std::cout << "[WebSocket] User interruption received." << std::endl;
                         user_interruption_flag = true;
-                        realtime_stream_buffer_cv.notify_all();
                         responses_stream_buffer_cv.notify_all();
                         audio_queue_cv.notify_all();
                         mouth_motion_queue_cv.notify_all();
@@ -2243,8 +2159,14 @@ int main() {
                 } 
                 else { // audio_chunk가 아닌 다른 모든 메시지(gpt_streaming_start, play_audio 등)는 메인 루프가 처리하도록 큐에 넣음
                     // 새로운 재생 시작을 알리는 모든 메시지 유형에 대해 인터럽트 플래그를 즉시 리셋
-                    if (type == "realtime_stream_start" || type == "play_audio" || type == "play_music" || type == "responses_only") {
+                    if (type == "play_audio" || type == "play_music" || type == "responses_only" || type == "play_audio_csv") {
                         user_interruption_flag = false;
+                        if (type == "responses_only") {
+                            is_responses_streaming = true;
+                        }
+                        if (response.contains("turn_id")) {
+                            current_turn_id = response["turn_id"].get<int>();
+                        }
                     }
                     std::lock_guard<std::mutex> lock(server_message_queue_mutex);
                     server_message_queue.push(response);
@@ -2265,11 +2187,14 @@ int main() {
     webSocket.start();
     std::thread robot_thread(robot_main_loop, std::move(server_ready_future));
     robot_thread.join();
-    if (tuning_logger) tuning_logger->stop();
-    motion_logger.stop();
     webSocket.stop();
     ix::uninitNetSystem();
+
+    #ifdef MOTOR_ENABLED
+    if (tuning_logger) tuning_logger->stop();
+    motion_logger.stop();
     cleanup_dynamixel();
-    
+    #endif
+
     return 0;
 }

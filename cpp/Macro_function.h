@@ -16,9 +16,11 @@
 #include <tuple>
 #include <vector>
 
-// Linux/System headers
+// Linux/System headers (POSIX 전용)
+#ifndef _WIN32
 #include <fcntl.h>
 #include <termios.h>
+#endif
 
 // External Libraries
 #include <Eigen/Dense>

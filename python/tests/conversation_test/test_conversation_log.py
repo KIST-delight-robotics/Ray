@@ -37,8 +37,8 @@ from openai import OpenAI
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import RESPONSES_PRESETS, RESPONSES_MODEL
-from prompts import SYSTEM_PROMPT_V0_1
-from conversation_manager import ConversationManager
+from llm.prompts import SYSTEM_PROMPT_V0_1
+from engine.session import ConversationManager
 from test_scenarios import TEST_SCENARIOS
 
 # ─── 설정 ─────────────────────────────────────────────────────────────────────

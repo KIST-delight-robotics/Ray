@@ -90,14 +90,11 @@ def offline_motion_generation(audioname):
     
     currentpath = os.path.abspath(os.getcwd())
     # currentpath = os.path.dirname(os.path.abspath(__file__))
-    audiofilepath = currentpath+'/assets/audio/vocal/'+audioname+'_vocals.wav'
-    headcsvfilepath = currentpath+'/assets/headMotion/'+audioname+'.csv'
-    mouthcsvfilepath = currentpath+'/assets/mouthMotion/'+audioname+'-delta-big.csv'
-    # audiofilepath = audioname+'.wav'
-    # headcsvfilepath = audioname+'.csv'
-    # mouthcsvfilepath = audioname+'-delta-big.csv'
+    audiofilepath = os.path.join(currentpath, 'assets', 'audio', 'vocal', audioname + '_vocals.wav')
+    headcsvfilepath = os.path.join(currentpath, 'assets', 'headMotion', audioname + '.csv')
+    mouthcsvfilepath = os.path.join(currentpath, 'assets', 'mouthMotion', audioname + '-delta-big.csv')
 
-    segmentfolder = currentpath+'/data/segments_offline/'
+    segmentfolder = os.path.join(currentpath, 'data', 'segments_offline')
 
     ####################################################################################################################################
     #################################################################################################################################### MOUTH
@@ -1011,8 +1008,8 @@ def offline_motion_generation(audioname):
     ####################################################################################################################################
     ####################################################################################################################################
 
-    rpysegmentsavepath = segmentfolder+'rpysegments_'+str(segmentLength) + '_' + rpy_grad +   '_'+str(classNum)+      '.npy'
-    audioboundsavepath = segmentfolder+'energybd_'+str(segmentLength) + '_' + audio_grad +    '_'+str(classNum)+     '.npy'
+    rpysegmentsavepath = os.path.join(segmentfolder, 'rpysegments_'+str(segmentLength) + '_' + rpy_grad + '_'+str(classNum)+ '.npy')
+    audioboundsavepath = os.path.join(segmentfolder, 'energybd_'+str(segmentLength) + '_' + audio_grad + '_'+str(classNum)+ '.npy')
 
     with open(rpysegmentsavepath, 'rb') as f:
         rpysegments_parallel = pickle.load(f)

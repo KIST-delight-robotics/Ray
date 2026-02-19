@@ -86,8 +86,9 @@ void DataLogger::stop() {
 
 
 // ==========================================
-// HighFreqLogger 구현 (5ms)
+// HighFreqLogger 구현 (5ms, 하드웨어 전용)
 // ==========================================
+#ifdef MOTOR_ENABLED
 
 HighFreqLogger::HighFreqLogger(DynamixelDriver* drv) : driver(drv) {
     buffer.reserve(1000000); // 초기 버퍼 용량 예약
@@ -175,3 +176,5 @@ void HighFreqLogger::saveToFile() {
     file.close();
     std::cout << "[HighFreqLogger] Saved " << buffer.size() << " samples to " << ss.str() << std::endl;
 }
+
+#endif // MOTOR_ENABLED

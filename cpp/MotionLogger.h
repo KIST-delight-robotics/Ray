@@ -1,7 +1,18 @@
 #ifndef MOTION_LOGGER_H
 #define MOTION_LOGGER_H
 
+#ifdef MOTOR_ENABLED
 #include "DynamixelDriver.h" // MotorState 구조체 사용을 위해 필요
+#else
+// MOTOR_ENABLED가 아닐 때 MotorState 스텁 제공
+#include <cstdint>
+struct MotorState {
+    int32_t position = 0;
+    int32_t velocity = 0;
+    int16_t current = 0;
+};
+#endif
+
 #include <fstream>
 #include <vector>
 #include <string>
@@ -27,7 +38,7 @@ private:
 public:
     DataLogger();
     ~DataLogger();
-    
+
     void start(const std::chrono::time_point<std::chrono::high_resolution_clock>& start_t, const std::string& dir);
     void stop();
 
@@ -38,7 +49,8 @@ public:
              const std::vector<MotorState>& states);
 };
 
-// --- 2. 고속 로거 (5ms 주기) ---
+// --- 2. 고속 로거 (5ms 주기, 하드웨어 전용) ---
+#ifdef MOTOR_ENABLED
 struct HighFreqData {
     double timestamp_ms;
     std::vector<MotorState> states;
@@ -50,7 +62,7 @@ private:
     std::atomic<bool> is_logging{false};
     std::thread log_thread;
     std::chrono::time_point<std::chrono::high_resolution_clock> shared_start_time;
-    
+
     DynamixelDriver* driver; // 드라이버 포인터 필요
     std::string save_dir;
 
@@ -64,5 +76,6 @@ public:
     void start(const std::chrono::time_point<std::chrono::high_resolution_clock>& start_t, const std::string& dir);
     void stop();
 };
+#endif // MOTOR_ENABLED
 
 #endif // MOTION_LOGGER_H

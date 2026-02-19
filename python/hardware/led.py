@@ -1,7 +1,8 @@
-from rpi5_ws2812.ws2812 import Color, WS2812SpiDriver
 import logging
 import time
 import math
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
 # [전역 설정] 모듈이 import 될 때 딱 한 번 실행됨.
@@ -11,16 +12,21 @@ SPI_BUS = 0
 SPI_DEVICE = 0
 
 try:
+    from rpi5_ws2812.ws2812 import Color, WS2812SpiDriver
     # 스트립 객체 생성 (전역 변수)
     _driver = WS2812SpiDriver(spi_bus=SPI_BUS, spi_device=SPI_DEVICE, led_count=LED_COUNT)
     strip = _driver.get_strip()
     strip.clear()  # 초기화 시 끄기
     strip.show()   # 적용
     logging.info(f"✅ LED Strip initialized with {LED_COUNT} LEDs.")
-    
+
 except Exception as e:
-    logging.error(f"❌ LED 초기화 실패: {e}")
+    logging.warning(f"LED 비활성화 (하드웨어 없음): {e}")
     strip = None  # 하드웨어가 없을 때 에러 방지용
+
+    # 더미 Color: strip=None일 때 다른 모듈에서 Color를 참조해도 에러 방지
+    def Color(r, g, b):
+        return (r, g, b)
 
 # ---------------------------------------------------------
 # [제어 함수] 외부에서 이 함수들을 호출하여 LED 제어.
@@ -77,6 +83,43 @@ def led_clear():
     if strip:
         strip.clear()
         strip.show()
+
+
+# ---------------------------------------------------------
+# [고수준 애니메이션 지원 함수]
+# led_animations.py 등 외부 모듈에서 strip 직접 접근 없이
+# 개별 픽셀 제어가 가능하도록 지원합니다.
+# ---------------------------------------------------------
+
+RING_SIZE = 8
+RING_TOP_OFFSET = 8
+RING_BOTTOM_OFFSET = 16
+BAR_SIZE = 8
+
+def led_set_ring_pixels(pixel_colors: list[tuple[int, int, int]]):
+    """
+    링 LED에 개별 색상을 적용합니다 (위/아래 대칭).
+    pixel_colors: 8개의 (r, g, b) 튜플 리스트
+    """
+    if not strip:
+        return
+    for i, (r, g, b) in enumerate(pixel_colors):
+        color = Color(r, g, b)
+        strip.set_pixel_color(RING_TOP_OFFSET + i, color)
+        strip.set_pixel_color(RING_BOTTOM_OFFSET + i, color)
+    strip.show()
+
+
+def led_set_bar_pixels(pixel_colors: list[tuple[int, int, int]]):
+    """
+    바 LED에 개별 색상을 적용합니다.
+    pixel_colors: 8개의 (r, g, b) 튜플 리스트
+    """
+    if not strip:
+        return
+    for i, (r, g, b) in enumerate(pixel_colors):
+        strip.set_pixel_color(i, Color(r, g, b))
+    strip.show()
 
 def led_smooth_wave(r, g, b, speed=4.0, focus=10.0):
     """

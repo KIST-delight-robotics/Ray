@@ -85,3 +85,24 @@ SMART_TURN_MAX_RETRIES = 3          # '진행중'일 때 재추론 최대 횟수
 
 
 STT_WAIT_TIMEOUT_SECONDS = 5.0     # STT 결과 대기 최대 시간 (초)
+
+# --- LED 색상 설정 ---
+LED_COLOR_OFF = (0, 0, 0)
+LED_COLOR_SLEEP = (100, 100, 30)       # Sleep 상태 Ring (따뜻한 흰색)
+LED_COLOR_ACTIVE = (233, 233, 50)      # 활성 상태 (노란색)
+LED_COLOR_LISTENING = (233, 50, 50)    # Listening 상태 Bar (빨간색)
+
+# --- WebSocket 설정 ---
+WS_HOST = "127.0.0.1"
+WS_PORT = 5000
+
+# --- OpenAI 클라이언트 팩토리 ---
+def create_openai_client():
+    """동기 OpenAI 클라이언트를 생성합니다."""
+    from openai import OpenAI
+    return OpenAI(api_key=OPENAI_API_KEY)
+
+def create_async_openai_client():
+    """비동기 OpenAI 클라이언트를 생성합니다."""
+    from openai import AsyncOpenAI
+    return AsyncOpenAI(api_key=OPENAI_API_KEY)

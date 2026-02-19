@@ -6,14 +6,16 @@ import json
 import signal
 import sys
 import atexit
-from openai import AsyncOpenAI
-
-from config import OPENAI_API_KEY, AWAKE_FILE, SLEEP_FILE, AWAKE_FILE_SCRIPT, SLEEP_FILE_SCRIPT, RAG_PERSIST_DIR
-from prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_RESP_ONLY
-from conversation_manager import ConversationManager
-from api_pipeline import save_tts_to_file
-from led import led_set_ring, led_set_bar, led_clear
-from state_manager import ConversationEngine
+from config import (
+    create_async_openai_client, OPENAI_API_KEY,
+    AWAKE_FILE, SLEEP_FILE, AWAKE_FILE_SCRIPT, SLEEP_FILE_SCRIPT,
+    RAG_PERSIST_DIR, WS_HOST, WS_PORT,
+)
+from llm.prompts import SYSTEM_PROMPT_RESP_ONLY
+from engine.session import ConversationManager
+from tts.file_utils import save_tts_to_file
+from hardware.led import led_set_ring, led_set_bar, led_clear
+from engine import ConversationEngine
 from rag import init_db
 
 # 전역 엔진 변수 (Listening Loop에서 접근)
@@ -29,12 +31,13 @@ def shutdown_handler(signum=None, frame=None):
         sys.exit(0)
 
 atexit.register(shutdown_handler) # 정상 종료시 실행
-signal.signal(signal.SIGTERM, shutdown_handler) # kill 신호시 실행
+if sys.platform != "win32":
+    signal.signal(signal.SIGTERM, shutdown_handler) # kill 신호시 실행 (Unix only)
 
 
 async def main_logic_loop(websocket):
     global conversation_engine
-    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    openai_client = create_async_openai_client()
 
     if not AWAKE_FILE.exists():
         logging.info(f"음성 파일 생성 중: {AWAKE_FILE}")
@@ -77,9 +80,10 @@ async def background_listener(websocket):
             
             # C++ 로봇 동작 완료 신호 ("speaking_finished")
             if data.get("type") == "speaking_finished":
-                logging.info("Signal: speaking_finished received from C++")
+                turn_id = data.get("turn_id", 0)
+                logging.info(f"Signal: speaking_finished received from C++ (turn_id={turn_id})")
                 if conversation_engine:
-                    conversation_engine.on_robot_finished()
+                    conversation_engine.on_robot_finished(turn_id)
                 continue
 
     except websockets.exceptions.ConnectionClosed:
@@ -114,8 +118,8 @@ async def main():
     )
     
     # 웹소켓 서버 시작
-    server = await websockets.serve(chat_handler, "127.0.0.1", 5000, family=socket.AF_INET)
-    logging.info("🚀 통합 WebSocket 서버가 127.0.0.1:5000 에서 시작되었습니다.")
+    server = await websockets.serve(chat_handler, WS_HOST, WS_PORT, family=socket.AF_INET)
+    logging.info(f"통합 WebSocket 서버가 {WS_HOST}:{WS_PORT} 에서 시작되었습니다.")
     await server.wait_closed()
 
 if __name__ == "__main__":

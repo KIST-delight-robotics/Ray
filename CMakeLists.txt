@@ -9,6 +9,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 # ==================================================================
+# 하드웨어 옵션 (모터/센서 없이 테스트하려면 OFF)
+# 사용법: cmake -DMOTOR_ENABLED=OFF ..
+# ==================================================================
+option(MOTOR_ENABLED "Enable Dynamixel motor and WiringPi hardware support" ON)
+
+# ==================================================================
 # 의존성 관리 (FetchContent)
 include(FetchContent)
 
@@ -65,11 +71,13 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(json cnpy Eigen3 SFML ixwebsocket tomlplusplus)
 
 # ==================================================================
-# 시스템 라이브러리 찾기
+# 시스템 라이브러리 찾기 (하드웨어 활성화 시에만)
 # ==================================================================
 
-find_library(WIRINGPI_LIBRARY NAMES wiringPi)
-find_path(WIRINGPI_INCLUDE_DIR NAMES wiringPi.h)
+if(MOTOR_ENABLED)
+    find_library(WIRINGPI_LIBRARY NAMES wiringPi)
+    find_path(WIRINGPI_INCLUDE_DIR NAMES wiringPi.h)
+endif()
 
 # ==================================================================
 # 프로젝트 소스 코드 및 실행 파일 정의
@@ -78,38 +86,50 @@ find_path(WIRINGPI_INCLUDE_DIR NAMES wiringPi.h)
 # 실행 파일 생성 위치 설정
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/build)
 
-# 실행 파일 생성
-add_executable(Ray
+# 소스 파일 목록
+set(RAY_SOURCES
     cpp/main.cpp
     cpp/Macro_function.cpp
-    cpp/DynamixelDriver.cpp
     cpp/MotionLogger.cpp
-    # 여기에 다른 .cpp 파일들을 추가하세요.
-    # 예: cpp/audio_processing.cpp
-    #    cpp/robot_control.cpp
 )
+
+# 하드웨어 활성화 시에만 DynamixelDriver 컴파일
+if(MOTOR_ENABLED)
+    list(APPEND RAY_SOURCES cpp/DynamixelDriver.cpp)
+endif()
+
+# 실행 파일 생성
+add_executable(Ray ${RAY_SOURCES})
 
 # 헤더 파일 검색 경로 추가
 target_include_directories(Ray PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/cpp"
     ${cnpy_SOURCE_DIR}
-    third_party/DynamixelSDK-3.7.31/c++/include/dynamixel_sdk
-    ${WIRINGPI_INCLUDE_DIR}
 )
 
-target_link_directories(Ray PRIVATE
-    third_party/DynamixelSDK-3.7.31/c++/build/linux64
-)
-
-# 실행 파일에 라이브러리 링크
+# 공통 라이브러리 링크
 target_link_libraries(Ray PRIVATE
     nlohmann_json::nlohmann_json
     tomlplusplus::tomlplusplus
     cnpy
     Eigen3::Eigen
     sfml-audio
-    dxl_x64_cpp
     ixwebsocket
-    sndfile
-    ${WIRINGPI_LIBRARY}
+    ${SNDFILE_TARGET}
 )
+
+# 하드웨어 활성화 시: 컴파일 플래그 및 하드웨어 라이브러리 추가
+if(MOTOR_ENABLED)
+    target_compile_definitions(Ray PRIVATE MOTOR_ENABLED)
+    target_include_directories(Ray PRIVATE
+        third_party/DynamixelSDK-3.7.31/c++/include/dynamixel_sdk
+        ${WIRINGPI_INCLUDE_DIR}
+    )
+    target_link_directories(Ray PRIVATE
+        third_party/DynamixelSDK-3.7.31/c++/build/linux64
+    )
+    target_link_libraries(Ray PRIVATE
+        dxl_x64_cpp
+        ${WIRINGPI_LIBRARY}
+    )
+endif()
