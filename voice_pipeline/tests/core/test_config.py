@@ -22,7 +22,7 @@ class TestAudioConfig:
 class TestConversationHistoryConfig:
     def test_defaults(self) -> None:
         cfg = ConversationHistoryConfig()
-        assert cfg.max_turns_in_context == 20
+        assert cfg.max_context_tokens == 4096
         assert cfg.storage_backend == "memory"
         assert cfg.storage_path == ""
 

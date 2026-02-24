@@ -93,13 +93,8 @@ class IConversationHistory(ABC):
         """
 
     @abstractmethod
-    def get_messages(self, max_turns: int | None = None) -> list[dict[str, Any]]:
-        """Retrieve conversation messages.
-
-        Args:
-            max_turns: If given, return only the most recent N turns
-                (one turn = one user + one assistant message).
-                None returns all messages.
+    def get_messages(self) -> list[dict[str, Any]]:
+        """Retrieve all conversation messages.
 
         Returns:
             List of message dicts in vendor-specific format.

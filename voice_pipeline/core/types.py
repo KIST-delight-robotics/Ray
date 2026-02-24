@@ -7,7 +7,15 @@ types belong in their own modules.
 from __future__ import annotations
 
 import enum
+from collections.abc import Callable
 from dataclasses import dataclass, field
+
+# ---------------------------------------------------------------------------
+# Callable type aliases
+# ---------------------------------------------------------------------------
+
+TokenCounter = Callable[[str], int]
+"""Counts tokens in a string. Vendor-specific implementations provided in Phase 3."""
 
 # ---------------------------------------------------------------------------
 # Primitive aliases

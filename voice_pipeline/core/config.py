@@ -31,7 +31,7 @@ class AudioConfig:
 class ConversationHistoryConfig:
     """Configuration for ConversationHistory and StorageBackend."""
 
-    max_turns_in_context: int = 20
+    max_context_tokens: int = 4096
     storage_backend: str = "memory"
     storage_path: str = ""
 
