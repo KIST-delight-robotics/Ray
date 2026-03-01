@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Any
 
@@ -48,7 +49,7 @@ class ConversationHistory(IConversationHistory):
     def get_messages(self) -> list[dict[str, Any]]:
         """Retrieve all conversation messages."""
         self._require_session()
-        return list(self._messages)
+        return copy.deepcopy(self._messages)
 
     def clear(self) -> None:
         """Remove all messages from the current session in memory."""

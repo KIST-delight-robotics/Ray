@@ -143,3 +143,48 @@ class TestContextBuilder:
         cb = ContextBuilder(history, config, "", _word_counter)
         result = cb.build("hi")
         assert result == [{"role": "user", "content": "hi"}]
+
+    def test_system_prompt_exceeds_budget(self) -> None:
+        """When system prompt alone exceeds budget, history is dropped but both
+        system prompt and current text are still included."""
+        history = StubHistory([{"role": "user", "content": "old"}])
+        # Budget: 2, system "a very long system prompt" = 5 → budget goes negative
+        config = ConversationHistoryConfig(max_context_tokens=2)
+        cb = ContextBuilder(history, config, "a very long system prompt", _word_counter)
+        result = cb.build("hi")
+        assert result[0] == {"role": "system", "content": "a very long system prompt"}
+        assert result[-1] == {"role": "user", "content": "hi"}
+        # history should be excluded (budget negative)
+        assert len(result) == 2
+
+    def test_zero_budget(self) -> None:
+        """Zero budget still includes system prompt and current text."""
+        history = StubHistory([{"role": "user", "content": "old"}])
+        config = ConversationHistoryConfig(max_context_tokens=0)
+        cb = ContextBuilder(history, config, "sys", _word_counter)
+        result = cb.build("hi")
+        assert result[0] == {"role": "system", "content": "sys"}
+        assert result[-1] == {"role": "user", "content": "hi"}
+        assert len(result) == 2
+
+    def test_empty_current_text(self) -> None:
+        """Empty current text produces a user message with empty content."""
+        history = StubHistory()
+        config = ConversationHistoryConfig(max_context_tokens=100)
+        cb = ContextBuilder(history, config, "", _word_counter)
+        result = cb.build("")
+        assert result == [{"role": "user", "content": ""}]
+
+    def test_single_message_exactly_fills_budget(self) -> None:
+        """A history message that exactly uses the remaining budget is included."""
+        history = StubHistory(
+            [{"role": "user", "content": "two words"}]  # 2 tokens
+        )
+        # Budget: 3, current "hi" = 1 → remaining = 2
+        # history "two words" = 2 → exactly fits
+        config = ConversationHistoryConfig(max_context_tokens=3)
+        cb = ContextBuilder(history, config, "", _word_counter)
+        result = cb.build("hi")
+        assert len(result) == 2
+        assert result[0] == {"role": "user", "content": "two words"}
+        assert result[1] == {"role": "user", "content": "hi"}

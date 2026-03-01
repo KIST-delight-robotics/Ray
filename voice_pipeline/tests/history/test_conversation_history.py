@@ -65,13 +65,22 @@ class TestConversationHistory:
         assert messages[0] == {"role": "user", "content": "hello"}
         assert messages[3] == {"role": "assistant", "content": "good"}
 
-    def test_get_messages_returns_copy(self) -> None:
+    def test_get_messages_returns_copy_list(self) -> None:
         h = self._make_history()
         h.new_session("s1")
         h.add_user_message("hello")
         msgs = h.get_messages()
         msgs.append({"role": "user", "content": "injected"})
         assert len(h.get_messages()) == 1
+
+    def test_get_messages_returns_deep_copy(self) -> None:
+        """Mutating dict fields in the returned list must not affect internal state."""
+        h = self._make_history()
+        h.new_session("s1")
+        h.add_user_message("hello")
+        msgs = h.get_messages()
+        msgs[0]["content"] = "tampered"
+        assert h.get_messages()[0]["content"] == "hello"
 
     def test_clear(self) -> None:
         h = self._make_history()
@@ -99,3 +108,13 @@ class TestConversationHistory:
         h.add_user_message("hello")
         h.new_session("s2")
         assert h.get_messages() == []
+
+    def test_save_persists_before_new_session(self) -> None:
+        """Saved data survives new_session() in the backend."""
+        backend = MemoryStorageBackend()
+        h = ConversationHistory(backend=backend)
+        h.new_session("s1")
+        h.add_user_message("hello")
+        h.save()
+        h.new_session("s2")
+        assert backend.load("s1") == [{"role": "user", "content": "hello"}]
