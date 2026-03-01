@@ -52,6 +52,19 @@ class PlaybackState(enum.Enum):
     STOP_PENDING = "stop_pending"
 
 
+class LEDState(enum.Enum):
+    """LED display states triggered by the pipeline.
+
+    Implementations map these states to specific colors/animations.
+    """
+
+    OFF = "off"
+    SLEEPING = "sleeping"
+    LISTENING = "listening"
+    THINKING = "thinking"
+    SPEAKING = "speaking"
+
+
 # ---------------------------------------------------------------------------
 # Turn-taking types
 # ---------------------------------------------------------------------------

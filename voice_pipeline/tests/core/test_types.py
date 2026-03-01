@@ -5,6 +5,7 @@ import pytest
 from voice_pipeline.core.types import (
     CppEvent,
     CppEventType,
+    LEDState,
     PlaybackState,
     ResponseData,
     SystemMode,
@@ -114,6 +115,18 @@ class TestCppEvent:
     def test_playback_complete_no_position(self) -> None:
         event = CppEvent(event_type=CppEventType.PLAYBACK_COMPLETE)
         assert event.position_sec is None
+
+
+class TestLEDState:
+    def test_values(self) -> None:
+        assert LEDState.OFF.value == "off"
+        assert LEDState.SLEEPING.value == "sleeping"
+        assert LEDState.LISTENING.value == "listening"
+        assert LEDState.THINKING.value == "thinking"
+        assert LEDState.SPEAKING.value == "speaking"
+
+    def test_member_count(self) -> None:
+        assert len(LEDState) == 5
 
 
 class TestEnums:
