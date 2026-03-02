@@ -150,8 +150,8 @@ class TTSStream(Iterator[bytes]):
     """Streaming TTS result. Yields PCM audio chunks.
 
     After full iteration, ``.audio`` / ``.timestamps`` / ``.result`` become
-    available.  Must be closed (full iteration, ``.close()``, or context
-    manager) to release resources.
+    available.  Must be closed (full iteration or ``.close()``) to release
+    resources.
     """
 
     __slots__ = ("_gen", "_close_fn", "_ts_fn", "_audio", "_done", "_closed", "_ts_cache")

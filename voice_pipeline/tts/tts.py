@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any
 
@@ -69,8 +69,21 @@ class OpenAITTS(ITTS):
             logger.warning("OpenAI TTS API error: %s", exc)
             raise TTSError(str(exc)) from exc
 
-        gen = _iter_response(response_cm)
-        return TTSStream(gen, close_fn=lambda: _close_cm(response_cm))
+        # Enter CM eagerly so close_fn can always exit it safely.
+        try:
+            response = response_cm.__enter__()
+        except Exception as exc:
+            raise TTSError(str(exc)) from exc
+
+        exited = [False]
+
+        def safe_exit(*exc_info: object) -> None:
+            if not exited[0]:
+                exited[0] = True
+                response_cm.__exit__(*exc_info)
+
+        gen = _iter_chunks(response, safe_exit)
+        return TTSStream(gen, close_fn=lambda: _safe_close(safe_exit))
 
     def save_to_file(self, text: str, path: str | Path) -> None:
         """Non-streaming: synthesize and save as WAV file.
@@ -108,29 +121,33 @@ class OpenAITTS(ITTS):
             raise TTSError(str(exc)) from exc
 
 
-def _iter_response(response_cm: Any) -> Generator[bytes, None, None]:
-    """Enter the streaming response CM, yield audio chunks, exit exactly once."""
-    response = response_cm.__enter__()
+def _iter_chunks(response: Any, safe_exit: Callable[..., None]) -> Generator[bytes, None, None]:
+    """Yield audio chunks from an already-entered streaming response.
+
+    Calls *safe_exit* exactly once on completion, error, or generator close.
+    *safe_exit* is idempotent, so duplicate calls (e.g. from TTSStream.close_fn)
+    are harmless.
+    """
     try:
         for chunk in response.iter_bytes(chunk_size=4096):  # noqa: UP028
             yield chunk
     except GeneratorExit:
-        response_cm.__exit__(None, None, None)
+        safe_exit(None, None, None)
         return
     except openai.OpenAIError as exc:
-        response_cm.__exit__(type(exc), exc, exc.__traceback__)
+        safe_exit(type(exc), exc, exc.__traceback__)
         raise TTSError(str(exc)) from exc
     except Exception as exc:
-        response_cm.__exit__(type(exc), exc, exc.__traceback__)
+        safe_exit(type(exc), exc, exc.__traceback__)
         raise TTSError(str(exc)) from exc
     else:
-        response_cm.__exit__(None, None, None)
+        safe_exit(None, None, None)
 
 
-def _close_cm(cm: Any) -> None:
-    """Best-effort close of context manager (for TTSStream.close_fn)."""
+def _safe_close(safe_exit: Callable[..., None]) -> None:
+    """Best-effort close via safe_exit (for TTSStream.close_fn)."""
     try:
-        cm.__exit__(None, None, None)
+        safe_exit(None, None, None)
     except Exception:
         logger.debug("Error closing CM (suppressed)", exc_info=True)
 

@@ -294,6 +294,88 @@ class TestStreamCleanup:
 
         mock_cm.__exit__.assert_called()
 
+    def test_cm_exited_exactly_once_after_full_iteration(self, tts_config: TTSConfig) -> None:
+        """__exit__ must be called exactly once, not double-exited."""
+        client = create_mock_client([b"\x01", b"\x02"])
+        tts = _build_tts(client, tts_config)
+        mock_cm = client.audio.speech.with_streaming_response.create.return_value
+
+        stream = tts.synthesize("Hello")
+        list(stream)
+        stream.close()  # extra close after exhaustion
+
+        # __enter__ called once by synthesize(), __exit__ exactly once
+        mock_cm.__enter__.assert_called_once()
+        mock_cm.__exit__.assert_called_once()
+
+    def test_cm_exited_exactly_once_on_partial_close(self, tts_config: TTSConfig) -> None:
+        """Partial iteration + close: __exit__ exactly once."""
+        client = create_mock_client([b"\x01", b"\x02", b"\x03"])
+        tts = _build_tts(client, tts_config)
+        mock_cm = client.audio.speech.with_streaming_response.create.return_value
+
+        stream = tts.synthesize("Hello")
+        next(stream)
+        stream.close()
+
+        mock_cm.__exit__.assert_called_once()
+
+    def test_close_after_exhaustion_is_idempotent(self, tts_config: TTSConfig) -> None:
+        client = create_mock_client([b"\x01"])
+        tts = _build_tts(client, tts_config)
+
+        stream = tts.synthesize("Hello")
+        list(stream)
+        stream.close()
+        stream.close()  # double close — should be a no-op
+
+
+# ---------------------------------------------------------------------------
+# TestEnterError
+# ---------------------------------------------------------------------------
+
+
+class TestEnterError:
+    def test_enter_error_wrapped_as_tts_error(self, tts_config: TTSConfig) -> None:
+        """__enter__ failure is wrapped as TTSError."""
+        client = create_mock_client([b"\x00"])
+        mock_cm = client.audio.speech.with_streaming_response.create.return_value
+        mock_cm.__enter__ = MagicMock(side_effect=RuntimeError("connection failed"))
+        tts = _build_tts(client, tts_config)
+
+        with pytest.raises(TTSError, match="connection failed"):
+            tts.synthesize("Hello")
+
+
+# ---------------------------------------------------------------------------
+# TestMidStreamError
+# ---------------------------------------------------------------------------
+
+
+class TestMidStreamError:
+    def test_error_after_partial_chunks(self, tts_config: TTSConfig) -> None:
+        """Error mid-stream after some chunks: collected audio is partial, TTSError raised."""
+        client = create_mock_client()
+        mock_cm = client.audio.speech.with_streaming_response.create.return_value
+        mock_response = mock_cm.__enter__.return_value
+
+        # Yield one chunk then raise
+        def _mixed_iter(**kwargs):  # noqa: ARG001
+            yield b"\x01\x02"
+            raise openai.APIConnectionError(request=MagicMock())
+
+        mock_response.iter_bytes = _mixed_iter
+        tts = _build_tts(client, tts_config)
+
+        stream = tts.synthesize("Hello")
+        first = next(stream)
+        assert first == b"\x01\x02"
+
+        with pytest.raises(TTSError):
+            next(stream)
+
+        mock_cm.__exit__.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # TestClientConfig
