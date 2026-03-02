@@ -170,11 +170,43 @@ threading + `queue.Queue` based.
 
 ## Testing
 
+### Structure
+
 - File naming: `test_*.py`
-- Location: `tests/<module>/` mirroring source structure. Integration tests in `tests/integration/`.
-- External services (ASR, LLM, TTS, CppBridge) must be mocked in unit tests.
-- External model wrappers (VAP, TurnGPT, Wakeword): mock the wrapper interface. Tests requiring real models use `@pytest.mark.requires_model`.
+- Location: `tests/<module>/` mirroring source structure.
 - Tests must pass after each Phase before proceeding to the next.
+
+### Test tiers
+
+| Tier | File pattern | Marker | Default run | Purpose |
+|------|-------------|--------|-------------|---------|
+| Unit | `test_<module>.py` | (none) | Yes | Logic in isolation, external deps mocked |
+| Integration | `test_<module>_integration.py` | `@pytest.mark.requires_api` | No | Real API/service verification |
+| Stress | `test_<module>_stress.py` | `@pytest.mark.requires_stress` | No | Load, duration, rapid-cycle scenarios |
+| Cross-module | `tests/integration/test_*.py` | varies | varies | End-to-end flows spanning modules |
+
+### Running tests
+
+```bash
+uv run pytest                                    # unit tests only (default)
+uv run pytest -m requires_api                    # API integration tests
+uv run pytest -m requires_stress                 # stress/load tests
+uv run pytest -m 'requires_api or requires_stress'  # all real-service tests
+uv run pytest -m ''                              # everything
+```
+
+### Mocking rules
+
+- **External services** (ASR, LLM, TTS, CppBridge): must be mocked in unit tests.
+- **External model wrappers** (VAP, TurnGPT, Wakeword): mock the wrapper interface. Tests requiring real models use `@pytest.mark.requires_model`.
+
+### Integration & stress test conventions
+
+- **Module-local**: Place in `tests/<module>/`, not `tests/integration/` (which is reserved for cross-module tests).
+- **Environment variables** for test inputs (file paths, language codes, etc.) — never hardcoded.
+- **Mirror orchestrator usage**: test the same call patterns the orchestrator will use (e.g., frame-by-frame feed+get, reset between turns, mid-stream stop).
+- **Error recovery**: test real failure scenarios — invalid credentials, errors during streaming, recovery via reset/restart.
+- **Stress scenarios**: rapid reset cycles, sustained streaming, back-to-back start/stop.
 
 
 ## Logging

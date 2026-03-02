@@ -3,7 +3,9 @@ name = "ray-revamped"
 version = "0.1.0"
 description = "Voice conversation robot pipeline"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "google-cloud-speech>=2.0,<3.0",
+]
 
 [dependency-groups]
 dev = [
@@ -13,8 +15,11 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["voice_pipeline/tests"]
+addopts = "-m 'not requires_model and not requires_api and not requires_stress'"
 markers = [
     "requires_model: tests requiring real model files",
+    "requires_api: tests requiring real API credentials (Google Cloud, OpenAI, etc.)",
+    "requires_stress: stress/load tests requiring real services and longer runtime",
 ]
 
 [tool.ruff]
