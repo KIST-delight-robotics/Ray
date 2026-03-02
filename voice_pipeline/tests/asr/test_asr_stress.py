@@ -14,7 +14,7 @@ Configuration via environment variables:
 
 Run:
     GOOGLE_APPLICATION_CREDENTIALS=creds.json ASR_TEST_WAV=speech.wav \
-        uv run pytest -m requires_stress voice_pipeline/tests/asr/ -v
+        uv run pytest -m requires_api voice_pipeline/tests/asr/ -v
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from voice_pipeline.core.config import ASRConfig
 
 from .conftest import audio_config_from_wav, read_wav_frames
 
-pytestmark = pytest.mark.requires_stress
+pytestmark = pytest.mark.requires_api
 
 
 # ---------------------------------------------------------------------------

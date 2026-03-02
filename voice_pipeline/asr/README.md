@@ -83,21 +83,13 @@ uv run pytest voice_pipeline/tests/asr/test_asr.py -v
 
 26 tests with mocked `SpeechClient` — no API credentials needed.
 
-### Integration tests (real API)
+### Integration & stress tests (real API)
 
 ```bash
 GOOGLE_APPLICATION_CREDENTIALS=creds.json \
 ASR_TEST_WAV=/path/to/speech.wav \
 ASR_TEST_LANG=ko-KR \
 uv run pytest -m requires_api voice_pipeline/tests/asr/ -v
-```
-
-### Stress tests
-
-```bash
-GOOGLE_APPLICATION_CREDENTIALS=creds.json \
-ASR_TEST_WAV=/path/to/speech.wav \
-uv run pytest -m requires_stress voice_pipeline/tests/asr/ -v
 ```
 
 ### Environment variables

@@ -15,11 +15,10 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["voice_pipeline/tests"]
-addopts = "-m 'not requires_model and not requires_api and not requires_stress'"
+addopts = "-m 'not requires_model and not requires_api'"
 markers = [
     "requires_model: tests requiring real model files",
     "requires_api: tests requiring real API credentials (Google Cloud, OpenAI, etc.)",
-    "requires_stress: stress/load tests requiring real services and longer runtime",
 ]
 
 [tool.ruff]

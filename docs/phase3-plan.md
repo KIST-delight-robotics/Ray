@@ -14,13 +14,15 @@
 
 ## Steps
 
-1. core/ — add Phase 3 interfaces and configs
-2. llm/
-3. tts/ (OpenAI + ElevenLabs)
-4. asr/
-5. bridge/
-6. audio/wakeword
-7. led/
+| Step | Module | Status |
+|------|--------|--------|
+| 1 | core/ — add Phase 3 interfaces and configs | Done |
+| 2 | asr/ | Done |
+| 3 | llm/ | |
+| 4 | tts/ (OpenAI + ElevenLabs) | |
+| 5 | bridge/ | |
+| 6 | audio/wakeword | |
+| 7 | led/ | |
 
 Step 1 is prerequisite. Steps 2-7 are independent.
 
@@ -28,3 +30,6 @@ Step 1 is prerequisite. Steps 2-7 are independent.
 
 - Refer to official API docs per vendor. Do not reference legacy codebase.
 - Each implementation conforms to its interface contract (format conversion, auth, etc. are internal).
+- Tests follow unit (mock) + integration/stress (`@requires_api`) structure.
+- Test inputs (file paths, API keys, language codes) via environment variables, never hardcoded.
+- Each module gets a README (English, usage-focused). Vendor API constraints in a separate doc within the module directory.
