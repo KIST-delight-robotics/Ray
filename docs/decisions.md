@@ -49,3 +49,17 @@
 - **Test helpers in conftest.py**: WAV helpers (`WavInfo`, `read_wav_frames`, etc.) and fixtures (`speech_wav`, `asr_lang`) shared via `tests/asr/conftest.py` instead of duplicating across test files.
 - **API constraints documented separately**: Google STT v1 constraints in `asr/google_stt_v1_constraints.md`. Module README focuses on usage, not API limits.
 - **Documentation language**: All docs written in English.
+
+## 2026-03-03 — Phase 3 Step 3: LLM Module (`llm/`)
+
+- **Vendor**: OpenAI Responses API. Only vendor needed; interface allows swapping later.
+- **System message → `instructions`**: System message extracted from ContextBuilder output and passed via the Responses API's `instructions` parameter (idiomatic pattern), not embedded in `input`.
+- **No `previous_response_id`**: We manage context ourselves via ContextBuilder with token budgeting, not the Responses API's server-side conversation state.
+- **API key via env var**: Standard `OPENAI_API_KEY` environment variable, not in config. The SDK reads it automatically.
+- **Config field mapping**: `LLMConfig.max_tokens` maps to API's `max_output_tokens`.
+- **Explicit stream cleanup**: `create(stream=True)` + `try/finally` with `stream.close()`. Avoids the context-manager-inside-generator antipattern where `__exit__` is deferred to GC. Caller must exhaust or `.close()` the iterator.
+- **Broad error wrapping**: All SDK and streaming exceptions (including `APITimeoutError`) wrapped in `LLMError` for predictable orchestrator behavior. Non-OpenAI exceptions during streaming also wrapped.
+- **SDK-delegated retry**: Transient errors (429, 500, 503, connection) handled by OpenAI SDK's built-in retry with exponential backoff. Exposed via `LLMConfig.max_retries` (default 2). No custom retry logic to avoid double-retry.
+- **Request timeout**: `LLMConfig.timeout_sec` (default 30s) prevents stalled API calls from blocking the voice pipeline. Passed to SDK client constructor.
+- **Token counter**: `create_token_counter(model)` factory uses tiktoken. Falls back to `o200k_base` encoding for unknown models. Returns a `TokenCounter` callable matching the type alias in `core/types.py`.
+- **Default system prompt**: `DEFAULT_SYSTEM_PROMPT` in `prompts.py`. Kept short and conversational for the Ray voice assistant persona.

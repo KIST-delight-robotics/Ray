@@ -53,6 +53,8 @@ class LLMConfig:
     model: str = "gpt-4o"
     temperature: float = 0.7
     max_tokens: int = 256
+    max_retries: int = 2
+    timeout_sec: float = 30.0
 
 
 @dataclass

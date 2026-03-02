@@ -52,6 +52,8 @@ class TestLLMConfig:
         assert cfg.model == "gpt-4o"
         assert cfg.temperature == 0.7
         assert cfg.max_tokens == 256
+        assert cfg.max_retries == 2
+        assert cfg.timeout_sec == 30.0
 
 
 class TestTTSConfig:
