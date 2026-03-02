@@ -77,6 +77,10 @@ class CppBridgeConfig:
 
     host: str = "localhost"
     port: int = 8765
+    reconnect_attempts: int = 3
+    recv_timeout_sec: float = 1.0
+    connect_timeout_sec: float = 5.0
+    close_timeout_sec: float = 5.0
 
 
 @dataclass
