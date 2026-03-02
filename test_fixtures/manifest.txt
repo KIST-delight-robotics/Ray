@@ -1,0 +1,3 @@
+hello_ray.wav	Hello, my name is Ray. I am a voice assistant.
+pangram.wav	The quick brown fox jumps over the lazy dog.
+command_lights.wav	Please turn on the lights in the living room.
