@@ -89,6 +89,11 @@ class WakewordConfig:
 
     keywords: tuple[str, ...] = ("ray",)
     vad_threshold: float = 0.5
+    language_code: str = "en-US"
+    speech_pad_ms: int = 300
+    min_speech_duration_ms: int = 100
+    max_speech_duration_sec: float = 3.0
+    stt_timeout_sec: float = 5.0
 
 
 @dataclass
