@@ -109,3 +109,17 @@
 - **Duration math**: Uses `_bytes_per_sec` (sample_rate * sample_width * channels) for all duration calculations, correctly handling multi-channel audio.
 - **STT phrase hints**: `SpeechContext(phrases=keywords)` boosts recognition of wakeword terms. `max_alternatives=5` to check multiple transcript hypotheses.
 - **Config additions**: `WakewordConfig` extended with `language_code`, `speech_pad_ms`, `min_speech_duration_ms`, `max_speech_duration_sec`, `stt_timeout_sec`.
+
+## 2026-03-03 — Phase 3 Step 7: LED Controller (`led/`)
+
+- **Optional hardware**: `rpi5_ws2812` imported at module level with `try/except ImportError`. When absent, `_strip` is `None` and frame writes are skipped (noop mode). No runtime flag needed — import presence drives the behavior.
+- **Animation protocol**: `LEDAnimation` is a `runtime_checkable` Protocol with `reset()`, `render(tick, bar_count, ring_count)`, and `frame_interval_sec`. Pluggable per-state: custom animations just implement the protocol.
+- **StaticAnimation**: Built-in fixed-color animation. All default state mappings use `StaticAnimation` with placeholder colors. Real colors/animations added later without architecture changes.
+- **Animation thread**: Daemon thread with `Event`-based sleeping (`_state_changed.wait(timeout=interval)`). `set_state()` signals the event so the thread wakes immediately instead of waiting for the previous animation's interval to expire.
+- **Thread safety**: `threading.Lock` protects `_state`, `_tick`, and `_animations` reads/writes. `_stop_event` and `_state_changed` are `threading.Event` (inherently thread-safe).
+- **close() lifecycle**: Sets `_stop_event`, signals `_state_changed` to wake thread, `join(timeout=2.0)`, logs warning if thread didn't exit (matching CppBridge pattern), then applies OFF frame.
+- **Missing animation fallback**: If no animation is registered for a state, the loop applies an all-off frame instead of leaving stale LEDs.
+- **Render error resilience**: Exceptions from `animation.render()` are logged at DEBUG and suppressed. Visual feedback is non-critical — fail-open.
+- **Hardware driver API**: `rpi5_ws2812` uses `WS2812SpiDriver(spi_bus, spi_device, led_count)` + `driver.get_strip()`. Brightness is 0.0-1.0 float on the strip. No explicit `close()` — cleanup is turn-off-and-show.
+- **LEDConfig redesign**: Replaced generic `led_count`/`spi_device`/`noop` fields with `bar_count=8`, `ring_count=16`, `spi_pin=10`, `brightness=128` (0-255 integer, converted to 0.0-1.0 for the driver). `spi_pin` documents physical wiring; driver uses `spi_bus=0, spi_device=0`.
+- **No integration tests**: Hardware-dependent module with no real device in CI. All unit tests run in noop mode or with mocked driver class.
