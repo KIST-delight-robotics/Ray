@@ -136,9 +136,7 @@ class TestASRIntegration:
 class TestASRErrorRecovery:
     """Error recovery scenarios against real Google Cloud Speech API."""
 
-    def test_invalid_language_code_propagates_error(
-        self, speech_wav: Path, asr_lang: str
-    ) -> None:
+    def test_invalid_language_code_propagates_error(self, speech_wav: Path, asr_lang: str) -> None:
         """An invalid language code should surface an ASRError during streaming.
 
         The error may appear asynchronously via the reader thread — we verify it
@@ -170,9 +168,7 @@ class TestASRErrorRecovery:
         finally:
             asr.stop()
 
-    def test_recovery_after_error_via_stop_start(
-        self, speech_wav: Path, asr_lang: str
-    ) -> None:
+    def test_recovery_after_error_via_stop_start(self, speech_wav: Path, asr_lang: str) -> None:
         """After an error, stop() + start() should restore normal operation."""
         info, frames = read_wav_frames(speech_wav)
         frame_sec = 30 / 1000
@@ -209,9 +205,7 @@ class TestASRErrorRecovery:
         finally:
             asr_good.stop()
 
-    def test_reset_recovers_from_stale_stream(
-        self, speech_wav: Path, asr_lang: str
-    ) -> None:
+    def test_reset_recovers_from_stale_stream(self, speech_wav: Path, asr_lang: str) -> None:
         """reset() should recover from a potentially stale gRPC stream.
 
         Simulates a gap where no audio is fed for several seconds (e.g., user

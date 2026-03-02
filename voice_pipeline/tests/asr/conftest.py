@@ -65,8 +65,16 @@ def ensure_compatible_wav(path: Path, tmp_path: Path) -> Path:
     out = tmp_path / f"converted_{path.name}"
     subprocess.run(
         [
-            "ffmpeg", "-y", "-i", str(path),
-            "-ar", str(target_rate), "-ac", "1", "-sample_fmt", "s16",
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(path),
+            "-ar",
+            str(target_rate),
+            "-ac",
+            "1",
+            "-sample_fmt",
+            "s16",
             str(out),
         ],
         capture_output=True,
