@@ -94,3 +94,18 @@
 - **Config fields**: `reconnect_attempts` (3), `recv_timeout_sec` (1.0), `connect_timeout_sec` (5.0), `close_timeout_sec` (5.0) added to `CppBridgeConfig`.
 - **Integration tests**: Self-contained — `websockets.sync.server.serve()` as in-process test server. No external C++ process required. Server-side connection tracking for explicit close testing.
 - **Stress tests**: Rapid connect/disconnect cycles (10x), high-volume audio streaming (1000 chunks), event flood (500 events), concurrent send+poll (no deadlock).
+
+## 2026-03-03 — Phase 3 Step 6: Wakeword Detector
+
+- **Architecture**: Silero VAD (speech segmentation) + Google STT `recognize()` (keyword matching). VAD detects speech boundaries, STT transcribes the segment, regex checks for keywords.
+- **Non-streaming STT**: `client.recognize()` instead of streaming. Wakeword utterances are <3s, SessionManager is in SLEEP mode so brief blocking (~200-500ms) is acceptable. Timeout via `stt_timeout_sec` (default 5s).
+- **VAD rechunking**: Pipeline frames are 480 samples (30ms@16kHz), Silero VAD requires 512 samples (32ms). Residual buffer carries across `feed_audio()` calls. Duration calculations calibrated in ms based on 32ms per VAD chunk.
+- **Silero VAD via `silero-vad` package**: `load_silero_vad(onnx=False)` returns JIT model (~2MB). Model states reset between detection cycles (not every call). `torch` pulled in as transitive dependency (needed for Phase 4 VAP/TurnGPT anyway).
+- **State machine**: IDLE → SPEECH (prob > threshold) → TRAILING (prob < threshold) → recognition (silence exceeds `speech_pad_ms`). TRAILING can recover back to SPEECH if speech resumes. Safety cap forces recognition at `max_speech_duration_sec`.
+- **Word-boundary keyword matching**: `\b` regex instead of substring `in` to avoid false positives (e.g., "array" matching "ray"). Case-insensitive. All STT result alternatives checked, not just top-1.
+- **Fail-closed error handling**: VAD inference errors and STT/network errors log a warning and return `False`. Only initialization failures (model load, client creation) raise `WakewordError`. VAD `reset_states()` errors suppressed to avoid masking primary exceptions.
+- **Resource cleanup**: `close()` method for STT client transport teardown. Idempotent, error-suppressing. SessionManager calls it when destroying the detector.
+- **Threading**: Not thread-safe by design. SessionManager feeds frames from a single SLEEP loop thread. No locking needed.
+- **Duration math**: Uses `_bytes_per_sec` (sample_rate * sample_width * channels) for all duration calculations, correctly handling multi-channel audio.
+- **STT phrase hints**: `SpeechContext(phrases=keywords)` boosts recognition of wakeword terms. `max_alternatives=5` to check multiple transcript hypotheses.
+- **Config additions**: `WakewordConfig` extended with `language_code`, `speech_pad_ms`, `min_speech_duration_ms`, `max_speech_duration_sec`, `stt_timeout_sec`.
