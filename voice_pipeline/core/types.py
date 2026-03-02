@@ -7,8 +7,11 @@ types belong in their own modules.
 from __future__ import annotations
 
 import enum
-from collections.abc import Callable
+import logging
+from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass, field
+
+logger = logging.getLogger("voice_pipeline.core")
 
 # ---------------------------------------------------------------------------
 # Callable type aliases
@@ -141,6 +144,81 @@ class TTSResult:
 
     audio: bytes
     timestamps: tuple[WordTimestamp, ...] = ()
+
+
+class TTSStream(Iterator[bytes]):
+    """Streaming TTS result. Yields PCM audio chunks.
+
+    After full iteration, ``.audio`` / ``.timestamps`` / ``.result`` become
+    available.  Must be closed (full iteration, ``.close()``, or context
+    manager) to release resources.
+    """
+
+    __slots__ = ("_gen", "_close_fn", "_ts_fn", "_audio", "_done", "_closed", "_ts_cache")
+
+    def __init__(
+        self,
+        gen: Generator[bytes, None, None],
+        *,
+        close_fn: Callable[[], None] | None = None,
+        timestamps_fn: Callable[[], tuple[WordTimestamp, ...]] | None = None,
+    ) -> None:
+        self._gen = gen
+        self._close_fn = close_fn
+        self._ts_fn = timestamps_fn
+        self._audio = bytearray()
+        self._done = False
+        self._closed = False
+        self._ts_cache: tuple[WordTimestamp, ...] | None = None
+
+    def __next__(self) -> bytes:
+        if self._closed:
+            raise StopIteration
+        try:
+            chunk = next(self._gen)
+            self._audio.extend(chunk)
+            return chunk
+        except StopIteration:
+            self._done = True
+            raise
+
+    def __iter__(self) -> TTSStream:
+        return self
+
+    def close(self) -> None:
+        """Close the generator and release resources."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._gen.close()
+        finally:
+            if self._close_fn is not None:
+                try:
+                    self._close_fn()
+                except Exception:
+                    logger.debug("Error in close_fn (suppressed)", exc_info=True)
+
+    @property
+    def audio(self) -> bytes:
+        """Full audio data. Only available after complete iteration."""
+        if not self._done:
+            raise RuntimeError("Audio not available until stream is fully consumed")
+        return bytes(self._audio)
+
+    @property
+    def timestamps(self) -> tuple[WordTimestamp, ...]:
+        """Word-level timestamps. Only available after complete iteration."""
+        if not self._done:
+            raise RuntimeError("Timestamps not available until stream is fully consumed")
+        if self._ts_cache is None:
+            self._ts_cache = self._ts_fn() if self._ts_fn is not None else ()
+        return self._ts_cache
+
+    @property
+    def result(self) -> TTSResult:
+        """Convenience: return a TTSResult from the completed stream."""
+        return TTSResult(audio=self.audio, timestamps=self.timestamps)
 
 
 @dataclass

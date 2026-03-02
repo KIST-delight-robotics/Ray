@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from typing import Any
 
-from voice_pipeline.core.types import AudioFrame, CppEvent, LEDState, TTSResult, WordTimestamp
+from voice_pipeline.core.types import AudioFrame, CppEvent, LEDState, TTSStream, WordTimestamp
 
 # ---------------------------------------------------------------------------
 # StorageBackend
@@ -240,17 +240,23 @@ class ILLM(ABC):
 
 
 class ITTS(ABC):
-    """Text-to-speech synthesis interface."""
+    """Text-to-speech synthesis interface.
+
+    synthesize() returns a TTSStream that yields PCM audio chunks.
+    After iteration, .timestamps and .audio are available on the stream.
+    Thread-safe: concurrent synthesize() calls are independent.
+    """
 
     @abstractmethod
-    def synthesize(self, text: str) -> TTSResult:
+    def synthesize(self, text: str) -> TTSStream:
         """Synthesize speech from text.
 
         Args:
             text: Text to synthesize.
 
         Returns:
-            TTSResult containing audio bytes and optional word timestamps.
+            TTSStream yielding PCM audio chunks. Iterate to receive audio.
+            After iteration, access .audio, .timestamps, or .result.
         """
 
 

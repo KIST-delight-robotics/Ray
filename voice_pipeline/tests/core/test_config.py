@@ -63,6 +63,10 @@ class TestTTSConfig:
         assert cfg.voice == "alloy"
         assert cfg.model == "tts-1"
         assert cfg.output_sample_rate == 24000
+        assert cfg.speed == 1.0
+        assert cfg.timeout_sec == 30.0
+        assert cfg.max_retries == 2
+        assert cfg.instructions == ""
 
 
 class TestCppBridgeConfig:

@@ -65,6 +65,10 @@ class TTSConfig:
     voice: str = "alloy"
     model: str = "tts-1"
     output_sample_rate: int = 24000
+    speed: float = 1.0
+    timeout_sec: float = 30.0
+    max_retries: int = 2
+    instructions: str = ""
 
 
 @dataclass
