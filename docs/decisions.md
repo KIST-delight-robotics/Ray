@@ -63,3 +63,20 @@
 - **Request timeout**: `LLMConfig.timeout_sec` (default 30s) prevents stalled API calls from blocking the voice pipeline. Passed to SDK client constructor.
 - **Token counter**: `create_token_counter(model)` factory uses tiktoken. Falls back to `o200k_base` encoding for unknown models. Returns a `TokenCounter` callable matching the type alias in `core/types.py`.
 - **Default system prompt**: `DEFAULT_SYSTEM_PROMPT` in `prompts.py`. Kept short and conversational for the Ray voice assistant persona.
+
+## 2026-03-03 — Phase 3 Step 4: TTS Module (`tts/`)
+
+- **Vendor**: OpenAI Audio API. Only vendor needed; `ITTS` interface allows swapping later.
+- **Streaming redesign**: `ITTS.synthesize()` returns `TTSStream` (Iterator[bytes]) instead of `TTSResult`. Audio chunks arrive incrementally so SpeechGenerator can buffer and send to C++ on demand. `TTSResult` is still used as a convenience via `TTSStream.result` property after full iteration.
+- **`TTSStream` in `core/types.py`**: Concrete `Iterator[bytes]` wrapper. Yields PCM chunks, collects full audio internally via `bytearray`. Exposes `.audio`, `.timestamps`, `.result` only after complete iteration (raises `RuntimeError` otherwise). `_done` flag set only on natural `StopIteration`, not on `close()`.
+- **`timestamps_fn` callback**: Deferred timestamp retrieval. OpenAI passes `None` (no timestamps). Future vendors (e.g., ElevenLabs) can pass a callable. Result cached on first access.
+- **Eager CM entry**: `synthesize()` calls `response_cm.__enter__()` immediately, not inside the generator. This ensures `close_fn` can always safely exit the CM, even if the generator was never started. `__enter__` errors are wrapped as `TTSError`.
+- **Single-exit guarantee**: Shared `exited` flag between `_iter_chunks` and `_safe_close` prevents double `__exit__()` calls. The generator marks exited on completion/error/GeneratorExit; `close_fn` checks the flag before attempting exit.
+- **PCM output**: 24 kHz, 16-bit signed little-endian, mono (headerless). Fixed by OpenAI when `response_format="pcm"`. Matches `TTSConfig.output_sample_rate` default.
+- **No word timestamps**: OpenAI TTS does not support word-level timestamps. `stream.timestamps` returns `()`. `DurationRatioTruncator` handles this case for barge-in.
+- **Model-specific instructions**: `_SUPPORTS_INSTRUCTIONS = {"gpt-4o-mini-tts"}` explicit set. `instructions` kwarg only sent for supported models; unsupported models log a warning and omit the parameter. No prefix matching — easy to extend.
+- **`save_to_file()`**: Non-streaming convenience method on `OpenAITTS` (not on `ITTS` interface). Uses `response_format="wav"` and `write_to_file()`. For testing/utility only.
+- **Input validation**: Text must be non-empty, non-whitespace, ≤4096 chars. Speed must be 0.25–4.0. Validated before API call to fail fast.
+- **SDK-delegated retry**: Same pattern as LLM — `max_retries` and `timeout_sec` passed to `openai.OpenAI()` constructor. No custom retry logic.
+- **TTSConfig new fields**: `speed` (0.25–4.0, default 1.0), `timeout_sec` (default 30.0), `max_retries` (default 2), `instructions` (default empty, for gpt-4o-mini-tts only).
+- **Thread safety**: Not TTSStream's concern. SpeechGenerator handles concurrent synthesize() calls. Each TTSStream instance is consumed by a single thread.
