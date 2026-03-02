@@ -80,3 +80,17 @@
 - **SDK-delegated retry**: Same pattern as LLM — `max_retries` and `timeout_sec` passed to `openai.OpenAI()` constructor. No custom retry logic.
 - **TTSConfig new fields**: `speed` (0.25–4.0, default 1.0), `timeout_sec` (default 30.0), `max_retries` (default 2), `instructions` (default empty, for gpt-4o-mini-tts only).
 - **Thread safety**: Not TTSStream's concern. SpeechGenerator handles concurrent synthesize() calls. Each TTSStream instance is consumed by a single thread.
+
+## 2026-03-03 — Phase 3 Step 5: CppBridge Module (`bridge/`)
+
+- **Transport**: `websockets` sync client (v14–16). Stable, well-documented sync API. Async not needed since bridge runs from the orchestrator's sync frame loop.
+- **Message protocol**: JSON text frames for all messages. Audio encoded as base64 in JSON (`{"type": "audio", "data": "<base64>"}`). Single parsing path, simpler debugging. ~33% bandwidth overhead acceptable for PCM at 24 kHz over localhost.
+- **Threading model**: Single-threaded lifecycle (connect/disconnect/send_*/poll_event from orchestrator thread only). Daemon receiver thread calls `recv(timeout=1.0)` in a loop, checking `_running` event flag. Same pattern as ASR's `_audio_generator` timeout loop.
+- **Event queue**: Unbounded `queue.Queue`. Events are tiny frozen dataclasses (4 types), orchestrator polls at ~33 Hz (30 ms frame duration). No backpressure risk.
+- **Error propagation**: Receiver stores `BridgeError` under lock on connection loss. Orchestrator discovers via `_check_error()` in `poll_event()`/`send_*()`. Error cleared after first raise. Same pattern as ASR.
+- **Connection retry**: `connect()` retries up to `reconnect_attempts` (default 3) with 1s fixed sleep between attempts. No exponential backoff — this is a localhost connection, not a distributed service. Retries exist for startup race (Python up before C++).
+- **WebSocket connect params**: Explicit `proxy=None` (avoid v15+ auto-proxy), `ping_interval=None` (no WebSocket keepalive on localhost — TCP handles it), `compression=None` (avoid CPU overhead on base64 audio).
+- **Fresh state on reconnect**: `connect()` creates a new `queue.Queue` and clears stale error. Old receiver thread exits when `_running` is cleared during `disconnect()`. No generation ID needed.
+- **Config fields**: `reconnect_attempts` (3), `recv_timeout_sec` (1.0), `connect_timeout_sec` (5.0), `close_timeout_sec` (5.0) added to `CppBridgeConfig`.
+- **Integration tests**: Self-contained — `websockets.sync.server.serve()` as in-process test server. No external C++ process required. Server-side connection tracking for explicit close testing.
+- **Stress tests**: Rapid connect/disconnect cycles (10x), high-volume audio streaming (1000 chunks), event flood (500 events), concurrent send+poll (no deadlock).
