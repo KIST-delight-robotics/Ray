@@ -43,6 +43,29 @@ def _make_response(transcript: str, *, is_final: bool = False) -> MagicMock:
     return response
 
 
+def _make_multi_result_response(
+    *parts: tuple[str, bool],
+) -> MagicMock:
+    """Build a mock response with multiple results.
+
+    Each *part* is ``(transcript, is_final)``.  This mirrors Google STT
+    behaviour where a single response contains a stable prefix + speculative
+    suffix, or a final + following interim.
+    """
+    results = []
+    for transcript, is_final in parts:
+        alt = MagicMock()
+        alt.transcript = transcript
+        result = MagicMock()
+        result.alternatives = [alt]
+        result.is_final = is_final
+        results.append(result)
+
+    response = MagicMock()
+    response.results = results
+    return response
+
+
 def _make_empty_response() -> MagicMock:
     """Build a mock response with no alternatives."""
     result = MagicMock()
@@ -337,6 +360,105 @@ class TestTranscription:
             assert asr.get_text() == ""
             with asr._lock:
                 assert asr._final_transcript == ""
+                assert asr._interim_transcript == ""
+        finally:
+            asr.stop()
+
+    def test_multi_interim_response_concatenated(self, mock_client_cls: MagicMock) -> None:
+        """Multiple interims in one response are concatenated, not overwritten.
+
+        Google STT may split a single response into a stable prefix and a
+        speculative suffix.  get_text() must return them joined.
+        """
+        done = threading.Event()
+        # Response with two interim results: stable prefix + speculative suffix
+        multi_resp = _make_multi_result_response(
+            ("안녕하세요 저는", False),
+            (" 레이입니다", False),
+        )
+
+        def fake_streaming_recognize(config, requests):
+            for _ in requests:
+                break
+            done.set()
+            return iter([multi_resp])
+
+        mock_client = MagicMock()
+        mock_client.streaming_recognize.side_effect = fake_streaming_recognize
+        mock_client_cls.return_value = mock_client
+
+        asr = _make_asr()
+        asr.start()
+        try:
+            asr.feed_audio(b"\x00" * 960)
+            assert done.wait(timeout=5.0)
+            _wait_for_transcript(asr, "안녕하세요 저는 레이입니다")
+            assert asr.get_text() == "안녕하세요 저는 레이입니다"
+        finally:
+            asr.stop()
+
+    def test_multi_result_final_plus_interim(self, mock_client_cls: MagicMock) -> None:
+        """Response with a final followed by an interim in the same message."""
+        done = threading.Event()
+        multi_resp = _make_multi_result_response(
+            ("첫 문장. ", True),
+            ("두번째", False),
+        )
+
+        def fake_streaming_recognize(config, requests):
+            for _ in requests:
+                break
+            done.set()
+            return iter([multi_resp])
+
+        mock_client = MagicMock()
+        mock_client.streaming_recognize.side_effect = fake_streaming_recognize
+        mock_client_cls.return_value = mock_client
+
+        asr = _make_asr()
+        asr.start()
+        try:
+            asr.feed_audio(b"\x00" * 960)
+            assert done.wait(timeout=5.0)
+            _wait_for_transcript(asr, "첫 문장. 두번째")
+            assert asr.get_text() == "첫 문장. 두번째"
+            with asr._lock:
+                assert asr._final_transcript == "첫 문장. "
+                assert asr._interim_transcript == "두번째"
+        finally:
+            asr.stop()
+
+    def test_multi_result_final_clears_preceding_interims(
+        self, mock_client_cls: MagicMock
+    ) -> None:
+        """A final in a multi-result response clears interims that preceded it."""
+        done = threading.Event()
+        # Two interims, then a final that covers everything
+        multi_resp = _make_multi_result_response(
+            ("가나", False),
+            ("다라", False),
+            ("가나다라마", True),
+        )
+
+        def fake_streaming_recognize(config, requests):
+            for _ in requests:
+                break
+            done.set()
+            return iter([multi_resp])
+
+        mock_client = MagicMock()
+        mock_client.streaming_recognize.side_effect = fake_streaming_recognize
+        mock_client_cls.return_value = mock_client
+
+        asr = _make_asr()
+        asr.start()
+        try:
+            asr.feed_audio(b"\x00" * 960)
+            assert done.wait(timeout=5.0)
+            _wait_for_transcript(asr, "가나다라마")
+            assert asr.get_text() == "가나다라마"
+            with asr._lock:
+                assert asr._final_transcript == "가나다라마"
                 assert asr._interim_transcript == ""
         finally:
             asr.stop()

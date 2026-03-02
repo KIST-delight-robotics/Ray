@@ -184,7 +184,12 @@ class GoogleCloudASR(IASR):
             yield speech.StreamingRecognizeRequest(audio_content=chunk)
 
     def _read_responses(self, streaming_config: speech.StreamingRecognitionConfig) -> None:
-        """Read gRPC responses and update transcript (runs on reader thread)."""
+        """Read gRPC responses and update transcript (runs on reader thread).
+
+        A single response may contain multiple sequential results (e.g. a
+        stable prefix + a speculative suffix).  We concatenate all interim
+        parts so that ``get_text()`` always returns the best available text.
+        """
         try:
             responses = self._client.streaming_recognize(  # type: ignore[union-attr]
                 config=streaming_config,
@@ -193,16 +198,25 @@ class GoogleCloudASR(IASR):
             for response in responses:
                 if not self._running.is_set():
                     return
+                new_finals: list[str] = []
+                interim_parts: list[str] = []
+                has_results = False
                 for result in response.results:
                     if not result.alternatives:
                         continue
+                    has_results = True
                     transcript = result.alternatives[0].transcript
-                    with self._lock:
-                        if result.is_final:
-                            self._final_transcript += transcript
-                            self._interim_transcript = ""
-                        else:
-                            self._interim_transcript = transcript
+                    if result.is_final:
+                        new_finals.append(transcript)
+                        interim_parts.clear()
+                    else:
+                        interim_parts.append(transcript)
+                if not has_results:
+                    continue
+                with self._lock:
+                    if new_finals:
+                        self._final_transcript += "".join(new_finals)
+                    self._interim_transcript = "".join(interim_parts)
         except GoogleAPICallError as exc:
             with self._lock:
                 self._error = ASRError(str(exc))
