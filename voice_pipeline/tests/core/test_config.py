@@ -19,6 +19,7 @@ class TestAudioConfig:
         assert cfg.sample_rate == 16000
         assert cfg.channels == 1
         assert cfg.frame_duration_ms == 30
+        assert cfg.sample_width == 2
 
     def test_frame_size_samples(self) -> None:
         cfg = AudioConfig(sample_rate=16000, frame_duration_ms=30)
@@ -40,7 +41,7 @@ class TestConversationHistoryConfig:
 class TestASRConfig:
     def test_defaults(self) -> None:
         cfg = ASRConfig()
-        assert cfg.language_code == "ko-KR"
+        assert cfg.language_code == "en-US"
         assert cfg.model == "latest_long"
         assert cfg.interim_results is True
 
@@ -72,7 +73,7 @@ class TestCppBridgeConfig:
 class TestWakewordConfig:
     def test_defaults(self) -> None:
         cfg = WakewordConfig()
-        assert cfg.keywords == ("레이",)
+        assert cfg.keywords == ("ray",)
         assert cfg.vad_threshold == 0.5
 
 

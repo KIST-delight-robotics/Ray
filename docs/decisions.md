@@ -29,3 +29,23 @@
 - **MemoryStorageBackend only**: File/DB backends deferred. Deep copies on load/save to prevent aliasing between backend and history.
 - **HistoryError**: Raised on operations without an active session. Inherits from `PipelineError`.
 - **`__init__.py` re-exports**: All Phase 2 modules re-export public classes via `__init__.py` for cleaner import paths. Applied consistently going forward.
+
+## 2026-03-02 — Phase 3 Step 2: ASR Module (`asr/`)
+
+- **Vendor**: Google Cloud Speech-to-Text. Only vendor needed for the project; interface allows swapping later.
+- **API version**: V1 (`google.cloud.speech`), not V2. V1 is stable, well-documented, and sufficient for streaming recognition. V2 adds features (e.g., batch, adaptation) not needed here.
+- **Threading model**: Background daemon reader thread per stream. Orchestrator thread calls `feed_audio()`/`get_text()` synchronously. Audio flows through a bounded `queue.Queue(maxsize=300)` (~9s at 30ms frames). Reader thread calls `streaming_recognize()` and updates `_transcript` under a `threading.Lock`.
+- **Encoding derivation**: `AudioConfig.sample_width` maps to gRPC encoding via `_ENCODING_MAP` (2 → LINEAR16). Unsupported widths raise `ASRError` at `_start_stream()` time. Added `sample_width: int = 2` to `AudioConfig`.
+- **Sentinel shutdown**: `_stop_stream()` puts `b""` sentinel in the queue to unblock `_audio_generator()`. Reader thread exits cleanly when it receives the sentinel or `_running` event is cleared.
+- **No auto-restart on stream limit**: Google's streaming API has a ~5 minute limit. The orchestrator handles this via `reset()` between turns — no automatic restart logic inside `GoogleCloudASR`.
+- **Single exception class**: `ASRError(PipelineError)` for all ASR failures. gRPC errors (`GoogleAPICallError`) and unexpected exceptions are wrapped into `ASRError` and stored for the orchestrator thread to raise via `_check_error()`. Error is cleared after first raise to prevent stale re-raises.
+- **Queue backpressure**: `feed_audio()` uses `put_nowait()` with `queue.Full` catch — drops the frame and logs a warning. Prevents unbounded memory growth if gRPC ingestion is slow.
+- **Client cleanup**: `self._client.transport.close()` releases the gRPC channel on `stop()`.
+- **Sample rate validation**: `_start_stream()` validates `sample_rate` is within Google STT's supported range (8000–48000 Hz). Raises `ASRError` if out of range. WAV files at any valid sample rate work without resampling.
+- **Default language**: English (`en-US`) for ASR, `("ray",)` for wakeword keywords. LLM and TTS defaults (`gpt-4o`, `alloy`) already work with English without an explicit language field.
+- **Transcript accumulation**: `is_final` results are concatenated into `_final_transcript`; interim results are stored in `_interim_transcript` and replaced on each update. `get_text()` returns `_final_transcript + _interim_transcript`. `reset()` clears both. Fixes a bug where previous final segments were lost when a new result arrived.
+- **Client cleanup on start() failure**: `start()` wraps `_start_stream()` in try/except. If validation fails (bad sample rate, unsupported encoding), the already-created `SpeechClient` is closed and `_client` set to `None`. Prevents gRPC channel leak.
+- **3-tier test structure**: Unit (`test_<module>.py`, no marker), integration (`test_<module>_integration.py`, `@requires_api`), stress (`test_<module>_stress.py`, `@requires_stress`). All three markers excluded from default pytest run. Integration tests cover error recovery (invalid config, stale stream, double stop). Stress tests cover rapid reset cycles, sustained streaming, back-to-back start/stop.
+- **Test helpers in conftest.py**: WAV helpers (`WavInfo`, `read_wav_frames`, etc.) and fixtures (`speech_wav`, `asr_lang`) shared via `tests/asr/conftest.py` instead of duplicating across test files.
+- **API constraints documented separately**: Google STT v1 constraints in `asr/google_stt_v1_constraints.md`. Module README focuses on usage, not API limits.
+- **Documentation language**: All docs written in English.

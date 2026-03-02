@@ -20,6 +20,7 @@ class AudioConfig:
     sample_rate: int = 16000
     channels: int = 1
     frame_duration_ms: int = 30
+    sample_width: int = 2
 
     @property
     def frame_size_samples(self) -> int:
@@ -40,7 +41,7 @@ class ConversationHistoryConfig:
 class ASRConfig:
     """Configuration for the ASR module."""
 
-    language_code: str = "ko-KR"
+    language_code: str = "en-US"
     model: str = "latest_long"
     interim_results: bool = True
 
@@ -76,7 +77,7 @@ class CppBridgeConfig:
 class WakewordConfig:
     """Configuration for wakeword detection."""
 
-    keywords: tuple[str, ...] = ("레이",)
+    keywords: tuple[str, ...] = ("ray",)
     vad_threshold: float = 0.5
 
 
