@@ -86,10 +86,10 @@ class TestWakewordConfig:
 class TestLEDConfig:
     def test_defaults(self) -> None:
         cfg = LEDConfig()
-        assert cfg.led_count == 12
-        assert cfg.spi_device == "/dev/spidev0.0"
-        assert cfg.brightness == 0.5
-        assert cfg.noop is False
+        assert cfg.bar_count == 8
+        assert cfg.ring_count == 16
+        assert cfg.spi_pin == 10
+        assert cfg.brightness == 128
 
 
 class TestPipelineConfig:

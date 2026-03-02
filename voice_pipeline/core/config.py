@@ -98,12 +98,19 @@ class WakewordConfig:
 
 @dataclass
 class LEDConfig:
-    """Configuration for the LED controller."""
+    """Configuration for the LED controller.
 
-    led_count: int = 12
-    spi_device: str = "/dev/spidev0.0"
-    brightness: float = 0.5
-    noop: bool = False
+    Attributes:
+        bar_count: Number of LEDs in the bar segment (indices 0..bar_count-1).
+        ring_count: Number of LEDs in the ring segment (indices bar_count..bar_count+ring_count-1).
+        spi_pin: SPI GPIO pin number (Pi 5 default: GPIO 10 = SPI0 MOSI).
+        brightness: Global brightness 0-255.
+    """
+
+    bar_count: int = 8
+    ring_count: int = 16
+    spi_pin: int = 10
+    brightness: int = 128
 
 
 @dataclass
