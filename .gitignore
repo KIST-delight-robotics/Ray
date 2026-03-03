@@ -43,3 +43,7 @@ Thumbs.db
 *.onnx
 *.bin
 *.safetensors
+
+# External model repositories
+TurnGPT/
+VoiceActivityProjection/
