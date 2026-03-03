@@ -8,7 +8,11 @@ from voice_pipeline.core.config import (
     LEDConfig,
     LLMConfig,
     PipelineConfig,
+    SpeechGeneratorConfig,
     TTSConfig,
+    TurnDetectorConfig,
+    TurnGPTConfig,
+    VAPConfig,
     WakewordConfig,
 )
 
@@ -92,6 +96,41 @@ class TestLEDConfig:
         assert cfg.brightness == 128
 
 
+class TestVAPConfig:
+    def test_defaults(self) -> None:
+        cfg = VAPConfig()
+        assert cfg.model_path == ""
+        assert cfg.context_sec == 20.0
+        assert cfg.step_sec == 0.1
+        assert cfg.tt_time == 0.5
+        assert cfg.device == "cpu"
+        assert cfg.vad_threshold == 0.5
+
+
+class TestTurnGPTConfig:
+    def test_defaults(self) -> None:
+        cfg = TurnGPTConfig()
+        assert cfg.checkpoint_path == ""
+        assert cfg.device == "cpu"
+
+
+class TestTurnDetectorConfig:
+    def test_defaults(self) -> None:
+        cfg = TurnDetectorConfig()
+        assert cfg.turn_shift_silence_frames == 20
+        assert cfg.interrupt_vad_threshold == 0.5
+        assert cfg.prepare_stable_ms == 800
+        assert cfg.text_similarity_threshold == 0.85
+        assert cfg.turngpt_threshold == 0.3
+        assert cfg.hard_silence_timeout_ms == 2000
+
+
+class TestSpeechGeneratorConfig:
+    def test_defaults(self) -> None:
+        cfg = SpeechGeneratorConfig()
+        assert cfg.max_workers == 1
+
+
 class TestPipelineConfig:
     def test_default_construction(self) -> None:
         cfg = PipelineConfig()
@@ -103,6 +142,10 @@ class TestPipelineConfig:
         assert isinstance(cfg.cpp_bridge, CppBridgeConfig)
         assert isinstance(cfg.wakeword, WakewordConfig)
         assert isinstance(cfg.led, LEDConfig)
+        assert isinstance(cfg.vap, VAPConfig)
+        assert isinstance(cfg.turngpt, TurnGPTConfig)
+        assert isinstance(cfg.turn_detector, TurnDetectorConfig)
+        assert isinstance(cfg.speech_generator, SpeechGeneratorConfig)
 
     def test_sub_configs_independent(self) -> None:
         cfg1 = PipelineConfig()

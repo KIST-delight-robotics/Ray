@@ -42,6 +42,21 @@ class SystemMode(enum.Enum):
     FAREWELL = "farewell"
 
 
+class GeneratorState(enum.Enum):
+    """SpeechGenerator background preparation state.
+
+    IDLE      — no preparation in progress, ready to accept prepare().
+    PREPARING — background LLM+TTS generation is running.
+    READY     — generation complete, result available via get_result().
+    FAILED    — generation failed, Orchestrator should skip this turn.
+    """
+
+    IDLE = "idle"
+    PREPARING = "preparing"
+    READY = "ready"
+    FAILED = "failed"
+
+
 class PlaybackState(enum.Enum):
     """Audio playback state tracked by Orchestrator.
 

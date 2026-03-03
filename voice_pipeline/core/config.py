@@ -1,7 +1,7 @@
 """Dataclass-based configuration for the voice pipeline.
 
 Config sections are added as their modules are implemented.
-Current: Phase 1 (audio, history) + Phase 3 (asr, llm, tts, cpp_bridge, wakeword, led).
+Current: Phase 1–3 + Phase 4 (vap, turngpt, turn_detector, speech_generator).
 """
 
 from __future__ import annotations
@@ -114,6 +114,77 @@ class LEDConfig:
 
 
 @dataclass
+class VAPConfig:
+    """Configuration for the VAP (Voice Activity Projection) wrapper.
+
+    Attributes:
+        model_path: Path to the VAP model state_dict file.
+        context_sec: Rolling buffer duration in seconds.
+        step_sec: Inference interval in seconds.
+        tt_time: Turn-taking lookahead window in seconds for averaging.
+        device: Torch device string.
+        vad_threshold: Threshold for user_is_speaking derivation.
+    """
+
+    model_path: str = ""
+    context_sec: float = 20.0
+    step_sec: float = 0.1
+    tt_time: float = 0.5
+    device: str = "cpu"
+    vad_threshold: float = 0.5
+
+
+@dataclass
+class TurnGPTConfig:
+    """Configuration for the TurnGPT wrapper.
+
+    Attributes:
+        checkpoint_path: Path to the TurnGPT checkpoint file.
+        device: Torch device string.
+    """
+
+    checkpoint_path: str = ""
+    device: str = "cpu"
+
+
+@dataclass
+class TurnDetectorConfig:
+    """Configuration for the combined TurnDetector.
+
+    Attributes:
+        turn_shift_silence_frames: Consecutive non-speaking frames before
+            a turn_shift is emitted (~30ms each).
+        interrupt_vad_threshold: VAP threshold for interrupt detection
+            (applied to p_now when robot is speaking).
+        prepare_stable_ms: ASR text must be stable for this many ms
+            before a prepare signal.
+        text_similarity_threshold: SequenceMatcher ratio below which
+            ASR text is considered changed.
+        turngpt_threshold: TurnGPT probability above which prepare fires.
+        hard_silence_timeout_ms: Maximum silence before forced turn_shift,
+            regardless of other signals.
+    """
+
+    turn_shift_silence_frames: int = 20
+    interrupt_vad_threshold: float = 0.5
+    prepare_stable_ms: int = 800
+    text_similarity_threshold: float = 0.85
+    turngpt_threshold: float = 0.3
+    hard_silence_timeout_ms: int = 2000
+
+
+@dataclass
+class SpeechGeneratorConfig:
+    """Configuration for the SpeechGenerator.
+
+    Attributes:
+        max_workers: Thread pool size for background generation.
+    """
+
+    max_workers: int = 1
+
+
+@dataclass
 class PipelineConfig:
     """Top-level configuration for the voice pipeline.
 
@@ -129,3 +200,7 @@ class PipelineConfig:
     cpp_bridge: CppBridgeConfig = field(default_factory=CppBridgeConfig)
     wakeword: WakewordConfig = field(default_factory=WakewordConfig)
     led: LEDConfig = field(default_factory=LEDConfig)
+    vap: VAPConfig = field(default_factory=VAPConfig)
+    turngpt: TurnGPTConfig = field(default_factory=TurnGPTConfig)
+    turn_detector: TurnDetectorConfig = field(default_factory=TurnDetectorConfig)
+    speech_generator: SpeechGeneratorConfig = field(default_factory=SpeechGeneratorConfig)

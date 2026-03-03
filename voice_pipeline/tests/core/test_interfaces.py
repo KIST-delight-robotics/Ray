@@ -6,11 +6,15 @@ from voice_pipeline.core.interfaces import (
     IASR,
     ILLM,
     ITTS,
+    IVAP,
     IContextBuilder,
     IConversationHistory,
     ICppBridge,
     ILEDController,
+    ISpeechGenerator,
     IStorageBackend,
+    ITurnDetector,
+    ITurnGPT,
     IUtteranceTruncator,
     IWakewordDetector,
 )
@@ -58,3 +62,19 @@ class TestInterfacesAreAbstract:
     def test_led_controller_abstract(self) -> None:
         with pytest.raises(TypeError):
             ILEDController()  # type: ignore[abstract]
+
+    def test_vap_abstract(self) -> None:
+        with pytest.raises(TypeError):
+            IVAP()  # type: ignore[abstract]
+
+    def test_turngpt_abstract(self) -> None:
+        with pytest.raises(TypeError):
+            ITurnGPT()  # type: ignore[abstract]
+
+    def test_turn_detector_abstract(self) -> None:
+        with pytest.raises(TypeError):
+            ITurnDetector()  # type: ignore[abstract]
+
+    def test_speech_generator_abstract(self) -> None:
+        with pytest.raises(TypeError):
+            ISpeechGenerator()  # type: ignore[abstract]

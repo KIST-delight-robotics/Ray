@@ -5,6 +5,7 @@ import pytest
 from voice_pipeline.core.types import (
     CppEvent,
     CppEventType,
+    GeneratorState,
     LEDState,
     PlaybackState,
     ResponseData,
@@ -257,6 +258,13 @@ class TestEnums:
         assert PlaybackState.IDLE.value == "idle"
         assert PlaybackState.PLAYING.value == "playing"
         assert PlaybackState.STOP_PENDING.value == "stop_pending"
+
+    def test_generator_state_values(self) -> None:
+        assert GeneratorState.IDLE.value == "idle"
+        assert GeneratorState.PREPARING.value == "preparing"
+        assert GeneratorState.READY.value == "ready"
+        assert GeneratorState.FAILED.value == "failed"
+        assert len(GeneratorState) == 4
 
     def test_cpp_event_type_values(self) -> None:
         assert len(CppEventType) == 4

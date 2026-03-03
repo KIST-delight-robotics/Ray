@@ -3,7 +3,7 @@
 Only interfaces needed by the next implementation phase are defined here.
 New interfaces are added just before their consuming phase begins.
 
-Current: Phase 2 + Phase 3 interfaces.
+Current: Phase 2 + Phase 3 + Phase 4 interfaces.
 """
 
 from __future__ import annotations
@@ -12,7 +12,17 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from typing import Any
 
-from voice_pipeline.core.types import AudioFrame, CppEvent, LEDState, TTSStream, WordTimestamp
+from voice_pipeline.core.types import (
+    AudioFrame,
+    CppEvent,
+    GeneratorState,
+    LEDState,
+    ResponseData,
+    TTSStream,
+    TurnDecision,
+    VAPResult,
+    WordTimestamp,
+)
 
 # ---------------------------------------------------------------------------
 # StorageBackend
@@ -351,3 +361,158 @@ class ILEDController(ABC):
         Args:
             state: The desired LED display state.
         """
+
+
+# ---------------------------------------------------------------------------
+# VAP (Voice Activity Projection)
+# ---------------------------------------------------------------------------
+
+
+class IVAP(ABC):
+    """Voice Activity Projection model wrapper.
+
+    Maintains a rolling stereo audio buffer and runs periodic inference
+    to estimate current/future voice activity probabilities.
+
+    Returns cached result when no new inference is due.
+    """
+
+    @abstractmethod
+    def feed_audio(
+        self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None
+    ) -> VAPResult:
+        """Feed one pipeline frame and return voice activity estimates.
+
+        Args:
+            user_audio: 30ms PCM chunk at 16kHz (pipeline AudioConfig rate).
+            robot_audio: 30ms PCM chunk at TTS output sample rate (24kHz).
+                None when the robot is not speaking. Wrapper resamples
+                internally to 16kHz.
+
+        Returns:
+            VAPResult with p_now, p_fut, and user_is_speaking.
+        """
+
+    @abstractmethod
+    def reset(self) -> None:
+        """Clear the rolling buffer and internal state for a new turn."""
+
+
+# ---------------------------------------------------------------------------
+# TurnGPT
+# ---------------------------------------------------------------------------
+
+
+class ITurnGPT(ABC):
+    """TurnGPT model wrapper for text-based turn-shift prediction.
+
+    Accepts ``<ts>``-delimited dialog text and returns a turn-shift
+    probability for the current (partial) turn.
+    """
+
+    @abstractmethod
+    def predict(self, dialog_text: str) -> float:
+        """Predict turn-shift probability for the given dialog.
+
+        Args:
+            dialog_text: Full conversation text with ``<ts>`` separators
+                between completed turns. No trailing ``<ts>`` for the
+                current in-progress turn.
+
+        Returns:
+            Turn-shift probability in [0, 1].
+        """
+
+    @abstractmethod
+    def reset(self) -> None:
+        """Reset internal state for a new conversation."""
+
+
+# ---------------------------------------------------------------------------
+# TurnDetector
+# ---------------------------------------------------------------------------
+
+
+class ITurnDetector(ABC):
+    """Combined turn-taking detector.
+
+    Fuses VAP, TurnGPT, and timing heuristics into a single
+    per-frame TurnDecision.
+    """
+
+    @abstractmethod
+    def process_frame(
+        self,
+        user_audio: AudioFrame,
+        asr_text: str,
+        robot_audio: AudioFrame | None = None,
+    ) -> TurnDecision:
+        """Process one pipeline frame and return a turn decision.
+
+        Args:
+            user_audio: 30ms PCM chunk at 16kHz.
+            asr_text: Current ASR transcription (interim or final).
+            robot_audio: 30ms PCM chunk at TTS output sample rate (24kHz).
+                None when the robot is not speaking.
+
+        Returns:
+            TurnDecision with at most one signal active.
+        """
+
+    @abstractmethod
+    def reset(self) -> None:
+        """Reset internal state for a new turn."""
+
+
+# ---------------------------------------------------------------------------
+# SpeechGenerator
+# ---------------------------------------------------------------------------
+
+
+class ISpeechGenerator(ABC):
+    """Background speech generation pipeline.
+
+    Chains ContextBuilder -> LLM -> TTS in a background thread.
+    Supports cancellation and state inspection.
+    """
+
+    @property
+    @abstractmethod
+    def state(self) -> GeneratorState:
+        """Current generator state."""
+
+    @abstractmethod
+    def prepare(self, current_text: str) -> None:
+        """Start background generation for the given user text.
+
+        If already PREPARING, cancels the current run and restarts.
+        If READY or FAILED, discards the previous result and starts fresh.
+
+        Args:
+            current_text: Current ASR transcription to generate a
+                response for.
+        """
+
+    @abstractmethod
+    def cancel(self) -> None:
+        """Cancel any in-progress or completed preparation.
+
+        Transitions state back to IDLE.
+        """
+
+    @abstractmethod
+    def get_result(self) -> ResponseData:
+        """Retrieve the generated response.
+
+        Only valid when state is READY. Transitions state to IDLE.
+
+        Returns:
+            ResponseData with text, audio, and timestamps.
+
+        Raises:
+            RuntimeError: If state is not READY.
+        """
+
+    @abstractmethod
+    def shutdown(self) -> None:
+        """Shut down the background executor and release resources."""
