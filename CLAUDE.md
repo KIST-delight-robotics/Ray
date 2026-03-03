@@ -237,4 +237,21 @@ Phase 6 — Top-level:     session/, audio/audio_input
 Phase 7 — Integration tests
 ```
 
+
+## Codex Review Workflow
+
+### Plan review (before ExitPlanMode)
+Before calling ExitPlanMode, always run a Codex review of the plan first:
+1. Pass the full plan content to Codex via `bash ~/.claude/skills/codex/run_codex.sh`
+2. Ask Codex to review the plan for risks, blind spots, and missing considerations
+3. Present Codex's feedback alongside the plan to the user
+4. Only then call ExitPlanMode for user confirmation
+
+### Code review (after task completion)
+After marking a task as completed (TaskUpdate status=completed), run a Codex code review:
+1. Collect: brief task description + `git diff HEAD` output
+2. Pass both to Codex via `bash ~/.claude/skills/codex/run_codex.sh`
+3. Ask Codex to review for bugs, style issues, missing tests, and improvements
+4. Present the review to the user
+
 Add interfaces/types needed by the next Phase to `core/` before starting it. Phase 1 defines only confirmed shared types (TurnDecision, ResponseData, etc.).
