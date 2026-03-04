@@ -383,10 +383,10 @@ Test structure and development conventions are documented in CLAUDE.md.
 - [x] ~~Main loop execution model~~ → Frame-driven sync loop + module-internal background processing
 - [x] ~~Audio distribution~~ → AudioInput separate thread → queue → consumer loop (SessionManager-owned)
 - [x] ~~ASR text delivery~~ → Polling (Orchestrator polls per frame). ConversationHistory saves only on turn confirmation.
-- [ ] VAP robot audio source (TTS audio + timing sync vs OS capture vs C++ relay)
+- [x] ~~VAP robot audio source~~ → TTS audio + playback timing sync (Python-held audio, C++ provides position events)
 - [ ] ConversationHistory StorageBackend selection
-- [ ] Wakeword engine selection
-- [ ] LLM / TTS vendor finalization (ASR: Google Cloud STT selected)
+- [x] ~~Wakeword engine selection~~ → Silero VAD (speech segmentation) + Google STT `recognize()` (keyword matching)
+- [x] ~~LLM / TTS vendor finalization~~ → OpenAI (LLM: Responses API, TTS: Audio API). ASR: Google Cloud STT.
 - [ ] Exit keyword list and configuration location
 - [ ] Session timeout value and configuration location
 - [ ] ContextBuilder tool definition integration (deferred until LLM tools implementation)

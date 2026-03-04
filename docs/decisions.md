@@ -123,3 +123,24 @@
 - **Hardware driver API**: `rpi5_ws2812` uses `WS2812SpiDriver(spi_bus, spi_device, led_count)` + `driver.get_strip()`. Brightness is 0.0-1.0 float on the strip. No explicit `close()` — cleanup is turn-off-and-show.
 - **LEDConfig redesign**: Replaced generic `led_count`/`spi_device`/`noop` fields with `bar_count=8`, `ring_count=16`, `spi_pin=10`, `brightness=128` (0-255 integer, converted to 0.0-1.0 for the driver). `spi_pin` documents physical wiring; driver uses `spi_bus=0, spi_device=0`.
 - **No integration tests**: Hardware-dependent module with no real device in CI. All unit tests run in noop mode or with mocked driver class.
+
+## 2026-03-04 — Phase 4 Step 1: VAP Wrapper (`turn_taking/vap.py`)
+
+- **Rolling stereo buffer**: `(1, 2, n_samples)` on CPU. User audio in channel 0, robot audio in channel 1. Copied to device only at inference time to avoid persistent GPU memory.
+- **Model loading**: `VapGPT(VapConfig())` + `torch.load(state_dict, weights_only=True)` + `load_state_dict`. All errors wrapped in `VAPError`.
+- **Timing validation**: Zero `n_samples`, `step_samples`, or `tt_frames` raises `VAPError` at construction. Prevents silent incorrect slicing.
+- **Robot audio resampling**: `torchaudio.functional.resample` from TTS rate (24kHz) to pipeline rate (16kHz). Pad/trim to match user audio length.
+- **Cached result**: Inference runs only when `samples_since_inference >= step_samples`. Between inferences, the cached `VAPResult` is returned.
+- **Error resilience**: `feed_audio()` catches all exceptions and returns `_DEFAULT_RESULT`. `_run_inference()` also catches internally. Never propagates errors to orchestrator.
+- **PCM conversion**: 16-bit signed LE to float32 via `struct.unpack` + normalize by 32768. No numpy dependency.
+- **Oversized frame clamping**: Frames larger than the context buffer are silently truncated to buffer size.
+
+## 2026-03-04 — Phase 4 Step 2: TurnGPT Wrapper (`turn_taking/turngpt.py`)
+
+- **Stateless wrapper**: No internal buffer, cache, or counter. Each `predict()` call is independent. `reset()` is a no-op (satisfies interface contract).
+- **Model loading**: `TurnGPT.load_from_checkpoint(checkpoint_path)` — single-step load (restores tokenizer + embeddings). All errors wrapped in `TurnGPTError`.
+- **Inference**: `string_list_to_trp(dialog_text, add_post_eos_token=False)` → extract `trp_probs[0, -1].item()`. Last position gives the probability for the current (partial) turn.
+- **Empty guard**: Empty or whitespace-only input returns `0.0` without calling the model. Avoids tokenizer errors on empty strings.
+- **Error resilience**: All inference errors caught, logged as warning, return `0.0`. Never propagates errors to TurnDetector/Orchestrator. Matches VAP wrapper pattern.
+- **Lazy import**: `from turngpt import TurnGPT` inside constructor `try/except`. Package absence raises `TurnGPTError` at construction, not import time.
+- **Text formatting contract**: Wrapper does not modify input text. TurnDetector is responsible for correct `<ts>` formatting. Trailing separators or malformed input are passed through to the model.
