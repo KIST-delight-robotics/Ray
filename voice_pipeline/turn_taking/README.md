@@ -39,7 +39,29 @@ The VAP encoder uses a CPC (Contrastive Predictive Coding) component that may **
 
 Repository: <https://github.com/ErikEkstedt/TurnGPT>
 
-Setup and usage documented when the TurnGPT wrapper is implemented.
+#### Setup
+
+```bash
+git clone https://github.com/ErikEkstedt/TurnGPT.git external/TurnGPT
+uv pip install -e external/TurnGPT
+```
+
+#### Checkpoint
+
+TurnGPT uses `load_from_checkpoint` (PyTorch Lightning). Set `TurnGPTConfig.checkpoint_path` to the checkpoint file.
+
+For integration and stress tests, export the env var:
+
+```bash
+export TURNGPT_CHECKPOINT_PATH=/path/to/turngpt.ckpt
+```
+
+#### Config
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `checkpoint_path` | `""` | Path to TurnGPT checkpoint file |
+| `device` | `"cpu"` | Torch device (`"cpu"` or `"cuda"`) |
 
 ## Module Structure
 
@@ -48,7 +70,7 @@ turn_taking/
 ├── __init__.py
 ├── exceptions.py       # TurnTakingError, VAPError, TurnGPTError, TurnDetectorError
 ├── vap.py              # VAPWrapper(IVAP)
-├── turngpt.py          # TurnGPTWrapper(ITurnGPT)        [future]
+├── turngpt.py          # TurnGPTWrapper(ITurnGPT)
 ├── turn_detector.py    # TurnDetector(ITurnDetector)      [future]
 └── README.md
 ```
