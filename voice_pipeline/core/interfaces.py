@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Literal
 
 from voice_pipeline.core.types import (
     AudioFrame,
@@ -460,8 +460,29 @@ class ITurnDetector(ABC):
         """
 
     @abstractmethod
+    def notify_turn_complete(
+        self, role: Literal["user", "robot"], text: str
+    ) -> None:
+        """Inform the detector that a turn was completed.
+
+        Called by Orchestrator after a user or robot turn is finalized.
+        Used internally to maintain the ``<ts>``-delimited dialog context
+        for TurnGPT predictions. Empty *text* is ignored (no-op).
+
+        Args:
+            role: ``"user"`` or ``"robot"``.
+            text: Final text of the completed turn. For robot turns
+                interrupted by barge-in, this should be the truncated
+                text (what was actually spoken).
+        """
+
+    @abstractmethod
     def reset(self) -> None:
-        """Reset internal state for a new turn."""
+        """Reset per-frame tracking state for a new turn.
+
+        Clears frame counters, text-stability timers, and prepare flags.
+        Does **not** clear the accumulated dialog context used by TurnGPT.
+        """
 
 
 # ---------------------------------------------------------------------------
