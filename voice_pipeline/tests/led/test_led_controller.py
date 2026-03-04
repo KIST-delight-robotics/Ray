@@ -5,7 +5,6 @@ Hardware driver is never present in CI — all tests exercise noop fallback mode
 
 from __future__ import annotations
 
-import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -16,7 +15,6 @@ from voice_pipeline.core.types import LEDState
 from voice_pipeline.led.animations import LEDAnimation, StaticAnimation
 from voice_pipeline.led.exceptions import LEDError
 from voice_pipeline.led.led_controller import LEDController
-
 
 # ---------------------------------------------------------------------------
 # Helpers

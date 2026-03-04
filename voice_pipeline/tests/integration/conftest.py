@@ -11,7 +11,6 @@ import pytest
 
 from voice_pipeline.core.config import AudioConfig
 
-
 # ---------------------------------------------------------------------------
 # WAV helpers (reusable across cross-module tests)
 # ---------------------------------------------------------------------------

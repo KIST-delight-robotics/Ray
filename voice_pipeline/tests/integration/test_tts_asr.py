@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from voice_pipeline.asr.asr import GoogleCloudASR
-from voice_pipeline.core.config import ASRConfig, AudioConfig, TTSConfig
+from voice_pipeline.core.config import ASRConfig, TTSConfig
 from voice_pipeline.tts.tts import OpenAITTS
 
 from .conftest import audio_config_from_wav, make_silence_frames, read_wav_frames
