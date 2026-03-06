@@ -116,7 +116,7 @@ class TestRapidResetCycles:
     def test_100_reset_cycles(self, wrapper):
         """100 short turns (5 frames each + reset). No exceptions, valid results."""
         frame = _pcm_tone()
-        for cycle in range(100):
+        for _cycle in range(100):
             for _ in range(5):
                 result = wrapper.feed_audio(frame)
             assert isinstance(result, VAPResult)

@@ -69,7 +69,9 @@ def audio_config_from_wav(info: WavInfo) -> AudioConfig:
     )
 
 
-def make_silence_frames(frame_bytes: int, duration_sec: float, frame_duration_ms: int = 30) -> list[bytes]:
+def make_silence_frames(
+    frame_bytes: int, duration_sec: float, frame_duration_ms: int = 30
+) -> list[bytes]:
     """Generate silence frames to simulate continued mic input after speech."""
     n_frames = int(duration_sec / (frame_duration_ms / 1000))
     silence = b"\x00" * frame_bytes
