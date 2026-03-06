@@ -112,6 +112,7 @@ class TestTurnGPTConfig:
         cfg = TurnGPTConfig()
         assert cfg.checkpoint_path == ""
         assert cfg.device == "cpu"
+        assert cfg.max_context_tokens == 1024
 
 
 class TestTurnDetectorConfig:

@@ -72,7 +72,9 @@
 
 ### TurnGPT Wrapper (`turn_taking/turngpt.py`)
 
-- **Stateless**: No buffer/cache/counter. Each `predict()` independent. `reset()` is no-op.
+- **Stateful (KV cache)**: Maintains `past_key_values` across `predict()` calls. Compares token-level prefix with previous input; only new tokens are forwarded. Identical input returns cached probability without model call. `reset()` clears all cache state. Rationale: ASR sends incremental updates (same prefix, growing suffix) — reprocessing the entire dialog each time is wasteful.
+- **Direct model API**: Replaced `string_list_to_trp()` with separate `tokenizer()` → `model()` → `get_trp()` calls to control KV cache passing.
+- **Context window eviction**: `max_context_tokens` (default 1024, GPT-2 limit). When exceeded, oldest turns evicted at text level (split by `<ts>`) until token count ≤ 80% of max. Eviction invalidates cache entirely (full rebuild). Headroom (0.8) prevents thrashing near the limit.
 - **Lazy import**: `from turngpt import TurnGPT` inside constructor. Package absence raises `TurnGPTError` at construction.
-- **Inference**: `string_list_to_trp()` → `trp_probs[0, -1].item()`. Last position = current turn probability.
 - **Text formatting contract**: Wrapper passes input as-is. TurnDetector owns `<ts>` formatting.
+- **Open**: Proactive cache warming (pre-forwarding robot turn tokens after turn completion) — deferred until latency measurement shows it's needed. No wrapper change required; TurnDetector adds one `predict()` call.

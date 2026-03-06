@@ -154,6 +154,14 @@ class TestTurnCycle:
         assert all(isinstance(r, float) for r in results)
         assert all(0.0 <= r <= 1.0 for r in results)
 
+    def test_incremental_asr_updates(self, wrapper):
+        """ASR partial updates — same prefix, growing suffix."""
+        base = "hello<ts>"
+        for suffix in ["I", "I think", "I think that", "I think that is great"]:
+            result = wrapper.predict(base + suffix)
+            assert isinstance(result, float)
+            assert 0.0 <= result <= 1.0
+
 
 # ---------------------------------------------------------------------------
 # Tests: Error handling

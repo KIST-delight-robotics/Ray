@@ -81,6 +81,30 @@ class TestPerformance:
 
         assert elapsed < 25.0, f"50 predictions took {elapsed:.3f}s, expected < 25s"
 
+    def test_incremental_faster_than_full(self, wrapper):
+        """Cache-enabled incremental should not be slower than repeated full."""
+        base = "hello how are you<ts>I am fine thanks<ts>"
+        # Warm up cache with base
+        wrapper.predict(base + "so")
+
+        # Incremental: same prefix, growing suffix
+        start = time.perf_counter()
+        for i in range(50):
+            wrapper.predict(base + f"so what do you think about topic {i}")
+        incremental_time = time.perf_counter() - start
+
+        # Full: reset each time (no cache)
+        start = time.perf_counter()
+        for i in range(50):
+            wrapper.reset()
+            wrapper.predict(base + f"so what do you think about topic {i}")
+        full_time = time.perf_counter() - start
+
+        # Incremental should not be slower than full (allow 20% tolerance)
+        assert incremental_time <= full_time * 1.2, (
+            f"Incremental ({incremental_time:.3f}s) slower than full ({full_time:.3f}s)"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: Rapid reset cycles

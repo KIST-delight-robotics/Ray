@@ -141,10 +141,13 @@ class TurnGPTConfig:
     Attributes:
         checkpoint_path: Path to the TurnGPT checkpoint file.
         device: Torch device string.
+        max_context_tokens: Maximum token count before old turns are evicted.
+            GPT-2 position limit is 1024. 0 = no limit.
     """
 
     checkpoint_path: str = ""
     device: str = "cpu"
+    max_context_tokens: int = 1024
 
 
 @dataclass

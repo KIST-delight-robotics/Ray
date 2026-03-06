@@ -62,6 +62,7 @@ export TURNGPT_CHECKPOINT_PATH=/path/to/turngpt.ckpt
 |-----------|---------|-------------|
 | `checkpoint_path` | `""` | Path to TurnGPT checkpoint file |
 | `device` | `"cpu"` | Torch device (`"cpu"` or `"cuda"`) |
+| `max_context_tokens` | `1024` | Max tokens before old turns are evicted (GPT-2 limit). `0` = no limit |
 
 ## Module Structure
 
