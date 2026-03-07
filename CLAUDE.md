@@ -111,7 +111,8 @@ voice_pipeline/
 
 ## Documentation
 
-- **decisions.md**: Append after each Phase. Record key decisions made during implementation.
+- **SCRATCHPAD.md**: Claude's working memory. Read at session start, update freely.
+- **decisions.md**: Append after each Phase. Record: key design choices and their rationale (especially when alternatives existed or it deviates from the original plan), gotchas/edge cases that affect integration or tuning, and constraints future phases should respect. Skip trivial implementation details obvious from reading the code.
 - **Module READMEs** (`turn_taking/README.md`, etc.): Created when implementing the module. Covers external repo setup, constraints, config params.
 
 
