@@ -8,6 +8,7 @@ from voice_pipeline.turn_taking.exceptions import (
 )
 
 __all__ = [
+    "TurnDetector",
     "TurnDetectorError",
     "TurnGPTError",
     "TurnGPTWrapper",
@@ -26,4 +27,8 @@ def __getattr__(name: str):  # noqa: N807
         from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
         return TurnGPTWrapper
+    if name == "TurnDetector":
+        from voice_pipeline.turn_taking.turn_detector import TurnDetector
+
+        return TurnDetector
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
