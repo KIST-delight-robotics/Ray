@@ -3,87 +3,96 @@
 Claude's working memory. Free-form notes, observations, and context carried across sessions.
 
 
-## TurnDetector Redesign Notes
+## TurnDetector Design Notes
 
-Previous implementation was removed because it did not follow the paper's algorithm.
+TurnDetector is not yet implemented. These notes define the design requirements based on the reference paper and project-specific adaptation decisions. The paper's pseudo-code (Appendix A) is a reference, not a blueprint — the actual design must fit our decoupled architecture.
+
 Reference paper: `docs/Applying General Turn-taking Models to Conversational Human-Robot Interaction.pdf` (Skantze & Irfan, 2025).
-These notes capture design discussion conclusions that cannot be derived from the paper or architecture docs alone.
 
 
-### Why the previous implementation was wrong
+### Internal Turn State
 
-The old turn_detector.py had these critical problems:
-1. **Interrupt**: Treated ALL user speech during robot playback as interrupt. The paper uses VAP p_now/p_fut thresholds to distinguish genuine interrupts from backchannels (e.g., "yeah", "mhm"). Only when both p_now AND p_fut favor the user is it a real interrupt.
-2. **Turn-shift**: Used pure silence frame counting with no VAP involvement. The paper has two independent OR paths: (a) VAP path (p_now/p_fut favor robot for ≥ 500ms), (b) TurnGPT graduated timeout (silence ≥ timeout that varies by TurnGPT probability: 0.3→500ms, 0.2→1000ms, 0.1→2000ms, 0.0→3000ms).
-3. **Prepare**: Required 800ms stability AND TurnGPT threshold. The paper uses TurnGPT OR 200ms timeout, gated by semantic similarity to avoid redundant generation.
-4. **VAP p_now/p_fut were never used** in turn-shift or interrupt decisions — only `user_is_speaking` was used.
+TurnDetector must track whose turn it is internally. The paper's pseudo-code doesn't do this because its main loop has direct access to `Speech_Generator.is_speaking()` / `is_ready()`. Our TurnDetector is decoupled from SpeechGenerator and Orchestrator, so it needs its own state.
 
-
-### Internal turn state tracking (not in paper)
-
-The paper's pseudo-code branches only on `user_is_speaking` (voice activity) and gates actions with `Speech_Generator.is_speaking()` / `Speech_Generator.is_ready()`. Our TurnDetector is decoupled from SpeechGenerator, so it needs its own state tracking.
-
-**Two internal states:**
-- `LISTENING` — User's turn. Run prepare/turn_shift logic.
-- `ROBOT_SPEAKING` — Robot's turn. Only run interrupt logic.
+**Two states:**
+- `LISTENING` — User's turn. Prepare and turn_shift logic active.
+- `ROBOT_SPEAKING` — Robot's turn. Only interrupt logic active. Prepare and turn_shift must not run.
 
 **Transitions:**
-- `LISTENING → ROBOT_SPEAKING`: When robot_audio starts being provided (= CppBridge confirmed playback, Orchestrator feeds robot audio frames).
-- `ROBOT_SPEAKING → LISTENING`: When robot_audio stops being provided (playback ended or interrupted).
+- `LISTENING → ROBOT_SPEAKING`: robot_audio starts being provided to process_frame.
+- `ROBOT_SPEAKING → LISTENING`: robot_audio stops being provided.
 
-**Key consequence — turn_shift does NOT change internal state:**
-After TurnDetector emits turn_shift, it calls reset() and stays in LISTENING. The robot hasn't started speaking yet (C++ bridge hasn't confirmed playback). Only when Orchestrator begins providing robot_audio does the state change to ROBOT_SPEAKING.
+Robot speaking state is determined by actual C++ bridge playback signals, not by Python-side intent. The Orchestrator provides robot_audio to TurnDetector only while C++ is actually playing back. This means the transition to ROBOT_SPEAKING only happens when playback truly begins.
 
-**Why this matters — the gap between turn_shift and playback start:**
-If the user speaks again during this gap (turn_shift emitted, but robot not yet playing):
-- TurnDetector is still LISTENING → emits prepare or turn_shift normally (NOT interrupt)
-- Orchestrator handles this: combines saved user message + new ASR text, cancels/restarts generation
-- This is more natural than treating it as interrupt, because (a) robot said nothing yet so there's nothing to truncate, and (b) the user is just continuing their thought
-- ARCHITECTURE.md's `awaiting_response` section already describes this flow
+**turn_shift does not change internal state.** After emitting turn_shift, TurnDetector resets per-frame state and stays in LISTENING. Only when robot_audio actually arrives does the state become ROBOT_SPEAKING.
 
-**Robot speaking state must be based on C++ bridge signals** (actual playback), not on Python-side "I sent audio to the bridge" events. The Orchestrator determines this from CppBridge events and communicates it to TurnDetector by providing/not providing robot_audio frames.
+Without this state tracking, problems arise: during robot playback with user silent, silence counters would accumulate and eventually trigger a spurious turn_shift. During ROBOT_SPEAKING, these checks simply don't run.
 
 
-### VAP output convention
+### Turn-Shift: Two Independent OR Paths
 
-VAPResult.p_now and p_fut values: the exact channel index (0 or 1) doesn't matter as long as:
-1. The VAPResult docstring clearly defines what the values mean
-2. The TurnDetector applies thresholds consistently with that definition
+The paper's core contribution for turn-shift detection. Both paths run during LISTENING when the user is not speaking. Either path alone can trigger turn_shift.
 
-Current vap.py uses index 0. Whichever convention is chosen, document it clearly in VAPResult and use matching threshold directions in TurnDetector. The paper's pseudo-code uses a convention where high p_now = robot should speak, but the code can use the opposite as long as comparisons are flipped accordingly.
+**Path 1 — VAP (fast path):**
+p_now and p_fut both favor the robot, sustained for ≥ MIN_GAP_TIME (500ms). If either value stops favoring the robot, the timer resets. This enables response times as low as 500ms.
 
+**Path 2 — TurnGPT graduated timeout (fallback):**
+Silence duration since user stopped speaking, compared against a timeout that varies by TurnGPT's turn completion probability:
+- prob ≥ 0.3 → 500ms
+- prob ≥ 0.2 → 1000ms
+- prob ≥ 0.1 → 2000ms
+- prob ≥ 0.0 → 3000ms (maximum, safety fallback)
 
-### Graduated timeout and ASR timing
+This ensures the robot eventually takes the turn even if VAP fails to detect yield, while still being fast when TurnGPT is confident.
 
-The TurnGPT graduated timeout naturally handles ASR timing concerns: every ASR text change triggers TurnGPT re-evaluation, which updates the probability, which recalculates the timeout. By the time silence truly starts (no more ASR changes), TurnGPT has already processed the final text and the timeout reflects the most accurate probability. No special synchronization needed.
-
-
-### Prepare signal design details
-
-- Similarity comparison target: "the ASR text at the time of the last prepare emit" (not the last text change). This avoids re-generating when the text hasn't meaningfully changed since the last preparation.
-- Paper uses sentence embedding similarity (all-MiniLM-L6-v2). We may use simpler methods (e.g., SequenceMatcher) initially if embedding adds too much latency. The key behavior is: avoid redundant LLM+TTS generation for semantically equivalent inputs.
-- `prepare` can fire multiple times as text evolves — each one cancels the previous preparation and starts fresh.
+**Graduated timeout and ASR timing:** Every ASR text change triggers TurnGPT re-evaluation, which updates the probability and recalculates the timeout. By the time silence truly starts (no more ASR changes), the timeout already reflects the most accurate TurnGPT probability. No special synchronization needed.
 
 
-### What's preserved from old implementation
+### Interrupt vs Backchannel Distinction
 
-- `ITurnDetector` interface (process_frame, notify_turn_complete, reset) — still valid
-- `TurnDecision` type (turn_shift, interrupt, prepare) — still valid
-- `VAPResult` type — still valid
-- VAP wrapper (vap.py) — verified correct, no changes needed
-- TurnGPT wrapper (turngpt.py) — verified correct, no changes needed
-- `TurnDetectorConfig` placeholder in config.py — fields to be redefined
-- `TurnDetectorError` exception — still valid
-- `notify_turn_complete` for building TurnGPT dialog context — good design, keep
+During ROBOT_SPEAKING, when user speech is detected (VAP's user_is_speaking), the system must distinguish genuine interrupts from backchannels ("yeah", "mhm").
+
+**Interrupt** (robot should stop): Both p_now AND p_fut favor the user.
+**Backchannel** (robot continues): p_now may favor user but p_fut favors robot, indicating brief user speech. Robot should not stop.
+
+Only genuine interrupts emit the interrupt signal.
+
+**Empty robot turn after interrupt:** If an interrupt occurs very early in playback (or if truncation results in empty text), the robot turn is simply not recorded in ConversationHistory. The result is consecutive user turns in history, which is a natural representation of "user continued speaking."
 
 
-### ITurnDetector interface considerations for redesign
+### Prepare: Speculative Response Generation
 
-Current interface signature:
-```python
-def process_frame(self, user_audio: AudioFrame, asr_text: str, robot_audio: AudioFrame | None = None) -> TurnDecision
-def notify_turn_complete(self, role: Literal["user", "robot"], text: str) -> None
-def reset(self) -> None
-```
+During LISTENING, TurnDetector decides when to trigger background LLM+TTS preparation.
 
-This should remain largely unchanged. The robot_audio parameter serves double duty: feeds VAP's robot channel AND signals that the robot is currently speaking (ROBOT_SPEAKING state). This is fine because Orchestrator already only provides robot_audio during actual C++ playback.
+**Trigger condition (from paper):** ASR text has changed AND either:
+- TurnGPT probability > threshold (0.2), OR
+- Time since last ASR change ≥ timeout (200ms)
+
+**Gated by similarity:** Compare current ASR text against the text at the time of the last prepare emit. If similarity is above threshold (0.8), skip — the prepared response is still likely valid. This avoids redundant LLM+TTS work.
+
+Prepare can fire multiple times as text evolves. Each prepare cancels the previous generation and starts fresh (this cancellation is Orchestrator's responsibility, not TurnDetector's).
+
+
+### VAP Output Convention
+
+VAPResult contains p_now, p_fut, and user_is_speaking. The p_now/p_fut values come from the VAP model's output at a specific channel index.
+
+The exact index choice (0 = user probability, 1 = robot probability) doesn't matter as long as:
+1. VAPResult docstring clearly defines the semantic meaning of the values.
+2. TurnDetector threshold comparisons are consistent with that definition.
+3. The convention is documented in one place and followed everywhere.
+
+Whatever convention is chosen, the paper's threshold values (0.4, 0.5) need to be adapted to match. If p_now means "probability robot should speak," use the paper's thresholds directly. If it means "probability user should speak," flip the comparisons.
+
+
+### Preserved Components
+
+The following are already implemented and verified correct:
+- `ITurnDetector` interface: `process_frame()`, `notify_turn_complete()`, `reset()`
+- `TurnDecision` type: turn_shift, interrupt, prepare (at most one True per frame)
+- `VAPResult` type: p_now, p_fut, user_is_speaking
+- VAP wrapper (`vap.py`): stereo buffer, rolling window, periodic inference
+- TurnGPT wrapper (`turngpt.py`): `<ts>`-delimited dialog, KV cache, context window eviction
+- `notify_turn_complete()` builds dialog context for TurnGPT across turns
+- `TurnDetectorConfig` placeholder exists — fields to be defined with the implementation
+- `TurnDetectorError` exception class
