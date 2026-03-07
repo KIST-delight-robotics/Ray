@@ -154,8 +154,38 @@ class TurnGPTConfig:
 class TurnDetectorConfig:
     """Configuration for the combined TurnDetector.
 
-    Placeholder — fields will be redefined when TurnDetector is reimplemented.
+    Fuses VAP (audio) and TurnGPT (text) signals with timing heuristics.
+
+    Attributes:
+        vap_user_threshold: p_now/p_fut below this means "favors robot".
+        min_gap_time_sec: Sustained VAP robot-favor duration for turn-shift.
+        turngpt_thresholds: Graduated (prob, timeout_sec) pairs for Path 2.
+            Evaluated top-down; first matching prob triggers timeout.
+        interrupt_user_threshold: p_now/p_fut above this means "favors user".
+        prepare_turngpt_threshold: TurnGPT prob above this triggers prepare.
+        prepare_timeout_sec: Time since last ASR change to trigger prepare.
+        prepare_similarity_threshold: Skip prepare if text similarity >= this.
     """
+
+    # --- VAP turn-shift thresholds (Path 1) ---
+    vap_user_threshold: float = 0.5
+    min_gap_time_sec: float = 0.5
+
+    # --- TurnGPT graduated timeout (Path 2) ---
+    turngpt_thresholds: tuple[tuple[float, float], ...] = (
+        (0.3, 0.5),
+        (0.2, 1.0),
+        (0.1, 2.0),
+        (0.0, 3.0),
+    )
+
+    # --- Interrupt detection (ROBOT_TURN) ---
+    interrupt_user_threshold: float = 0.5
+
+    # --- Prepare (speculative generation) ---
+    prepare_turngpt_threshold: float = 0.2
+    prepare_timeout_sec: float = 0.2
+    prepare_similarity_threshold: float = 0.8
 
 
 @dataclass
