@@ -38,6 +38,7 @@
 - **Eager CM entry**: `response_cm.__enter__()` called immediately in `synthesize()`, not inside generator. Ensures safe cleanup even if generator never started.
 - **Single-exit guarantee**: Shared `exited` flag prevents double `__exit__()` between generator and `close_fn`.
 - **No word timestamps from OpenAI**: `DurationRatioTruncator` handles barge-in estimation.
+- **WAV header quirk**: OpenAI TTS may return WAV with `n_frames = INT_MAX` (malformed header). Use ffmpeg to re-encode if feeding into ASR or other consumers that validate headers.
 - **Model-specific instructions**: Explicit `_SUPPORTS_INSTRUCTIONS` set (not prefix matching).
 
 ### CppBridge (`bridge/`)

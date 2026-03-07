@@ -56,7 +56,8 @@ voice_pipeline/
 ├── llm/
 │   ├── llm.py                 # LLM interface impl
 │   ├── prompts.py             # Prompt templates
-│   ├── tools.py               # Tool definitions & execution
+│   ├── tools.py               # Tool definitions & execution (planned)
+│   ├── token_counter.py       # Token counting utilities
 │   └── exceptions.py
 │
 ├── tts/
@@ -80,7 +81,9 @@ voice_pipeline/
 │   └── exceptions.py
 │
 ├── led/
-│   └── led_controller.py      # LED interface + impls (Direct / Bridge)
+│   ├── led_controller.py      # LED interface + impls (Direct / Bridge)
+│   ├── animations.py          # LED animation patterns
+│   └── exceptions.py
 │
 ├── orchestrator/
 │   └── orchestrator.py        # ACTIVE mode conversation loop
@@ -89,6 +92,7 @@ voice_pipeline/
 │   └── session_manager.py     # Top-level state machine
 │
 └── tests/
+    ├── core/
     ├── audio/
     ├── asr/
     ├── turn_taking/
@@ -107,13 +111,7 @@ voice_pipeline/
 
 ## Documentation
 
-```
-docs/
-├── ARCHITECTURE.md    # Module interactions, cross-cutting flows (primarily for Orchestrator impl)
-└── decisions.md       # Chronological decision log (date + decision + reasoning)
-```
-
-- **decisions.md**: Append after each Phase. Agent should record key decisions made during implementation.
+- **decisions.md**: Append after each Phase. Record key decisions made during implementation.
 - **Module READMEs** (`turn_taking/README.md`, etc.): Created when implementing the module. Covers external repo setup, constraints, config params.
 
 
@@ -130,7 +128,7 @@ Some modules (VAP, TurnGPT, Wakeword etc.) wrap externally cloned model reposito
 
 - Python 3.11+, uv (pyproject.toml), ruff (format + check), pytest
 - `uv run pytest` — run all tests
-- `uv run pytest tests/asr` — run module tests
+- `uv run pytest voice_pipeline/tests/asr` — run module tests
 - `ruff check --fix && ruff format` — lint + format
 
 
@@ -140,6 +138,8 @@ Some modules (VAP, TurnGPT, Wakeword etc.) wrap externally cloned model reposito
 - **Vendor abstraction**: ASR, LLM, TTS are interface-backed. Impl selection via config.
 - **Dependency direction**: always `module → core`. Modules must not import each other directly. TurnDetector does not know about SpeechGenerator or ASR; Orchestrator wires them.
 - **Type hints** required. **Docstrings** required on interface methods.
+- **Configuration**: `core/config.py` dataclass-based. Add fields as modules are implemented.
+- **Logging**: `voice_pipeline.*` namespace (`voice_pipeline.asr`, `voice_pipeline.orchestrator`, etc.)
 
 
 ## Concurrency Model
@@ -153,15 +153,8 @@ threading + `queue.Queue` based.
 - Minimize shared state between threads. Use `threading.Lock` when necessary.
 
 
-## Configuration
-
-- `core/config.py`: dataclass-based. Add fields as modules are implemented.
-
-
 ## Error Handling
 
-- `core/exceptions.py`: `PipelineError` as base class only.
-- Module-specific exceptions in each module's `exceptions.py`, inheriting from `PipelineError`.
 - Inside modules: handle transient errors with retries. Raise module exception when retries exhausted.
 - Orchestrator fallback policy:
   - ASR / LLM / TTS failure → skip the current turn, stay in ACTIVE.
@@ -170,11 +163,7 @@ threading + `queue.Queue` based.
 
 ## Testing
 
-### Structure
-
-- File naming: `test_*.py`
-- Location: `tests/<module>/` mirroring source structure.
-- Tests must pass after each Phase before proceeding to the next.
+Tests must pass after each Phase before proceeding to the next.
 
 ### Test tiers
 
@@ -204,12 +193,6 @@ uv run pytest -m ''                              # everything
 - **Environment variables** for test inputs (file paths, language codes, etc.) — never hardcoded.
 - **Mirror orchestrator usage**: test the same call patterns the orchestrator will use (e.g., frame-by-frame feed+get, reset between turns, mid-stream stop).
 - **Error recovery**: test real failure scenarios — invalid credentials, errors during streaming, recovery via reset/restart.
-- **Stress scenarios**: rapid reset cycles, sustained streaming, back-to-back start/stop.
-
-
-## Logging
-
-- Logger namespace: `voice_pipeline.*` (`voice_pipeline.asr`, `voice_pipeline.orchestrator`, etc.)
 
 
 ## Commit Convention
