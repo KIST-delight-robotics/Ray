@@ -64,6 +64,22 @@ export TURNGPT_CHECKPOINT_PATH=/path/to/turngpt.ckpt
 | `device` | `"cpu"` | Torch device (`"cpu"` or `"cuda"`) |
 | `max_context_tokens` | `1024` | Max tokens before old turns are evicted (GPT-2 limit). `0` = no limit |
 
+### TurnDetector
+
+Combines VAP and TurnGPT outputs with timing heuristics. No external dependencies beyond the two wrappers above.
+
+#### Config
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `vap_user_threshold` | `0.5` | p_now/p_fut below this = "favors robot" |
+| `min_gap_time_sec` | `0.5` | Sustained VAP robot-favor duration for turn-shift |
+| `turngpt_thresholds` | `((0.3, 0.5), (0.2, 1.0), (0.1, 2.0), (0.0, 3.0))` | Graduated (prob, timeout_sec) pairs |
+| `interrupt_user_threshold` | `0.5` | p_now/p_fut above this = "favors user" |
+| `prepare_turngpt_threshold` | `0.2` | TurnGPT prob above this triggers prepare |
+| `prepare_timeout_sec` | `0.2` | Time since last ASR change to trigger prepare |
+| `prepare_similarity_threshold` | `0.8` | Skip prepare if text similarity ≥ this |
+
 ## Module Structure
 
 ```
@@ -72,6 +88,6 @@ turn_taking/
 ├── exceptions.py       # TurnTakingError, VAPError, TurnGPTError, TurnDetectorError
 ├── vap.py              # VAPWrapper(IVAP)
 ├── turngpt.py          # TurnGPTWrapper(ITurnGPT)
-├── turn_detector.py    # TurnDetector(ITurnDetector)      [future]
+├── turn_detector.py    # TurnDetector(ITurnDetector)
 └── README.md
 ```

@@ -82,5 +82,10 @@
 
 ### TurnDetector (`turn_taking/turn_detector.py`)
 
-Previous implementation removed — will be reimplemented based on the paper's algorithm.
-See SCRATCHPAD.md for design discussion notes from the review session.
+- **Paper-based two-path algorithm** (Skantze & Irfan, 2025): Path 1 (VAP sustained robot-favor) OR Path 2 (TurnGPT graduated silence timeout). Either path alone triggers turn_shift. This avoids single-model dependency — VAP gives fast response (~500ms) while TurnGPT ensures eventual turn-taking even if VAP fails.
+- **Internal turn state transition**: `_turn_state` switches to `ROBOT_TURN` immediately on turn_shift (not on external signal). Prevents race condition where user speech during the generation gap could produce a spurious `prepare` instead of `interrupt`. Per-frame state is reset at transition, not deferred to `reset()`.
+- **VAP favor timer reset on user speech**: `_vap_favor_robot_elapsed_sec` resets when `user_is_speaking=True`, not only when VAP probabilities flip. Prevents stale accumulation across speech gaps.
+- **Backchannel distinction via p_fut**: During ROBOT_TURN with robot_audio, `p_now > threshold` alone is insufficient for interrupt — `p_fut` must also favor user. This filters out backchannels ("yeah", "mhm") where p_now spikes but p_fut stays robot-favoring.
+- **Prepare similarity gate**: `SequenceMatcher.ratio() >= 0.8` suppresses redundant prepare signals when ASR text changes minimally. Avoids wasteful LLM+TTS restarts on minor ASR corrections.
+- **`notify_turn_complete` ignores `role`**: TurnGPT's `<ts>` format marks turn boundaries without speaker identity. The `role` parameter exists in the interface contract for potential future use but is not needed by the current TurnGPT model.
+- **VAP error default behavior**: `VAPResult(0, 0, False)` on errors looks like "robot favored," which could accumulate toward false turn_shift via Path 1. Accepted because transient errors won't sustain for 500ms, and persistent VAP failure falls back to Path 2 (TurnGPT + silence timing) which operates independently.
