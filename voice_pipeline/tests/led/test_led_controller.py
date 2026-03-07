@@ -241,8 +241,9 @@ class TestCustomAnimations:
 class TestHardwareInit:
     def test_hardware_init_error_raises_led_error(self) -> None:
         mock_driver_cls = MagicMock(side_effect=RuntimeError("SPI fail"))
-        with patch(_DRIVER_PATH, mock_driver_cls), pytest.raises(
-            LEDError, match="Failed to initialize LED strip"
+        with (
+            patch(_DRIVER_PATH, mock_driver_cls),
+            pytest.raises(LEDError, match="Failed to initialize LED strip"),
         ):
             _make_controller()
 

@@ -460,9 +460,7 @@ class ITurnDetector(ABC):
         """
 
     @abstractmethod
-    def notify_turn_complete(
-        self, role: Literal["user", "robot"], text: str
-    ) -> None:
+    def notify_turn_complete(self, role: Literal["user", "robot"], text: str) -> None:
         """Inform the detector that a turn was completed.
 
         Called by Orchestrator after a user or robot turn is finalized.

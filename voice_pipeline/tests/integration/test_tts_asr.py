@@ -56,11 +56,16 @@ def _tts_generate_wav(tts: OpenAITTS, text: str, path: Path) -> Path:
     fixed_path = path / "tts_fixed.wav"
     subprocess.run(
         [
-            "ffmpeg", "-y",
-            "-i", str(raw_path),
-            "-ar", str(_ASR_SAMPLE_RATE),
-            "-ac", "1",
-            "-sample_fmt", "s16",
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(raw_path),
+            "-ar",
+            str(_ASR_SAMPLE_RATE),
+            "-ac",
+            "1",
+            "-sample_fmt",
+            "s16",
             str(fixed_path),
         ],
         capture_output=True,
@@ -275,11 +280,16 @@ class TestTTSToASRRoundTrip:
         fixed_wav = tmp_path / "streaming_fixed.wav"
         subprocess.run(
             [
-                "ffmpeg", "-y",
-                "-i", str(raw_wav),
-                "-ar", str(_ASR_SAMPLE_RATE),
-                "-ac", "1",
-                "-sample_fmt", "s16",
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(raw_wav),
+                "-ar",
+                str(_ASR_SAMPLE_RATE),
+                "-ac",
+                "1",
+                "-sample_fmt",
+                "s16",
                 str(fixed_wav),
             ],
             capture_output=True,

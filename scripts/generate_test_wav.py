@@ -62,7 +62,7 @@ def main() -> None:
 
     for phrase in PHRASES:
         out_path = output_dir / f"{phrase['filename']}.wav"
-        print(f"Generating: {out_path}  ←  \"{phrase['text']}\"")
+        print(f'Generating: {out_path}  ←  "{phrase["text"]}"')
         tts.save_to_file(phrase["text"], out_path)
         print(f"  ✓ saved ({out_path.stat().st_size:,} bytes)")
 
