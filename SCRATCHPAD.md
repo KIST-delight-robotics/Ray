@@ -12,26 +12,39 @@ Reference paper: `docs/Applying General Turn-taking Models to Conversational Hum
 
 ### Internal Turn State
 
-TurnDetector must track whose turn it is internally. The paper's pseudo-code doesn't do this because its main loop has direct access to `Speech_Generator.is_speaking()` / `is_ready()`. Our TurnDetector is decoupled from SpeechGenerator and Orchestrator, so it needs its own state.
+TurnDetector tracks whose turn it is with two internal states: `USER_TURN` and `ROBOT_TURN`. This determines which algorithms run each frame.
 
-**Two states:**
-- `LISTENING` — User's turn. Prepare and turn_shift logic active.
-- `ROBOT_SPEAKING` — Robot's turn. Only interrupt logic active. Prepare and turn_shift must not run.
+- `USER_TURN`: VAP + TurnGPT + timing heuristics active. Can emit turn_shift and prepare.
+- `ROBOT_TURN`: Interrupt detection only. TurnGPT is not invoked. Cannot emit turn_shift or prepare.
 
 **Transitions:**
-- `LISTENING → ROBOT_SPEAKING`: robot_audio starts being provided to process_frame.
-- `ROBOT_SPEAKING → LISTENING`: robot_audio stops being provided.
+- `USER_TURN → ROBOT_TURN`: Immediately when turn_shift is emitted. TurnDetector resets per-frame state (prev_asr_text, timers, etc.) and transitions.
+- `ROBOT_TURN → USER_TURN`: When Orchestrator calls reset() (after playback completes or interrupt is handled).
 
-Robot speaking state is determined by actual C++ bridge playback signals, not by Python-side intent. The Orchestrator provides robot_audio to TurnDetector only while C++ is actually playing back. This means the transition to ROBOT_SPEAKING only happens when playback truly begins.
+Note: `ROBOT_TURN` does not mean the robot is audibly speaking. It means the turn has logically shifted to the robot. There may be a gap before actual playback starts (response generation time). During this gap, robot_audio is None.
 
-**turn_shift does not change internal state.** After emitting turn_shift, TurnDetector resets per-frame state and stays in LISTENING. Only when robot_audio actually arrives does the state become ROBOT_SPEAKING.
+**Why internal transition on turn_shift (not external control):**
+If turn state were only controlled externally (e.g., by robot_audio presence), there would be a timing gap between turn_shift and playback start. During this gap, user speech would enter the prepare path, which has trigger conditions (TurnGPT > 0.2 or 200ms elapsed). If the response completes before prepare fires, the Orchestrator would start playback while the user is speaking. With internal transition, user speech during the gap immediately triggers interrupt, avoiding this race.
 
-Without this state tracking, problems arise: during robot playback with user silent, silence counters would accumulate and eventually trigger a spurious turn_shift. During ROBOT_SPEAKING, these checks simply don't run.
+
+### Interrupt Detection (ROBOT_TURN only)
+
+Two sub-cases based on whether robot_audio is being provided:
+
+**With robot_audio (robot is audibly speaking):**
+VAP processes both channels. Distinguish genuine interrupt from backchannel:
+- **Interrupt**: Both p_now AND p_fut favor the user → emit interrupt.
+- **Backchannel** ("yeah", "mhm"): p_now may favor user but p_fut favors robot → no action, robot continues.
+
+**Without robot_audio (gap before playback):**
+VAP only has user audio, so backchannel distinction is not possible. But it's also not needed — the robot is not audibly speaking, so backchannels don't apply. Any user speech (`user_is_speaking`) → emit interrupt immediately.
+
+**Empty robot turn after interrupt:** If interrupt results in empty robot text (nothing was spoken, or truncation yields empty text), the robot turn is not recorded in ConversationHistory. Consecutive user turns in history naturally represent "user continued speaking."
 
 
-### Turn-Shift: Two Independent OR Paths
+### Turn-Shift: Two Independent OR Paths (USER_TURN only)
 
-The paper's core contribution for turn-shift detection. Both paths run during LISTENING when the user is not speaking. Either path alone can trigger turn_shift.
+The paper's core contribution for turn-shift detection. Both paths check when the user is not speaking. Either path alone can trigger turn_shift.
 
 **Path 1 — VAP (fast path):**
 p_now and p_fut both favor the robot, sustained for ≥ MIN_GAP_TIME (500ms). If either value stops favoring the robot, the timer resets. This enables response times as low as 500ms.
@@ -48,21 +61,9 @@ This ensures the robot eventually takes the turn even if VAP fails to detect yie
 **Graduated timeout and ASR timing:** Every ASR text change triggers TurnGPT re-evaluation, which updates the probability and recalculates the timeout. By the time silence truly starts (no more ASR changes), the timeout already reflects the most accurate TurnGPT probability. No special synchronization needed.
 
 
-### Interrupt vs Backchannel Distinction
+### Prepare: Speculative Response Generation (USER_TURN only)
 
-During ROBOT_SPEAKING, when user speech is detected (VAP's user_is_speaking), the system must distinguish genuine interrupts from backchannels ("yeah", "mhm").
-
-**Interrupt** (robot should stop): Both p_now AND p_fut favor the user.
-**Backchannel** (robot continues): p_now may favor user but p_fut favors robot, indicating brief user speech. Robot should not stop.
-
-Only genuine interrupts emit the interrupt signal.
-
-**Empty robot turn after interrupt:** If an interrupt occurs very early in playback (or if truncation results in empty text), the robot turn is simply not recorded in ConversationHistory. The result is consecutive user turns in history, which is a natural representation of "user continued speaking."
-
-
-### Prepare: Speculative Response Generation
-
-During LISTENING, TurnDetector decides when to trigger background LLM+TTS preparation.
+TurnDetector decides when to trigger background LLM+TTS preparation.
 
 **Trigger condition (from paper):** ASR text has changed AND either:
 - TurnGPT probability > threshold (0.2), OR
