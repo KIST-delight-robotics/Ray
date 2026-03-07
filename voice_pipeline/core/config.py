@@ -154,26 +154,8 @@ class TurnGPTConfig:
 class TurnDetectorConfig:
     """Configuration for the combined TurnDetector.
 
-    Attributes:
-        turn_shift_silence_frames: Consecutive non-speaking frames before
-            a turn_shift is emitted (~30ms each).
-        interrupt_vad_threshold: VAP threshold for interrupt detection
-            (applied to p_now when robot is speaking).
-        prepare_stable_ms: ASR text must be stable for this many ms
-            before a prepare signal.
-        text_similarity_threshold: SequenceMatcher ratio below which
-            ASR text is considered changed.
-        turngpt_threshold: TurnGPT probability above which prepare fires.
-        hard_silence_timeout_ms: Maximum silence before forced turn_shift,
-            regardless of other signals.
+    Placeholder — fields will be redefined when TurnDetector is reimplemented.
     """
-
-    turn_shift_silence_frames: int = 20
-    interrupt_vad_threshold: float = 0.5
-    prepare_stable_ms: int = 800
-    text_similarity_threshold: float = 0.85
-    turngpt_threshold: float = 0.3
-    hard_silence_timeout_ms: int = 2000
 
 
 @dataclass

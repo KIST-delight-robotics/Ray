@@ -82,10 +82,5 @@
 
 ### TurnDetector (`turn_taking/turn_detector.py`)
 
-- **No internal PlaybackState**: ARCHITECTURE.md describes PlaybackState-based gating, but TurnDetector uses `robot_audio is not None` instead. Orchestrator already only passes `robot_audio` during playback, so a separate state enum would be redundant. This means interrupt logic depends on Orchestrator correctly passing `None` when not playing.
-- **Hard silence timeout ignores VAP**: Fires regardless of `user_is_speaking`. Intentional — it's a safety fallback for cases where VAP detects residual activity but the user has actually stopped. Frame-count turn_shift handles the normal case.
-- **`reset()` preserves `_dialog_turns`**: Unlike VAP/TurnGPT wrappers (which have their own `reset()`), TurnDetector's `reset()` only clears per-frame state. Dialog context persists because TurnGPT predictions improve with conversation history. Orchestrator must not assume `reset()` is a full state wipe.
-- **`_text_stable_since = 0.0` sentinel**: Guards prepare/hard-timeout checks. `time.monotonic()` is always > 0 in real usage. Tests must mock monotonic to > 0.
-- **Silence counter starts at 1 on text-change frame**: Text change resets count to 0, but silence tracking in the same frame increments to 1. Effective silence is `turn_shift_silence_frames - 1` frames after text stabilizes. Keep in mind when tuning config.
-- **`_current_partial` staleness**: Only updates when SequenceMatcher detects change (ratio < 0.85). Short appends to long strings may stay above threshold, leaving TurnGPT predicting on slightly stale text. Acceptable because prepare is speculative; monitor during integration.
-- **`interrupt_vad_threshold` config unused**: Config field exists but TurnDetector uses VAP's `user_is_speaking` boolean (which has its own threshold internally). Reserved for future fine-grained control via `p_now` if needed.
+Previous implementation removed — will be reimplemented based on the paper's algorithm.
+See SCRATCHPAD.md for design discussion notes from the review session.
