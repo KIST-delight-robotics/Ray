@@ -23,9 +23,6 @@ env/
 # Claude Code local settings
 .claude/
 
-# Local environment notes (not for git)
-LOCAL.md
-
 # OS
 .DS_Store
 Thumbs.db
