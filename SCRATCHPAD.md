@@ -69,8 +69,12 @@ send_stream_start() → send_audio(chunk) × N → send_audio_end()
 - 모터 제어 (`DynamixelDriver`)
 - `read_and_split` (greeting/farewell 파일 재생에 재활용)
 
+### VAP 로봇 오디오 입력 (미구현)
+- VAP는 stereo 입력 (ch0=user, ch1=robot). 현재 Orchestrator는 user 오디오만 VAP에 넣고 있고, robot 오디오(TTS 출력)를 VAP에 피드하는 로직은 미구현.
+- `playback_started` 이벤트를 받은 시점부터 TTS 청크를 VAP ch1에 실시간으로 넣으면 됨. C++의 실제 재생과 동기화되므로 별도 위치 추적 불필요.
+
 ### playback_position 관련
-- 현재는 생략. 향후 VAP에 로봇 오디오 피드 정밀 제어가 필요하면 추가.
+- 현재는 생략. 향후 VAP 로봇 오디오 피드 정밀 제어가 필요하면 추가.
 - `playback_started`는 구현 (VAP 타이밍 시작점으로 사용).
 
 ### stale 청크 오염 방지
