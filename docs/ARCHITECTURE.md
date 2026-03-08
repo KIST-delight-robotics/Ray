@@ -215,66 +215,103 @@ SLEEP ──(wakeword)──▶ GREETING ──(playback done)──▶ ACTIVE �
 |------|-------------|
 | Role | ACTIVE mode conversation loop. Frame-driven. Controls module execution flow based on TurnDecision. |
 | Input | audio_queue (received from SessionManager) |
-| Internal state | Current ASR text, playback state (`idle` / `playing` / `stop_pending`), awaiting_response flag, current ResponseData |
+| Internal state | PlaybackState (`idle`/`playing`/`stop_pending`), `awaiting_response` flag, current ResponseData, sent audio buffer, pending truncation |
+| Dependencies | IASR, ITurnDetector, ISpeechGenerator, ICppBridge, IConversationHistory, IUtteranceTruncator, ILEDController |
 
 **Per-frame loop (never blocks):**
 
-1. Dequeue frame from audio_queue
+1. Dequeue frame from audio_queue (with timeout)
 2. Feed frame to ASR
 3. Poll current text from ASR
-4. Feed frame + text + robot audio to TurnDetector → receive TurnDecision
-5. Handle TurnDecision (see below)
-6. Check CppBridge events
-7. If `awaiting_response`: check SpeechGenerator completion (see below)
-8. Check session timeout
+4. Track text changes (for session timeout)
+5. Turn detection → handle decision (**before** audio drain — interrupt processed before sending more audio)
+6. Poll CppBridge events
+7. If PLAYING: drain audio to bridge
+8. If `awaiting_response`: check SpeechGenerator completion
+9. If pending truncation: check deferred truncation
+10. STOP_PENDING watchdog check
+11. Session timeout check
 
 **On `prepare`:**
 
-- SpeechGenerator: cancel existing preparation + start new preparation (pass current ASR text, runs in background)
+- Combine text (saved + current if awaiting), restart SpeechGenerator. Clear pending truncation.
 
 **On `turn_shift`:**
 
 1. Check exit keyword → if match, return (end session)
-2. Save user message to ConversationHistory (current ASR text)
-3. Check SpeechGenerator state:
-   - `streaming` → begin streaming audio to CppBridge via `poll_audio()` → set playback state to `playing` → reset ASR
-   - `preparing` or `idle` → if `idle`, trigger generation now → set `awaiting_response` flag → reset ASR
-4. (Frame loop continues — no blocking)
+2. Check SpeechGenerator state:
+   - `streaming` → `_begin_streaming()` (see below)
+   - `preparing` → set `awaiting_response`, save user text, LED THINKING
+   - `idle` → trigger generation, set `awaiting_response`, LED THINKING
 
-**While `awaiting_response` (checked per frame, step 7):**
+**`_begin_streaming(text)`:**
 
-- Check SpeechGenerator state
-- When `streaming` → begin streaming audio to CppBridge via `poll_audio()` → set playback state to `playing` → clear `awaiting_response`
-- During `awaiting_response`, playback state is `idle` (C++ is not playing anything). Since the robot is not speaking, TurnDetector will not emit `interrupt` — instead, new user speech produces `prepare` or `turn_shift`:
-  - **`prepare`**: new user text is stabilizing. Cancel current generation, start fresh generation for combined text (saved user message + current ASR text). Remain in `awaiting_response`.
-  - **`turn_shift`**: user finished additional speech. Append new ASR text to the previously saved user message (combine into one turn), cancel current generation, start fresh generation for the combined text. Remain in `awaiting_response`.
+1. Combine user text (saved + current, filtering empties)
+2. Save user message to ConversationHistory (returns message ID)
+3. Notify TurnDetector of user turn completion
+4. Reset ASR
+5. Drain available audio to CppBridge
+6. Set playback state to PLAYING, LED SPEAKING
 
-**On `interrupt` (during `playing`):**
+**User message save policy:** Saved **once** at `_begin_streaming()` with final combined text. Not saved at turn_shift to avoid stale entries when text is combined during awaiting. If generation fails, user turn is not recorded.
 
-- Send stop command to CppBridge → set playback state to `stop_pending`
+**While `awaiting_response` (checked per frame, step 8):**
+
+- `STREAMING` → `_begin_streaming()` → clear awaiting
+- `FAILED` → skip turn, reset TurnDetector, clear awaiting, LED LISTENING
+- During awaiting, TurnDetector is in ROBOT_TURN. User speech triggers:
+  - **`interrupt`**: cancel generation, reset TurnDetector, clear awaiting, LED LISTENING
+  - **`prepare`**: combine saved + current text, restart generation
+
+**On `interrupt`:**
+
+- During PLAYING: send_stop → STOP_PENDING (start watchdog timer)
+- During awaiting: cancel generation, reset TurnDetector, clear awaiting
 
 **CppBridge events (checked per frame):**
 
-| Event | Action |
-|-------|--------|
-| **Playback complete** | Save full ResponseData text to ConversationHistory as assistant → set playback state to `idle` |
-| **Playback stopped** (during `stop_pending`) | Use stop position + ResponseData → select UtteranceTruncator strategy → save truncated text to ConversationHistory as assistant → set playback state to `idle` |
-| **Playback position** | Pass to TurnDetector for VAP robot audio synchronization |
+| Event | Guard | Action |
+|-------|-------|--------|
+| **PLAYBACK_COMPLETE** | PLAYING only | Save full text to history, notify TurnDetector, reset to IDLE |
+| **PLAYBACK_STOPPED** | STOP_PENDING only | Barge-in truncation (see below), reset to IDLE |
+| **PLAYBACK_POSITION** | PLAYING only | Update tracked position |
 
-**Truncation strategy selection (on barge-in):**
+Events arriving in wrong state (stale events) are silently ignored.
 
-- If `ResponseData.has_timestamps` → use TimestampTruncator (stateless, pre-injected)
-- Otherwise → create DurationRatioTruncator with `total_duration_sec` derived from audio length
+**Barge-in truncation (on PLAYBACK_STOPPED):**
 
-**Exit conditions:** Exit keyword detected or session timeout → return
+| Case | Condition | Action |
+|------|-----------|--------|
+| **A** | ResponseData available + has_timestamps | TimestampTruncator (injected) → save to history |
+| **B** | ResponseData available + no timestamps | DurationRatioTruncator (from audio length) → save to history |
+| **C** | No ResponseData (stream not done) | DurationRatioTruncator (from sent buffer length) → save approximate → set `_pending_truncation` |
 
-**Session timeout:** Elapsed time since last ASR text change while playback state is `idle` and not `awaiting_response`. Timer resets on ASR text change and on playback completion. Does not count during `playing`, `stop_pending`, or `awaiting_response`.
+**Deferred truncation (Case C follow-up, checked per frame):**
 
-**ACTIVE lifecycle:** Start ASR on entry, stop ASR and clean up resources on exit.
+- Generator stream completes → get ResponseData → re-truncate with precise data → `history.update_message()` to correct the approximate entry
+- Generator FAILED → keep approximate truncation, clear pending
+- Pending truncation cleared on: stream_done, FAILED, new `_begin_streaming()`, new `_handle_prepare()`, session end
 
-**Dependencies:** ASR, TurnDetector, SpeechGenerator, CppBridge, UtteranceTruncator, ConversationHistory
+**Robot audio for TurnDetector:** `get_robot_audio_chunk()` extracts a 30ms chunk from `_sent_audio_buffer` at the current playback position. Returns None when not PLAYING or buffer exhausted.
 
-**Execution model:** Frame-driven synchronous loop — never blocks on I/O. Background operations (LLM, TTS) run within respective modules; Orchestrator polls for completion.
+**STOP_PENDING watchdog:** If no PLAYBACK_STOPPED event arrives within `stop_pending_timeout_sec` (default 5s), force transition to IDLE. Stale events arriving after watchdog timeout are ignored (state is already IDLE).
+
+**Exit keyword:** Case-insensitive word boundary match after stripping punctuation. Checked on turn_shift before generation.
+
+**Session timeout:** Timer since last ASR text change. Paused (timer reset) during PLAYING or `awaiting_response`. Resets on any text change.
+
+**Error handling:**
+
+| Source | Policy |
+|--------|--------|
+| ASR / TurnDetector | Log warning, skip frame, continue |
+| SpeechGenerator FAILED | Skip turn, reset TurnDetector, LED LISTENING |
+| CppBridge | Terminate session |
+| History / LED | Log warning, continue |
+
+**ACTIVE lifecycle:** Start ASR + LED LISTENING on entry. Stop ASR, shutdown generator, save history, LED OFF on exit.
+
+**Execution model:** Frame-driven synchronous loop — never blocks on I/O. Background operations (LLM, TTS) run within SpeechGenerator; Orchestrator polls for completion.
 
 
 ## 3. Call Structure
@@ -369,7 +406,8 @@ voice_pipeline/
 │   └── led_controller.py        # LED interface + implementations
 │
 ├── orchestrator/
-│   └── orchestrator.py          # ACTIVE mode conversation loop
+│   ├── orchestrator.py          # ACTIVE mode conversation loop
+│   └── exceptions.py
 │
 └── session/
     └── session_manager.py       # Top-level state machine
@@ -388,8 +426,8 @@ Test structure and development conventions are documented in CLAUDE.md.
 - [ ] ConversationHistory StorageBackend selection
 - [x] ~~Wakeword engine selection~~ → Silero VAD (speech segmentation) + Google STT `recognize()` (keyword matching)
 - [x] ~~LLM / TTS vendor finalization~~ → OpenAI (LLM: Responses API, TTS: Audio API). ASR: Google Cloud STT.
-- [ ] Exit keyword list and configuration location
-- [ ] Session timeout value and configuration location
+- [x] ~~Exit keyword list and configuration location~~ → `OrchestratorConfig.exit_keywords`, default `("bye", "goodbye")`
+- [x] ~~Session timeout value and configuration location~~ → `OrchestratorConfig.session_timeout_sec`, default 30s
 - [ ] ContextBuilder tool definition integration (deferred until LLM tools implementation)
 - [ ] RAG / long-term memory design (future)
 - [ ] LED behavior definition (which timing → which color/animation)

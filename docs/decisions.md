@@ -99,3 +99,24 @@
 - **`max_workers=2` default**: With `max_workers=1`, a new `prepare()` run queues behind the cancelled run until it exits. If the cancelled run is blocked on a first-token API call (1–3s), the new run is delayed. With 2 workers, the new run starts immediately on the other worker while the cancelled run drains cooperatively. Pileup concern: at most 2 runs active simultaneously; stale runs exit within one blocking call duration. Voice pipeline prepare() frequency is bounded by turn detector signals, so 3+ rapid cancellations within one API timeout is unrealistic.
 - **Timestamp retrieval fallback**: `tts_stream.timestamps` access wrapped in `try/except`. If timestamps fail, empty list used instead of failing the entire run. Audio and text are already produced at that point.
 - **`get_text()` accessible in FAILED state**: After STREAMING → FAILED (mid-stream TTS error), the LLM text is still valid and useful for logging/debugging. Blocking it would discard useful information.
+
+## Phase 5 — Orchestrator
+
+### ConversationHistory ID-based update
+
+- **Message IDs**: `add_user_message`/`add_assistant_message` return sequential `int` IDs. Messages stored with internal `_id` field, stripped on `get_messages()` and `save()`. Enables `update_message(id, text)` for barge-in truncation correction (Case C: approximate → precise).
+- **No deep copy in `get_messages()`**: Switched from `copy.deepcopy()` to dict comprehension stripping `_id`. New dicts are created per call so external mutation doesn't affect internal state.
+
+### Orchestrator design
+
+- **Decision before drain (step 5 before step 7)**: Turn detection runs before draining audio to bridge. An interrupt is processed before sending more audio, preventing unnecessary data transmission.
+- **User message save at `_begin_streaming()` only**: Not saved at `turn_shift`. During `awaiting_response`, the user may continue speaking — saving early would create stale entries. If generation fails, user turn is not recorded (no orphan messages).
+- **`_check_generator_completion` passes empty text**: When generator becomes STREAMING while `awaiting_response`, `_begin_streaming("")` is called. The method uses `_saved_user_text` (stable) internally, not the volatile `_last_asr_text` which may have been reset by ASR errors or prior operations.
+- **Three-case barge-in truncation**: Case A (timestamps from ResponseData) and B (duration ratio from ResponseData) are immediate. Case C (stream not done) saves approximate truncation immediately, then defers correction via `_pending_truncation` — each frame checks if generator has finished and updates via `history.update_message()`.
+- **Pending truncation cleanup**: Cleared in 5 situations — stream_done (with correction), generator FAILED (keep approximate), new `_begin_streaming()`, new `_handle_prepare()`, and `_end_session()`. Prevents stale pending state from leaking across turns.
+- **STOP_PENDING watchdog (5s default)**: If C++ never responds to send_stop, force IDLE. Stale events arriving after watchdog timeout are naturally ignored (playback state is already IDLE, so the state guards on PLAYBACK_COMPLETE/PLAYBACK_STOPPED don't match).
+- **Interrupt during awaiting**: TurnDetector switches to ROBOT_TURN on turn_shift (preventing spurious `prepare` from user speech during generation gap). If user speaks during awaiting, TurnDetector emits `interrupt`. Orchestrator cancels generation, calls `turn_detector.reset()` to restore USER_TURN, clears awaiting state.
+- **`turn_detector.reset()` on generator FAILED**: Same as interrupt — must restore USER_TURN so TurnDetector doesn't stay stuck in ROBOT_TURN.
+- **Bridge send errors not fatal**: `send_audio()`/`send_stop()` failures are logged. The subsequent `_poll_cpp_events()` on the same or next frame will detect the broken connection and terminate the session. Avoids duplicating termination logic.
+- **DurationRatioTruncator direct import from tts module**: Orchestrator is the wiring layer per CLAUDE.md design. Creating new `DurationRatioTruncator` instances per barge-in with response-specific `total_duration_sec` is inherently a concrete operation — cannot be abstracted behind the `IUtteranceTruncator` interface without factory complexity.
+- **Exit keyword matching**: Punctuation stripped, case-insensitive, word boundary via set membership. `"goodbye"` does not match keyword `"bye"` — each keyword is an exact word.
