@@ -159,14 +159,15 @@ SLEEP ──(wakeword)──▶ GREETING ──(playback done)──▶ ACTIVE �
 | Item | Description |
 |------|-------------|
 | Role | Chain ContextBuilder → LLM → TTS to produce response audio. Manage speculative preparation. |
-| States | `idle` → `preparing` → `ready` → `idle` |
+| States | `idle` → `preparing` → `streaming` → `idle` (normal), `preparing`/`streaming` → `failed` (error) |
 | Flow | 1. ContextBuilder assembles context |
-|      | 2. LLM generates response text (streaming) |
-|      | 3. TTS converts to audio |
-| Output | ResponseData (full response text, audio data, word-level timestamps) |
-| Key behaviors | **Speculative prepare**: run LLM+TTS in background before turn confirmation → transition to `ready` |
-|               | **Cancel**: on context change (new ASR text), cancel previous preparation → `idle` |
-|               | **Fetch result**: from `ready` state, return ResponseData → `idle` |
+|      | 2. LLM generates full response text (streaming collected) |
+|      | 3. TTS streams audio chunks → `poll_audio()` |
+| Output | `poll_audio()` for incremental PCM chunks during `streaming`, `get_response_data()` for full ResponseData after `stream_done` |
+| Key behaviors | **Speculative prepare**: run LLM+TTS in background before turn confirmation. Audio chunks available via `poll_audio()` as soon as state reaches `streaming`. |
+|               | **Cancel**: on context change (new ASR text), cancel previous preparation → `idle`. Run-ID guard ensures stale runs never write state. |
+|               | **Streaming consumption**: Orchestrator polls `poll_audio()` per frame, checks `stream_done` to know when complete. `get_response_data()` returns full ResponseData and transitions to `idle`. |
+| Execution | `ThreadPoolExecutor(max_workers=2)`. New `prepare()` starts immediately on fresh worker while cancelled run drains cooperatively. |
 | Dependencies | ContextBuilder, LLM, TTS |
 
 
@@ -236,14 +237,14 @@ SLEEP ──(wakeword)──▶ GREETING ──(playback done)──▶ ACTIVE �
 1. Check exit keyword → if match, return (end session)
 2. Save user message to ConversationHistory (current ASR text)
 3. Check SpeechGenerator state:
-   - `ready` → fetch ResponseData → send audio to CppBridge → set playback state to `playing` → reset ASR
+   - `streaming` → begin streaming audio to CppBridge via `poll_audio()` → set playback state to `playing` → reset ASR
    - `preparing` or `idle` → if `idle`, trigger generation now → set `awaiting_response` flag → reset ASR
 4. (Frame loop continues — no blocking)
 
 **While `awaiting_response` (checked per frame, step 7):**
 
-- Poll SpeechGenerator for completion
-- When ready → fetch ResponseData → send audio to CppBridge → set playback state to `playing` → clear `awaiting_response`
+- Check SpeechGenerator state
+- When `streaming` → begin streaming audio to CppBridge via `poll_audio()` → set playback state to `playing` → clear `awaiting_response`
 - During `awaiting_response`, playback state is `idle` (C++ is not playing anything). Since the robot is not speaking, TurnDetector will not emit `interrupt` — instead, new user speech produces `prepare` or `turn_shift`:
   - **`prepare`**: new user text is stabilizing. Cancel current generation, start fresh generation for combined text (saved user message + current ASR text). Remain in `awaiting_response`.
   - **`turn_shift`**: user finished additional speech. Append new ASR text to the previously saved user message (combine into one turn), cancel current generation, start fresh generation for the combined text. Remain in `awaiting_response`.
