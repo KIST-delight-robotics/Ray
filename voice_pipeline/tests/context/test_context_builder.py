@@ -25,15 +25,25 @@ class StubHistory(IConversationHistory):
 
     def __init__(self, messages: list[dict[str, Any]] | None = None) -> None:
         self._messages = messages or []
+        self._next_id = 0
 
     def new_session(self, session_id: str) -> None:
         pass
 
-    def add_user_message(self, text: str) -> None:
+    def add_user_message(self, text: str) -> int:
+        msg_id = self._next_id
+        self._next_id += 1
         self._messages.append({"role": "user", "content": text})
+        return msg_id
 
-    def add_assistant_message(self, text: str) -> None:
+    def add_assistant_message(self, text: str) -> int:
+        msg_id = self._next_id
+        self._next_id += 1
         self._messages.append({"role": "assistant", "content": text})
+        return msg_id
+
+    def update_message(self, message_id: int, text: str) -> None:
+        pass
 
     def get_messages(self) -> list[dict[str, Any]]:
         return list(self._messages)

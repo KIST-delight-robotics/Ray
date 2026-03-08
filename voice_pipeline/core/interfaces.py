@@ -3,7 +3,7 @@
 Only interfaces needed by the next implementation phase are defined here.
 New interfaces are added just before their consuming phase begins.
 
-Current: Phase 2 + Phase 3 + Phase 4 interfaces.
+Current: Phase 2 + Phase 3 + Phase 4 + Phase 5 interfaces.
 """
 
 from __future__ import annotations
@@ -85,15 +85,18 @@ class IConversationHistory(ABC):
         """
 
     @abstractmethod
-    def add_user_message(self, text: str) -> None:
+    def add_user_message(self, text: str) -> int:
         """Append a user message to the current session.
 
         Args:
             text: The user's transcribed utterance (final ASR result).
+
+        Returns:
+            Message ID for later reference (e.g. update_message).
         """
 
     @abstractmethod
-    def add_assistant_message(self, text: str) -> None:
+    def add_assistant_message(self, text: str) -> int:
         """Append an assistant message to the current session.
 
         Called with full response text on normal playback completion,
@@ -101,6 +104,25 @@ class IConversationHistory(ABC):
 
         Args:
             text: The robot's spoken text (full or truncated).
+
+        Returns:
+            Message ID for later reference (e.g. update_message).
+        """
+
+    @abstractmethod
+    def update_message(self, message_id: int, text: str) -> None:
+        """Update the content of an existing message by ID.
+
+        Used for barge-in truncation correction: an approximate
+        truncation is saved first, then corrected when precise
+        data becomes available.
+
+        Args:
+            message_id: ID returned by add_user_message/add_assistant_message.
+            text: New content to replace the existing message content.
+
+        Raises:
+            HistoryError: If no message with the given ID exists.
         """
 
     @abstractmethod
@@ -108,7 +130,7 @@ class IConversationHistory(ABC):
         """Retrieve all conversation messages.
 
         Returns:
-            List of message dicts in vendor-specific format.
+            List of message dicts in vendor-specific format (no internal IDs).
         """
 
     @abstractmethod

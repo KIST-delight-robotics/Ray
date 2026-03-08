@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import logging
 from typing import Any
 
@@ -24,6 +23,7 @@ class ConversationHistory(IConversationHistory):
         self._backend = backend
         self._session_id: str | None = None
         self._messages: list[dict[str, Any]] = []
+        self._next_id: int = 0
 
     def _require_session(self) -> str:
         if self._session_id is None:
@@ -34,22 +34,41 @@ class ConversationHistory(IConversationHistory):
         """Start a new session, clearing any in-memory state."""
         self._session_id = session_id
         self._messages = []
+        self._next_id = 0
         logger.info("Started new session: %s", session_id)
 
-    def add_user_message(self, text: str) -> None:
+    def _allocate_id(self) -> int:
+        msg_id = self._next_id
+        self._next_id += 1
+        return msg_id
+
+    def add_user_message(self, text: str) -> int:
         """Append a user message to the current session."""
         self._require_session()
-        self._messages.append({"role": "user", "content": text})
+        msg_id = self._allocate_id()
+        self._messages.append({"role": "user", "content": text, "_id": msg_id})
+        return msg_id
 
-    def add_assistant_message(self, text: str) -> None:
+    def add_assistant_message(self, text: str) -> int:
         """Append an assistant message to the current session."""
         self._require_session()
-        self._messages.append({"role": "assistant", "content": text})
+        msg_id = self._allocate_id()
+        self._messages.append({"role": "assistant", "content": text, "_id": msg_id})
+        return msg_id
+
+    def update_message(self, message_id: int, text: str) -> None:
+        """Update the content of an existing message by ID."""
+        self._require_session()
+        for msg in self._messages:
+            if msg.get("_id") == message_id:
+                msg["content"] = text
+                return
+        raise HistoryError(f"No message with ID {message_id}")
 
     def get_messages(self) -> list[dict[str, Any]]:
-        """Retrieve all conversation messages."""
+        """Retrieve all conversation messages (internal IDs stripped)."""
         self._require_session()
-        return copy.deepcopy(self._messages)
+        return [{k: v for k, v in msg.items() if k != "_id"} for msg in self._messages]
 
     def clear(self) -> None:
         """Remove all messages from the current session in memory."""
@@ -59,4 +78,5 @@ class ConversationHistory(IConversationHistory):
     def save(self) -> None:
         """Persist the current session to the storage backend."""
         session_id = self._require_session()
-        self._backend.save(session_id, self._messages)
+        clean = [{k: v for k, v in msg.items() if k != "_id"} for msg in self._messages]
+        self._backend.save(session_id, clean)
