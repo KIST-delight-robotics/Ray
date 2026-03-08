@@ -5,3 +5,7 @@ from voice_pipeline.core.exceptions import PipelineError
 
 class WakewordError(PipelineError):
     """Error in wakeword detection."""
+
+
+class AudioInputError(PipelineError):
+    """Error in audio input capture."""
