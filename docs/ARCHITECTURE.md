@@ -1,6 +1,4 @@
-# Voice Conversation Robot — Python Pipeline Architecture v2
-
-Temporary — subject to change at any time.
+# Voice Conversation Robot — Python Pipeline Architecture
 
 
 ## 1. System Modes
@@ -418,19 +416,59 @@ voice_pipeline/
 Test structure and development conventions are documented in CLAUDE.md.
 
 
-## 6. Open Items
+## 6. Threading Model & Debugging
 
-- [x] ~~Main loop orchestrator structure~~ → SessionManager (top-level state machine) → Orchestrator (ACTIVE-only, frame-driven loop)
-- [x] ~~Main loop execution model~~ → Frame-driven sync loop + module-internal background processing
-- [x] ~~Audio distribution~~ → AudioInput separate thread → queue → consumer loop (SessionManager-owned)
-- [x] ~~ASR text delivery~~ → Polling (Orchestrator polls per frame). ConversationHistory saves only on turn confirmation.
-- [x] ~~VAP robot audio source~~ → TTS audio + playback timing sync (Python-held audio, C++ provides position events)
-- [ ] ConversationHistory StorageBackend selection
-- [x] ~~Wakeword engine selection~~ → Silero VAD (speech segmentation) + Google STT `recognize()` (keyword matching)
-- [x] ~~LLM / TTS vendor finalization~~ → OpenAI (LLM: Responses API, TTS: Audio API). ASR: Google Cloud STT.
-- [x] ~~Exit keyword list and configuration location~~ → `OrchestratorConfig.exit_keywords`, default `("bye", "goodbye")`
-- [x] ~~Session timeout value and configuration location~~ → `OrchestratorConfig.session_timeout_sec`, default 30s
-- [ ] ContextBuilder tool definition integration (deferred until LLM tools implementation)
-- [ ] RAG / long-term memory design (future)
-- [ ] LED behavior definition (which timing → which color/animation)
-- [ ] LED control location (Python direct vs C++ relay)
+### Threads at runtime
+
+| Thread | Owner | Lifetime | Purpose |
+|--------|-------|----------|---------|
+| Main | SessionManager | `run()` duration | State machine loop, Orchestrator frame loop |
+| AudioInput | AudioInput | `start()` → `stop()` | PyAudio capture → `audio_queue` |
+| CppBridge receiver | CppBridge | `connect()` → `disconnect()` | WebSocket recv → `event_queue` |
+| SpeechGenerator workers (×2) | SpeechGenerator | per `prepare()` | LLM + TTS background generation |
+| LED animation | LEDController | `set_state()` lifecycle | Animation render loop |
+
+### Log namespaces
+
+```
+voice_pipeline.audio        # AudioInput, WakewordDetector
+voice_pipeline.asr          # ASR streaming
+voice_pipeline.turn_taking  # TurnDetector, VAP, TurnGPT
+voice_pipeline.generation   # SpeechGenerator
+voice_pipeline.llm          # LLM API calls
+voice_pipeline.tts          # TTS synthesis
+voice_pipeline.bridge       # CppBridge WebSocket
+voice_pipeline.led          # LED controller
+voice_pipeline.orchestrator # Frame loop, turn handling, barge-in
+voice_pipeline.session      # SessionManager state transitions
+voice_pipeline.core         # TTSStream
+```
+
+### Error propagation summary
+
+| Source | Orchestrator policy | SessionManager policy |
+|--------|--------------------|-----------------------|
+| ASR | Log, skip frame, continue | N/A (Orchestrator handles) |
+| TurnDetector | Log, skip frame, continue | N/A |
+| SpeechGenerator | Skip turn, reset TurnDetector | N/A |
+| CppBridge | **Terminate session** | Greeting/farewell: log, break poll loop |
+| History / LED | Log, continue | Log, continue |
+| WakewordDetector | N/A | **Crash** (real bug — should be fixed) |
+| AudioInput thread | Capture stops silently (`_error` set) | Not detected (queue starves) |
+
+
+## 7. Known Limitations
+
+- **`generator.shutdown()` reuse**: Orchestrator calls `generator.shutdown()` in `_end_session()`, terminating the ThreadPoolExecutor. If the same SpeechGenerator instance is reused for a second session, `prepare()` will fail unless the implementation re-creates the executor.
+- **AudioInput thread death undetected**: If the capture thread dies (device error, etc.), the audio queue starves. SessionManager stays in SLEEP waiting for frames that never come. No health-check mechanism exists.
+- **CppBridge reconnect**: `bridge.connect()` is only called once at `SessionManager.run()` start. If the bridge disconnects mid-session, Orchestrator terminates the session → FAREWELL → SLEEP. On the next wakeword, greeting is sent on a dead connection. Needs reconnect logic before greeting or in the SLEEP loop.
+- **Signal handling**: No SIGINT/SIGTERM handler. `Ctrl+C` kills the process without calling `shutdown()`, so `history.save()` is skipped.
+
+
+## 8. Open Design Questions
+
+- ConversationHistory StorageBackend selection (memory / file / DB)
+- ContextBuilder tool definition integration (deferred until LLM tools)
+- RAG / long-term memory design
+- LED behavior definition (which state → which color/animation)
+- LED control location (Python direct vs C++ relay)

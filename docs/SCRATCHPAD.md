@@ -4,32 +4,45 @@ Claude's working memory. Read at session start, update freely.
 
 ## Current State
 
-Phase 6 complete (reviewed + fixes applied). All runtime modules implemented:
-- `audio/audio_input.py` — mic capture daemon thread
-- `session/session_manager.py` — top-level state machine (implements `ISessionManager`)
-- Orchestrator `request_stop()` for external stop signal
-- Orchestrator `_start_session()` resets all internal state for clean reuse
+Phase 1–6 complete. All modules implemented and unit-tested (488 tests pass).
 
-## Phase Status
+Remaining: Phase 7 (integration tests).
 
-| Phase | Status |
-|-------|--------|
-| 1 — Foundation (core/) | Done |
-| 2 — Independent (history, truncator, context) | Done |
-| 3 — External (asr, llm, tts, bridge, wakeword, led) | Done |
-| 4 — Composite (turn_taking, generation) | Done |
-| 5 — Orchestration (orchestrator) | Done |
-| 6 — Top-level (session, audio_input) | Done |
-| 7 — Integration tests | Not started |
+## What to do next
 
-## Known Limitations (deferred)
+### Phase 7 — Integration tests (`tests/integration/`)
 
-- **`generator.shutdown()` reuse**: Orchestrator calls `generator.shutdown()` in `_end_session()`, terminating the ThreadPoolExecutor. Generator implementations must handle re-initialization on next `prepare()` or this will break multi-session reuse.
-- **AudioInput thread death undetected**: If capture thread dies, queue starves silently. No health-check mechanism yet.
-- **CppBridge reconnect**: `bridge.connect()` only called at `run()` start. If bridge disconnects mid-session and Orchestrator terminates → FAREWELL → SLEEP → next wakeword, bridge is not reconnected before greeting.
-- **Signal handling**: No SIGINT/SIGTERM handler. `Ctrl+C` skips `shutdown()`.
+Cross-module end-to-end flows with mocked external services. Key scenarios:
+1. **Full conversation cycle**: SessionManager SLEEP → wakeword → GREETING → ACTIVE (Orchestrator runs a turn) → exit keyword → FAREWELL → SLEEP
+2. **Barge-in flow**: Mid-playback interrupt → STOP_PENDING → truncation → history updated
+3. **Speculative prepare**: TurnDetector prepare → SpeechGenerator background run → turn_shift → immediate streaming
+4. **Error recovery**: ASR failure mid-session → skip turn → continue. CppBridge disconnect → session terminates cleanly.
+5. **Multi-session reuse**: Run two sessions on the same Orchestrator instance to verify state reset.
 
-## Open Items
+### Before real hardware testing
 
-- Integration tests (Phase 7) — cross-module end-to-end flows
-- Real hardware testing with PyAudio
+These known limitations should be addressed:
+- **`generator.shutdown()` reuse** — Orchestrator calls `shutdown()` at session end, killing the ThreadPoolExecutor. Second session will fail. Fix: re-create executor in `prepare()` if shut down, or don't call `shutdown()` in `_end_session()`.
+- **CppBridge reconnect** — Bridge only connected once at `run()` start. Needs reconnect before greeting or periodic health check.
+- **Signal handling** — Add SIGINT/SIGTERM handler that calls `SessionManager.shutdown()`.
+
+## Module quick reference
+
+| Module | Key file | Interface | Config |
+|--------|----------|-----------|--------|
+| AudioInput | `audio/audio_input.py` | `IAudioInput` | `AudioInputConfig` |
+| Wakeword | `audio/wakeword.py` | `IWakewordDetector` | `WakewordConfig` |
+| ASR | `asr/asr.py` | `IASR` | `ASRConfig` |
+| LLM | `llm/llm.py` | `ILLM` | `LLMConfig` |
+| TTS | `tts/tts.py` | `ITTS` | `TTSConfig` |
+| CppBridge | `bridge/cpp_bridge.py` | `ICppBridge` | `CppBridgeConfig` |
+| LED | `led/led_controller.py` | `ILEDController` | `LEDConfig` |
+| VAP | `turn_taking/vap.py` | `IVAP` | `VAPConfig` |
+| TurnGPT | `turn_taking/turngpt.py` | `ITurnGPT` | `TurnGPTConfig` |
+| TurnDetector | `turn_taking/turn_detector.py` | `ITurnDetector` | `TurnDetectorConfig` |
+| SpeechGenerator | `generation/speech_generator.py` | `ISpeechGenerator` | `SpeechGeneratorConfig` |
+| ContextBuilder | `context/context_builder.py` | `IContextBuilder` | — |
+| History | `history/conversation_history.py` | `IConversationHistory` | `ConversationHistoryConfig` |
+| Truncator | `tts/utterance_truncator.py` | `IUtteranceTruncator` | — |
+| Orchestrator | `orchestrator/orchestrator.py` | — (concrete) | `OrchestratorConfig` |
+| SessionManager | `session/session_manager.py` | `ISessionManager` | `SessionConfig` |

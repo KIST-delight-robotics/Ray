@@ -144,6 +144,6 @@
 - **`poll_event()` exception handling**: Greeting/farewell polling loops catch `poll_event()` exceptions. Bridge errors break out of the poll loop but don't crash SessionManager.
 - **Audio queue drain on ACTIVE entry**: `_drain_audio_queue()` clears stale frames before passing the queue to Orchestrator. Prevents the first ASR/TurnDetector frames from containing old audio.
 - **Greeting/farewell timeout**: Timeout expiry is treated as playback done (log warning, proceed). No error raised.
-- **`bridge.disconnect()` on exit**: `run()` finally 블록에서 `bridge.disconnect()` 호출. `connect()`와 대칭.
-- **Orchestrator 내부 상태 초기화**: `_start_session()`에서 모든 내부 상태(`_playback_state`, `_awaiting_response` 등) 초기화. `request_stop()`으로 비정상 종료 후 재사용 시 이전 세션 상태가 남는 문제 방지.
-- **`SessionManager(ISessionManager)` 상속**: `core/interfaces.py`의 `ISessionManager` 구현. 프로젝트의 인터페이스 규칙 준수.
+- **`bridge.disconnect()` on exit**: `run()` finally block calls `bridge.disconnect()`, symmetric with `connect()` at startup.
+- **Orchestrator internal state reset**: `_start_session()` resets all internal state (`_playback_state`, `_awaiting_response`, etc.). Prevents stale state from a previous session when reusing the same Orchestrator instance after `request_stop()`.
+- **`SessionManager(ISessionManager)` inheritance**: Implements `ISessionManager` from `core/interfaces.py`. Follows the project's interface convention.
