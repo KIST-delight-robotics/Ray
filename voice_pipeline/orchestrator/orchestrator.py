@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import queue
 import re
+import threading
 import time
 from dataclasses import dataclass
 
@@ -72,6 +73,9 @@ class Orchestrator:
         self._tts_config = tts_config
         self._audio_config = audio_config
 
+        # External stop signal
+        self._stop_event = threading.Event()
+
         # Internal state
         self._playback_state = PlaybackState.IDLE
         self._awaiting_response = False
@@ -92,12 +96,17 @@ class Orchestrator:
 
     def run(self, audio_queue: queue.Queue[AudioFrame]) -> None:
         """Run the conversation loop until exit keyword or timeout."""
+        self._stop_event.clear()
         self._start_session()
         try:
             while not self._run_frame(audio_queue):
                 pass
         finally:
             self._end_session()
+
+    def request_stop(self) -> None:
+        """Signal the orchestrator to stop at the next frame."""
+        self._stop_event.set()
 
     def get_robot_audio_chunk(self) -> AudioFrame | None:
         """Extract a 30ms chunk from sent audio buffer at playback position.
@@ -125,6 +134,19 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _start_session(self) -> None:
+        # Reset internal state from any previous session
+        self._playback_state = PlaybackState.IDLE
+        self._awaiting_response = False
+        self._current_response = None
+        self._sent_audio_buffer = bytearray()
+        self._saved_user_text = ""
+        self._last_asr_text = ""
+        self._playback_position_sec = 0.0
+        self._stop_pending_time = 0.0
+        self._pending_truncation = None
+        self._user_msg_id = None
+        self._assistant_msg_id = None
+
         self._asr.start()
         self._set_led(LEDState.LISTENING)
         self._last_text_change_time = time.monotonic()
@@ -144,6 +166,11 @@ class Orchestrator:
 
     def _run_frame(self, audio_queue: queue.Queue[AudioFrame]) -> bool:
         """Process one frame. Returns True to exit the loop."""
+        # 0. Check external stop signal
+        if self._stop_event.is_set():
+            logger.info("External stop requested — exiting")
+            return True
+
         # 1. Get audio frame
         frame = self._get_frame(audio_queue)
 
