@@ -25,40 +25,46 @@ Next: C++ ↔ Python WebSocket 프로토콜 정렬 (아래 참조), 그리고 Ph
 | `audio` | `data` (base64 PCM) | 오디오 청크 | `responses_audio_chunk` |
 | `audio_end` | - | 스트림 종료 | `responses_stream_end` |
 | `stop` | - | 재생 중단 (barge-in) | `user_interruption` |
-| `greeting` | - | 인사 재생 | `play_audio` (파일경로 방식) |
-| `farewell` | - | 작별 재생 | `play_audio` (파일경로 방식) |
+| `play_file` | `file_path` | 파일 재생 (인사/작별 등) | `play_audio` |
 
 **C++ → Python:**
 
 | 메시지 | 필드 | 설명 | C++ 기존 대응 |
 |--------|------|------|---------------|
 | `playback_started` | - | 재생 시작 (VAP 타이밍용) | (신규) |
-| `playback_complete` | - | 정상 재생 완료 | `speaking_finished` |
-| `playback_stopped` | - | 중단 완료 (stop 응답) | (신규) |
+| `playback_complete` | - | 재생 완료 (정상/중단 모두) | `speaking_finished` |
 
-### Python 인터페이스 수정 필요 사항
+- `playback_stopped`는 별도로 두지 않음. Python이 `stop`을 보낸 상태인지 자체적으로 알고 있으므로, `playback_complete`를 받았을 때 문맥으로 구분.
 
-`ICppBridge`에 추가할 메서드:
-- `send_stream_start()` — Orchestrator가 오디오 드레인 시작 전 호출
-- `send_audio_end()` — Orchestrator가 오디오 드레인 완료 후 호출
+### Python 수정 사항
 
-`CppBridge` 구현에 해당 JSON 전송 추가.
+**`ICppBridge` 인터페이스에 추가할 메서드:**
+- `send_stream_start()`
+- `send_audio_end()`
+- `send_play_file(file_path: str)` — 기존 `send_greeting()`/`send_farewell()` 대체
 
-Orchestrator `_drain_audio_to_bridge()` 흐름:
-```
-send_stream_start() → send_audio(chunk) × N → send_audio_end()
-```
+**`CppBridge` 구현:** 해당 JSON 전송 추가.
+
+**`CppEventType`:** `PLAYBACK_STOPPED` 제거. `PLAYBACK_COMPLETE` 하나로 통합.
+
+**Orchestrator:**
+- 오디오 드레인 흐름: `send_stream_start()` → `send_audio(chunk)` × N → `send_audio_end()`
+- `stop` 전송 후 `playback_complete` 대기 (기존 STOP_PENDING 로직 유지, 이벤트 타입만 변경)
+
+**SessionManager:**
+- `send_greeting()` → `send_play_file("assets/audio/awake.wav")`
+- `send_farewell()` → `send_play_file("assets/audio/sleep.wav")`
 
 ### C++ 수정 사항
 
 1. **WebSocket: 클라이언트 → 서버** (`ix::WebSocket` → `ix::WebSocketServer`, 포트 8765)
 2. **onMessageCallback**: type 문자열 매핑 교체 (위 표 참조)
-3. **robot_main_loop**: 응답 메시지 이름 변경 + `playback_started`/`playback_stopped` 전송 추가
-4. **stop 처리**: `stop` 수신 → 재생 중단 → 큐 비우기 → `playback_stopped` 전송
-5. **greeting/farewell**: 기존 `play_audio` 로직 재활용, 고정 파일경로 (`assets/audio/awake.wav`, `sleep.wav`)
+3. **robot_main_loop**: `speaking_finished` → `playback_complete` rename + `playback_started` 전송 추가
+4. **stop 처리**: 기존 `user_interruption` 로직 그대로, type명만 `stop`으로 변경. 스레드 종료 후 기존과 동일하게 `playback_complete` 전송.
+5. **`play_file`**: 기존 `play_audio` 로직 재활용, type명만 변경
 
 ### 삭제 가능 항목
-- `turn_id` 관련 로직 (WebSocket 순서보장 + Python이 `playback_stopped` 대기 후 다음 턴 전송)
+- `turn_id` 관련 로직 (WebSocket 순서보장 + Python이 `playback_complete` 대기 후 다음 턴 전송)
 - `stt_done` 핸들링
 - `responses_stream_start` (별도 메시지 불필요, `stream_start`에 통합)
 - `play_music` / `play_audio_csv` (당장 불필요하면)
@@ -67,7 +73,7 @@ send_stream_start() → send_audio(chunk) × N → send_audio_end()
 - 모션 생성 (`generate_motion`, `control_motor`)
 - 오디오 재생 (`CustomSoundStream`)
 - 모터 제어 (`DynamixelDriver`)
-- `read_and_split` (greeting/farewell 파일 재생에 재활용)
+- `read_and_split` (파일 재생에 재활용)
 
 ### VAP 로봇 오디오 입력 (미구현)
 - VAP는 stereo 입력 (ch0=user, ch1=robot). 현재 Orchestrator는 user 오디오만 VAP에 넣고 있고, robot 오디오(TTS 출력)를 VAP에 피드하는 로직은 미구현.
@@ -79,7 +85,7 @@ send_stream_start() → send_audio(chunk) × N → send_audio_end()
 
 ### stale 청크 오염 방지
 - `turn_id` 대신 WebSocket TCP 순서보장에 의존.
-- Python은 `playback_stopped` 수신 후에만 다음 턴 오디오 전송 → 순서적으로 꼬이지 않음.
+- Python은 `playback_complete` 수신 후에만 다음 턴 오디오 전송 → 순서적으로 꼬이지 않음.
 - C++은 `stop` 수신 시 버퍼/큐 전부 비움.
 
 ## Phase 5 Notes
