@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import enum
 import logging
 import re
@@ -87,6 +88,12 @@ class WakewordDetector(IWakewordDetector):
             audio_config.sample_rate * audio_config.sample_width * audio_config.channels
         )
 
+        # Pre-buffer: ring buffer of recent chunks for capturing speech onset
+        pre_buffer_chunks = max(1, config.pre_buffer_ms // _VAD_CHUNK_DURATION_MS)
+        self._pre_buffer: collections.deque[bytes] = collections.deque(
+            maxlen=pre_buffer_chunks,
+        )
+
         # State
         self._state = _State.IDLE
         self._vad_buffer = bytearray()  # residual bytes for rechunking
@@ -144,7 +151,13 @@ class WakewordDetector(IWakewordDetector):
         if self._state is _State.IDLE:
             if prob > self._config.vad_threshold:
                 self._state = _State.SPEECH
+                # Prepend pre-buffer to capture speech onset
+                for buffered_chunk in self._pre_buffer:
+                    self._speech_buffer.extend(buffered_chunk)
+                self._pre_buffer.clear()
                 self._speech_buffer.extend(chunk_bytes)
+            else:
+                self._pre_buffer.append(chunk_bytes)
 
         elif self._state is _State.SPEECH:
             self._speech_buffer.extend(chunk_bytes)
@@ -207,6 +220,7 @@ class WakewordDetector(IWakewordDetector):
         for result in response.results:
             for alternative in result.alternatives:
                 transcript = alternative.transcript
+                logger.info("STT result: %r (confidence=%.2f)", transcript, alternative.confidence)
                 for pattern in self._keyword_patterns:
                     if pattern.search(transcript):
                         logger.info(
@@ -217,7 +231,10 @@ class WakewordDetector(IWakewordDetector):
                         self._reset()
                         return
 
-        logger.debug("No wakeword match in %d results", len(response.results))
+        if not response.results:
+            logger.debug("STT returned no results")
+        else:
+            logger.debug("No wakeword match in %d results", len(response.results))
         self._reset()
 
     # ------------------------------------------------------------------
@@ -227,6 +244,7 @@ class WakewordDetector(IWakewordDetector):
     def _reset(self) -> None:
         """Reset speech state for next detection cycle."""
         self._speech_buffer.clear()
+        self._pre_buffer.clear()
         self._state = _State.IDLE
         self._silence_chunks = 0
         try:
