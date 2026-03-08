@@ -1,7 +1,7 @@
 """Dataclass-based configuration for the voice pipeline.
 
 Config sections are added as their modules are implemented.
-Current: Phase 1–3 + Phase 4 (vap, turngpt, turn_detector, speech_generator).
+Current: Phase 1–3 + Phase 4 + Phase 5 (orchestrator).
 """
 
 from __future__ import annotations
@@ -189,6 +189,23 @@ class TurnDetectorConfig:
 
 
 @dataclass
+class OrchestratorConfig:
+    """Configuration for the Orchestrator conversation loop.
+
+    Attributes:
+        exit_keywords: Words that end the conversation (case-insensitive).
+        session_timeout_sec: Inactivity timeout before auto-exit.
+        frame_timeout_sec: audio_queue.get() timeout per frame.
+        stop_pending_timeout_sec: Watchdog timeout for STOP_PENDING state.
+    """
+
+    exit_keywords: tuple[str, ...] = ("bye", "goodbye")
+    session_timeout_sec: float = 30.0
+    frame_timeout_sec: float = 0.1
+    stop_pending_timeout_sec: float = 5.0
+
+
+@dataclass
 class SpeechGeneratorConfig:
     """Configuration for the SpeechGenerator.
 
@@ -221,3 +238,4 @@ class PipelineConfig:
     turngpt: TurnGPTConfig = field(default_factory=TurnGPTConfig)
     turn_detector: TurnDetectorConfig = field(default_factory=TurnDetectorConfig)
     speech_generator: SpeechGeneratorConfig = field(default_factory=SpeechGeneratorConfig)
+    orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
