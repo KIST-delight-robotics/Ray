@@ -3,7 +3,7 @@
 Only interfaces needed by the next implementation phase are defined here.
 New interfaces are added just before their consuming phase begins.
 
-Current: Phase 2 + Phase 3 + Phase 4 + Phase 5 interfaces.
+Current: Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 interfaces.
 """
 
 from __future__ import annotations
@@ -585,3 +585,43 @@ class ISpeechGenerator(ABC):
     @abstractmethod
     def shutdown(self) -> None:
         """Shut down the background executor and release resources."""
+
+
+# ---------------------------------------------------------------------------
+# AudioInput
+# ---------------------------------------------------------------------------
+
+
+class IAudioInput(ABC):
+    """Microphone capture interface.
+
+    Runs on a separate daemon thread, pushing AudioFrame to a shared queue.
+    """
+
+    @abstractmethod
+    def start(self) -> None:
+        """Start capturing audio. Idempotent."""
+
+    @abstractmethod
+    def stop(self) -> None:
+        """Stop capturing audio and release resources."""
+
+
+# ---------------------------------------------------------------------------
+# SessionManager
+# ---------------------------------------------------------------------------
+
+
+class ISessionManager(ABC):
+    """Top-level state machine interface.
+
+    Manages SLEEP → GREETING → ACTIVE → FAREWELL → SLEEP cycle.
+    """
+
+    @abstractmethod
+    def run(self) -> None:
+        """Run the session manager main loop."""
+
+    @abstractmethod
+    def shutdown(self) -> None:
+        """Signal the session manager to shut down gracefully."""

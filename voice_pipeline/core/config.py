@@ -1,7 +1,7 @@
 """Dataclass-based configuration for the voice pipeline.
 
 Config sections are added as their modules are implemented.
-Current: Phase 1–3 + Phase 4 + Phase 5 (orchestrator).
+Current: Phase 1–3 + Phase 4 + Phase 5 + Phase 6.
 """
 
 from __future__ import annotations
@@ -219,6 +219,34 @@ class SpeechGeneratorConfig:
 
 
 @dataclass
+class AudioInputConfig:
+    """Configuration for the AudioInput module.
+
+    Attributes:
+        device_index: PyAudio device index. None = system default.
+    """
+
+    device_index: int | None = None
+
+
+@dataclass
+class SessionConfig:
+    """Configuration for the SessionManager.
+
+    Attributes:
+        audio_queue_size: Bounded queue size for audio frames.
+        greeting_timeout_sec: Max wait for greeting playback completion.
+        farewell_timeout_sec: Max wait for farewell playback completion.
+        frame_timeout_sec: Queue.get() timeout for audio frames.
+    """
+
+    audio_queue_size: int = 300
+    greeting_timeout_sec: float = 10.0
+    farewell_timeout_sec: float = 10.0
+    frame_timeout_sec: float = 0.1
+
+
+@dataclass
 class PipelineConfig:
     """Top-level configuration for the voice pipeline.
 
@@ -239,3 +267,5 @@ class PipelineConfig:
     turn_detector: TurnDetectorConfig = field(default_factory=TurnDetectorConfig)
     speech_generator: SpeechGeneratorConfig = field(default_factory=SpeechGeneratorConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
+    audio_input: AudioInputConfig = field(default_factory=AudioInputConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
