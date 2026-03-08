@@ -111,6 +111,22 @@ class TestLifecycle:
         assert led_calls[0] == LEDState.LISTENING
         assert led_calls[-1] == LEDState.OFF
 
+    def test_start_session_resets_internal_state(self) -> None:
+        """run() resets all internal state from a previous session."""
+        orch, mocks = _make_orchestrator(session_timeout_sec=0.0)
+        # Simulate dirty state from a previous session
+        orch._playback_state = PlaybackState.PLAYING
+        orch._awaiting_response = True
+        orch._saved_user_text = "leftover"
+        orch._sent_audio_buffer = bytearray(b"\xff" * 100)
+
+        orch.run(_audio_queue_with())
+
+        # After run(), state should have been reset at start
+        # (end_session also resets some, but start must handle it)
+        assert orch._saved_user_text == ""
+        assert orch._awaiting_response is False
+
 
 # ---------------------------------------------------------------------------
 # Turn shift tests
@@ -618,6 +634,32 @@ class TestStopPendingWatchdog:
 # ---------------------------------------------------------------------------
 # Error handling tests
 # ---------------------------------------------------------------------------
+
+
+class TestRequestStop:
+    def test_request_stop_exits_frame_loop(self) -> None:
+        """request_stop() causes _run_frame() to return True immediately."""
+        orch, mocks = _make_orchestrator(session_timeout_sec=100.0)
+        orch._start_session()
+        orch.request_stop()
+
+        q = _audio_queue_with(_frame())
+        result = orch._run_frame(q)
+
+        assert result is True
+
+    def test_run_clears_stale_stop(self) -> None:
+        """run() clears a stale stop event from a previous session."""
+        orch, mocks = _make_orchestrator(session_timeout_sec=0.0)
+        # Set stop before run — should be cleared
+        orch.request_stop()
+
+        # run() should clear the event and proceed normally (exit via timeout)
+        orch.run(_audio_queue_with())
+
+        # If stale stop wasn't cleared, _end_session wouldn't be called properly
+        mocks["asr"].start.assert_called_once()
+        mocks["asr"].stop.assert_called_once()
 
 
 class TestErrorHandling:
