@@ -262,7 +262,7 @@ class TestEnums:
     def test_generator_state_values(self) -> None:
         assert GeneratorState.IDLE.value == "idle"
         assert GeneratorState.PREPARING.value == "preparing"
-        assert GeneratorState.READY.value == "ready"
+        assert GeneratorState.STREAMING.value == "streaming"
         assert GeneratorState.FAILED.value == "failed"
         assert len(GeneratorState) == 4
 

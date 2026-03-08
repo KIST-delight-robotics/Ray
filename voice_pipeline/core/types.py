@@ -47,13 +47,13 @@ class GeneratorState(enum.Enum):
 
     IDLE      — no preparation in progress, ready to accept prepare().
     PREPARING — background LLM+TTS generation is running.
-    READY     — generation complete, result available via get_result().
+    STREAMING — LLM text collected, TTS audio chunks available via poll_audio().
     FAILED    — generation failed, Orchestrator should skip this turn.
     """
 
     IDLE = "idle"
     PREPARING = "preparing"
-    READY = "ready"
+    STREAMING = "streaming"
     FAILED = "failed"
 
 

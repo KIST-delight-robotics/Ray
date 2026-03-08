@@ -194,9 +194,11 @@ class SpeechGeneratorConfig:
 
     Attributes:
         max_workers: Thread pool size for background generation.
+            Default 2 so a new prepare() run starts immediately on a
+            separate worker while the cancelled run drains cooperatively.
     """
 
-    max_workers: int = 1
+    max_workers: int = 2
 
 
 @dataclass

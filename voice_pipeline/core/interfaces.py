@@ -492,7 +492,11 @@ class ISpeechGenerator(ABC):
     """Background speech generation pipeline.
 
     Chains ContextBuilder -> LLM -> TTS in a background thread.
-    Supports cancellation and state inspection.
+    Supports cancellation, streaming audio output, and state inspection.
+
+    State flow: IDLE → PREPARING → STREAMING → IDLE (normal)
+                PREPARING → FAILED (LLM/TTS error, empty text)
+                STREAMING → FAILED (TTS stream error mid-stream)
     """
 
     @property
@@ -500,12 +504,21 @@ class ISpeechGenerator(ABC):
     def state(self) -> GeneratorState:
         """Current generator state."""
 
+    @property
+    @abstractmethod
+    def stream_done(self) -> bool:
+        """True when TTS stream is fully consumed.
+
+        Check after poll_audio() returns None to distinguish
+        empty queue from stream end.
+        """
+
     @abstractmethod
     def prepare(self, current_text: str) -> None:
         """Start background generation for the given user text.
 
-        If already PREPARING, cancels the current run and restarts.
-        If READY or FAILED, discards the previous result and starts fresh.
+        If already PREPARING or STREAMING, cancels the current run and restarts.
+        If FAILED, discards the previous result and starts fresh.
 
         Args:
             current_text: Current ASR transcription to generate a
@@ -520,16 +533,31 @@ class ISpeechGenerator(ABC):
         """
 
     @abstractmethod
-    def get_result(self) -> ResponseData:
-        """Retrieve the generated response.
+    def poll_audio(self) -> bytes | None:
+        """Return next TTS audio chunk, or None if queue is empty.
 
-        Only valid when state is READY. Transitions state to IDLE.
+        Use stream_done property to distinguish empty queue from stream end.
+        """
 
-        Returns:
-            ResponseData with text, audio, and timestamps.
+    @abstractmethod
+    def get_text(self) -> str:
+        """Return the generated response text.
+
+        Available once state is STREAMING.
 
         Raises:
-            RuntimeError: If state is not READY.
+            RuntimeError: If state is not STREAMING or later.
+        """
+
+    @abstractmethod
+    def get_response_data(self) -> ResponseData:
+        """Return full ResponseData after stream completes.
+
+        Idempotent per run — callable multiple times until next prepare().
+        Transitions state to IDLE on first call.
+
+        Raises:
+            RuntimeError: If stream is not done.
         """
 
     @abstractmethod

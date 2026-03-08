@@ -124,7 +124,7 @@ class TestTurnDetectorConfig:
 class TestSpeechGeneratorConfig:
     def test_defaults(self) -> None:
         cfg = SpeechGeneratorConfig()
-        assert cfg.max_workers == 1
+        assert cfg.max_workers == 2
 
 
 class TestPipelineConfig:
