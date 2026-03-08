@@ -206,7 +206,9 @@ SLEEP ──(wakeword)──▶ GREETING ──(playback done)──▶ ACTIVE �
 | GREETING | Send greeting signal via CppBridge → wait for playback completion → transition to ACTIVE. |
 | ACTIVE | Drain audio_queue → issue session_id, initialize ConversationHistory → call `Orchestrator.run(audio_queue)`. On return → transition to FAREWELL. |
 | FAREWELL | Send farewell signal via CppBridge → wait for playback completion → save ConversationHistory → transition to SLEEP. |
-| Note | During GREETING/FAREWELL: signal only, no audio streaming to C++. audio_queue not consumed (drained on ACTIVE entry). |
+| Startup | `run()` calls `bridge.connect()` then `audio_input.start()`. |
+| Shutdown | `shutdown()` sets event + `orchestrator.request_stop()`. `run()` finally block calls `audio_input.stop()` + `bridge.disconnect()`. |
+| Note | During GREETING/FAREWELL: signal only, no audio streaming to C++. audio_queue not consumed (drained on ACTIVE entry). Stale CppBridge events flushed before greeting/farewell. |
 
 
 ### 2.16 Orchestrator
@@ -309,7 +311,7 @@ Events arriving in wrong state (stale events) are silently ignored.
 | CppBridge | Terminate session |
 | History / LED | Log warning, continue |
 
-**ACTIVE lifecycle:** Start ASR + LED LISTENING on entry. Stop ASR, shutdown generator, save history, LED OFF on exit.
+**ACTIVE lifecycle:** Start ASR + LED LISTENING on entry (all internal state reset for clean session). Stop ASR, shutdown generator, save history, LED OFF on exit. Supports `request_stop()` for external cancellation (SessionManager shutdown).
 
 **Execution model:** Frame-driven synchronous loop — never blocks on I/O. Background operations (LLM, TTS) run within SpeechGenerator; Orchestrator polls for completion.
 

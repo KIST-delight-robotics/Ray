@@ -120,3 +120,30 @@
 - **Bridge send errors not fatal**: `send_audio()`/`send_stop()` failures are logged. The subsequent `_poll_cpp_events()` on the same or next frame will detect the broken connection and terminate the session. Avoids duplicating termination logic.
 - **DurationRatioTruncator direct import from tts module**: Orchestrator is the wiring layer per CLAUDE.md design. Creating new `DurationRatioTruncator` instances per barge-in with response-specific `total_duration_sec` is inherently a concrete operation — cannot be abstracted behind the `IUtteranceTruncator` interface without factory complexity.
 - **Exit keyword matching**: Punctuation stripped, case-insensitive, word boundary via set membership. `"goodbye"` does not match keyword `"bye"` — each keyword is an exact word.
+
+## Phase 6 — SessionManager + AudioInput
+
+### AudioInput (`audio/audio_input.py`)
+
+- **Lazy PyAudio import**: `import pyaudio` in constructor. `ImportError` → `AudioInputError` at construction time, not at runtime.
+- **Daemon thread**: If main thread dies, audio thread dies too. Clean shutdown via `stop()` in normal flow.
+- **Always drop on queue full**: `put_nowait()` with `queue.Full` caught and logged. No config flag — blocking the capture thread is never acceptable.
+- **Error attribute**: Thread captures exception to `_error` attribute for external inspection, then exits. No re-raise — thread errors are silent to the main loop.
+
+### Orchestrator stop signal
+
+- **`request_stop()` + `threading.Event`**: External stop signal checked at the top of `_run_frame()`. Lets SessionManager cancel a running Orchestrator on shutdown.
+- **Clear event at `run()` start**: `self._stop_event.clear()` prevents a stale stop from a previous session from immediately terminating the next one.
+
+### SessionManager (`session/session_manager.py`)
+
+- **Orchestrator as direct dependency (not factory)**: Orchestrator's `run()` already calls `_start_session()`/`_end_session()` — it resets itself between sessions. No need for re-creation.
+- **Flush CppBridge events before greeting/farewell**: `_flush_bridge_events()` drains all pending events. Prevents acting on stale `PLAYBACK_COMPLETE` from a previous cycle.
+- **`history.save()` guarded**: Called in FAREWELL and `shutdown()`, but only if `_session_started` is True. Prevents crash on cold-start shutdown before any session.
+- **CppBridge connect on startup**: `run()` calls `cpp_bridge.connect()` before entering the main loop. Ensures connection is established before any greeting/farewell.
+- **`poll_event()` exception handling**: Greeting/farewell polling loops catch `poll_event()` exceptions. Bridge errors break out of the poll loop but don't crash SessionManager.
+- **Audio queue drain on ACTIVE entry**: `_drain_audio_queue()` clears stale frames before passing the queue to Orchestrator. Prevents the first ASR/TurnDetector frames from containing old audio.
+- **Greeting/farewell timeout**: Timeout expiry is treated as playback done (log warning, proceed). No error raised.
+- **`bridge.disconnect()` on exit**: `run()` finally 블록에서 `bridge.disconnect()` 호출. `connect()`와 대칭.
+- **Orchestrator 내부 상태 초기화**: `_start_session()`에서 모든 내부 상태(`_playback_state`, `_awaiting_response` 등) 초기화. `request_stop()`으로 비정상 종료 후 재사용 시 이전 세션 상태가 남는 문제 방지.
+- **`SessionManager(ISessionManager)` 상속**: `core/interfaces.py`의 `ISessionManager` 구현. 프로젝트의 인터페이스 규칙 준수.
