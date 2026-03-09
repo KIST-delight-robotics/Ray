@@ -4,9 +4,13 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 
 ## Current Status
 
-Phase 6 complete. C++ code imported from RAG_test branch.
+C++ ↔ Python WebSocket 프로토콜 정렬 완료.
 
-Next: C++ ↔ Python WebSocket 프로토콜 정렬 (아래 참조), 그리고 Phase 7 — Integration tests.
+- Python 측: types, interfaces, bridge, orchestrator, session, tests 모두 업데이트 (490 tests pass)
+- C++ 측: WebSocket 서버 전환, 프로토콜 매핑, playback_started/playback_complete 전송, turn_id/STT_DONE_TIME 제거
+- C++ 빌드 확인 (MOTOR_ENABLED=OFF)
+
+Next: Phase 7 — Integration tests (Python ↔ C++ 실제 연결 테스트)
 
 ## C++ ↔ Python 브릿지 프로토콜 정렬 작업
 
@@ -63,11 +67,14 @@ Next: C++ ↔ Python WebSocket 프로토콜 정렬 (아래 참조), 그리고 Ph
 4. **stop 처리**: 기존 `user_interruption` 로직 그대로, type명만 `stop`으로 변경. 스레드 종료 후 기존과 동일하게 `playback_complete` 전송.
 5. **`play_file`**: 기존 `play_audio` 로직 재활용, type명만 변경
 
-### 삭제 가능 항목
-- `turn_id` 관련 로직 (WebSocket 순서보장 + Python이 `playback_complete` 대기 후 다음 턴 전송)
-- `stt_done` 핸들링
-- `responses_stream_start` (별도 메시지 불필요, `stream_start`에 통합)
-- `play_music` / `play_audio_csv` (당장 불필요하면)
+### 실제 삭제된 항목
+- `turn_id` (전역 `current_turn_id`, 모든 메시지에서 제거)
+- `STT_DONE_TIME` (전역 변수 및 관련 로직)
+- `stt_done` 핸들러
+- `responses_stream_start` (`stream_start`에 통합)
+
+### 유지된 항목
+- `play_music` / `play_audio_csv` (기존 로직 그대로)
 
 ### 안 건드리는 것
 - 모션 생성 (`generate_motion`, `control_motor`)

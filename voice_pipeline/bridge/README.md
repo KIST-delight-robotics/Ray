@@ -1,6 +1,7 @@
 # CppBridge Module
 
 WebSocket bridge between the Python voice pipeline and the C++ audio playback process.
+C++ runs a WebSocket server; Python connects as a client.
 
 ## Usage
 
@@ -13,18 +14,21 @@ bridge = CppBridge(config)
 
 bridge.connect()
 
-# Send audio for playback
+# Streaming TTS audio
+bridge.send_stream_start()
 bridge.send_audio(pcm_bytes)
+bridge.send_audio_end()
 
-# Send control commands
+# File playback (greeting/farewell)
+bridge.send_play_file("assets/audio/awake.wav")
+
+# Interrupt playback (barge-in)
 bridge.send_stop()
-bridge.send_greeting()
-bridge.send_farewell()
 
 # Poll for events (non-blocking)
 event = bridge.poll_event()
 if event is not None:
-    print(event.event_type, event.position_sec)
+    print(event.event_type)
 
 bridge.disconnect()
 ```
@@ -33,23 +37,25 @@ bridge.disconnect()
 
 All messages are JSON text frames over WebSocket.
 
-### Python to C++
+### Python → C++
 
 | Message | Format |
 |---------|--------|
+| Stream start | `{"type": "stream_start"}` |
 | Audio | `{"type": "audio", "data": "<base64-pcm>"}` |
+| Audio end | `{"type": "audio_end"}` |
 | Stop | `{"type": "stop"}` |
-| Greeting | `{"type": "greeting"}` |
-| Farewell | `{"type": "farewell"}` |
+| Play file | `{"type": "play_file", "file_path": "path/to/file.wav"}` |
 
-### C++ to Python
+### C++ → Python
 
 | Message | Format |
 |---------|--------|
 | Playback started | `{"type": "playback_started"}` |
-| Playback position | `{"type": "playback_position", "position_sec": 1.23}` |
 | Playback complete | `{"type": "playback_complete"}` |
-| Playback stopped | `{"type": "playback_stopped", "position_sec": 4.56}` |
+
+`playback_complete` is sent for both normal completion and after a `stop` interrupt.
+Python distinguishes the two by tracking whether it sent `stop` (STOP_PENDING state).
 
 ## Configuration
 
@@ -61,6 +67,16 @@ All messages are JSON text frames over WebSocket.
 | `recv_timeout_sec` | `1.0` | Receiver loop poll interval |
 | `connect_timeout_sec` | `5.0` | WebSocket handshake timeout |
 | `close_timeout_sec` | `5.0` | WebSocket close handshake timeout |
+
+## Remote Deployment
+
+C++ (RPi)와 Python (PC)을 분리 실행할 수 있다. C++ 서버가 `0.0.0.0`으로 바인드하므로 `host`만 변경하면 된다.
+
+```python
+config = CppBridgeConfig(host="192.168.x.x", port=8765)  # RPi IP
+```
+
+연결 확인: `scripts/test_ws_connection.py --host 192.168.x.x`
 
 ## Threading Model
 

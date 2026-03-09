@@ -4,7 +4,7 @@
 
 - **Incremental interfaces**: Only next-phase consumer interfaces defined at each step. Remaining interfaces added just before their consuming phase.
 - **ResponseData mutable**: Not frozen because hashing large audio bytes is expensive.
-- **CppEvent.position_sec is Optional**: `None` for events where position is meaningless. Avoids ambiguous `0.0`.
+- **CppEvent minimal**: Only `event_type` field. No `position_sec` — barge-in position estimated via time-based tracking in Orchestrator.
 - **TurnDecision**: `__post_init__` validates at most one signal True. `none()` class method eliminates nullable returns.
 
 ## Phase 2 — Independent Modules (`history/`, `utterance_truncator`, `context/`)
@@ -147,3 +147,24 @@
 - **`bridge.disconnect()` on exit**: `run()` finally block calls `bridge.disconnect()`, symmetric with `connect()` at startup.
 - **Orchestrator internal state reset**: `_start_session()` resets all internal state (`_playback_state`, `_awaiting_response`, etc.). Prevents stale state from a previous session when reusing the same Orchestrator instance after `request_stop()`.
 - **`SessionManager(ISessionManager)` inheritance**: Implements `ISessionManager` from `core/interfaces.py`. Follows the project's interface convention.
+
+## C++ ↔ Python Protocol Alignment
+
+### WebSocket topology
+- **C++ as server, Python as client**: C++ runs `ix::WebSocketServer` on port 8765. Python connects via `websockets`. Reversed from legacy (both were clients to separate servers). Single connection expected — `g_client_ws` stores the one connected Python client.
+
+### Protocol simplification
+- **No `turn_id`**: Removed from C++. WebSocket TCP ordering + Python's state machine (wait for `playback_complete` before next turn) prevent stale chunk contamination. C++ clears buffers on `stream_start`.
+- **No `playback_stopped`**: Merged into `playback_complete`. Python tracks its own `STOP_PENDING` state to distinguish normal completion from barge-in interruption. Simpler C++ — always sends `playback_complete` regardless of how playback ended.
+- **No `playback_position` stream**: Position estimated via time: `stop_pos = stop_pending_time - playback_start_time`. Acceptable ~±100ms accuracy on localhost. `playback_started` event marks the timing reference.
+- **`stream_start` replaces `responses_only` + `responses_stream_start`**: Single message to signal streaming intent. C++ clears old buffers and sets streaming flag on receipt.
+- **`audio_end` replaces `responses_stream_end`**: Sent once by Python when TTS stream is fully drained.
+- **`play_file` replaces `play_audio` + `send_greeting` + `send_farewell`**: Generic file playback. SessionManager passes config paths (`greeting_audio_path`, `farewell_audio_path`).
+- **`stop` replaces `user_interruption`**: Python sends on barge-in. C++ sets `user_interruption_flag` (internal name preserved), threads check it cooperatively.
+- **`playback_started` (new)**: Sent from `control_motor` at cycle 0 after `soundStream.play()`. Provides timing reference for barge-in position estimation and future VAP robot audio feed.
+
+### C++ changes kept minimal
+- **`play_music` and `play_audio_csv` preserved**: Not used by Python pipeline but kept in C++ to avoid breaking existing functionality.
+- **Thread model unchanged**: `stream_and_split`, `generate_motion`, `control_motor` structure untouched. Only message handling and WebSocket setup modified.
+- **`send_to_python()` helper**: Thread-safe send via `g_client_ws_mutex`. All `webSocket.sendText()` calls replaced.
+- **Interruption sends `playback_complete`**: After cleanup, C++ now also sends `playback_complete` on interrupt (previously only sent on normal completion). This lets Python's STOP_PENDING state resolve cleanly.
