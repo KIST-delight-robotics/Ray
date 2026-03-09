@@ -38,6 +38,7 @@
 // WebSocket 및 JSON 관련 헤더
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocket.h>
+#include <ixwebsocket/IXWebSocketServer.h>
 #include <ixwebsocket/IXBase64.h>
 #include <nlohmann/json.hpp>
 
@@ -62,12 +63,10 @@ const std::string IDLE_MOTION_FILE = DATA_DIR + "/empty_10min.csv";
 std::string vocal_file_path;
 
 std::chrono::time_point<std::chrono::high_resolution_clock> start_time; // 쓰레드 대기 시간 설정용
-double STT_DONE_TIME = 0.0; // STT 완료 시간 (사용자 입력 완료 후 음성 출력까지의 시간 측정용)
 
 std::atomic<bool> stop_flag(false);
 std::atomic<bool> user_interruption_flag(false);
 std::atomic<bool> is_speaking(false);
-std::atomic<int> current_turn_id(0);
 
 int first_move_flag = 1;
 float final_result = 0.0f;
@@ -104,18 +103,29 @@ bool playing_music_flag = 0;
 
 bool finish_adjust_ready = false;
 
-// WebSocket 관련 전역 객체
-ix::WebSocket webSocket;
+// WebSocket 서버 관련 전역 객체
+ix::WebSocketServer* g_ws_server = nullptr;
+ix::WebSocket* g_client_ws = nullptr;  // 연결된 Python 클라이언트
+std::mutex g_client_ws_mutex;
 std::queue<json> server_message_queue;
 std::mutex server_message_queue_mutex;
 std::condition_variable server_message_queue_cv;
 std::promise<void> server_ready_promise;
+std::atomic<bool> server_ready_fired{false};
 
 // 스트리밍 데이터 처리를 위한 전역 변수
 std::atomic<bool> is_responses_streaming(false);
 std::vector<uint8_t> responses_stream_buffer;
 std::mutex responses_stream_buffer_mutex;
 std::condition_variable responses_stream_buffer_cv;
+
+// Python 클라이언트에 JSON 메시지 전송 (스레드 안전)
+void send_to_python(const json& msg) {
+    std::lock_guard<std::mutex> lock(g_client_ws_mutex);
+    if (g_client_ws) {
+        g_client_ws->sendText(msg.dump());
+    }
+}
 
 // 시간 포매터 함수
 std::string get_time_str() {
@@ -500,7 +510,7 @@ void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream) {
         {
             std::unique_lock<std::mutex> lock(*buffer_mutex);
             buffer_cv->wait(lock, [&] {
-                return buffer->size() >= bytes_per_interval || !(*is_streaming_flag);
+                return buffer->size() >= bytes_per_interval || !(*is_streaming_flag) || user_interruption_flag;
             });
 
             if (!(*is_streaming_flag) && buffer->empty()) {
@@ -696,9 +706,9 @@ void generate_motion(int channels, int samplerate) {
 
         // 오디오 데이터 가져오기
         std::unique_lock<std::mutex> lock(audio_queue_mutex);
-        audio_queue_cv.wait(lock, [] {return !audio_queue.empty() || stop_flag;});
+        audio_queue_cv.wait(lock, [] {return !audio_queue.empty() || stop_flag || user_interruption_flag;});
 
-        if (stop_flag && audio_queue.empty()) {
+        if ((stop_flag || user_interruption_flag) && audio_queue.empty()) {
             std::cout << "generate motion break ------------------------" << std::endl;
             break;
         }
@@ -979,15 +989,14 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
         if (cycle_num == 0) {
             start_time = std::chrono::high_resolution_clock::now();
             soundStream.play(); // 첫 사이클에서 오디오 재생
-            // 로그 출력
-            auto playback_start_time = std::chrono::high_resolution_clock::now();
+            // Python에 playback_started 이벤트 전송
+            send_to_python({{"type", "playback_started"}});
             {
                 std::lock_guard<std::mutex> lock(cout_mutex);
-                auto playback_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(playback_start_time.time_since_epoch()).count();
                 std::cout << "[시간 측정] start → 오디오 재생 시작: "
-                        << std::chrono::duration_cast<std::chrono::milliseconds>(playback_start_time - start_time).count() << "ms\n" 
-                        << "[시간 측정] stt 완료 → 오디오 재생 시작: "
-                        << static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(playback_start_time.time_since_epoch()).count() - STT_DONE_TIME) << "ms" << std::endl;
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::high_resolution_clock::now() - start_time).count()
+                        << "ms" << std::endl;
             }
         }
         
@@ -1173,9 +1182,7 @@ void wait_control_motor(){
         #else
         // --- 가짜 모터 대기 동작 ---
         if(wait_mode_flag == false) break;
-        // 실제 모션 파일은 읽지 않고, 대기 중임을 알리며 잠시 대기
-        std::cout << "[DUMMY MOTOR] 대기 모드 동작 중..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         #endif
     }
     std::cout << "wait mode finish " << std::endl;
@@ -1843,7 +1850,7 @@ void signal_handler(int signum) {
     mouth_motion_queue_cv.notify_all();
     responses_stream_buffer_cv.notify_all();
 
-    webSocket.stop();
+    if (g_ws_server) g_ws_server->stop();
 
     #ifdef MOTOR_ENABLED
     if (tuning_logger) tuning_logger->stop();
@@ -1871,9 +1878,9 @@ auto clear_queues() {
 }
 
 void robot_main_loop(std::future<void> server_ready_future) {
-    std::cout << "서버 연결 대기 중..." << std::endl;
-    server_ready_future.get(); // 서버가 준비될 때까지 대기
-    std::cout << "서버 연결 완료!" << std::endl;
+    std::cout << "Python 클라이언트 연결 대기 중..." << std::endl;
+    server_ready_future.get(); // 클라이언트가 연결될 때까지 대기
+    std::cout << "Python 클라이언트 연결 완료!" << std::endl;
 
     #ifdef MOTOR_ENABLED
     std::string log_dir = create_log_directory();
@@ -1927,11 +1934,11 @@ void robot_main_loop(std::future<void> server_ready_future) {
             }
             
             std::string type = response.value("type", "error");
-            
-            if (type == "play_audio") {
+
+            if (type == "play_file") {
                 current_mode_label = "PLAY_AUDIO";
-                std::string file_to_play = response.value("file_to_play", "");
-                sndfile = sf_open(file_to_play.c_str(), SFM_READ, &sfinfo);
+                std::string file_path = response.value("file_path", "");
+                sndfile = sf_open(file_path.c_str(), SFM_READ, &sfinfo);
                 if (sndfile) is_file_based = true;
             }
             else if (type == "play_music") {
@@ -1942,7 +1949,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 sndfile = sf_open(file_to_play.c_str(), SFM_READ, &sfinfo);
                 if (sndfile) is_file_based = true;
             }
-            else if (type == "responses_only") {
+            else if (type == "stream_start") {
                 is_file_based = false;
                 current_mode_label = "RESPONSE";
                 sfinfo.channels = AUDIO_CHANNELS;
@@ -1953,36 +1960,32 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 csv_audio_name = response.value("audio_name", "");
             }
             else {
-                std::cerr << "Error: Unknown command type received from server." << std::endl;
+                std::cerr << "Error: Unknown command type received: " << type << std::endl;
             }
         }
 
+        std::cout << "[MainLoop] is_file_based=" << is_file_based << " is_csv=" << is_csv_based << " sndfile=" << (sndfile ? "OK" : "NULL") << std::endl;
         CustomSoundStream soundStream(sfinfo.channels, sfinfo.samplerate);
+        std::cout << "[MainLoop] SoundStream 생성 완료" << std::endl;
 
         // --- 2. 스레드 시작 ---
         is_speaking = true;
         clear_queues();
-        
+
         if (is_csv_based) {
             wait_mode_flag = false;
 			if (wait_mode_thread.joinable()) {
 				wait_mode_thread.join();
 			}
             csv_control_motor(csv_audio_name);
-
-            // 정상 종료 시 speaking_finished 전송 (인터럽션 시에는 전송하지 않음)
-            if (!user_interruption_flag) {
-                json finished_msg;
-                finished_msg["type"] = "speaking_finished";
-                finished_msg["turn_id"] = current_turn_id.load();
-                webSocket.sendText(finished_msg.dump());
-            }
         }
         else if (is_file_based) {
 			wait_mode_flag = false;
+			std::cout << "[MainLoop] wait_mode join 시작" << std::endl;
 			if (wait_mode_thread.joinable()) {
 				wait_mode_thread.join();
 			}
+			std::cout << "[MainLoop] wait_mode join 완료, 재생 시작" << std::endl;
             start_time = std::chrono::high_resolution_clock::now();
             std::thread t1(read_and_split, sndfile, sfinfo, std::ref(soundStream));
             std::thread t2(generate_motion, sfinfo.channels, sfinfo.samplerate);
@@ -1990,18 +1993,13 @@ void robot_main_loop(std::future<void> server_ready_future) {
             t1.join();
             t2.join();
             t3.join();
-
-            json finished_msg;
-            finished_msg["type"] = "speaking_finished";
-            finished_msg["turn_id"] = current_turn_id.load();
-            webSocket.sendText(finished_msg.dump());
-        } 
+        }
         else { // responses 스트리밍
             const size_t bytes_per_interval = sfinfo.samplerate * sfinfo.channels * sizeof(sf::Int16) * INTERVAL_MS / 1000;
 
             // Responses 처리
             if (!user_interruption_flag) {
-                // Responses 스트림이 시작되고 데이터가 들어올 때까지 대기
+                // audio 데이터가 들어올 때까지 대기
                 {
                     std::unique_lock<std::mutex> lock(responses_stream_buffer_mutex);
                     responses_stream_buffer_cv.wait(lock, [&]{ return responses_stream_buffer.size() >= bytes_per_interval || !is_responses_streaming || user_interruption_flag; });
@@ -2022,25 +2020,16 @@ void robot_main_loop(std::future<void> server_ready_future) {
                     t1_responses.join();
                     t2_responses.join();
                     t3_responses.join();
-
-                    json finished_msg;
-                    finished_msg["type"] = "speaking_finished";
-                    finished_msg["turn_id"] = current_turn_id.load();
-                    webSocket.sendText(finished_msg.dump());
-                }
-                else if (!user_interruption_flag) {
-                    // 빈 스트림 (TTS 오류 등) -> speaking_finished 전송하여 Python 교착 방지
-                    json finished_msg;
-                    finished_msg["type"] = "speaking_finished";
-                    finished_msg["turn_id"] = current_turn_id.load();
-                    webSocket.sendText(finished_msg.dump());
                 }
             }
         }
 
+        // playback_complete는 정상 종료/인터럽션 구분 없이 항상 1회 전송
         if (user_interruption_flag) {
             std::cout << "Interruption handling: Cleaning up resources." << std::endl;
         }
+        std::cout << "[MainLoop] playback_complete 전송" << std::endl;
+        send_to_python({{"type", "playback_complete"}});
 
         // 리소스 정리
         soundStream.stop();
@@ -2112,20 +2101,45 @@ int main() {
     
 
 
-    // 웹소켓 서버 준비
+    // 웹소켓 서버 준비 (Python 클라이언트가 접속)
     std::future<void> server_ready_future = server_ready_promise.get_future();
     ix::initNetSystem();
-    webSocket.setUrl("ws://127.0.0.1:5000");
-    webSocket.setOnMessageCallback([](const ix::WebSocketMessagePtr& msg) {
-        if (msg->type == ix::WebSocketMessageType::Message) {
+
+    const int ws_port = cfg_ws.port;
+    ix::WebSocketServer ws_server(ws_port, "0.0.0.0");
+    g_ws_server = &ws_server;
+
+    ws_server.setOnClientMessageCallback(
+        [](std::shared_ptr<ix::ConnectionState> connectionState,
+           ix::WebSocket& ws,
+           const ix::WebSocketMessagePtr& msg) {
+
+        if (msg->type == ix::WebSocketMessageType::Open) {
+            std::cout << "[WebSocket] Python 클라이언트 연결됨: " << connectionState->getRemoteIp() << std::endl;
+            {
+                std::lock_guard<std::mutex> lock(g_client_ws_mutex);
+                g_client_ws = &ws;
+            }
+            // promise는 한 번만 set 가능 — 재접속 시 중복 set 방지
+            bool expected = false;
+            if (server_ready_fired.compare_exchange_strong(expected, true)) {
+                server_ready_promise.set_value();
+            }
+        }
+        else if (msg->type == ix::WebSocketMessageType::Close) {
+            std::cout << "[WebSocket] Python 클라이언트 연결 해제" << std::endl;
+            {
+                std::lock_guard<std::mutex> lock(g_client_ws_mutex);
+                g_client_ws = nullptr;
+            }
+        }
+        else if (msg->type == ix::WebSocketMessageType::Message) {
             try {
                 json response = json::parse(msg->str);
                 std::string type = response.value("type", "");
 
-                if (type == "responses_audio_chunk") {
+                if (type == "audio") {
                     if (user_interruption_flag) return;
-                    int chunk_turn_id = response.value("turn_id", -1);
-                    if (chunk_turn_id != current_turn_id.load()) return; // stale 청크 폐기
                     std::string b64_data = response.value("data", "");
                     std::string decoded_data;
                     macaron::Base64::Decode(b64_data, decoded_data);
@@ -2133,39 +2147,30 @@ int main() {
                     responses_stream_buffer.insert(responses_stream_buffer.end(), decoded_data.begin(), decoded_data.end());
                     responses_stream_buffer_cv.notify_one();
                 }
-                else if (type == "responses_stream_start") {
-                    is_responses_streaming = true;
-                    responses_stream_buffer_cv.notify_one();
-                }
-                else if (type == "responses_stream_end") {
-                    int end_turn_id = response.value("turn_id", -1);
-                    if (end_turn_id != current_turn_id.load()) return; // stale 종료 신호 무시
+                else if (type == "audio_end") {
                     is_responses_streaming = false;
                     responses_stream_buffer_cv.notify_one();
-                } 
-                else if (type == "stt_done") {
-                    if (response.contains("stt_done_time")) {
-                        STT_DONE_TIME = response["stt_done_time"].get<double>();
-                    }
-                } 
-                else if (type == "user_interruption") {
+                }
+                else if (type == "stop") {
                     if (is_speaking) {
-                        std::cout << "[WebSocket] User interruption received." << std::endl;
+                        std::cout << "[WebSocket] Stop (interrupt) received." << std::endl;
                         user_interruption_flag = true;
                         responses_stream_buffer_cv.notify_all();
                         audio_queue_cv.notify_all();
                         mouth_motion_queue_cv.notify_all();
                     }
-                } 
-                else { // audio_chunk가 아닌 다른 모든 메시지(gpt_streaming_start, play_audio 등)는 메인 루프가 처리하도록 큐에 넣음
-                    // 새로운 재생 시작을 알리는 모든 메시지 유형에 대해 인터럽트 플래그를 즉시 리셋
-                    if (type == "play_audio" || type == "play_music" || type == "responses_only" || type == "play_audio_csv") {
+                }
+                else {
+                    // stream_start, play_file, play_music, play_audio_csv → 메인 루프가 처리
+                    if (type == "stream_start" || type == "play_file" || type == "play_music" || type == "play_audio_csv") {
                         user_interruption_flag = false;
-                        if (type == "responses_only") {
+                        if (type == "stream_start") {
+                            // 이전 버퍼 강제 비움 (stale 청크 방어)
+                            {
+                                std::lock_guard<std::mutex> lock(responses_stream_buffer_mutex);
+                                responses_stream_buffer.clear();
+                            }
                             is_responses_streaming = true;
-                        }
-                        if (response.contains("turn_id")) {
-                            current_turn_id = response["turn_id"].get<int>();
                         }
                     }
                     std::lock_guard<std::mutex> lock(server_message_queue_mutex);
@@ -2175,19 +2180,25 @@ int main() {
             } catch (const json::parse_error& e) {
                 std::cerr << "JSON 파싱 오류: " << e.what() << " | 원본 메시지: " << msg->str << std::endl;
             }
-        } else if (msg->type == ix::WebSocketMessageType::Open) {
-            std::cout << "[WebSocket] 서버에 성공적으로 연결되었습니다." << std::endl;
-            server_ready_promise.set_value();
-        } else if (msg->type == ix::WebSocketMessageType::Error) {
-            std::cerr << "[WebSocket] 연결 오류: " << msg->errorInfo.reason << std::endl;
+        }
+        else if (msg->type == ix::WebSocketMessageType::Error) {
+            std::cerr << "[WebSocket] 오류: " << msg->errorInfo.reason << std::endl;
         }
     });
 
-    // 웹소켓 서버 및 메인 루프 시작
-    webSocket.start();
+    // 웹소켓 서버 시작 및 메인 루프
+    auto res = ws_server.listen();
+    if (!res.first) {
+        std::cerr << "WebSocket 서버 listen 실패: " << res.second << std::endl;
+        return -1;
+    }
+    ws_server.start();
+    std::cout << "[WebSocket] 서버 시작됨 (port " << ws_port << "), Python 클라이언트 대기 중..." << std::endl;
+
     std::thread robot_thread(robot_main_loop, std::move(server_ready_future));
     robot_thread.join();
-    webSocket.stop();
+    ws_server.stop();
+    g_ws_server = nullptr;
     ix::uninitNetSystem();
 
     #ifdef MOTOR_ENABLED

@@ -52,12 +52,11 @@ FetchContent_Declare(
   GIT_TAG        2.6.1 # 특정 버전 고정
 )
 
-# 5. ixwebsocket (웹소켓 통신)
+# 5. ixwebsocket (웹소켓 통신 — 클라이언트 + 서버)
+set(USE_TLS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
   ixwebsocket
   GIT_REPOSITORY https://github.com/machinezone/IXWebSocket.git
-  CMAKE_ARGS -DUSE_WS=OFF # 웹소켓 클라이언트 기능만 사용 (서버 불필요)
-             -DUSE_TLS=OFF # TLS(OpenSSL) 지원 비활성화 (필요 시 ON)
 )
 
 # 6. toml++ (설정 파일)
@@ -71,8 +70,12 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(json cnpy Eigen3 SFML ixwebsocket tomlplusplus)
 
 # ==================================================================
-# 시스템 라이브러리 찾기 (하드웨어 활성화 시에만)
+# 시스템 라이브러리 찾기
 # ==================================================================
+
+# libsndfile (오디오 파일 읽기/쓰기)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SNDFILE REQUIRED sndfile)
 
 if(MOTOR_ENABLED)
     find_library(WIRINGPI_LIBRARY NAMES wiringPi)
@@ -115,8 +118,9 @@ target_link_libraries(Ray PRIVATE
     Eigen3::Eigen
     sfml-audio
     ixwebsocket
-    ${SNDFILE_TARGET}
+    ${SNDFILE_LIBRARIES}
 )
+target_include_directories(Ray PRIVATE ${SNDFILE_INCLUDE_DIRS})
 
 # 하드웨어 활성화 시: 컴파일 플래그 및 하드웨어 라이브러리 추가
 if(MOTOR_ENABLED)

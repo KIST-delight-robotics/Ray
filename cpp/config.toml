@@ -1,4 +1,5 @@
-
+[websocket]
+port = 8765
 
 [dynamixel]
 protocol_version = 2.0
@@ -30,11 +31,11 @@ ff2_gain = [0, 0, 0, 0, 0]
 # default_mouth   = 4000
 
 # 2호기
-default_pitch   = 1186
-default_roll_r  = 2933
-default_roll_l  = 4040
+default_pitch   = 1136
+default_roll_r  = 2750
+default_roll_l  = 0
 default_yaw     = 2085
-default_mouth   = 2211
+default_mouth   = 2100
 
 #robot parameter
 pulley_diameter = 40

@@ -24,6 +24,10 @@ struct DynamixelConfig {
     std::vector<uint16_t> pos_d_gain;
 };
 
+struct WebSocketConfig {
+    int port = 8765;
+};
+
 struct RobotConfig {
     int32_t default_pitch;
     int32_t default_roll_r;
@@ -46,6 +50,7 @@ struct RobotConfig {
 };
 
 // 전역 인스턴스
+inline WebSocketConfig cfg_ws;
 inline DynamixelConfig cfg_dxl;
 inline RobotConfig cfg_robot;
 
@@ -95,6 +100,12 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
 
     // 데이터 로드 및 검증 (실패 시 즉시 종료)
     
+    // [websocket] 섹션 (옵션 — 없으면 기본값 사용)
+    if (tbl["websocket"].is_table()) {
+        auto ws_node = tbl["websocket"];
+        REQ(ws_node, "port", cfg_ws.port);
+    }
+
     // [dynamixel] 섹션 확인
     if (!tbl["dynamixel"].is_table()) {
         std::cerr << "[Config Error] [dynamixel] 섹션이 없습니다.\n";
