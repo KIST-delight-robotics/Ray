@@ -314,6 +314,10 @@ class ICppBridge(ABC):
         """Close the connection to the C++ process."""
 
     @abstractmethod
+    def send_stream_start(self) -> None:
+        """Signal that audio streaming is about to begin."""
+
+    @abstractmethod
     def send_audio(self, audio: bytes) -> None:
         """Send audio data for playback.
 
@@ -322,16 +326,20 @@ class ICppBridge(ABC):
         """
 
     @abstractmethod
+    def send_audio_end(self) -> None:
+        """Signal that all audio data has been sent for the current stream."""
+
+    @abstractmethod
     def send_stop(self) -> None:
         """Send a stop/interrupt signal to halt playback."""
 
     @abstractmethod
-    def send_greeting(self) -> None:
-        """Send a greeting trigger to the C++ process."""
+    def send_play_file(self, file_path: str) -> None:
+        """Request the C++ process to play an audio file.
 
-    @abstractmethod
-    def send_farewell(self) -> None:
-        """Send a farewell trigger to the C++ process."""
+        Args:
+            file_path: Path to the audio file (relative to C++ working dir).
+        """
 
     @abstractmethod
     def poll_event(self) -> CppEvent | None:

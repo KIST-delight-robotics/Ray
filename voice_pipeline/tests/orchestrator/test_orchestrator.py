@@ -150,6 +150,7 @@ class TestTurnShift:
         mocks["history"].add_user_message.assert_called_once_with("hello")
         mocks["asr"].reset.assert_called_once()
         assert orch._playback_state == PlaybackState.PLAYING
+        mocks["bridge"].send_stream_start.assert_called_once()
 
         led_calls = [c.args[0] for c in mocks["led"].set_state.call_args_list]
         assert LEDState.SPEAKING in led_calls
@@ -311,6 +312,8 @@ class TestBargeIn:
         orch, mocks = _make_orchestrator()
         orch._start_session()
         orch._playback_state = PlaybackState.STOP_PENDING
+        orch._playback_start_time = time.monotonic() - 1.0
+        orch._stop_pending_time = time.monotonic() - 0.65
 
         timestamps = [
             WordTimestamp("hello", 0.0, 0.3),
@@ -321,9 +324,13 @@ class TestBargeIn:
         )
         mocks["truncator"].truncate.return_value = "hello"
 
-        orch._on_playback_stopped(0.35)
+        orch._on_playback_interrupted()
 
-        mocks["truncator"].truncate.assert_called_once_with("hello world", 0.35, timestamps)
+        mocks["truncator"].truncate.assert_called_once()
+        call_args = mocks["truncator"].truncate.call_args[0]
+        assert call_args[0] == "hello world"
+        # stop_pos ≈ stop_pending_time - playback_start_time ≈ 0.35
+        assert 0.2 < call_args[1] < 0.5
         mocks["history"].add_assistant_message.assert_called_once_with("hello")
 
     def test_case_b_no_timestamps(self) -> None:
@@ -331,6 +338,8 @@ class TestBargeIn:
         orch, mocks = _make_orchestrator(output_sample_rate=24000)
         orch._start_session()
         orch._playback_state = PlaybackState.STOP_PENDING
+        orch._playback_start_time = time.monotonic() - 1.0
+        orch._stop_pending_time = time.monotonic() - 0.75
 
         # 48000 bytes @ 24kHz 16-bit = 1.0 sec
         audio = b"\x00" * 48000
@@ -341,7 +350,7 @@ class TestBargeIn:
         with patch("voice_pipeline.orchestrator.orchestrator.DurationRatioTruncator") as MockTrunc:
             mock_instance = MockTrunc.return_value
             mock_instance.truncate.return_value = "hello"
-            orch._on_playback_stopped(0.25)
+            orch._on_playback_interrupted()
 
             MockTrunc.assert_called_once_with(1.0)
             mock_instance.truncate.assert_called_once()
@@ -354,6 +363,8 @@ class TestBargeIn:
         orch._start_session()
         orch._playback_state = PlaybackState.STOP_PENDING
         orch._current_response = None
+        orch._playback_start_time = time.monotonic() - 1.0
+        orch._stop_pending_time = time.monotonic() - 0.5
         # 48000 bytes = 1.0 sec at 24kHz 16-bit
         orch._sent_audio_buffer = bytearray(b"\x00" * 48000)
 
@@ -365,28 +376,27 @@ class TestBargeIn:
             mock_instance.truncate.return_value = "hello"
             mocks["history"].add_assistant_message.return_value = 42
 
-            orch._on_playback_stopped(0.5)
+            orch._on_playback_interrupted()
 
             MockTrunc.assert_called_once_with(1.0)
 
         assert orch._pending_truncation is not None
         assert orch._pending_truncation.msg_id == 42
-        assert orch._pending_truncation.stop_position_sec == 0.5
 
-    def test_position_sec_none_fallback(self) -> None:
-        """PLAYBACK_STOPPED with position_sec=None falls back to tracked position."""
+    def test_no_playback_start_uses_zero(self) -> None:
+        """When playback_started was never received, stop_pos defaults to 0."""
         orch, mocks = _make_orchestrator()
         orch._start_session()
         orch._playback_state = PlaybackState.STOP_PENDING
-        orch._playback_position_sec = 1.5
+        orch._playback_start_time = 0.0
 
         timestamps = [WordTimestamp("a", 0.0, 0.5)]
         orch._current_response = ResponseData(text="a", audio=b"\x00", timestamps=timestamps)
         mocks["truncator"].truncate.return_value = "a"
 
-        orch._on_playback_stopped(None)
+        orch._on_playback_interrupted()
 
-        mocks["truncator"].truncate.assert_called_once_with("a", 1.5, timestamps)
+        mocks["truncator"].truncate.assert_called_once_with("a", 0.0, timestamps)
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +471,7 @@ class TestRobotAudioChunk:
         """get_robot_audio_chunk extracts 30ms at playback position."""
         orch, _ = _make_orchestrator(output_sample_rate=24000)
         orch._playback_state = PlaybackState.PLAYING
-        orch._playback_position_sec = 0.0
+        orch._playback_start_time = time.monotonic()
 
         # 30ms @ 24kHz 16-bit = 24000 * 0.03 * 2 = 1440 bytes
         orch._sent_audio_buffer = bytearray(b"\x01" * 2880)
@@ -476,11 +486,20 @@ class TestRobotAudioChunk:
         orch._playback_state = PlaybackState.IDLE
         assert orch.get_robot_audio_chunk() is None
 
+    def test_no_playback_start_returns_none(self) -> None:
+        """Returns None if playback_started event was never received."""
+        orch, _ = _make_orchestrator(output_sample_rate=24000)
+        orch._playback_state = PlaybackState.PLAYING
+        orch._playback_start_time = 0.0
+        orch._sent_audio_buffer = bytearray(b"\x00" * 2880)
+
+        assert orch.get_robot_audio_chunk() is None
+
     def test_insufficient_buffer_returns_none(self) -> None:
         """Returns None if buffer doesn't have enough data."""
         orch, _ = _make_orchestrator(output_sample_rate=24000)
         orch._playback_state = PlaybackState.PLAYING
-        orch._playback_position_sec = 0.0
+        orch._playback_start_time = time.monotonic()
         orch._sent_audio_buffer = bytearray(b"\x00" * 10)
 
         assert orch.get_robot_audio_chunk() is None
@@ -615,20 +634,6 @@ class TestStopPendingWatchdog:
         assert orch._playback_state == PlaybackState.IDLE
         mocks["history"].add_assistant_message.assert_not_called()
 
-    def test_stale_stopped_ignored_when_idle(self) -> None:
-        """PLAYBACK_STOPPED events are ignored when in IDLE state."""
-        orch, mocks = _make_orchestrator()
-        orch._start_session()
-        orch._playback_state = PlaybackState.IDLE
-
-        event = CppEvent(CppEventType.PLAYBACK_STOPPED, position_sec=0.5)
-        mocks["bridge"].poll_event.side_effect = [event, None]
-
-        q = _audio_queue_with()
-        orch._run_frame(q)
-
-        assert orch._playback_state == PlaybackState.IDLE
-        mocks["truncator"].truncate.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -693,19 +698,21 @@ class TestErrorHandling:
 
 
 class TestCppEvents:
-    def test_playback_position_updates(self) -> None:
-        """PLAYBACK_POSITION event updates tracked position."""
+    def test_playback_started_records_time(self) -> None:
+        """PLAYBACK_STARTED event records start time for position estimation."""
         orch, mocks = _make_orchestrator()
         orch._start_session()
         orch._playback_state = PlaybackState.PLAYING
 
-        event = CppEvent(CppEventType.PLAYBACK_POSITION, position_sec=1.5)
+        event = CppEvent(CppEventType.PLAYBACK_STARTED)
         mocks["bridge"].poll_event.side_effect = [event, None]
 
+        before = time.monotonic()
         q = _audio_queue_with()
         orch._run_frame(q)
+        after = time.monotonic()
 
-        assert orch._playback_position_sec == 1.5
+        assert before <= orch._playback_start_time <= after
 
     def test_playback_complete_saves_and_resets(self) -> None:
         """PLAYBACK_COMPLETE saves full text and resets to IDLE."""
@@ -724,11 +731,35 @@ class TestCppEvents:
         mocks["turn_detector"].notify_turn_complete.assert_called_once_with("robot", "hi there")
         assert orch._playback_state == PlaybackState.IDLE
 
-    def test_playback_complete_ignored_when_not_playing(self) -> None:
-        """PLAYBACK_COMPLETE is ignored when not in PLAYING state."""
+    def test_playback_complete_in_stop_pending_triggers_interrupted(self) -> None:
+        """PLAYBACK_COMPLETE during STOP_PENDING triggers barge-in handling."""
         orch, mocks = _make_orchestrator()
         orch._start_session()
         orch._playback_state = PlaybackState.STOP_PENDING
+        orch._playback_start_time = time.monotonic() - 1.0
+        orch._stop_pending_time = time.monotonic() - 0.5
+        orch._current_response = ResponseData(
+            text="hello world", audio=b"\x00" * 100, timestamps=[]
+        )
+
+        event = CppEvent(CppEventType.PLAYBACK_COMPLETE)
+        mocks["bridge"].poll_event.side_effect = [event, None]
+
+        with patch("voice_pipeline.orchestrator.orchestrator.DurationRatioTruncator") as MockTrunc:
+            mock_instance = MockTrunc.return_value
+            mock_instance.truncate.return_value = "hello"
+
+            q = _audio_queue_with()
+            orch._run_frame(q)
+
+        assert orch._playback_state == PlaybackState.IDLE
+        mocks["history"].add_assistant_message.assert_called_once_with("hello")
+
+    def test_playback_complete_ignored_when_idle(self) -> None:
+        """PLAYBACK_COMPLETE is ignored when in IDLE state."""
+        orch, mocks = _make_orchestrator()
+        orch._start_session()
+        orch._playback_state = PlaybackState.IDLE
 
         event = CppEvent(CppEventType.PLAYBACK_COMPLETE)
         mocks["bridge"].poll_event.side_effect = [event, None]
@@ -736,6 +767,7 @@ class TestCppEvents:
         q = _audio_queue_with()
         orch._run_frame(q)
 
+        assert orch._playback_state == PlaybackState.IDLE
         mocks["history"].add_assistant_message.assert_not_called()
 
 
@@ -761,7 +793,7 @@ class TestDrainAudio:
         assert len(orch._sent_audio_buffer) == 200
 
     def test_drain_gets_response_data_on_stream_done(self) -> None:
-        """When stream_done after drain, get_response_data is called."""
+        """When stream_done after drain, get_response_data is called and audio_end sent."""
         orch, mocks = _make_orchestrator()
         orch._start_session()
         orch._playback_state = PlaybackState.PLAYING
@@ -774,3 +806,21 @@ class TestDrainAudio:
         orch._drain_audio_to_bridge()
 
         assert orch._current_response is response
+        mocks["bridge"].send_audio_end.assert_called_once()
+
+    def test_drain_sends_audio_end_only_once(self) -> None:
+        """audio_end is sent only once even if drain is called multiple times."""
+        orch, mocks = _make_orchestrator()
+        orch._start_session()
+        orch._playback_state = PlaybackState.PLAYING
+
+        mocks["generator"].poll_audio.return_value = None
+        mocks["generator"].stream_done = True
+        mocks["generator"].get_response_data.return_value = ResponseData(
+            text="hi", audio=b"\x00", timestamps=[]
+        )
+
+        orch._drain_audio_to_bridge()
+        orch._drain_audio_to_bridge()
+
+        mocks["bridge"].send_audio_end.assert_called_once()

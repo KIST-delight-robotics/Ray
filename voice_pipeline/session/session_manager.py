@@ -113,7 +113,7 @@ class SessionManager(ISessionManager):
         self._led.set_state(LEDState.LISTENING)
 
         try:
-            self._bridge.send_greeting()
+            self._bridge.send_play_file(self._config.greeting_audio_path)
         except Exception:
             logger.warning("Failed to send greeting", exc_info=True)
 
@@ -155,7 +155,7 @@ class SessionManager(ISessionManager):
         self._flush_bridge_events()
 
         try:
-            self._bridge.send_farewell()
+            self._bridge.send_play_file(self._config.farewell_audio_path)
         except Exception:
             logger.warning("Failed to send farewell", exc_info=True)
 

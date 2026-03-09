@@ -84,8 +84,9 @@ class Orchestrator:
         self._saved_user_text = ""
         self._last_asr_text = ""
         self._last_text_change_time = time.monotonic()
-        self._playback_position_sec = 0.0
+        self._playback_start_time = 0.0
         self._stop_pending_time = 0.0
+        self._audio_end_sent = False
         self._pending_truncation: _PendingTruncation | None = None
         self._user_msg_id: int | None = None
         self._assistant_msg_id: int | None = None
@@ -112,17 +113,23 @@ class Orchestrator:
         """Extract a 30ms chunk from sent audio buffer at playback position.
 
         Used by Orchestrator to provide robot_audio to TurnDetector.
+        Uses time-based position estimation from playback_started event.
         Returns None if not enough data at the current position.
         """
         if self._playback_state != PlaybackState.PLAYING:
+            return None
+        if self._playback_start_time == 0.0:
             return None
 
         sample_rate = self._tts_config.output_sample_rate
         sample_width = 2  # 16-bit PCM
         frame_ms = self._audio_config.frame_duration_ms
 
+        elapsed = time.monotonic() - self._playback_start_time
+        if elapsed < 0:
+            return None
         frame_bytes = sample_rate * frame_ms * sample_width // 1000
-        start = int(self._playback_position_sec * sample_rate * sample_width)
+        start = int(elapsed * sample_rate * sample_width)
         end = start + frame_bytes
 
         if end > len(self._sent_audio_buffer):
@@ -141,8 +148,9 @@ class Orchestrator:
         self._sent_audio_buffer = bytearray()
         self._saved_user_text = ""
         self._last_asr_text = ""
-        self._playback_position_sec = 0.0
+        self._playback_start_time = 0.0
         self._stop_pending_time = 0.0
+        self._audio_end_sent = False
         self._pending_truncation = None
         self._user_msg_id = None
         self._assistant_msg_id = None
@@ -302,6 +310,7 @@ class Orchestrator:
             self._turn_detector.reset()
             self._awaiting_response = False
             self._saved_user_text = ""
+            self._audio_end_sent = False
             self._set_led(LEDState.LISTENING)
 
     # ------------------------------------------------------------------
@@ -327,9 +336,11 @@ class Orchestrator:
         self._saved_user_text = ""
         self._current_response = None
         self._sent_audio_buffer = bytearray()
-        self._playback_position_sec = 0.0
+        self._playback_start_time = 0.0
+        self._audio_end_sent = False
         self._pending_truncation = None
 
+        self._bridge.send_stream_start()
         self._drain_audio_to_bridge()
         self._playback_state = PlaybackState.PLAYING
         self._set_led(LEDState.SPEAKING)
@@ -353,6 +364,12 @@ class Orchestrator:
                 self._current_response = self._generator.get_response_data()
             except RuntimeError:
                 logger.warning("Failed to get response data", exc_info=True)
+            if not self._audio_end_sent:
+                self._audio_end_sent = True
+                try:
+                    self._bridge.send_audio_end()
+                except Exception:
+                    logger.warning("Bridge send_audio_end error", exc_info=True)
 
     # ------------------------------------------------------------------
     # C++ events
@@ -366,20 +383,15 @@ class Orchestrator:
                 if event is None:
                     break
 
-                if event.event_type == CppEventType.PLAYBACK_POSITION:
-                    is_playing = self._playback_state == PlaybackState.PLAYING
-                    if is_playing and event.position_sec is not None:
-                        self._playback_position_sec = event.position_sec
+                if event.event_type == CppEventType.PLAYBACK_STARTED:
+                    if self._playback_state == PlaybackState.PLAYING:
+                        self._playback_start_time = time.monotonic()
 
                 elif event.event_type == CppEventType.PLAYBACK_COMPLETE:
                     if self._playback_state == PlaybackState.PLAYING:
                         self._on_playback_complete()
-
-                elif (
-                    event.event_type == CppEventType.PLAYBACK_STOPPED
-                    and self._playback_state == PlaybackState.STOP_PENDING
-                ):
-                    self._on_playback_stopped(event.position_sec)
+                    elif self._playback_state == PlaybackState.STOP_PENDING:
+                        self._on_playback_interrupted()
 
         except Exception:
             logger.error("CppBridge error — terminating session", exc_info=True)
@@ -395,9 +407,16 @@ class Orchestrator:
 
         self._reset_playback_state()
 
-    def _on_playback_stopped(self, position_sec: float | None) -> None:
-        """Barge-in: truncate and save what was actually spoken."""
-        stop_pos = position_sec if position_sec is not None else self._playback_position_sec
+    def _on_playback_interrupted(self) -> None:
+        """Barge-in: truncate and save what was actually spoken.
+
+        Stop position is estimated from the time between playback_started
+        and stop being sent (time-based estimation).
+        """
+        if self._playback_start_time > 0.0:
+            stop_pos = max(0.0, self._stop_pending_time - self._playback_start_time)
+        else:
+            stop_pos = 0.0
         text = self._get_response_text()
 
         if not text:
@@ -553,11 +572,12 @@ class Orchestrator:
             return ""
 
     def _reset_playback_state(self) -> None:
-        """Reset to IDLE after playback ends (complete or stopped)."""
+        """Reset to IDLE after playback ends (complete or interrupted)."""
         self._playback_state = PlaybackState.IDLE
         self._current_response = None
         self._sent_audio_buffer = bytearray()
-        self._playback_position_sec = 0.0
+        self._playback_start_time = 0.0
+        self._audio_end_sent = False
         self._set_led(LEDState.LISTENING)
 
     def _set_led(self, state: LEDState) -> None:

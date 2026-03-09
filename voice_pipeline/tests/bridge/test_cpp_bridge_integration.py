@@ -36,8 +36,8 @@ def _echo_handler(conn: ServerConnection) -> None:
         if msg_type == "audio":
             conn.send(json.dumps({"type": "playback_started"}))
         elif msg_type == "stop":
-            conn.send(json.dumps({"type": "playback_stopped", "position_sec": 0.0}))
-        elif msg_type in ("greeting", "farewell"):
+            conn.send(json.dumps({"type": "playback_complete"}))
+        elif msg_type == "play_file":
             conn.send(json.dumps({"type": "playback_complete"}))
 
 
@@ -149,21 +149,23 @@ class TestSendReceive:
             bridge.connect()
 
             bridge.send_stop()
-            bridge.send_greeting()
-            bridge.send_farewell()
+            bridge.send_stream_start()
+            bridge.send_play_file("test.wav")
             audio = b"\xaa\xbb\xcc"
             bridge.send_audio(audio)
+            bridge.send_audio_end()
 
             # Give server time to collect
             time.sleep(0.2)
             bridge.disconnect()
 
-            assert len(collected) == 4
+            assert len(collected) == 5
             assert collected[0] == {"type": "stop"}
-            assert collected[1] == {"type": "greeting"}
-            assert collected[2] == {"type": "farewell"}
+            assert collected[1] == {"type": "stream_start"}
+            assert collected[2] == {"type": "play_file", "file_path": "test.wav"}
             assert collected[3]["type"] == "audio"
             assert base64.b64decode(collected[3]["data"]) == audio
+            assert collected[4] == {"type": "audio_end"}
         finally:
             server.shutdown()
             thread.join(timeout=5.0)
@@ -186,7 +188,7 @@ class TestSendReceive:
         assert event.event_type == CppEventType.PLAYBACK_STARTED
         bridge.disconnect()
 
-    def test_round_trip_stop_to_stopped(self, echo_config: CppBridgeConfig, echo_server) -> None:
+    def test_round_trip_stop_to_complete(self, echo_config: CppBridgeConfig, echo_server) -> None:
         bridge = CppBridge(echo_config)
         bridge.connect()
         bridge.send_stop()
@@ -200,8 +202,7 @@ class TestSendReceive:
             time.sleep(0.01)
 
         assert event is not None
-        assert event.event_type == CppEventType.PLAYBACK_STOPPED
-        assert event.position_sec == 0.0
+        assert event.event_type == CppEventType.PLAYBACK_COMPLETE
         bridge.disconnect()
 
 

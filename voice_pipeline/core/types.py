@@ -263,9 +263,7 @@ class CppEventType(enum.Enum):
     """Event types sent from C++ to Python via CppBridge."""
 
     PLAYBACK_STARTED = "playback_started"
-    PLAYBACK_POSITION = "playback_position"
     PLAYBACK_COMPLETE = "playback_complete"
-    PLAYBACK_STOPPED = "playback_stopped"
 
 
 @dataclass(frozen=True)
@@ -274,9 +272,6 @@ class CppEvent:
 
     Attributes:
         event_type: Type of event.
-        position_sec: Playback position in seconds. Meaningful for
-            PLAYBACK_POSITION and PLAYBACK_STOPPED. None otherwise.
     """
 
     event_type: CppEventType
-    position_sec: float | None = None

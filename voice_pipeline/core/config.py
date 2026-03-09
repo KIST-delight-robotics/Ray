@@ -239,12 +239,16 @@ class SessionConfig:
         greeting_timeout_sec: Max wait for greeting playback completion.
         farewell_timeout_sec: Max wait for farewell playback completion.
         frame_timeout_sec: Queue.get() timeout for audio frames.
+        greeting_audio_path: Audio file path for greeting (relative to C++ working dir).
+        farewell_audio_path: Audio file path for farewell (relative to C++ working dir).
     """
 
     audio_queue_size: int = 300
     greeting_timeout_sec: float = 10.0
     farewell_timeout_sec: float = 10.0
     frame_timeout_sec: float = 0.1
+    greeting_audio_path: str = "assets/audio/awake.wav"
+    farewell_audio_path: str = "assets/audio/sleep.wav"
 
 
 @dataclass

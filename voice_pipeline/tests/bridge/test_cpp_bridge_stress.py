@@ -30,11 +30,11 @@ def _sink_handler(conn: ServerConnection) -> None:
 
 
 def _event_flood_handler(conn: ServerConnection) -> None:
-    """Send a playback_position event for every message received."""
+    """Send a playback_started event for every message received."""
     for msg in conn:
         data = json.loads(msg)
         if data["type"] == "audio":
-            conn.send(json.dumps({"type": "playback_position", "position_sec": 0.0}))
+            conn.send(json.dumps({"type": "playback_started"}))
 
 
 def _mass_event_handler(conn: ServerConnection) -> None:
@@ -43,8 +43,8 @@ def _mass_event_handler(conn: ServerConnection) -> None:
     for _msg in conn:
         if first:
             first = False
-            for i in range(500):
-                conn.send(json.dumps({"type": "playback_position", "position_sec": float(i)}))
+            for _i in range(500):
+                conn.send(json.dumps({"type": "playback_started"}))
             conn.send(json.dumps({"type": "playback_complete"}))
 
 

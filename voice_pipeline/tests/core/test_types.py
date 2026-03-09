@@ -219,20 +219,19 @@ class TestResponseData:
 
 
 class TestCppEvent:
-    def test_position_none_by_default(self) -> None:
+    def test_playback_started(self) -> None:
         event = CppEvent(event_type=CppEventType.PLAYBACK_STARTED)
-        assert event.position_sec is None
+        assert event.event_type == CppEventType.PLAYBACK_STARTED
 
-    def test_position_with_value(self) -> None:
-        event = CppEvent(
-            event_type=CppEventType.PLAYBACK_STOPPED,
-            position_sec=2.5,
-        )
-        assert event.position_sec == 2.5
-
-    def test_playback_complete_no_position(self) -> None:
+    def test_playback_complete(self) -> None:
         event = CppEvent(event_type=CppEventType.PLAYBACK_COMPLETE)
-        assert event.position_sec is None
+        assert event.event_type == CppEventType.PLAYBACK_COMPLETE
+
+    def test_frozen(self) -> None:
+        event = CppEvent(event_type=CppEventType.PLAYBACK_STARTED)
+        import pytest
+        with pytest.raises(AttributeError):
+            event.event_type = CppEventType.PLAYBACK_COMPLETE  # type: ignore[misc]
 
 
 class TestLEDState:
@@ -267,4 +266,4 @@ class TestEnums:
         assert len(GeneratorState) == 4
 
     def test_cpp_event_type_values(self) -> None:
-        assert len(CppEventType) == 4
+        assert len(CppEventType) == 2

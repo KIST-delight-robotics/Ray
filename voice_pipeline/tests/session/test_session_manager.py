@@ -116,9 +116,9 @@ class TestFullCycle:
         mocks["bridge"].connect.assert_called_once()
         mocks["audio_input"].start.assert_called_once()
         mocks["audio_input"].stop.assert_called_once()
-        mocks["bridge"].send_greeting.assert_called_once()
+        mocks["bridge"].send_play_file.assert_any_call(sm._config.greeting_audio_path)
         mocks["orchestrator"].run.assert_called_once_with(sm._audio_queue)
-        mocks["bridge"].send_farewell.assert_called_once()
+        mocks["bridge"].send_play_file.assert_any_call(sm._config.farewell_audio_path)
         mocks["history"].new_session.assert_called_once()
         mocks["history"].save.assert_called_once()
 
@@ -134,7 +134,7 @@ class TestGreeting:
         sm._run_greeting()
 
         assert sm._mode == SystemMode.ACTIVE
-        mocks["bridge"].send_greeting.assert_called_once()
+        mocks["bridge"].send_play_file.assert_called_once_with(sm._config.greeting_audio_path)
 
     def test_greeting_flushes_stale_events(self) -> None:
         """Stale events are flushed before sending greeting."""
@@ -148,13 +148,13 @@ class TestGreeting:
         sm._run_greeting()
 
         assert sm._mode == SystemMode.ACTIVE
-        mocks["bridge"].send_greeting.assert_called_once()
+        mocks["bridge"].send_play_file.assert_called_once_with(sm._config.greeting_audio_path)
 
     def test_greeting_bridge_error(self) -> None:
         """send_greeting error doesn't crash SessionManager."""
         sm, mocks = _make_session_manager(greeting_timeout_sec=0.01)
 
-        mocks["bridge"].send_greeting.side_effect = RuntimeError("Bridge down")
+        mocks["bridge"].send_play_file.side_effect = RuntimeError("Bridge down")
         mocks["bridge"].poll_event.return_value = None
 
         sm._run_greeting()  # Should not raise
@@ -179,14 +179,14 @@ class TestFarewell:
         sm, mocks = _make_session_manager()
         sm._session_started = True
 
-        stale = CppEvent(CppEventType.PLAYBACK_STOPPED, position_sec=0.5)
+        stale = CppEvent(CppEventType.PLAYBACK_COMPLETE)
         fresh = CppEvent(CppEventType.PLAYBACK_COMPLETE)
         mocks["bridge"].poll_event.side_effect = [stale, None, fresh]
 
         sm._run_farewell()
 
         assert sm._mode == SystemMode.SLEEP
-        mocks["bridge"].send_farewell.assert_called_once()
+        mocks["bridge"].send_play_file.assert_called_once_with(sm._config.farewell_audio_path)
 
     def test_farewell_saves_history(self) -> None:
         """History is saved during farewell."""

@@ -48,19 +48,10 @@ class TestEventParsing:
     def test_playback_started(self) -> None:
         event = _parse_event('{"type": "playback_started"}')
         assert event == CppEvent(event_type=CppEventType.PLAYBACK_STARTED)
-        assert event.position_sec is None
-
-    def test_playback_position(self) -> None:
-        event = _parse_event('{"type": "playback_position", "position_sec": 1.23}')
-        assert event == CppEvent(event_type=CppEventType.PLAYBACK_POSITION, position_sec=1.23)
 
     def test_playback_complete(self) -> None:
         event = _parse_event('{"type": "playback_complete"}')
         assert event == CppEvent(event_type=CppEventType.PLAYBACK_COMPLETE)
-
-    def test_playback_stopped(self) -> None:
-        event = _parse_event('{"type": "playback_stopped", "position_sec": 4.56}')
-        assert event == CppEvent(event_type=CppEventType.PLAYBACK_STOPPED, position_sec=4.56)
 
     def test_unknown_type_raises(self) -> None:
         with pytest.raises(ValueError, match="Unknown event type"):
@@ -104,15 +95,20 @@ class TestIdleState:
         with pytest.raises(BridgeError, match="Not connected"):
             bridge.send_stop()
 
-    def test_send_greeting_before_connect(self, config: CppBridgeConfig) -> None:
+    def test_send_stream_start_before_connect(self, config: CppBridgeConfig) -> None:
         bridge = CppBridge(config)
         with pytest.raises(BridgeError, match="Not connected"):
-            bridge.send_greeting()
+            bridge.send_stream_start()
 
-    def test_send_farewell_before_connect(self, config: CppBridgeConfig) -> None:
+    def test_send_audio_end_before_connect(self, config: CppBridgeConfig) -> None:
         bridge = CppBridge(config)
         with pytest.raises(BridgeError, match="Not connected"):
-            bridge.send_farewell()
+            bridge.send_audio_end()
+
+    def test_send_play_file_before_connect(self, config: CppBridgeConfig) -> None:
+        bridge = CppBridge(config)
+        with pytest.raises(BridgeError, match="Not connected"):
+            bridge.send_play_file("test.wav")
 
     def test_poll_event_before_connect(self, config: CppBridgeConfig) -> None:
         bridge = CppBridge(config)
@@ -239,18 +235,25 @@ class TestSendMethods:
         assert sent == {"type": "stop"}
         bridge.disconnect()
 
-    def test_send_greeting(self, config: CppBridgeConfig, mock_conn: MagicMock) -> None:
+    def test_send_stream_start(self, config: CppBridgeConfig, mock_conn: MagicMock) -> None:
         bridge = _make_bridge(config, mock_conn)
-        bridge.send_greeting()
+        bridge.send_stream_start()
         sent = json.loads(mock_conn.send.call_args[0][0])
-        assert sent == {"type": "greeting"}
+        assert sent == {"type": "stream_start"}
         bridge.disconnect()
 
-    def test_send_farewell(self, config: CppBridgeConfig, mock_conn: MagicMock) -> None:
+    def test_send_audio_end(self, config: CppBridgeConfig, mock_conn: MagicMock) -> None:
         bridge = _make_bridge(config, mock_conn)
-        bridge.send_farewell()
+        bridge.send_audio_end()
         sent = json.loads(mock_conn.send.call_args[0][0])
-        assert sent == {"type": "farewell"}
+        assert sent == {"type": "audio_end"}
+        bridge.disconnect()
+
+    def test_send_play_file(self, config: CppBridgeConfig, mock_conn: MagicMock) -> None:
+        bridge = _make_bridge(config, mock_conn)
+        bridge.send_play_file("assets/audio/awake.wav")
+        sent = json.loads(mock_conn.send.call_args[0][0])
+        assert sent == {"type": "play_file", "file_path": "assets/audio/awake.wav"}
         bridge.disconnect()
 
     def test_connection_closed_during_send(
@@ -298,7 +301,7 @@ class TestReceiverThread:
         """Receiver thread parses JSON messages and enqueues CppEvents."""
         messages = [
             '{"type": "playback_started"}',
-            '{"type": "playback_position", "position_sec": 1.5}',
+            '{"type": "playback_complete"}',
         ]
         call_count = 0
 
@@ -320,9 +323,7 @@ class TestReceiverThread:
             time.sleep(0.01)
 
         assert bridge.poll_event() == CppEvent(event_type=CppEventType.PLAYBACK_STARTED)
-        assert bridge.poll_event() == CppEvent(
-            event_type=CppEventType.PLAYBACK_POSITION, position_sec=1.5
-        )
+        assert bridge.poll_event() == CppEvent(event_type=CppEventType.PLAYBACK_COMPLETE)
         bridge.disconnect()
 
     def test_connection_loss_stores_error(self, config: CppBridgeConfig) -> None:

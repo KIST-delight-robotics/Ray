@@ -41,8 +41,7 @@ def _parse_event(raw: str | bytes) -> CppEvent:
     event_type = _EVENT_TYPE_MAP.get(type_str)
     if event_type is None:
         raise ValueError(f"Unknown event type: {type_str!r}")
-    position = data.get("position_sec")
-    return CppEvent(event_type=event_type, position_sec=position)
+    return CppEvent(event_type=event_type)
 
 
 # ---------------------------------------------------------------------------
@@ -142,26 +141,31 @@ class CppBridge(ICppBridge):
     # ICppBridge send methods
     # ------------------------------------------------------------------
 
+    def send_stream_start(self) -> None:
+        """Signal that audio streaming is about to begin."""
+        self._guard_connected()
+        self._send_json({"type": "stream_start"})
+
     def send_audio(self, audio: bytes) -> None:
         """Send audio data for playback."""
         self._guard_connected()
         encoded = base64.b64encode(audio).decode("ascii")
         self._send_json({"type": "audio", "data": encoded})
 
+    def send_audio_end(self) -> None:
+        """Signal that all audio data has been sent for the current stream."""
+        self._guard_connected()
+        self._send_json({"type": "audio_end"})
+
     def send_stop(self) -> None:
         """Send a stop/interrupt signal to halt playback."""
         self._guard_connected()
         self._send_json({"type": "stop"})
 
-    def send_greeting(self) -> None:
-        """Send a greeting trigger to the C++ process."""
+    def send_play_file(self, file_path: str) -> None:
+        """Request the C++ process to play an audio file."""
         self._guard_connected()
-        self._send_json({"type": "greeting"})
-
-    def send_farewell(self) -> None:
-        """Send a farewell trigger to the C++ process."""
-        self._guard_connected()
-        self._send_json({"type": "farewell"})
+        self._send_json({"type": "play_file", "file_path": file_path})
 
     # ------------------------------------------------------------------
     # ICppBridge poll
