@@ -10,6 +10,7 @@ import sys
 import types
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 
@@ -510,3 +511,412 @@ class TestWindow:
         # Model should receive at most max_context_tokens
         args, _ = model.call_args
         assert args[0].shape[-1] <= 10
+
+
+# ===========================================================================
+# ONNX backend tests
+# ===========================================================================
+
+_ONNX_EOS_ID = 50257
+_ONNX_SP1_ID = 50258
+_ONNX_SP2_ID = 50259
+_ONNX_VOCAB = 50260
+_ONNX_NL = 12
+
+
+def _onnx_char_tokenize(text: str, **_kwargs) -> dict:
+    """Mock HF tokenizer: char-level, <ts> -> eos_token_id."""
+    ids = []
+    i = 0
+    while i < len(text):
+        if text[i : i + 4] == "<ts>":
+            ids.append(_ONNX_EOS_ID)
+            i += 4
+        else:
+            ids.append(ord(text[i]) % 500)
+            i += 1
+    return {"input_ids": torch.tensor([ids])}
+
+
+def _make_onnx_session_mock(*, has_kv: bool = True) -> MagicMock:
+    """Create a mock ORT InferenceSession."""
+    mock_sess = MagicMock()
+
+    if has_kv:
+        input_names = ["input_ids", "speaker_ids", "position_ids"]
+        for i in range(_ONNX_NL):
+            input_names += [f"past_key_{i}", f"past_value_{i}"]
+    else:
+        input_names = ["input_ids", "speaker_ids"]
+
+    mock_inputs = []
+    for name in input_names:
+        inp = MagicMock()
+        inp.name = name
+        mock_inputs.append(inp)
+    mock_sess.get_inputs.return_value = mock_inputs
+
+    def _run(_output_names, feeds):
+        ids = feeds["input_ids"]
+        seq_len = ids.shape[1]
+        # Logits: put high value at EOS index for predictable TRP
+        logits = np.zeros((1, seq_len, _ONNX_VOCAB), dtype=np.float32)
+        logits[0, -1, _ONNX_EOS_ID] = 2.0  # will give ~0.73 after softmax? no...
+        # Actually let's make it simple: set eos logit high
+        logits[0, -1, _ONNX_EOS_ID] = 10.0
+        outputs = [logits]
+
+        if has_kv:
+            if "past_key_0" in feeds:
+                past_len = feeds["past_key_0"].shape[2]
+            else:
+                past_len = 0
+            total_len = past_len + seq_len
+            for _i in range(_ONNX_NL):
+                outputs.append(np.random.randn(1, 12, total_len, 64).astype(np.float32))
+                outputs.append(np.random.randn(1, 12, total_len, 64).astype(np.float32))
+        return outputs
+
+    mock_sess.run.side_effect = _run
+    return mock_sess
+
+
+def _build_onnx_wrapper(**kwargs) -> MagicMock:
+    """Build TurnGPTWrapper in ONNX mode with mocked dependencies."""
+    import unittest.mock as um
+
+    has_kv = kwargs.pop("has_kv", True)
+    mock_sess = _make_onnx_session_mock(has_kv=has_kv)
+
+    mock_hf_tok = MagicMock()
+    mock_hf_tok.side_effect = _onnx_char_tokenize
+    mock_hf_tok.eos_token_id = _ONNX_EOS_ID
+    mock_hf_tok.convert_tokens_to_ids.side_effect = (
+        lambda t: {
+            "<speaker1>": _ONNX_SP1_ID,
+            "<speaker2>": _ONNX_SP2_ID,
+        }.get(t, 0)
+    )
+
+    mock_so = MagicMock()
+
+    config = TurnGPTConfig(
+        onnx_model_path="/fake/model.onnx",
+        tokenizer_path="/fake/tokenizer",
+        max_context_tokens=kwargs.get("max_context_tokens", 1024),
+        onnx_threads=kwargs.get("onnx_threads", 4),
+    )
+
+    mock_ort_module = MagicMock()
+    mock_ort_module.SessionOptions.return_value = mock_so
+    mock_ort_module.GraphOptimizationLevel.ORT_ENABLE_ALL = 99
+    mock_ort_module.InferenceSession.return_value = mock_sess
+
+    mock_transformers = MagicMock()
+    mock_transformers.GPT2TokenizerFast.from_pretrained.return_value = mock_hf_tok
+
+    import sys
+    saved_ort = sys.modules.get("onnxruntime")
+    saved_tf = sys.modules.get("transformers")
+    sys.modules["onnxruntime"] = mock_ort_module
+    sys.modules["transformers"] = mock_transformers
+
+    try:
+        from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
+
+        wrapper = TurnGPTWrapper(config)
+    finally:
+        if saved_ort is None:
+            sys.modules.pop("onnxruntime", None)
+        else:
+            sys.modules["onnxruntime"] = saved_ort
+        if saved_tf is None:
+            sys.modules.pop("transformers", None)
+        else:
+            sys.modules["transformers"] = saved_tf
+
+    return wrapper, mock_sess
+
+
+class TestOnnxInit:
+    """ONNX backend initialization."""
+
+    def test_backend_set_to_onnx(self):
+        wrapper, _ = _build_onnx_wrapper()
+        assert wrapper._backend == "onnx"
+
+    def test_onnx_model_path_empty_uses_pytorch(self, _inject_turngpt_module):
+        mock_cls = _inject_turngpt_module
+        wrapper, _ = _build_wrapper(mock_cls)
+        assert wrapper._backend == "pytorch"
+
+    def test_missing_tokenizer_path_raises_turngpt_error(self):
+        from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
+
+        config = TurnGPTConfig(
+            onnx_model_path="/fake/model.onnx",
+            tokenizer_path="",
+        )
+        with pytest.raises(TurnGPTError, match="tokenizer_path is required"):
+            TurnGPTWrapper(config)
+
+    def test_onnx_init_error_raises_turngpt_error(self):
+        config = TurnGPTConfig(
+            onnx_model_path="/fake/model.onnx",
+            tokenizer_path="/fake/tokenizer",
+        )
+
+        # Make onnxruntime import fail
+        import builtins
+
+        original_import = builtins.__import__
+
+        def _fail_ort(name, *args, **kwargs):
+            if name == "onnxruntime":
+                raise ImportError("no onnxruntime")
+            return original_import(name, *args, **kwargs)
+
+        saved_ort = sys.modules.pop("onnxruntime", None)
+        builtins.__import__ = _fail_ort
+        try:
+            from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
+
+            with pytest.raises(TurnGPTError, match="Failed to load ONNX model"):
+                TurnGPTWrapper(config)
+        finally:
+            builtins.__import__ = original_import
+            if saved_ort is not None:
+                sys.modules["onnxruntime"] = saved_ort
+
+    def test_detects_kv_model(self):
+        wrapper, _ = _build_onnx_wrapper(has_kv=True)
+        assert wrapper._onnx_has_kv is True
+
+    def test_detects_no_cache_model(self):
+        wrapper, _ = _build_onnx_wrapper(has_kv=False)
+        assert wrapper._onnx_has_kv is False
+
+
+class TestOnnxPredict:
+    """ONNX backend predict() behavior."""
+
+    def test_returns_float_in_range(self):
+        wrapper, _ = _build_onnx_wrapper()
+        result = wrapper.predict("hello<ts>how are you")
+        assert isinstance(result, float)
+        assert 0.0 <= result <= 1.0
+
+    def test_empty_input_returns_default(self):
+        wrapper, _ = _build_onnx_wrapper()
+        assert wrapper.predict("") == 0.0
+        assert wrapper.predict("   ") == 0.0
+
+    def test_single_turn(self):
+        wrapper, sess = _build_onnx_wrapper()
+        result = wrapper.predict("hello")
+        assert isinstance(result, float)
+        sess.run.assert_called_once()
+
+    def test_multi_turn(self):
+        wrapper, sess = _build_onnx_wrapper()
+        result = wrapper.predict("a<ts>b<ts>c")
+        assert isinstance(result, float)
+        sess.run.assert_called_once()
+
+    def test_no_cache_model(self):
+        wrapper, sess = _build_onnx_wrapper(has_kv=False)
+        result = wrapper.predict("hello<ts>world")
+        assert isinstance(result, float)
+        sess.run.assert_called_once()
+        feeds = sess.run.call_args[0][1]
+        assert "input_ids" in feeds
+        assert "speaker_ids" in feeds
+        assert "position_ids" not in feeds
+
+
+class TestOnnxCache:
+    """ONNX KV cache reuse behavior."""
+
+    def test_cache_reuse_on_prefix_match(self):
+        wrapper, sess = _build_onnx_wrapper()
+        wrapper.predict("hello")
+        sess.run.reset_mock()
+
+        wrapper.predict("hello world")
+        sess.run.assert_called_once()
+        feeds = sess.run.call_args[0][1]
+        # Should have received only new tokens
+        assert feeds["input_ids"].shape[1] == 6  # " world" = 6 chars
+        # Should have non-empty past
+        assert feeds["past_key_0"].shape[2] > 0
+
+    def test_identical_input_returns_cached(self):
+        wrapper, sess = _build_onnx_wrapper()
+        wrapper.predict("hello<ts>world")
+        sess.run.reset_mock()
+
+        result = wrapper.predict("hello<ts>world")
+        sess.run.assert_not_called()
+        assert isinstance(result, float)
+
+    def test_cache_invalidation_on_prefix_change(self):
+        wrapper, sess = _build_onnx_wrapper()
+        wrapper.predict("hello")
+        sess.run.reset_mock()
+
+        wrapper.predict("world")
+        sess.run.assert_called_once()
+        feeds = sess.run.call_args[0][1]
+        assert feeds["input_ids"].shape[1] == 5  # full "world"
+        assert feeds["past_key_0"].shape[2] == 0  # empty past
+
+    def test_cache_cleared_on_reset(self):
+        wrapper, sess = _build_onnx_wrapper()
+        wrapper.predict("hello")
+        sess.run.reset_mock()
+
+        wrapper.reset()
+        wrapper.predict("hello")
+        sess.run.assert_called_once()
+        feeds = sess.run.call_args[0][1]
+        assert feeds["past_key_0"].shape[2] == 0
+
+    def test_no_cache_model_no_reuse(self):
+        wrapper, sess = _build_onnx_wrapper(has_kv=False)
+        wrapper.predict("hello")
+        sess.run.reset_mock()
+
+        # Same input — no cache, must call again
+        wrapper.predict("hello world")
+        sess.run.assert_called_once()
+
+
+class TestOnnxErrorHandling:
+    """ONNX predict error recovery."""
+
+    def test_runtime_error_returns_default(self):
+        wrapper, sess = _build_onnx_wrapper()
+        sess.run.side_effect = RuntimeError("ORT error")
+        result = wrapper.predict("hello")
+        assert result == 0.0
+
+    def test_recovery_after_error(self):
+        wrapper, sess = _build_onnx_wrapper()
+        # Fail first
+        sess.run.side_effect = RuntimeError("fail")
+        assert wrapper.predict("hello") == 0.0
+
+        # Restore
+        sess.run.side_effect = _make_onnx_session_mock(has_kv=True).run.side_effect
+        result = wrapper.predict("hello again")
+        assert isinstance(result, float)
+        assert result > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Test _build_speaker_ids
+# ---------------------------------------------------------------------------
+
+
+class TestOnnxWindow:
+    """ONNX backend window eviction behavior."""
+
+    def test_eviction_triggered_on_overflow(self):
+        wrapper, sess = _build_onnx_wrapper(max_context_tokens=20)
+        dialog = "aaaa<ts>bbbb<ts>cccc<ts>dddd<ts>eeee"
+        result = wrapper.predict(dialog)
+        assert isinstance(result, float)
+        # Should have called run (not crash)
+        assert sess.run.call_count >= 1
+
+    def test_eviction_removes_oldest_turns(self):
+        wrapper, sess = _build_onnx_wrapper(max_context_tokens=20)
+        dialog = "first<ts>second<ts>third<ts>last"
+        wrapper.predict(dialog)
+        feeds = sess.run.call_args[0][1]
+        ids = feeds["input_ids"]
+        # After eviction, should fit within max_context_tokens
+        assert ids.shape[1] <= 20
+
+    def test_single_long_turn_token_truncation(self):
+        wrapper, sess = _build_onnx_wrapper(max_context_tokens=10)
+        long_text = "a" * 30
+        result = wrapper.predict(long_text)
+        assert isinstance(result, float)
+        feeds = sess.run.call_args[0][1]
+        assert feeds["input_ids"].shape[1] <= 10
+
+
+class TestExtractTrpNumpy:
+    """Test _extract_trp_numpy correctness."""
+
+    def test_returns_eos_probability(self):
+        from voice_pipeline.turn_taking.turngpt import _extract_trp_numpy
+
+        # Create logits where EOS token gets a high logit
+        vocab_size = 100
+        eos_id = 50
+        logits = np.zeros((1, 3, vocab_size), dtype=np.float32)
+        logits[0, -1, eos_id] = 10.0  # high logit at EOS
+
+        trp = _extract_trp_numpy(logits, eos_id)
+        assert isinstance(trp, float)
+        assert 0.0 < trp <= 1.0
+        # With logit=10 vs 0 for all others, EOS prob should be dominant
+        assert trp > 0.5
+
+    def test_uniform_logits_gives_uniform_prob(self):
+        from voice_pipeline.turn_taking.turngpt import _extract_trp_numpy
+
+        vocab_size = 100
+        eos_id = 50
+        logits = np.zeros((1, 1, vocab_size), dtype=np.float32)
+
+        trp = _extract_trp_numpy(logits, eos_id)
+        assert trp == pytest.approx(1.0 / vocab_size, abs=1e-5)
+
+    def test_extracts_last_position_only(self):
+        from voice_pipeline.turn_taking.turngpt import _extract_trp_numpy
+
+        vocab_size = 100
+        eos_id = 50
+        logits = np.zeros((1, 3, vocab_size), dtype=np.float32)
+        # High EOS at position 0, zero at last position
+        logits[0, 0, eos_id] = 100.0
+        logits[0, -1, eos_id] = 0.0
+
+        trp = _extract_trp_numpy(logits, eos_id)
+        # Should use last position, which has uniform logits
+        assert trp == pytest.approx(1.0 / vocab_size, abs=1e-5)
+
+
+class TestBuildSpeakerIds:
+    """Test the speaker_ids construction logic."""
+
+    def test_single_turn_all_speaker1(self):
+        from voice_pipeline.turn_taking.turngpt import _build_speaker_ids
+
+        ids = torch.tensor([[10, 20, 30]])
+        sp = _build_speaker_ids(ids, _ONNX_EOS_ID, _ONNX_SP1_ID, _ONNX_SP2_ID)
+        assert (sp == _ONNX_SP1_ID).all()
+
+    def test_two_turns_alternates(self):
+        from voice_pipeline.turn_taking.turngpt import _build_speaker_ids
+
+        # "hello<ts>world" → [h, e, l, l, o, <ts>, w, o, r, l, d]
+        ids = torch.tensor([[10, 20, 30, _ONNX_EOS_ID, 40, 50]])
+        sp = _build_speaker_ids(ids, _ONNX_EOS_ID, _ONNX_SP1_ID, _ONNX_SP2_ID)
+        # Before <ts>: sp1, after <ts>: sp2
+        assert sp[0, 0].item() == _ONNX_SP1_ID
+        assert sp[0, 3].item() == _ONNX_SP1_ID  # <ts> itself is sp1
+        assert sp[0, 4].item() == _ONNX_SP2_ID
+        assert sp[0, 5].item() == _ONNX_SP2_ID
+
+    def test_three_turns(self):
+        from voice_pipeline.turn_taking.turngpt import _build_speaker_ids
+
+        ids = torch.tensor([[10, _ONNX_EOS_ID, 20, _ONNX_EOS_ID, 30]])
+        sp = _build_speaker_ids(ids, _ONNX_EOS_ID, _ONNX_SP1_ID, _ONNX_SP2_ID)
+        assert sp[0, 0].item() == _ONNX_SP1_ID  # turn 1
+        assert sp[0, 2].item() == _ONNX_SP2_ID  # turn 2
+        assert sp[0, 4].item() == _ONNX_SP1_ID  # turn 3

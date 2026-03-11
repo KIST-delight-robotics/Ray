@@ -140,15 +140,22 @@ class TurnGPTConfig:
     """Configuration for the TurnGPT wrapper.
 
     Attributes:
-        checkpoint_path: Path to the TurnGPT checkpoint file.
-        device: Torch device string.
+        checkpoint_path: Path to the TurnGPT checkpoint file (PyTorch mode).
+        onnx_model_path: Path to ONNX model file. When set, uses ONNX Runtime
+            instead of PyTorch for inference.
+        tokenizer_path: Path to saved tokenizer directory (required for ONNX mode).
+        device: Torch device string (PyTorch mode only).
         max_context_tokens: Maximum token count before old turns are evicted.
             GPT-2 position limit is 1024. 0 = no limit.
+        onnx_threads: Number of intra-op threads for ONNX Runtime.
     """
 
     checkpoint_path: str = ""
+    onnx_model_path: str = ""
+    tokenizer_path: str = ""
     device: str = "cpu"
     max_context_tokens: int = 1024
+    onnx_threads: int = 2
 
 
 @dataclass

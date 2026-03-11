@@ -78,6 +78,9 @@
 - **Context window eviction**: `max_context_tokens` (default 1024, GPT-2 limit). When exceeded, oldest turns evicted at text level (split by `<ts>`) until token count ≤ 80% of max. Eviction invalidates cache entirely (full rebuild). Headroom (0.8) prevents thrashing near the limit.
 - **Lazy import**: `from turngpt import TurnGPT` inside constructor. Package absence raises `TurnGPTError` at construction.
 - **Text formatting contract**: Wrapper passes input as-is. TurnDetector owns `<ts>` formatting.
+- **ONNX backend**: Added for inference performance on RPi. PyTorch still required (tokenization uses torch tensors) — goal is speed, not PyTorch elimination. Backend selected by config: `onnx_model_path` set → ONNX, otherwise PyTorch. KV cache support detected via `past_key_0` in ONNX input names. TRP extraction identical to PyTorch: softmax → EOS token probability (verified `get_trp` is just `x[..., eos_token_id]`).
+- **ONNX threads default = 2**: Benchmarked 1–4 threads on RPi 5 (4-core). 2 threads optimal for both fp32 and int8: fastest latency (42ms int8, 111ms fp32) while leaving 2 cores for other modules. 4 threads causes contention and is slower.
+- **int8 quantization**: 4x smaller (157MB vs 623MB), 2.6x faster, TRP difference negligible (~0.04). Recommended for deployment.
 - **Open**: Proactive cache warming (pre-forwarding robot turn tokens after turn completion) — deferred until latency measurement shows it's needed. No wrapper change required; TurnDetector adds one `predict()` call.
 
 ### TurnDetector (`turn_taking/turn_detector.py`)
