@@ -46,9 +46,22 @@ git clone https://github.com/ErikEkstedt/TurnGPT.git external/TurnGPT
 uv pip install -e external/TurnGPT
 ```
 
-#### Checkpoint
+#### Backends
 
-TurnGPT uses `load_from_checkpoint` (PyTorch Lightning). Set `TurnGPTConfig.checkpoint_path` to the checkpoint file.
+**PyTorch** (default): Uses `load_from_checkpoint` (PyTorch Lightning). Set `TurnGPTConfig.checkpoint_path`.
+
+**ONNX** (recommended for RPi): Uses ONNX Runtime. Set `TurnGPTConfig.onnx_model_path` and `tokenizer_path`. Requires `onnxruntime` and `transformers` packages. PyTorch is still required (tokenization uses torch tensors).
+
+ONNX models are exported via scripts in `turngpt_training/scripts/`. Place them in `models/turngpt/`. Tokenizer is included at `models/turngpt/tokenizer/`. Four variants available:
+
+| Variant | Size | Notes |
+|---------|------|-------|
+| `turngpt_v2.onnx` | 623MB | fp32, no KV cache |
+| `turngpt_v2_kvcache.onnx` | 623MB | fp32, KV cache |
+| `turngpt_v2_int8.onnx` | 157MB | int8 quantized, no KV cache |
+| `turngpt_v2_kvcache_int8.onnx` | 157MB | int8 quantized, KV cache |
+
+RPi 5 benchmarks (int8 kvcache, 2 threads): ~42ms/inference, CPU ~189%.
 
 For integration and stress tests, export the env var:
 
@@ -60,9 +73,12 @@ export TURNGPT_CHECKPOINT_PATH=/path/to/turngpt.ckpt
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `checkpoint_path` | `""` | Path to TurnGPT checkpoint file |
-| `device` | `"cpu"` | Torch device (`"cpu"` or `"cuda"`) |
+| `checkpoint_path` | `""` | Path to TurnGPT checkpoint file (PyTorch mode) |
+| `onnx_model_path` | `""` | Path to ONNX model file. When set, uses ONNX Runtime |
+| `tokenizer_path` | `""` | Path to saved tokenizer directory (required for ONNX mode) |
+| `device` | `"cpu"` | Torch device (PyTorch mode only) |
 | `max_context_tokens` | `1024` | Max tokens before old turns are evicted (GPT-2 limit). `0` = no limit |
+| `onnx_threads` | `2` | ONNX Runtime intra-op threads. 2 is optimal on RPi 5 (4-core) |
 
 ### TurnDetector
 

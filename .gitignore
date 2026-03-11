@@ -44,9 +44,18 @@ Thumbs.db
 *.bin
 *.safetensors
 
+# Model tokenizers are tracked (small); force-add if needed:
+#   git add -f models/turngpt/tokenizer/
+!models/turngpt/tokenizer/
+
+# Training artifacts
+runs/
+
 # External model repositories
-TurnGPT/
-VoiceActivityProjection/
+external/
 
 # C++ third-party libraries
 third_party/
+
+
+/CANDOR

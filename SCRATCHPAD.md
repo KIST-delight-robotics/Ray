@@ -4,11 +4,12 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 
 ## Current Status
 
-C++ ↔ Python WebSocket 프로토콜 정렬 완료.
+TurnGPT ONNX 백엔드 추가 완료. 517 tests pass.
 
-- Python 측: types, interfaces, bridge, orchestrator, session, tests 모두 업데이트 (490 tests pass)
-- C++ 측: WebSocket 서버 전환, 프로토콜 매핑, playback_started/playback_complete 전송, turn_id/STT_DONE_TIME 제거
-- C++ 빌드 확인 (MOTOR_ENABLED=OFF)
+- ONNX Runtime 추론 지원 (KV-cache / no-cache, fp32 / int8)
+- config 검증 (tokenizer_path 필수), KV-cache 감지 개선 (past_key_0)
+- onnx_threads 기본값 = 2 (RPi 5 벤치마크 기반)
+- C++ ↔ Python WebSocket 프로토콜 정렬 완료
 
 Next: Phase 7 — Integration tests (Python ↔ C++ 실제 연결 테스트)
 
