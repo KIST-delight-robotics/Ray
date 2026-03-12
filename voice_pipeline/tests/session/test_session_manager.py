@@ -14,7 +14,7 @@ from voice_pipeline.core.types import (
     LEDState,
     SystemMode,
 )
-from voice_pipeline.session.session_manager import SessionManager
+from voice_pipeline.session.session_manager import SessionComponents, SessionManager
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -42,6 +42,7 @@ def _make_session_manager(
     mocks["wakeword"].feed_audio.return_value = False
     mocks["bridge"].poll_event.return_value = None
     mocks["orchestrator"].request_stop = MagicMock()
+    mocks["orchestrator"].run = MagicMock()
 
     config = SessionConfig(
         audio_queue_size=audio_queue_size,
@@ -50,12 +51,17 @@ def _make_session_manager(
         frame_timeout_sec=frame_timeout_sec,
     )
 
+    def session_factory() -> SessionComponents:
+        return SessionComponents(
+            orchestrator=mocks["orchestrator"],
+            history=mocks["history"],
+        )
+
     sm = SessionManager(
         audio_input=mocks["audio_input"],
         wakeword=mocks["wakeword"],
-        orchestrator=mocks["orchestrator"],
+        session_factory=session_factory,
         cpp_bridge=mocks["bridge"],
-        history=mocks["history"],
         led=mocks["led"],
         config=config,
     )
@@ -166,6 +172,7 @@ class TestFarewell:
         """Farewell proceeds to SLEEP even without PLAYBACK_COMPLETE."""
         sm, mocks = _make_session_manager(farewell_timeout_sec=0.01)
         sm._session_started = True
+        sm._current_history = mocks["history"]
 
         mocks["bridge"].poll_event.return_value = None
 
@@ -178,6 +185,7 @@ class TestFarewell:
         """Stale events are flushed before sending farewell."""
         sm, mocks = _make_session_manager()
         sm._session_started = True
+        sm._current_history = mocks["history"]
 
         stale = CppEvent(CppEventType.PLAYBACK_COMPLETE)
         fresh = CppEvent(CppEventType.PLAYBACK_COMPLETE)
@@ -192,6 +200,7 @@ class TestFarewell:
         """History is saved during farewell."""
         sm, mocks = _make_session_manager(farewell_timeout_sec=0.01)
         sm._session_started = True
+        sm._current_history = mocks["history"]
 
         mocks["bridge"].poll_event.return_value = None
 
@@ -204,6 +213,7 @@ class TestFarewell:
         """poll_event error during farewell doesn't crash."""
         sm, mocks = _make_session_manager()
         sm._session_started = True
+        sm._current_history = mocks["history"]
 
         # flush returns None, then poll_event raises
         mocks["bridge"].poll_event.side_effect = [None, RuntimeError("gone")]
@@ -262,11 +272,24 @@ class TestActive:
 
         uuid.UUID(session_id)  # Raises if invalid
 
+    def test_factory_failure_returns_to_sleep(self) -> None:
+        """Session factory exception → SLEEP, no crash."""
+        sm, mocks = _make_session_manager()
+
+        # Replace factory with one that raises
+        sm._session_factory = MagicMock(side_effect=RuntimeError("factory boom"))
+
+        sm._run_active()
+
+        assert sm._mode == SystemMode.SLEEP
+        mocks["orchestrator"].run.assert_not_called()
+
 
 class TestShutdown:
     def test_shutdown_calls_request_stop(self) -> None:
-        """shutdown() calls orchestrator.request_stop()."""
+        """shutdown() calls orchestrator.request_stop() when orchestrator is set."""
         sm, mocks = _make_session_manager()
+        sm._current_orchestrator = mocks["orchestrator"]
 
         sm.shutdown()
 
@@ -277,6 +300,7 @@ class TestShutdown:
         """shutdown() saves history when a session is active."""
         sm, mocks = _make_session_manager()
         sm._session_started = True
+        sm._current_history = mocks["history"]
 
         sm.shutdown()
 
@@ -317,6 +341,14 @@ class TestShutdown:
 
         mocks["orchestrator"].request_stop.assert_called_once()
 
+    def test_shutdown_no_orchestrator(self) -> None:
+        """shutdown() is safe when no orchestrator is set."""
+        sm, mocks = _make_session_manager()
+        # _current_orchestrator is None by default
+
+        sm.shutdown()  # Should not raise
+        assert sm._shutdown_event.is_set()
+
 
 class TestLED:
     def test_sleep_sets_sleeping(self) -> None:
@@ -343,6 +375,7 @@ class TestLED:
         """FAREWELL sets LED back to SLEEPING."""
         sm, mocks = _make_session_manager(farewell_timeout_sec=0.01)
         sm._session_started = True
+        sm._current_history = mocks["history"]
         mocks["bridge"].poll_event.return_value = None
 
         sm._run_farewell()
@@ -360,3 +393,49 @@ class TestCppBridgeConnect:
         sm.run()
 
         mocks["bridge"].connect.assert_called_once()
+
+
+class TestMultiSessionIsolation:
+    def test_two_sessions_get_independent_components(self) -> None:
+        """Two consecutive sessions get independent history and orchestrator."""
+        histories = []
+        orchestrators = []
+
+        def tracking_factory() -> SessionComponents:
+            orch = MagicMock()
+            orch.run = MagicMock()
+            hist = MagicMock()
+            histories.append(hist)
+            orchestrators.append(orch)
+            return SessionComponents(orchestrator=orch, history=hist)
+
+        config = SessionConfig(
+            audio_queue_size=300,
+            greeting_timeout_sec=0.01,
+            farewell_timeout_sec=0.01,
+            frame_timeout_sec=0.01,
+        )
+
+        bridge = MagicMock()
+        bridge.poll_event.return_value = None
+
+        sm = SessionManager(
+            audio_input=MagicMock(),
+            wakeword=MagicMock(),
+            session_factory=tracking_factory,
+            cpp_bridge=bridge,
+            led=MagicMock(),
+            config=config,
+        )
+
+        # Run two active sessions
+        sm._run_active()
+        sm._run_farewell()
+
+        sm._run_active()
+        sm._run_farewell()
+
+        assert len(histories) == 2
+        assert len(orchestrators) == 2
+        assert histories[0] is not histories[1]
+        assert orchestrators[0] is not orchestrators[1]

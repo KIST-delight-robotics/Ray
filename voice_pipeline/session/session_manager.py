@@ -7,6 +7,8 @@ import queue
 import threading
 import time
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from voice_pipeline.core.config import SessionConfig
 from voice_pipeline.core.interfaces import (
@@ -23,34 +25,48 @@ from voice_pipeline.orchestrator.orchestrator import Orchestrator
 logger = logging.getLogger("voice_pipeline.session")
 
 
+@dataclass
+class SessionComponents:
+    """Per-session objects created by the session factory."""
+
+    orchestrator: Orchestrator
+    history: IConversationHistory
+
+
 class SessionManager(ISessionManager):
     """Top-level state machine: SLEEP → GREETING → ACTIVE → FAREWELL → SLEEP.
 
-    Owns the audio queue and coordinates all module lifecycles.
+    Uses a session factory to create fresh per-session components,
+    ensuring clean state isolation between conversations.
     """
 
     def __init__(
         self,
         audio_input: IAudioInput,
         wakeword: IWakewordDetector,
-        orchestrator: Orchestrator,
+        session_factory: Callable[[], SessionComponents],
         cpp_bridge: ICppBridge,
-        history: IConversationHistory,
         led: ILEDController,
         config: SessionConfig,
+        audio_queue: queue.Queue[AudioFrame] | None = None,
     ) -> None:
         self._audio_input = audio_input
         self._wakeword = wakeword
-        self._orchestrator = orchestrator
+        self._session_factory = session_factory
         self._bridge = cpp_bridge
-        self._history = history
         self._led = led
         self._config = config
 
-        self._audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=config.audio_queue_size)
+        self._audio_queue: queue.Queue[AudioFrame] = audio_queue or queue.Queue(
+            maxsize=config.audio_queue_size
+        )
         self._shutdown_event = threading.Event()
         self._mode = SystemMode.SLEEP
         self._session_started = False
+
+        self._session_lock = threading.Lock()
+        self._current_orchestrator: Orchestrator | None = None
+        self._current_history: IConversationHistory | None = None
 
     @property
     def audio_queue(self) -> queue.Queue[AudioFrame]:
@@ -81,12 +97,14 @@ class SessionManager(ISessionManager):
     def shutdown(self) -> None:
         """Signal the session manager to shut down gracefully."""
         self._shutdown_event.set()
-        self._orchestrator.request_stop()
-        if self._session_started:
-            try:
-                self._history.save()
-            except Exception:
-                logger.warning("History save error on shutdown", exc_info=True)
+        with self._session_lock:
+            if self._current_orchestrator is not None:
+                self._current_orchestrator.request_stop()
+            if self._session_started and self._current_history is not None:
+                try:
+                    self._current_history.save()
+                except Exception:
+                    logger.warning("History save error on shutdown", exc_info=True)
 
     # ------------------------------------------------------------------
     # Mode implementations
@@ -138,15 +156,29 @@ class SessionManager(ISessionManager):
         self._mode = SystemMode.ACTIVE
 
     def _run_active(self) -> None:
-        """ACTIVE mode: drain queue, start session, run orchestrator."""
+        """ACTIVE mode: create session components, run orchestrator."""
         self._drain_audio_queue()
 
+        try:
+            components = self._session_factory()
+        except Exception:
+            logger.error("Session factory failed", exc_info=True)
+            self._mode = SystemMode.SLEEP
+            return
+
+        with self._session_lock:
+            self._current_orchestrator = components.orchestrator
+            self._current_history = components.history
+
         session_id = str(uuid.uuid4())
-        self._history.new_session(session_id)
+        self._current_history.new_session(session_id)
         self._session_started = True
         logger.info("Session started: %s", session_id)
 
-        self._orchestrator.run(self._audio_queue)
+        try:
+            self._current_orchestrator.run(self._audio_queue)
+        except Exception:
+            logger.error("Orchestrator run failed", exc_info=True)
 
         self._mode = SystemMode.FAREWELL
 
@@ -177,15 +209,20 @@ class SessionManager(ISessionManager):
 
             time.sleep(min(0.05, remaining))
 
-        if self._session_started:
+        if self._session_started and self._current_history is not None:
             try:
-                self._history.save()
+                self._current_history.save()
             except Exception:
                 logger.warning("History save error in farewell", exc_info=True)
 
         self._session_started = False
         self._drain_audio_queue()
         self._led.set_state(LEDState.SLEEPING)
+
+        with self._session_lock:
+            self._current_orchestrator = None
+            self._current_history = None
+
         self._mode = SystemMode.SLEEP
         logger.info("Session ended — returning to SLEEP")
 
