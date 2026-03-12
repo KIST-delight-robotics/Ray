@@ -155,7 +155,7 @@ class MaAIVAPConfig:
     vad_threshold: float = 0.5
     ort_threads: int = 1
     pt_threads: int = 1
-    use_torch_compile: bool = False
+    use_torch_compile: bool = True
 
 
 @dataclass

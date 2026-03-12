@@ -83,6 +83,14 @@
 - **int8 quantization**: 4x smaller (157MB vs 623MB), 2.6x faster, TRP difference negligible (~0.04). Recommended for deployment.
 - **Open**: Proactive cache warming (pre-forwarding robot turn tokens after turn completion) — deferred until latency measurement shows it's needed. No wrapper change required; TurnDetector adds one `predict()` call.
 
+### MaAI VAP optimization (`turn_taking/maai_vap.py`)
+
+- **`use_torch_compile` default → True**: MaAI 트랜스포머(3.6M params, dim=256)의 병목은 연산량(7.2M FLOPs)이 아니라 258개 PyTorch 모듈의 dispatch overhead. `torch.compile(mode="default")`이 P50 기준 56ms→32ms (1.8x). 10Hz 100ms budget 대비 53% 여유 확보.
+- **INT8 양자화 부적합**: CPC 인코더(Conv1D+LSTM, 2.5M params)에 `quantize_dynamic` 적용 시 1.9x 느려지고 정확도 대폭 하락. TurnGPT(MatMul 위주, 163M params)와 달리 작은 Conv 커널에서는 양자화 오버헤드가 연산 절감을 초과하고, 모델이 이미 L2 캐시에 들어가므로 메모리 대역폭 이점 없음.
+- **배치 처리 무의미**: No-cache 배치(N frames)는 KV cache + 1 frame보다 느림. KV cache가 이미 반복 연산을 제거하므로 텐서 크기를 키워도 추가 이점 없음.
+- **torch.compile 한계**: Inductor가 그래프를 fuse하지만, 작은 텐서([1,1,256]) 연산에서 커널 launch + 메모리 할당 오버헤드가 남아 이론치(0.4ms) 대비 32ms. PyTorch 안에서 추가 개선 어려움. 10ms 이하를 원하면 트랜스포머도 ONNX export 필요.
+- **동시 실행 안정적**: VAP(10Hz, compile=ON) + TurnGPT(3Hz, ONNX int8) 동시 실행 시 CPU 34%, 두 모델 모두 budget 내 안정적. ASR/LLM/TTS에 ~60% 여유.
+
 ### TurnDetector (`turn_taking/turn_detector.py`)
 
 - **Paper-based two-path algorithm** (Skantze & Irfan, 2025): Path 1 (VAP sustained robot-favor) OR Path 2 (TurnGPT graduated silence timeout). Either path alone triggers turn_shift. This avoids single-model dependency — VAP gives fast response (~500ms) while TurnGPT ensures eventual turn-taking even if VAP fails.
