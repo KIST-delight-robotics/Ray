@@ -140,16 +140,28 @@
 
 ### SessionManager (`session/session_manager.py`)
 
-- **Orchestrator as direct dependency (not factory)**: Orchestrator's `run()` already calls `_start_session()`/`_end_session()` — it resets itself between sessions. No need for re-creation.
+- **Session factory pattern (replaces direct Orchestrator injection)**: Previous design reused a single Orchestrator/ConversationHistory across sessions, relying on `reset()` for state cleanup. TurnDetector's `_dialog_parts` (dialog context) was not cleared by `reset()`, causing state leakage between sessions. New design: `session_factory: Callable[[], SessionComponents]` creates fresh Orchestrator, TurnDetector, SpeechGenerator, ContextBuilder, and ConversationHistory per session. Process-level singletons (ASR, LLM, TTS, VAP, TurnGPT, CppBridge, executor) are captured by the factory closure.
+- **Three-tier lifecycle model**: (1) Process-level — model loads, API clients, hardware, shared executor (expensive init, once). (2) Session-level — stateful orchestration objects (factory-recreated per session). (3) Turn-level — lightweight `reset()` within session objects (ASR buffer, TurnDetector frame counters).
+- **Shared ThreadPoolExecutor**: SpeechGenerator accepts optional `executor` param. When externally provided, `shutdown()` only cancels in-flight work (sets cancel_event) without closing the executor. Main entry point creates the executor, injects into factory, shuts down in `finally`. Thread count stays fixed across sessions (max_workers=2).
+- **History save ownership**: Removed `_save_history()` from Orchestrator's `_end_session()`. SessionManager is the sole caller of `history.save()` — in `_run_farewell()` and `shutdown()`. Prevents double-save and clarifies lifecycle ownership.
+- **`orchestrator.run()` exception guard**: Wrapped in `try/except` in `_run_active()` to ensure FAREWELL mode is always reached. Without this, an exception from `_end_session()` (e.g., `asr.stop()` failure) would skip history save entirely since Orchestrator no longer saves.
+- **`_session_lock`**: Protects `_current_orchestrator` and `_current_history` against race between `shutdown()` (signal handler thread) and `_run_active()` (main thread).
+- **External audio_queue injection**: `audio_queue` parameter allows main entry point to create the queue and pass it to both AudioInput and SessionManager, avoiding circular dependency.
 - **Flush CppBridge events before greeting/farewell**: `_flush_bridge_events()` drains all pending events. Prevents acting on stale `PLAYBACK_COMPLETE` from a previous cycle.
-- **`history.save()` guarded**: Called in FAREWELL and `shutdown()`, but only if `_session_started` is True. Prevents crash on cold-start shutdown before any session.
+- **`history.save()` guarded**: Called in FAREWELL and `shutdown()`, but only if `_session_started` and `_current_history is not None`. Prevents crash on cold-start shutdown before any session.
 - **CppBridge connect on startup**: `run()` calls `cpp_bridge.connect()` before entering the main loop. Ensures connection is established before any greeting/farewell.
 - **`poll_event()` exception handling**: Greeting/farewell polling loops catch `poll_event()` exceptions. Bridge errors break out of the poll loop but don't crash SessionManager.
 - **Audio queue drain on ACTIVE entry**: `_drain_audio_queue()` clears stale frames before passing the queue to Orchestrator. Prevents the first ASR/TurnDetector frames from containing old audio.
 - **Greeting/farewell timeout**: Timeout expiry is treated as playback done (log warning, proceed). No error raised.
 - **`bridge.disconnect()` on exit**: `run()` finally block calls `bridge.disconnect()`, symmetric with `connect()` at startup.
-- **Orchestrator internal state reset**: `_start_session()` resets all internal state (`_playback_state`, `_awaiting_response`, etc.). Prevents stale state from a previous session when reusing the same Orchestrator instance after `request_stop()`.
 - **`SessionManager(ISessionManager)` inheritance**: Implements `ISessionManager` from `core/interfaces.py`. Follows the project's interface convention.
+
+### Main Entry Point (`voice_pipeline/__main__.py`)
+
+- **Process-level singletons in `main()`**: All expensive objects (models, API clients, hardware) created once. Session factory closure captures them by reference.
+- **`vap.reset()` / `turngpt.reset()` in factory**: Called at session start to clear wrapper-level caches/buffers. These are process-level singletons but carry session-scoped state (rolling audio buffer, dialog context).
+- **Windows signal handling**: `SIGINT` (Ctrl+C) + `SIGBREAK` (Ctrl+Break). No `SIGTERM` on Windows. Signal handler calls `sm.shutdown()` which is thread-safe via `_session_lock`.
+- **`finally` cleanup order**: `executor.shutdown(wait=True)` first (waits for in-flight tasks), then `wakeword.close()` and `led.close()` (hardware release).
 
 ## C++ ↔ Python Protocol Alignment
 

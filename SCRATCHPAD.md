@@ -4,9 +4,17 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 
 ## Current Status
 
-VAP + TurnGPT 스트레스 테스트 완료. TurnGPT eviction 버그 수정. 517 tests pass.
+Session factory 리팩터링 + main 엔트리 포인트 완료. 522 tests pass.
 
-### 완료된 작업 (2026-03-12)
+### 완료된 작업 (2026-03-12, session factory + entry point)
+- **3단계 생명주기 모델 도입**: process-level (모델/API/executor) → session-level (factory 재생성) → turn-level (reset)
+- **SpeechGenerator**: 외부 `ThreadPoolExecutor` 주입 지원 (`_owns_executor` 플래그)
+- **Orchestrator**: `_save_history()` 제거 — SessionManager에 save 책임 일원화
+- **SessionManager**: `session_factory: Callable[[], SessionComponents]` 패턴, `_session_lock` 추가, orchestrator.run() 예외 시에도 FAREWELL 전이 보장
+- **`voice_pipeline/__main__.py`**: process-level 싱글턴 + factory 클로저 + Windows signal 핸들링
+- **`pyproject.toml`**: `ray` 엔트리 포인트 추가 (`uv run ray`)
+
+### 완료된 작업 (2026-03-12, TurnGPT)
 - **TurnGPT eviction 버그 수정** (2건):
   1. `_clear_cache()` 제거 — eviction 시 매 호출 full recompute (~1,500ms) → cache 재활용으로 incremental 유지
   2. O(N) eviction 루프 → `keep_turns` 슬라이싱 (tokenize N회 → 1회)
@@ -51,8 +59,8 @@ VAP + TurnGPT 스트레스 테스트 완료. TurnGPT eviction 버그 수정. 517
 | CPU 전체 | 45.4% | | | 58.0% |
 
 ### Next
+- **`uv run ray` 실행 테스트** — 하드웨어 + 외부 서비스 연결 상태에서 전체 파이프라인 검증
 - Phase 7 — Integration tests (Python ↔ C++ 실제 연결 테스트)
-- 파이프라인 러너 스크립트 작성 (전체 end-to-end 실행)
 - MaAI VAP vs VAP-Realtime 최종 선택 후 파이프라인 통합
 - VAP budget 초과 20-25% 허용 설계 (프레임 드롭 or 5Hz 폴백)
 - TurnGPT: dialog 누적 시 비동기 cache prefill (선택적 최적화)
