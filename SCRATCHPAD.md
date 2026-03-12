@@ -4,118 +4,161 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 
 ## Current Status
 
-TurnGPT ONNX 백엔드 추가 완료. 517 tests pass.
+VAP + TurnGPT 스트레스 테스트 완료. TurnGPT eviction 버그 수정. 517 tests pass.
 
-- ONNX Runtime 추론 지원 (KV-cache / no-cache, fp32 / int8)
-- config 검증 (tokenizer_path 필수), KV-cache 감지 개선 (past_key_0)
-- onnx_threads 기본값 = 2 (RPi 5 벤치마크 기반)
-- C++ ↔ Python WebSocket 프로토콜 정렬 완료
+### 완료된 작업 (2026-03-12)
+- **TurnGPT eviction 버그 수정** (2건):
+  1. `_clear_cache()` 제거 — eviction 시 매 호출 full recompute (~1,500ms) → cache 재활용으로 incremental 유지
+  2. O(N) eviction 루프 → `keep_turns` 슬라이싱 (tokenize N회 → 1회)
+- `TurnGPTConfig.keep_turns` 추가 (기본값 2), `_EVICTION_HEADROOM` 제거
+- TurnGPT 스트레스 테스트: 150초 연속, eviction 경계 포함
+- VAP 스파이크 분석: per-stage profiling (encoder/transformer/cache trim)
+- `vap_console_view.py`: ONNX 파이프라인 + 오디오 동기화 재생 뷰어
 
-Next: Phase 7 — Integration tests (Python ↔ C++ 실제 연결 테스트)
+### 완료된 작업 (2026-03-11)
+- MaAI VAP: ONNX encoder + PyTorch transformer 커스텀 파이프라인
+- 최적 설정: pt=1, ort=1 (싱글스레드), mean 66ms (10Hz budget 100ms)
+- torch.compile: transformer 22% 추가 가속 (mean 56ms)
+- 실제 음성(CANDOR) 수치 동일성 검증 PASSED (max diff 1.4e-5)
+- `MaAIVAPWrapper(IVAP)` 구현 (`turn_taking/maai_vap.py`)
+- `MaAIVAPConfig` 추가 (`core/config.py`)
+- TurnGPT KV-cache 버그 수정: 입력이 캐시보다 짧을 때 0-token forward 에러
+- 부하 테스트: VAP + TurnGPT 동시 60초, CPU 45% (여유 있음)
 
-## C++ ↔ Python 브릿지 프로토콜 정렬 작업
+### TurnGPT 스트레스 테스트 결과 (eviction 수정 후, keep_turns=2)
 
-### 배경
-- C++ 코드(`cpp/main.cpp`)를 `RAG_test` 브랜치에서 가져옴 (커밋 `32e6096`)
-- 기존 C++ 프로토콜과 새 Python 파이프라인(`voice_pipeline/bridge/cpp_bridge.py`) 프로토콜이 다름
-- C++ 수정을 최소화하면서 양쪽 맞추기
+| | FP32 Mean | FP32 P95 | INT8 Mean | INT8 P95 |
+|---|---|---|---|---|
+| 수정 전 (ratio=0.8 + bug) | 366ms | 1,541ms | — | — |
+| **수정 후 (keep_turns=2)** | **70ms** | **104ms** | **30ms** | **43ms** |
 
-### 합의된 프로토콜
+- keep_turns 값 차이(0 vs 2)는 CPU governor 노이즈에 묻힘 → 기본값 2 유지
+- INT8: >100ms = 1.1% (5건/450), 실사용 문제 없음
 
-**Python → C++:**
+### VAP 스파이크 분석 결과 (10Hz, CANDOR 실제 음성)
+- 스파이크 원인: **100% Transformer** (encoder/cache trim 무관)
+- CPU governor (ondemand) 주파수 변동이 원인. GC 아님 (disable해도 동일)
+- 분포: 60-80ms에 79% 밀집, 이후 연속적 long tail (bimodal 아님)
+- budget(100ms) 초과: **20-25%** (3회 반복 측정 확인)
+- P95: 150±4ms (안정적), P99: 192-230ms (변동)
+- 메모리: drift 없음 (RSS ±1MB)
 
-| 메시지 | 필드 | 설명 | C++ 기존 대응 |
-|--------|------|------|---------------|
-| `stream_start` | - | 스트리밍 준비 | `responses_only` |
-| `audio` | `data` (base64 PCM) | 오디오 청크 | `responses_audio_chunk` |
-| `audio_end` | - | 스트림 종료 | `responses_stream_end` |
-| `stop` | - | 재생 중단 (barge-in) | `user_interruption` |
-| `play_file` | `file_path` | 파일 재생 (인사/작별 등) | `play_audio` |
+### 부하 테스트 결과 (VAP + TurnGPT 동시, CANDOR 실제 음성)
+| | Mean | Median | P95 | Max |
+|---|------|--------|-----|-----|
+| VAP (10Hz) | 83.5ms | 68.8ms | 139.4ms | 178.3ms |
+| TurnGPT (~3Hz) | 74.6ms | 70.5ms | 104.9ms | 119.2ms |
+| CPU 전체 | 45.4% | | | 58.0% |
 
-**C++ → Python:**
+### Next
+- Phase 7 — Integration tests (Python ↔ C++ 실제 연결 테스트)
+- 파이프라인 러너 스크립트 작성 (전체 end-to-end 실행)
+- MaAI VAP vs VAP-Realtime 최종 선택 후 파이프라인 통합
+- VAP budget 초과 20-25% 허용 설계 (프레임 드롭 or 5Hz 폴백)
+- TurnGPT: dialog 누적 시 비동기 cache prefill (선택적 최적화)
 
-| 메시지 | 필드 | 설명 | C++ 기존 대응 |
-|--------|------|------|---------------|
-| `playback_started` | - | 재생 시작 (VAP 타이밍용) | (신규) |
-| `playback_complete` | - | 재생 완료 (정상/중단 모두) | `speaking_finished` |
+---
 
-- `playback_stopped`는 별도로 두지 않음. Python이 `stop`을 보낸 상태인지 자체적으로 알고 있으므로, `playback_complete`를 받았을 때 문맥으로 구분.
+## VAP (MaAI) ONNX 경량화 작업 (2026-03-11)
 
-### Python 수정 사항
+### 목표
+RPi 5에서 VAP 10Hz 실시간 동작 (프레임당 100ms 예산)
 
-**`ICppBridge` 인터페이스에 추가할 메서드:**
-- `send_stream_start()`
-- `send_audio_end()`
-- `send_play_file(file_path: str)` — 기존 `send_greeting()`/`send_farewell()` 대체
+### 배경 — 왜 VAP가 느린가
+- MaAI VAP = CPC Encoder (Conv5 + LSTM) + Transformer (GPT cross-attention) + Classifier
+- 전체 ~9M params. Encoder ~2M, Transformer ~7M
+- 기존 MaAI 10Hz/5s: **~110ms/frame** (예산 100ms 초과, RTF 0.91x)
+- 5Hz/3s: ~115ms (예산 200ms, RTF 1.73x — 가능)
+- 병목: encoder ~40ms (양 채널), transformer ~70ms
 
-**`CppBridge` 구현:** 해당 JSON 전송 추가.
+### 시도 1: Encoder만 ONNX 변환 (기존 스크립트)
+- `scripts/convert_maai_encoder_onnx.py` (이전 버전)
+- **문제 1**: einops Rearrange가 ONNX에서 불필요한 Transpose 7개 생성
+- **문제 2**: ORT 세션 설정 누락 (스레드, 그래프 최적화 미적용)
+- **문제 3**: downsample 가중치가 랜덤 초기값 (VAP state dict 미적용)
+- 결과: FP32 ONNX가 PyTorch보다 같거나 느림
 
-**`CppEventType`:** `PLAYBACK_STOPPED` 제거. `PLAYBACK_COMPLETE` 하나로 통합.
+### 시도 2: 전체 파이프라인 ONNX 통합
+- 분석 결과 **불가능**: LSTM 내부 상태, KV cache Python dict, 동적 캐시 트리밍 등
+- `encoder_components.py:148-153`, `vap.py:137-144`, `model.py:294-311`이 주요 차단점
 
-**Orchestrator:**
-- 오디오 드레인 흐름: `send_stream_start()` → `send_audio(chunk)` × N → `send_audio_end()`
-- `stop` 전송 후 `playback_complete` 대기 (기존 STOP_PENDING 로직 유지, 이벤트 타입만 변경)
+### 시도 3: 수정된 ONNX 변환 + 커스텀 파이프라인
+**변환 스크립트 수정 (`convert_maai_encoder_onnx.py` v2):**
+- einops → `torch.permute()` 교체 (Transpose 7→4)
+- MaAI 인스턴스에서 encoder 추출 (학습된 downsample 가중치 보장)
+- ORT 세션: `ORT_ENABLE_ALL` + `intra_op_num_threads` 설정
 
-**SessionManager:**
-- `send_greeting()` → `send_play_file("assets/audio/awake.wav")`
-- `send_farewell()` → `send_play_file("assets/audio/sleep.wav")`
+**커스텀 파이프라인 (`VapOnnxPipeline` in `benchmark_maai_custom_pipeline.py`):**
+- MaAI.process() 우회: numpy → ONNX encoder → torch.from_numpy → vap.forward()
+- monkey-patch 방식 대비 torch↔numpy 변환 1회 절감
+- 수치 동일성 검증 PASSED (max diff < 1e-5, 50프레임)
 
-### C++ 수정 사항
+### 스레드 스윕 벤치마크 결과 (10Hz/5s, 200프레임)
 
-1. **WebSocket: 클라이언트 → 서버** (`ix::WebSocket` → `ix::WebSocketServer`, 포트 8765)
-2. **onMessageCallback**: type 문자열 매핑 교체 (위 표 참조)
-3. **robot_main_loop**: `speaking_finished` → `playback_complete` rename + `playback_started` 전송 추가
-4. **stop 처리**: 기존 `user_interruption` 로직 그대로, type명만 `stop`으로 변경. 스레드 종료 후 기존과 동일하게 `playback_complete` 전송.
-5. **`play_file`**: 기존 `play_audio` 로직 재활용, type명만 변경
+| Pipeline | Threads | Mean | Median | RTF | Status |
+|----------|---------|------|--------|-----|--------|
+| MaAI | pt=1 | 96.0ms | 87.7ms | 1.04x | OK |
+| MaAI | pt=2 | 118.6ms | 106.0ms | 0.84x | SLOW |
+| MaAI | pt=4 | 111.6ms | 101.5ms | 0.90x | SLOW |
+| **Custom** | **pt=1,ort=1** | **63.7ms** | **59.2ms** | **1.57x** | **OK** |
+| Custom | pt=1,ort=2 | 82.5ms | 73.7ms | 1.21x | OK |
+| Custom | pt=2,ort=1 | 96.4ms | 88.3ms | 1.04x | OK |
+| Custom | pt=4,ort=1 | 66.2ms | 58.4ms | 1.51x | OK |
+| Custom | pt=4,ort=4 | 88.9ms | 80.9ms | 1.12x | OK |
 
-### 실제 삭제된 항목
-- `turn_id` (전역 `current_turn_id`, 모든 메시지에서 제거)
-- `STT_DONE_TIME` (전역 변수 및 관련 로직)
-- `stt_done` 핸들러
-- `responses_stream_start` (`stream_start`에 통합)
+**핵심 발견:**
+1. **싱글스레드가 멀티스레드보다 빠름** — RPi 4코어에서 이 모델 크기는 스레드 동기화 비용 > 병렬 이득
+2. **Custom pt=1,ort=1 = 63.7ms** — 10Hz 예산(100ms)의 57% 여유. 이전에 불가능했던 10Hz 실시간 달성
+3. MaAI도 pt=1이 pt=4보다 빠름 (96ms vs 112ms)
 
-### 유지된 항목
-- `play_music` / `play_audio_csv` (기존 로직 그대로)
+### 실제 음성 수치 동일성 검증 (CANDOR 데이터셋, 1200프레임/120초)
+- p_now max diff: 1.4e-5, p_future: 1.3e-5, vad: 6.7e-6
+- 후반부 drift ratio 2.0x이나 절대값 극소 → LSTM 누적 오차 없음
+- **결론: ONNX encoder와 원본 PyTorch encoder는 수치적으로 동일**
 
-### 안 건드리는 것
-- 모션 생성 (`generate_motion`, `control_motor`)
-- 오디오 재생 (`CustomSoundStream`)
-- 모터 제어 (`DynamixelDriver`)
-- `read_and_split` (파일 재생에 재활용)
+### 프로파일링 (실제 음성, 10Hz/5s, pt=1,ort=1)
 
-### VAP 로봇 오디오 입력 (미구현)
-- VAP는 stereo 입력 (ch0=user, ch1=robot). 현재 Orchestrator는 user 오디오만 VAP에 넣고 있고, robot 오디오(TTS 출력)를 VAP에 피드하는 로직은 미구현.
-- `playback_started` 이벤트를 받은 시점부터 TTS 청크를 VAP ch1에 실시간으로 넣으면 됨. C++의 실제 재생과 동기화되므로 별도 위치 추적 불필요.
+| 단계 | Mean | 비중 |
+|------|------|------|
+| ONNX encoder (2ch) | 17.5ms | 23.8% |
+| Transformer fwd | 55.6ms | 75.6% |
+| 기타 (변환/캐시) | 0.4ms | 0.5% |
 
-### playback_position 관련
-- 현재는 생략. 향후 VAP 로봇 오디오 피드 정밀 제어가 필요하면 추가.
-- `playback_started`는 구현 (VAP 타이밍 시작점으로 사용).
+### torch.compile A/B 테스트 (동일 프로세스 내 비교)
 
-### stale 청크 오염 방지
-- `turn_id` 대신 WebSocket TCP 순서보장에 의존.
-- Python은 `playback_complete` 수신 후에만 다음 턴 오디오 전송 → 순서적으로 꼬이지 않음.
-- C++은 `stop` 수신 시 버퍼/큐 전부 비움.
+| Variant | Mean | Median | P95 |
+|---------|------|--------|-----|
+| no_grad (baseline) | 72.1ms | 64.0ms | 121.6ms |
+| torch.compile (warmed) | 56.1ms | 46.7ms | 105.5ms |
 
-## Phase 5 Notes
+- **torch.compile: mean 22% 감소, median 27% 감소**
+- 컴파일 캐시: `/tmp/torchinductor_*` (135MB). `TORCHINDUCTOR_CACHE_DIR`로 영구 경로 지정 가능
+- 첫 실행 시 warmup ~100프레임(10초) 필요, 캐시 있으면 재시작 시 빠르게 로드
 
-### Orchestrator frame loop ordering
-- Decision before drain (step 5 before 7) — interrupt processed before sending more audio.
-- Deferred truncation check (step 9) runs every frame to catch generator completion.
+### P95/Max 스파이크 원인 분석
+- **Python GC: 아님** (0회 발생)
+- **CPU governor (`ondemand`)가 원인** — 1.5~2.4GHz 주파수 스케일링으로 지터 발생
+- `performance` governor 테스트 → thermal throttling으로 오히려 악화 (mean 99ms, max 550ms)
+- **결론: 하드웨어 한계. ondemand 유지가 최적. 간헐적 budget 초과는 허용 설계 필요**
 
-### Barge-in Case C (deferred truncation)
-- Approximate truncation saved immediately (DurationRatioTruncator from sent buffer length).
-- `_pending_truncation` holds msg_id + stop_position. Each frame checks generator.stream_done.
-- On stream completion: re-truncate with full ResponseData, update_message to correct.
-- Cleanup in 5 places: stream_done, FAILED, new streaming, new prepare, session end.
+### 남아있는 작업
+- `VapOnnxPipeline` + `torch.compile`을 `voice_pipeline/turn_taking/vap.py`에 통합 (IVAP 구현)
+- 통합 시 결정 필요: 기존 VAPWrapper (VAP-Realtime) vs MaAI VAP 중 어떤 모델 사용할지
+- INT8 양자화 추가 테스트 (추가 속도 개선 가능)
+- 스레드 설정을 config에 반영 (`ort_threads`, `pt_threads`)
+- TurnGPT 스파이크 테스트 (2코어 최적이나 지터 미확인)
+- `TORCHINDUCTOR_CACHE_DIR` 영구 경로 설정
 
-### IConversationHistory breaking change
-- add_user_message/add_assistant_message now return int IDs.
-- Updated StubHistory in context tests to match.
-- get_messages() returns new dicts (no _id), not deepcopy.
+### 관련 파일
+- `scripts/convert_maai_encoder_onnx.py` — ONNX 변환 (v2, MaAI에서 가중치 추출)
+- `scripts/benchmark_maai_custom_pipeline.py` — 커스텀 파이프라인 벤치마크 + VapOnnxPipeline 클래스
+- `scripts/benchmark_maai_onnx_encoder.py` — encoder 단독 벤치마크
+- `scripts/verify_onnx_equivalence.py` — 실제 음성 수치 동일성 검증 + 단독 벤치마크
+- `scripts/_test_torch_optimizations.py` — no_grad/inference_mode/torch.compile A/B 테스트
+- `scripts/_profile_pipeline_split.py` — encoder/transformer 시간 분리 프로파일링
+- `docs/vap_onnx_thread_sweep_results.txt` — 스레드 스윕 결과 원본
+- `docs/vap_rpi_benchmark.md` — 이전 VAP 벤치마크
+- `external/MaAI/` — MaAI 원본 레포 (참조용)
+- `external/VAP-Realtime/` — VAP-Realtime 레포 (MaAI에 통합됨)
+- `models/maai_encoder_5hz.onnx`, `models/maai_encoder_10hz.onnx` — 변환된 ONNX (context=20 가중치)
 
-## Phase 4 Notes
-
-### SpeechGenerator threading model
-- `max_workers=2` so cancelled runs don't block new runs during API I/O.
-- Python generators can't be interrupted cross-thread during `next()`. Only cooperative cancel via `threading.Event` + run-ID guard.
-- Per-run `queue.Queue` isolation prevents stale audio contamination.
