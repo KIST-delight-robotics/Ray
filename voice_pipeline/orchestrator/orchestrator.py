@@ -516,6 +516,7 @@ class Orchestrator:
             self._begin_streaming("")
         elif state == GeneratorState.FAILED:
             logger.warning("Generator failed while awaiting — skipping turn")
+            self._generator.reset()
             self._awaiting_response = False
             self._saved_user_text = ""
             self._turn_detector.reset()
