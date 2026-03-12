@@ -97,14 +97,13 @@ def _audio_queue_with(*frames: AudioFrame) -> queue.Queue[AudioFrame]:
 
 class TestLifecycle:
     def test_start_stop_session(self) -> None:
-        """start_session calls asr.start and LED LISTENING; end calls shutdown/save/OFF."""
+        """start_session calls asr.start and LED LISTENING; end calls reset/OFF."""
         orch, mocks = _make_orchestrator(session_timeout_sec=0.0)
         # With 0 timeout, session ends immediately
         orch.run(_audio_queue_with())
         mocks["asr"].start.assert_called_once()
         mocks["asr"].stop.assert_called_once()
         mocks["generator"].reset.assert_called_once()
-        mocks["history"].save.assert_called_once()
 
         # LED sequence: LISTENING (start) → OFF (end)
         led_calls = [c.args[0] for c in mocks["led"].set_state.call_args_list]

@@ -163,7 +163,6 @@ class Orchestrator:
     def _end_session(self) -> None:
         self._asr.stop()
         self._generator.reset()
-        self._save_history()
         self._set_led(LEDState.OFF)
         self._pending_truncation = None
         logger.info("Orchestrator session ended")
@@ -588,9 +587,3 @@ class Orchestrator:
             self._led.set_state(state)
         except Exception:
             logger.warning("LED set_state error", exc_info=True)
-
-    def _save_history(self) -> None:
-        try:
-            self._history.save()
-        except Exception:
-            logger.warning("History save error", exc_info=True)
