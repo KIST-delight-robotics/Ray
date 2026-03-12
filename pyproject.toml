@@ -18,6 +18,9 @@ dev = [
     "ruff>=0.9",
 ]
 
+[project.scripts]
+ray = "voice_pipeline.__main__:main"
+
 [tool.pytest.ini_options]
 testpaths = ["voice_pipeline/tests"]
 addopts = "-m 'not requires_model and not requires_api'"
