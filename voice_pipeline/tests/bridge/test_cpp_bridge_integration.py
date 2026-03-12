@@ -35,9 +35,7 @@ def _echo_handler(conn: ServerConnection) -> None:
         msg_type = data["type"]
         if msg_type == "audio":
             conn.send(json.dumps({"type": "playback_started"}))
-        elif msg_type == "stop":
-            conn.send(json.dumps({"type": "playback_complete"}))
-        elif msg_type == "play_file":
+        elif msg_type == "stop" or msg_type == "play_file":
             conn.send(json.dumps({"type": "playback_complete"}))
 
 

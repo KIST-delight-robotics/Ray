@@ -583,7 +583,6 @@ def _make_onnx_session_mock(*, has_kv: bool = True) -> MagicMock:
 
 def _build_onnx_wrapper(**kwargs) -> MagicMock:
     """Build TurnGPTWrapper in ONNX mode with mocked dependencies."""
-    import unittest.mock as um
 
     has_kv = kwargs.pop("has_kv", True)
     mock_sess = _make_onnx_session_mock(has_kv=has_kv)
