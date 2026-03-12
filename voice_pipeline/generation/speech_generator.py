@@ -112,7 +112,19 @@ class SpeechGenerator(ISpeechGenerator):
             self._state = GeneratorState.IDLE
             return data
 
+    def reset(self) -> None:
+        """Cancel any running pipeline and reset state for the next session."""
+        with self._lock:
+            self._cancel_event.set()
+            self._run_id += 1
+            self._state = GeneratorState.IDLE
+            self._audio_queue = queue.Queue()
+            self._text = ""
+            self._response_data = None
+            self._stream_done = False
+
     def shutdown(self) -> None:
+        """Permanently shut down the executor. Call only at program exit."""
         with self._lock:
             self._cancel_event.set()
         self._executor.shutdown(wait=True)

@@ -162,7 +162,7 @@ class Orchestrator:
 
     def _end_session(self) -> None:
         self._asr.stop()
-        self._generator.shutdown()
+        self._generator.reset()
         self._save_history()
         self._set_led(LEDState.OFF)
         self._pending_truncation = None
@@ -405,6 +405,7 @@ class Orchestrator:
             self._assistant_msg_id = self._history.add_assistant_message(text)
             self._turn_detector.notify_turn_complete("robot", text)
 
+        self._turn_detector.reset()
         self._reset_playback_state()
 
     def _on_playback_interrupted(self) -> None:
@@ -420,6 +421,7 @@ class Orchestrator:
         text = self._get_response_text()
 
         if not text:
+            self._turn_detector.reset()
             self._reset_playback_state()
             return
 
@@ -456,6 +458,7 @@ class Orchestrator:
                     stop_position_sec=stop_pos,
                 )
 
+        self._turn_detector.reset()
         self._reset_playback_state()
 
     # ------------------------------------------------------------------

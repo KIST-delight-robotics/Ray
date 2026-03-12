@@ -184,6 +184,7 @@ class SessionManager(ISessionManager):
                 logger.warning("History save error in farewell", exc_info=True)
 
         self._session_started = False
+        self._drain_audio_queue()
         self._led.set_state(LEDState.SLEEPING)
         self._mode = SystemMode.SLEEP
         logger.info("Session ended — returning to SLEEP")

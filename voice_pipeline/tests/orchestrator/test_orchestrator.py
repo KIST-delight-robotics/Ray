@@ -103,7 +103,7 @@ class TestLifecycle:
         orch.run(_audio_queue_with())
         mocks["asr"].start.assert_called_once()
         mocks["asr"].stop.assert_called_once()
-        mocks["generator"].shutdown.assert_called_once()
+        mocks["generator"].reset.assert_called_once()
         mocks["history"].save.assert_called_once()
 
         # LED sequence: LISTENING (start) → OFF (end)
@@ -633,7 +633,6 @@ class TestStopPendingWatchdog:
         # Should remain IDLE, no history save for this
         assert orch._playback_state == PlaybackState.IDLE
         mocks["history"].add_assistant_message.assert_not_called()
-
 
 
 # ---------------------------------------------------------------------------

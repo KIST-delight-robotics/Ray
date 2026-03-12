@@ -591,8 +591,18 @@ class ISpeechGenerator(ABC):
         """
 
     @abstractmethod
+    def reset(self) -> None:
+        """Cancel any running pipeline and reset state for the next session.
+
+        Does not shut down the executor — the generator can be reused.
+        """
+
+    @abstractmethod
     def shutdown(self) -> None:
-        """Shut down the background executor and release resources."""
+        """Permanently shut down the background executor.
+
+        Call only at program exit. After this, prepare() will fail.
+        """
 
 
 # ---------------------------------------------------------------------------
