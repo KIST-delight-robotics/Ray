@@ -28,7 +28,6 @@ from voice_pipeline.turn_taking.exceptions import TurnGPTError
 logger = logging.getLogger("voice_pipeline.turn_taking.turngpt")
 
 _DEFAULT_PROBABILITY = 0.0
-_EVICTION_HEADROOM = 0.8
 
 # GPT-2 architecture constants (TurnGPT is always GPT-2 based)
 _NUM_LAYERS = 12
@@ -48,6 +47,7 @@ class TurnGPTWrapper(ITurnGPT):
 
     def __init__(self, config: TurnGPTConfig) -> None:
         self._max_context_tokens = config.max_context_tokens
+        self._keep_turns = config.keep_turns
         self._backend: str  # "pytorch" or "onnx"
 
         if config.onnx_model_path:
@@ -143,28 +143,34 @@ class TurnGPTWrapper(ITurnGPT):
     # ------------------------------------------------------------------
 
     def _tokenize_with_window(self, dialog_text: str) -> tuple[Tensor, Tensor]:
-        """Tokenize dialog, evicting old turns if over max_context_tokens."""
+        """Tokenize dialog, evicting old turns if over max_context_tokens.
+
+        Keeps the last ``keep_turns`` completed turns plus the current
+        incomplete turn.  ``max_context_tokens`` acts as a hard truncation
+        safety net.
+
+        The KV cache is NOT cleared here — the forward methods use prefix
+        matching against ``_cached_input_ids`` to decide whether to reuse
+        the cache or recompute.
+        """
         input_ids, speaker_ids = self._tokenize(dialog_text)
 
         max_tokens = self._max_context_tokens
         if max_tokens <= 0 or input_ids.shape[-1] <= max_tokens:
             return input_ids, speaker_ids
 
-        target = int(max_tokens * _EVICTION_HEADROOM)
         parts = dialog_text.split("<ts>")
-
-        while len(parts) > 1:
-            parts.pop(0)
-            trimmed = "<ts>".join(parts)
+        # parts[-1] is the current incomplete turn, parts[:-1] are completed.
+        # Keep the last keep_turns completed turns + the incomplete turn.
+        n_keep = self._keep_turns + 1  # +1 for current incomplete turn
+        if len(parts) > n_keep:
+            trimmed = "<ts>".join(parts[-n_keep:])
             input_ids, speaker_ids = self._tokenize(trimmed)
-            if input_ids.shape[-1] <= target:
-                break
 
         if input_ids.shape[-1] > max_tokens:
             input_ids = input_ids[:, -max_tokens:]
             speaker_ids = speaker_ids[:, -max_tokens:]
 
-        self._clear_cache()
         return input_ids, speaker_ids
 
     def _tokenize(self, text: str) -> tuple[Tensor, Tensor]:
@@ -196,17 +202,20 @@ class TurnGPTWrapper(ITurnGPT):
                 if prefix_len == input_ids.shape[-1] == cached.shape[-1]:
                     return self._cached_trp_prob
 
-                sliced_past = _slice_past_pytorch(past, prefix_len)
-                new_ids = input_ids[:, prefix_len:]
-                new_speaker = speaker_ids[:, prefix_len:]
+                if prefix_len < input_ids.shape[-1]:
+                    sliced_past = _slice_past_pytorch(past, prefix_len)
+                    new_ids = input_ids[:, prefix_len:]
+                    new_speaker = speaker_ids[:, prefix_len:]
 
-                out = self._model(
-                    new_ids,
-                    speaker_ids=new_speaker,
-                    past_key_values=sliced_past,
-                    use_cache=True,
-                )
-                return self._pytorch_update_cache(input_ids, out)
+                    out = self._model(
+                        new_ids,
+                        speaker_ids=new_speaker,
+                        past_key_values=sliced_past,
+                        use_cache=True,
+                    )
+                    return self._pytorch_update_cache(input_ids, out)
+                # Input is a strict prefix of cached — fall through to
+                # full recompute.
 
         out = self._model(input_ids, speaker_ids=speaker_ids, use_cache=True)
         return self._pytorch_update_cache(input_ids, out)
@@ -235,17 +244,21 @@ class TurnGPTWrapper(ITurnGPT):
                 if prefix_len == input_ids.shape[-1] == cached.shape[-1]:
                     return self._cached_trp_prob
 
-                sliced_past = _slice_past_onnx(past, prefix_len)
-                new_ids = input_ids[:, prefix_len:]
-                new_speaker = speaker_ids[:, prefix_len:]
+                if prefix_len < input_ids.shape[-1]:
+                    sliced_past = _slice_past_onnx(past, prefix_len)
+                    new_ids = input_ids[:, prefix_len:]
+                    new_speaker = speaker_ids[:, prefix_len:]
 
-                trp, presents = self._onnx_run(
-                    new_ids, new_speaker, prefix_len, sliced_past,
-                )
-                self._cached_input_ids = input_ids
-                self._past_key_values = presents
-                self._cached_trp_prob = trp
-                return trp
+                    trp, presents = self._onnx_run(
+                        new_ids, new_speaker, prefix_len, sliced_past,
+                    )
+                    self._cached_input_ids = input_ids
+                    self._past_key_values = presents
+                    self._cached_trp_prob = trp
+                    return trp
+                # prefix_len == input_ids length but cached is longer:
+                # input is a strict prefix of cached — fall through to
+                # full recompute since we cannot reuse the longer cache.
 
         if self._onnx_has_kv:
             trp, presents = self._onnx_run(

@@ -136,6 +136,29 @@ class VAPConfig:
 
 
 @dataclass
+class MaAIVAPConfig:
+    """Configuration for the MaAI VAP wrapper (ONNX encoder + PyTorch transformer).
+
+    Attributes:
+        lang: Language code for MaAI model.
+        frame_rate: VAP inference frame rate in Hz.
+        context_len_sec: Encoder context length in seconds.
+        vad_threshold: Threshold for user_is_speaking derivation.
+        ort_threads: ONNX Runtime intra-op thread count.
+        pt_threads: PyTorch intra-op thread count.
+        use_torch_compile: Enable torch.compile for transformer acceleration.
+    """
+
+    lang: str = "en"
+    frame_rate: int = 10
+    context_len_sec: float = 5.0
+    vad_threshold: float = 0.5
+    ort_threads: int = 1
+    pt_threads: int = 1
+    use_torch_compile: bool = False
+
+
+@dataclass
 class TurnGPTConfig:
     """Configuration for the TurnGPT wrapper.
 
@@ -145,8 +168,12 @@ class TurnGPTConfig:
             instead of PyTorch for inference.
         tokenizer_path: Path to saved tokenizer directory (required for ONNX mode).
         device: Torch device string (PyTorch mode only).
-        max_context_tokens: Maximum token count before old turns are evicted.
-            GPT-2 position limit is 1024. 0 = no limit.
+        max_context_tokens: Maximum token count for the model input.
+            GPT-2 position limit is 1024. 0 = no limit. Acts as a hard
+            truncation safety net after turn-based eviction.
+        keep_turns: Number of most recent completed turns to keep when the
+            input exceeds max_context_tokens. The current incomplete turn
+            is always kept. 0 = keep only the current incomplete turn.
         onnx_threads: Number of intra-op threads for ONNX Runtime.
     """
 
@@ -155,6 +182,7 @@ class TurnGPTConfig:
     tokenizer_path: str = ""
     device: str = "cpu"
     max_context_tokens: int = 1024
+    keep_turns: int = 2
     onnx_threads: int = 2
 
 
