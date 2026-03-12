@@ -4,7 +4,7 @@ Profiles each stage (ONNX encoder, transformer, cache trim) per frame
 to identify which component causes latency spikes.
 
 Usage:
-    uv run python scripts/stress_test_vap.py \
+    uv run python scripts/bench/stress_test_vap.py \
         --audio CANDOR/raw_media_part_001/a29635a0-.../processed/a29635a0-...mp3 \
         --duration 120
 """
@@ -22,9 +22,9 @@ import onnxruntime as ort
 import soundfile as sf
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.dirname(__file__))
-from benchmark_maai_custom_pipeline import VapOnnxPipeline
+from vap_onnx_pipeline import VapOnnxPipeline
 
 
 def load_stereo_audio(path: str) -> tuple[np.ndarray, np.ndarray]:

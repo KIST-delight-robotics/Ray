@@ -3,13 +3,13 @@
 
 Usage:
     # 1) Test connection only (ping-pong)
-    python scripts/test_ws_connection.py --host 192.168.x.x
+    python scripts/hardware/test_ws_connection.py --host 192.168.x.x
 
     # 2) Send a short beep tone to verify audio playback
-    python scripts/test_ws_connection.py --host 192.168.x.x --send-tone
+    python scripts/hardware/test_ws_connection.py --host 192.168.x.x --send-tone
 
     # 3) Custom port
-    python scripts/test_ws_connection.py --host 192.168.x.x --port 8765
+    python scripts/hardware/test_ws_connection.py --host 192.168.x.x --port 8765
 """
 
 from __future__ import annotations

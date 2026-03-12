@@ -3,7 +3,7 @@
 Shows p_now (turn-shift probability) and VAD as console bars.
 
 Usage:
-    uv run python scripts/vap_console_view.py \
+    uv run python scripts/bench/vap_console_view.py \
         --audio CANDOR/raw_media_part_001/a29635a0-.../processed/a29635a0-...mp3 \
         --duration 60
 """
@@ -20,9 +20,9 @@ import numpy as np
 import soundfile as sf
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.dirname(__file__))
-from benchmark_maai_custom_pipeline import VapOnnxPipeline
+from vap_onnx_pipeline import VapOnnxPipeline
 
 
 def load_stereo_16k(path: str) -> tuple[np.ndarray, np.ndarray]:

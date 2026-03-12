@@ -1,7 +1,7 @@
 """Microphone + Wakeword integration test.
 
 Usage:
-    PYTHONPATH=. uv run python scripts/test_wakeword.py [--device INDEX] [--keyword WORD]
+    PYTHONPATH=. uv run python scripts/hardware/test_wakeword.py [--device INDEX] [--keyword WORD]
 
 Listens on mic and prints when the wakeword is detected.
 Press Ctrl+C to stop.

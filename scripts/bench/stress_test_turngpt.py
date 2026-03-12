@@ -8,8 +8,8 @@ turns accumulate with <ts> separators, and the dialog eventually hits the
 256-token context window triggering eviction. Conversations reset periodically.
 
 Usage:
-    uv run python scripts/stress_test_turngpt.py --duration 300
-    uv run python scripts/stress_test_turngpt.py --duration 600 --reset-interval 120
+    uv run python scripts/bench/stress_test_turngpt.py --duration 300
+    uv run python scripts/bench/stress_test_turngpt.py --duration 600 --reset-interval 120
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import tracemalloc
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from voice_pipeline.core.config import TurnGPTConfig
 from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper

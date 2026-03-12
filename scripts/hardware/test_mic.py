@@ -1,7 +1,7 @@
 """Quick microphone test using AudioInput.
 
 Usage:
-    uv run python scripts/test_mic.py [--device INDEX] [--seconds N]
+    uv run python scripts/hardware/test_mic.py [--device INDEX] [--seconds N]
 
 Records from mic, prints frame stats, and saves to test_recording.wav.
 """

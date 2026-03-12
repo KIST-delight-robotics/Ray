@@ -3,7 +3,7 @@
 Requires OPENAI_API_KEY env var.
 
 Usage:
-    uv run python scripts/generate_test_wav.py [--output-dir DIR]
+    uv run python scripts/tools/generate_test_wav.py [--output-dir DIR]
 
 Generates WAV files in the output directory (default: test_fixtures/).
 Each file is named with a sanitised version of its transcript.
@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 # Ensure project root is importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from voice_pipeline.core.config import TTSConfig
 from voice_pipeline.tts.tts import OpenAITTS
