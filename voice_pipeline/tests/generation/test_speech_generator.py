@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -531,6 +532,40 @@ class TestStaleRunDiscarded:
         assert gen.poll_audio() is None
 
         gen.shutdown()
+
+
+class TestExternalExecutor:
+    """External executor injection: works normally, shutdown doesn't close it."""
+
+    def test_external_executor_works(self):
+        cb, llm, tts = _make_deps()
+        executor = ThreadPoolExecutor(max_workers=2)
+
+        gen = SpeechGenerator(cb, llm, tts, executor=executor)
+
+        gen.prepare("hello")
+        _wait_for_stream_done(gen)
+        chunks = _drain_audio(gen)
+        assert len(chunks) == 2
+        assert gen.get_text() == "Hello there!"
+
+        gen.shutdown()
+        # External executor should still be alive
+        assert not executor._shutdown
+        executor.shutdown(wait=True)
+
+    def test_shutdown_does_not_close_external_executor(self):
+        cb, llm, tts = _make_deps()
+        executor = ThreadPoolExecutor(max_workers=2)
+
+        gen = SpeechGenerator(cb, llm, tts, executor=executor)
+        gen.shutdown()
+
+        # Verify executor is still functional by submitting work
+        future = executor.submit(lambda: 42)
+        assert future.result(timeout=1.0) == 42
+
+        executor.shutdown(wait=True)
 
 
 class TestCancelDoesNotSetFailed:

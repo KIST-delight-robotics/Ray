@@ -28,6 +28,7 @@ class SpeechGenerator(ISpeechGenerator):
         llm: ILLM,
         tts: ITTS,
         config: SpeechGeneratorConfig | None = None,
+        executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self._context_builder = context_builder
         self._llm = llm
@@ -38,7 +39,8 @@ class SpeechGenerator(ISpeechGenerator):
         self._state = GeneratorState.IDLE
         self._run_id = 0
         self._cancel_event = threading.Event()
-        self._executor = ThreadPoolExecutor(max_workers=self._config.max_workers)
+        self._owns_executor = executor is None
+        self._executor = executor or ThreadPoolExecutor(max_workers=self._config.max_workers)
         self._text = ""
         self._audio_queue: queue.Queue[bytes] = queue.Queue()
         self._response_data: ResponseData | None = None
@@ -124,10 +126,15 @@ class SpeechGenerator(ISpeechGenerator):
             self._stream_done = False
 
     def shutdown(self) -> None:
-        """Permanently shut down the executor. Call only at program exit."""
+        """Permanently shut down the executor. Call only at program exit.
+
+        If the executor was injected externally, only cancels in-flight work
+        without shutting down the executor (caller owns the lifecycle).
+        """
         with self._lock:
             self._cancel_event.set()
-        self._executor.shutdown(wait=True)
+        if self._owns_executor:
+            self._executor.shutdown(wait=True)
 
     # -- Background pipeline -------------------------------------------------
 
