@@ -108,6 +108,8 @@ def main() -> None:
         sm.run()
     finally:
         executor.shutdown(wait=True)
+        asr.stop()
+        bridge.disconnect()
         wakeword.close()
         led.close()
 
