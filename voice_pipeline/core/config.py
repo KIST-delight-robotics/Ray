@@ -137,7 +137,7 @@ class VAPConfig:
 
 @dataclass
 class MaAIVAPConfig:
-    """Configuration for the MaAI VAP wrapper (ONNX encoder + PyTorch transformer).
+    """Configuration for the MaAI VAP wrapper.
 
     Attributes:
         lang: Language code for MaAI model.
@@ -146,7 +146,9 @@ class MaAIVAPConfig:
         vad_threshold: Threshold for user_is_speaking derivation.
         ort_threads: ONNX Runtime intra-op thread count.
         pt_threads: PyTorch intra-op thread count.
-        use_torch_compile: Enable torch.compile for transformer acceleration.
+        use_torch_compile: Enable torch.compile for transformer (PyTorch mode only).
+        use_onnx_transformer: Use ONNX transformer instead of PyTorch.
+            When True, use_torch_compile is ignored.
     """
 
     lang: str = "en"
@@ -156,6 +158,7 @@ class MaAIVAPConfig:
     ort_threads: int = 1
     pt_threads: int = 1
     use_torch_compile: bool = True
+    use_onnx_transformer: bool = True
 
 
 @dataclass

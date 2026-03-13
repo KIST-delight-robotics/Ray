@@ -1,10 +1,13 @@
-"""MaAI VAP wrapper with ONNX encoder + PyTorch transformer.
+"""MaAI VAP wrapper with full ONNX or hybrid (ONNX encoder + PyTorch transformer).
 
-Uses ONNX Runtime for the CPC encoder (2 channels) and PyTorch for the
-GPT cross-attention transformer.  Optionally applies ``torch.compile``
-for ~22% transformer speedup on RPi 5.
+When ``use_onnx_transformer=True`` (default), both encoder and transformer
+run via ONNX Runtime — no PyTorch dependency at inference time.
+Mean latency ~24ms on RPi 5 (4.2x RTF at 10Hz).
 
-Optimal RPi 5 config: pt_threads=1, ort_threads=1 (single-threaded).
+When ``use_onnx_transformer=False``, falls back to ONNX encoder + PyTorch
+transformer with optional ``torch.compile``.
+
+Optimal RPi 5 config: ort_threads=1 (single-threaded).
 
 External dependency: ``maai`` package (cloned at ``external/MaAI/``).
 """
@@ -22,7 +25,10 @@ from voice_pipeline.core.config import AudioConfig, MaAIVAPConfig, TTSConfig
 from voice_pipeline.core.interfaces import IVAP
 from voice_pipeline.core.types import AudioFrame, VAPResult
 from voice_pipeline.turn_taking.exceptions import VAPError
-from voice_pipeline.turn_taking.onnx_export import export_encoder_onnx
+from voice_pipeline.turn_taking.onnx_export import (
+    export_encoder_onnx,
+    export_transformer_onnx,
+)
 
 logger = logging.getLogger("voice_pipeline.turn_taking.maai_vap")
 
@@ -50,6 +56,7 @@ class MaAIVAPWrapper(IVAP):
         self._config = config
         self._audio_config = audio_config
         self._robot_sample_rate = tts_config.output_sample_rate
+        self._use_onnx_transformer = config.use_onnx_transformer
 
         # Set thread counts before loading anything
         torch.set_num_threads(config.pt_threads)
@@ -75,33 +82,56 @@ class MaAIVAPWrapper(IVAP):
 
         self._vap = self._maai.vap
 
+        # ORT session options (shared by encoder and transformer)
+        sess_opts = ort.SessionOptions()
+        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_opts.intra_op_num_threads = config.ort_threads
+
         # Export and load ONNX encoder sessions
         try:
             onnx_path = export_encoder_onnx(self._maai, config.frame_rate)
-
-            sess_opts = ort.SessionOptions()
-            sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            sess_opts.intra_op_num_threads = config.ort_threads
-
             self._sess1 = ort.InferenceSession(onnx_path, sess_opts)
             self._sess2 = ort.InferenceSession(onnx_path, sess_opts)
-
             os.unlink(onnx_path)
         except Exception as exc:
             raise VAPError(f"Failed to create ONNX encoder sessions: {exc}") from exc
 
-        # Optional torch.compile
-        if config.use_torch_compile:
+        # Transformer setup
+        if self._use_onnx_transformer:
             try:
-                self._vap_forward = torch.compile(
-                    self._vap.forward, mode="reduce-overhead"
-                )
-                logger.info("torch.compile enabled for transformer")
-            except Exception:
-                logger.warning("torch.compile failed, falling back to eager mode", exc_info=True)
-                self._vap_forward = self._vap.forward
+                tfm_path = export_transformer_onnx(self._vap)
+                self._tfm_sess = ort.InferenceSession(tfm_path, sess_opts)
+                os.unlink(tfm_path)
+                logger.info("ONNX transformer loaded")
+            except Exception as exc:
+                raise VAPError(
+                    f"Failed to create ONNX transformer session: {exc}"
+                ) from exc
+
+            # Cache shape constants for ONNX transformer
+            conf = self._vap.conf
+            nh = conf.num_heads
+            hd = conf.dim // nh
+            self._n_ch_layers = len(list(self._vap.ar_channel.layers))
+            self._n_cross_layers = len(list(self._vap.ar.layers))
+            self._nh = nh
+            self._hd = hd
         else:
-            self._vap_forward = self._vap.forward
+            # PyTorch transformer with optional torch.compile
+            if config.use_torch_compile:
+                try:
+                    self._vap_forward = torch.compile(
+                        self._vap.forward, mode="reduce-overhead"
+                    )
+                    logger.info("torch.compile enabled for transformer")
+                except Exception:
+                    logger.warning(
+                        "torch.compile failed, falling back to eager mode",
+                        exc_info=True,
+                    )
+                    self._vap_forward = self._vap.forward
+            else:
+                self._vap_forward = self._vap.forward
 
         # Audio buffering constants
         self._frame_rate = config.frame_rate
@@ -119,11 +149,15 @@ class MaAIVAPWrapper(IVAP):
         self._vap_cache: dict | None = None
         self._cached_result = _DEFAULT_RESULT
 
+        mode = "onnx" if self._use_onnx_transformer else "pytorch"
         logger.info(
             "MaAIVAPWrapper initialized: frame_rate=%d, context=%.1fs, "
-            "pt_threads=%d, ort_threads=%d, torch_compile=%s",
-            config.frame_rate, config.context_len_sec,
-            config.pt_threads, config.ort_threads, config.use_torch_compile,
+            "ort_threads=%d, pt_threads=%d, transformer=%s",
+            config.frame_rate,
+            config.context_len_sec,
+            config.ort_threads,
+            config.pt_threads,
+            mode,
         )
 
     def feed_audio(
@@ -165,7 +199,7 @@ class MaAIVAPWrapper(IVAP):
     def _process_frame(
         self, x1: np.ndarray, x2: np.ndarray
     ) -> VAPResult | None:
-        """Run one frame through ONNX encoder + PyTorch transformer."""
+        """Run one frame through ONNX encoder + transformer."""
         # Audio buffering
         self._buf_x1 = np.concatenate([self._buf_x1, x1])
         self._buf_x2 = np.concatenate([self._buf_x2, x2])
@@ -185,11 +219,86 @@ class MaAIVAPWrapper(IVAP):
         )
 
         # Transformer forward
+        if self._use_onnx_transformer:
+            out = self._process_transformer_onnx(e1_np, e2_np)
+        else:
+            out = self._process_transformer_pytorch(e1_np, e2_np)
+
+        # Buffer trimming
+        self._buf_x1 = self._buf_x1[-self._frame_contxt_padding :].copy()
+        self._buf_x2 = self._buf_x2[-self._frame_contxt_padding :].copy()
+
+        # Convert to VAPResult
+        p_now = float(out["p_now"])
+        p_fut = float(out["p_future"])
+        user_is_speaking = float(out["vad"][0]) > self._config.vad_threshold
+
+        return VAPResult(p_now, p_fut, user_is_speaking)
+
+    def _process_transformer_onnx(
+        self, e1_np: np.ndarray, e2_np: np.ndarray
+    ) -> dict:
+        """Run transformer via ONNX Runtime."""
+        limit = self._audio_context_len - 1
+
+        # Build cache inputs
+        if self._vap_cache is None:
+            empty_ch = np.zeros(
+                (self._n_ch_layers, 1, self._nh, 0, self._hd), dtype=np.float32
+            )
+            empty_cr = np.zeros(
+                (self._n_cross_layers, 1, self._nh, 0, self._hd), dtype=np.float32
+            )
+            cache = {
+                "ar1_k": empty_ch, "ar1_v": empty_ch.copy(),
+                "ar2_k": empty_ch.copy(), "ar2_v": empty_ch.copy(),
+                "cross1_k": empty_cr, "cross1_v": empty_cr.copy(),
+                "cross2_k": empty_cr.copy(), "cross2_v": empty_cr.copy(),
+                "cross1_c_k": empty_cr.copy(), "cross1_c_v": empty_cr.copy(),
+                "cross2_c_k": empty_cr.copy(), "cross2_c_v": empty_cr.copy(),
+            }
+        else:
+            cache = self._vap_cache
+
+        # Run
+        inputs = {"x1": e1_np, "x2": e2_np, **cache}
+        outputs = self._tfm_sess.run(None, inputs)
+        out_names = [o.name for o in self._tfm_sess.get_outputs()]
+        result = dict(zip(out_names, outputs))
+
+        # Update cache with trimming
+        new_cache = {
+            "ar1_k": result["out_ar1_k"], "ar1_v": result["out_ar1_v"],
+            "ar2_k": result["out_ar2_k"], "ar2_v": result["out_ar2_v"],
+            "cross1_k": result["out_cross1_k"], "cross1_v": result["out_cross1_v"],
+            "cross2_k": result["out_cross2_k"], "cross2_v": result["out_cross2_v"],
+            "cross1_c_k": result["out_cross1_c_k"],
+            "cross1_c_v": result["out_cross1_c_v"],
+            "cross2_c_k": result["out_cross2_c_k"],
+            "cross2_c_v": result["out_cross2_c_v"],
+        }
+        for name, arr in new_cache.items():
+            if arr.ndim >= 4 and arr.shape[3] > limit:
+                new_cache[name] = arr[:, :, :, -limit:, :]
+        self._vap_cache = new_cache
+
+        return {
+            "p_now": result["p_now"][0],
+            "p_future": result["p_future"][0],
+            "vad": [float(result["vad1"]), float(result["vad2"])],
+        }
+
+    def _process_transformer_pytorch(
+        self, e1_np: np.ndarray, e2_np: np.ndarray
+    ) -> dict:
+        """Run transformer via PyTorch (fallback path)."""
         e1 = torch.from_numpy(e1_np)
         e2 = torch.from_numpy(e2_np)
 
         with torch.inference_mode():
-            out, self._vap_cache = self._vap_forward(e1, e2, cache=self._vap_cache)
+            out, self._vap_cache = self._vap_forward(
+                e1, e2, cache=self._vap_cache
+            )
 
         # Cache trimming
         if self._vap_cache is not None:
@@ -208,16 +317,15 @@ class MaAIVAPWrapper(IVAP):
                 )
             self._vap_cache = new_cache
 
-        # Buffer trimming
-        self._buf_x1 = self._buf_x1[-self._frame_contxt_padding:].copy()
-        self._buf_x2 = self._buf_x2[-self._frame_contxt_padding:].copy()
-
-        # Convert MaAI output to VAPResult
-        p_now = float(out["p_now"])
-        p_fut = float(out["p_future"])
-        user_is_speaking = float(out["vad"][0]) > self._config.vad_threshold
-
-        return VAPResult(p_now, p_fut, user_is_speaking)
+        # Normalize to same format as ONNX path:
+        # VapGPT.forward() returns p_now/p_future as [speaker1, speaker2] lists.
+        p_now = out["p_now"]
+        p_fut = out["p_future"]
+        return {
+            "p_now": p_now[0] if isinstance(p_now, list) else p_now,
+            "p_future": p_fut[0] if isinstance(p_fut, list) else p_fut,
+            "vad": out["vad"],
+        }
 
     def _pcm_to_numpy(self, pcm: bytes) -> np.ndarray:
         """Convert 16-bit PCM bytes to float32 numpy array normalized to [-1, 1]."""
