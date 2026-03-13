@@ -4,7 +4,39 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 
 ## Current Status
 
-Session factory 리팩터링 + main 엔트리 포인트 완료. 522 tests pass.
+배치 드레인 + mock C++ 서버 + config 기본값 작업 완료. 531 tests pass.
+
+### 완료된 작업 (2026-03-12, 배치 드레인 + mock 서버 + config)
+
+**1. 추론 지연 시 프레임 배치 드레인 (Orchestrator + TurnDetector)**
+- **문제**: VAP/TurnGPT 추론이 30ms 프레임 예산 초과 시 오디오 큐에 프레임이 밀림
+- **해결**: `_run_frame()`에서 첫 프레임 후 밀린 프레임을 non-blocking drain → ASR 개별 feed → 유저 오디오 concat → TurnDetector 1회 호출 + `frame_count` 전달
+- **변경 파일**:
+  - `core/interfaces.py`: `ITurnDetector.process_frame`에 `frame_count: int = 1` 추가
+  - `turn_taking/turn_detector.py`: 타이머 증분을 `frame_duration_sec * frame_count`로 보정 (silence, vap_favor_robot, last_asr_change)
+  - `orchestrator/orchestrator.py`: `_drain_available_frames()` 추가, `_MAX_BATCH_FRAMES = 10` 상한, `_process_turn_detector`에 frame_count 전달
+  - `turn_taking/vap.py`: step counter 잔여 샘플 보존 (`= 0` → `%= self._step_samples`)
+
+**2. mock C++ WebSocket 서버 (`mock_cpp_server.py`)**
+- C++ 프로세스 없이 전체 파이프라인 테스트용 PyAudio 재생 서버
+- 프로토콜: stream_start/audio/audio_end/stop/play_file ↔ playback_started/playback_complete
+- `AudioPlayer`: `stop_event` + `end_of_stream` 이벤트 기반 즉시 중단 (큐 sentinel 방식 X)
+- `MockCppServer`: `ws.recv(timeout=0.05)` 폴링 + `response_queue` + `_monitor_completion` 스레드로 메시지 수신/재생 완료 분리 → stop 메시지를 재생 중에도 수신 가능
+- 검증 완료: normal flow, barge-in (stop after audio_end), stop before audio_end — 모두 playback_complete 1회, duplicate 없음
+
+**3. config 기본값에 모델 경로 설정**
+- `VAPConfig.model_path`: `"external/VoiceActivityProjection/example/VAP_3mmz3t0u_50Hz_ad20s_134-epoch9-val_2.56.pt"`
+- `TurnGPTConfig.onnx_model_path`: `"models/turngpt/turngpt_v2_kvcache_int8.onnx"`
+- `TurnGPTConfig.tokenizer_path`: `"models/turngpt/tokenizer"`
+- PyTorch 백엔드 테스트에 `onnx_model_path=""` 명시 추가 (ONNX 기본값이 비어있지 않으므로)
+- config 기본값 테스트는 경로 하드코딩 대신 `assert cfg.model_path` (truthy 체크)
+
+### 미완료 — 다음 세션에서 진행
+
+**#2+#5 배치 드레인 시 robot_audio 비대칭 + 배치 내 상태 전이 누락**
+- 현재: 5프레임 배치에서 유저 오디오 150ms / 로봇 오디오 30ms 1개 → VAP 버퍼에 120ms 공백
+- 현재: 배치 중간에 유저가 말을 멈춰도 마지막 VAP 결과만 보고 전체 배치를 침묵으로 처리 → 턴 시프트 조기 발생 가능
+- **계획된 해결**: 배치 내 프레임별로 VAP `feed_audio`만 호출 (추론은 step 간격 유지), TurnGPT는 1회만. 이러면 robot_audio도 프레임별 전달, 상태 전이도 정확 추적. VAP feed_audio 자체는 버퍼 append만이라 성능 영향 없음.
 
 ### 완료된 작업 (2026-03-12, session factory + entry point)
 - **3단계 생명주기 모델 도입**: process-level (모델/API/executor) → session-level (factory 재생성) → turn-level (reset)
