@@ -90,6 +90,9 @@
 - **배치 처리 무의미**: No-cache 배치(N frames)는 KV cache + 1 frame보다 느림. KV cache가 이미 반복 연산을 제거하므로 텐서 크기를 키워도 추가 이점 없음.
 - **torch.compile 한계**: Inductor가 그래프를 fuse하지만, 작은 텐서([1,1,256]) 연산에서 커널 launch + 메모리 할당 오버헤드가 남아 이론치(0.4ms) 대비 32ms. PyTorch 안에서 추가 개선 어려움. 10ms 이하를 원하면 트랜스포머도 ONNX export 필요.
 - **동시 실행 안정적**: VAP(10Hz, compile=ON) + TurnGPT(3Hz, ONNX int8) 동시 실행 시 CPU 34%, 두 모델 모두 budget 내 안정적. ASR/LLM/TTS에 ~60% 여유.
+- **`use_onnx_transformer` default → True**: Transformer를 ONNX export하여 전체 파이프라인(encoder+transformer)을 ORT로 실행. PyTorch dispatch overhead 완전 제거. Mean 24ms (vs PyTorch 106ms, 3.9x speedup). Budget 초과 0% (PyTorch 35.5%). `torch.compile` warmup 100프레임 문제도 해소. ONNX 변환 시 dict KV cache → 12개 flat stacked tensor로 변환. ALiBi 마스크 pre-compute. Cross-attention source 순서 주의 필요 (원본 입력을 src로 전달, 업데이트된 값 아님). 수치 차이 max 6.8e-6 (1,200프레임 CANDOR 실제 음성).
+- **ORT 싱글스레드 최적 유지**: Transformer ONNX 추가 후에도 `ort_threads=1`이 최적. `ort_threads=4`는 스레드 동기화 비용으로 2x 느려짐 (48ms vs 24ms). PyTorch threads는 전체 ONNX 파이프라인에서 영향 없음 (ORT가 자체 스레드풀 사용).
+- **PyTorch `p_now` 리스트 반환 버그**: `VapGPT.forward()`가 `p_now`을 `[speaker1, speaker2]` 리스트로 반환. 기존 코드 `float(out["p_now"])`은 항상 실패하지만 integration test 없어 미발견. `_process_transformer_pytorch`에서 `p_now[0]` 추출로 수정.
 
 ### TurnDetector (`turn_taking/turn_detector.py`)
 

@@ -96,13 +96,57 @@ Combines VAP and TurnGPT outputs with timing heuristics. No external dependencie
 | `prepare_timeout_sec` | `0.2` | Time since last ASR change to trigger prepare |
 | `prepare_similarity_threshold` | `0.8` | Skip prepare if text similarity ≥ this |
 
+### MaAI VAP
+
+Repository: <https://github.com/Seongbuming/MaAI>
+
+#### Setup
+
+```bash
+git clone https://github.com/Seongbuming/MaAI.git external/MaAI
+uv pip install -e external/MaAI
+```
+
+#### Backends
+
+**Full ONNX** (default, recommended): Both CPC encoder and GPT transformer run via ONNX Runtime. No PyTorch inference at runtime. Mean latency ~24ms on RPi 5.
+
+**Hybrid** (`use_onnx_transformer=False`): ONNX encoder + PyTorch transformer. Optional `torch.compile` for ~22% speedup. Useful if ONNX export fails for a new model variant.
+
+Both ONNX models are auto-exported from the loaded MaAI weights at initialization. No manual export step needed.
+
+#### Config
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `lang` | `"en"` | Language code for MaAI model |
+| `frame_rate` | `10` | VAP inference frame rate (Hz) |
+| `context_len_sec` | `5.0` | KV cache context length (seconds) |
+| `vad_threshold` | `0.5` | Threshold for `user_is_speaking` |
+| `ort_threads` | `1` | ONNX Runtime intra-op threads. 1 is optimal on RPi 5 |
+| `pt_threads` | `1` | PyTorch threads (minimal impact in full ONNX mode) |
+| `use_onnx_transformer` | `True` | Use ONNX transformer (True) or PyTorch (False) |
+| `use_torch_compile` | `True` | Enable torch.compile (PyTorch mode only) |
+
+#### RPi 5 Performance (full ONNX, ort_threads=1)
+
+| Stage | Mean | % of Total |
+|-------|------|------------|
+| Encoder (2ch) | 16.2ms | 67% |
+| Transformer | 7.8ms | 32% |
+| Total | **24.0ms** | 100% |
+
+RTF: 4.16x (100ms budget). Budget exceeded: 0%.
+
 ## Module Structure
 
 ```
 turn_taking/
 ├── __init__.py
 ├── exceptions.py       # TurnTakingError, VAPError, TurnGPTError, TurnDetectorError
-├── vap.py              # VAPWrapper(IVAP)
+├── vap.py              # VAPWrapper(IVAP) — VAP-Realtime
+├── maai_vap.py         # MaAIVAPWrapper(IVAP) — MaAI VAP (ONNX)
+├── onnx_export.py      # ONNX export wrappers (encoder + transformer)
 ├── turngpt.py          # TurnGPTWrapper(ITurnGPT)
 ├── turn_detector.py    # TurnDetector(ITurnDetector)
 └── README.md

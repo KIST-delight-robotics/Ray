@@ -4,7 +4,45 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 
 ## Current Status
 
-#2 robot_audio 비대칭 수정 + 마이크 에러 전파 완료. 538 tests pass.
+VAP transformer ONNX 변환 완료. 전체 ONNX 파이프라인(enc+tfm) 프로덕션 통합. 538 unit + 15 integration tests pass.
+
+### 완료된 작업 (2026-03-13, VAP transformer ONNX)
+
+**1. Transformer ONNX export (`onnx_export.py`)**
+- `TransformerONNXWrapper`: dict KV cache → 12개 flat stacked tensor I/O
+- ALiBi 마스크 pre-compute + 슬라이싱 (상태 변이 제거)
+- einops → `torch.permute` 교체
+- Cross-attention 순서 보존: `z1_in/z2_in` 저장 후 원본을 cross-attn source로 전달
+- `export_transformer_onnx()`: opset 17, dynamic axes on T_cached/T_total
+
+**2. 수치 동일성 검증**
+- Transformer 단독 (500 synthetic frames): max diff 1.5e-6, PASSED
+- Full pipeline enc+tfm (300 synthetic frames): max diff 2.0e-6, PASSED
+- Full pipeline CANDOR 실제 음성 120초 (1,200 frames): max diff 6.8e-6, drift 없음, PASSED
+
+**3. 성능 (CANDOR 120초, RPi 5, ort=1)**
+
+| 단계 | Mean | 비중 |
+|------|------|------|
+| ONNX Encoder (2ch) | 16.2ms | 67.4% |
+| ONNX Transformer | 7.8ms | 32.4% |
+| Cache+trim | 0.1ms | 0.3% |
+| **Total** | **24.0ms** | 100% |
+
+- RTF: 4.16x (budget 100ms의 76% 여유)
+- Budget 초과: 0% (1,200프레임 중 0건)
+- vs PyTorch: 106.2ms → 24.0ms (3.9x speedup)
+- 스레드 스윕: ORT=1이 최적, ORT=4는 2x 느려짐
+
+**4. 프로덕션 통합 (`maai_vap.py`)**
+- `MaAIVAPConfig.use_onnx_transformer` (기본값 True)
+- `_process_transformer_onnx()`: numpy KV cache, ORT 추론
+- `_process_transformer_pytorch()`: 기존 경로 (fallback)
+- PyTorch `p_now` 리스트 반환 형식 버그 수정 (`float([a,b])` → `float(a)`)
+
+**5. Integration test (`test_maai_vap_integration.py`)**
+- 15 tests: BasicOperation(3), Stereo(2), Reset(2), TurnCycle(2), OnnxPytorchEquivalence(4), PyTorchMode(2)
+- ONNX vs PyTorch 수치 일치 검증 (< 1e-4)
 
 ### 완료된 작업 (2026-03-13, robot_audio 비대칭 + 마이크 에러)
 
