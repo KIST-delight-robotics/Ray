@@ -284,19 +284,6 @@ class TestPrepare:
 
         mocks["generator"].prepare.assert_called_once_with("how are you")
 
-    def test_prepare_combines_text_during_awaiting(self) -> None:
-        """Prepare during awaiting combines saved and current text."""
-        orch, mocks = _make_orchestrator()
-        orch._start_session()
-        orch._awaiting_response = True
-        orch._saved_user_text = "hello"
-        mocks["asr"].get_text.return_value = "world"
-        mocks["turn_detector"].process_frame.return_value = TurnDecision(prepare=True)
-
-        q = _audio_queue_with(_frame())
-        orch._run_frame(q)
-
-        mocks["generator"].prepare.assert_called_once_with("hello world")
 
 
 # ---------------------------------------------------------------------------

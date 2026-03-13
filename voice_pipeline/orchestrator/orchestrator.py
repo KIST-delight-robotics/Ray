@@ -356,14 +356,10 @@ class Orchestrator:
         return False
 
     def _handle_prepare(self, text: str) -> None:
-        """Cancel current generation and restart with new text."""
-        if self._awaiting_response and self._saved_user_text:
-            combined = self._saved_user_text + " " + text
-        else:
-            combined = text
+        """Start speculative generation with current text."""
         self._pending_truncation = None
-        self._generator.prepare(combined)
-        self._prepared_text = combined
+        self._generator.prepare(text)
+        self._prepared_text = text
 
     def _handle_interrupt(self) -> None:
         """Handle interrupt signal from TurnDetector."""
