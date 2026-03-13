@@ -62,6 +62,11 @@ class AudioInput(IAudioInput):
             self._thread.join(timeout=2.0)
             self._thread = None
 
+    @property
+    def error(self) -> Exception | None:
+        """Return the captured error if the capture thread has died."""
+        return self._error
+
     def _capture_loop(self) -> None:
         """Thread target: open stream, read frames, push to queue."""
         pa = None

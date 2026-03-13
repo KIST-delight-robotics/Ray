@@ -631,6 +631,14 @@ class IAudioInput(ABC):
     def stop(self) -> None:
         """Stop capturing audio and release resources."""
 
+    @property
+    @abstractmethod
+    def error(self) -> Exception | None:
+        """Return the captured error if the capture thread has died.
+
+        Returns None if the thread is running normally.
+        """
+
 
 # ---------------------------------------------------------------------------
 # SessionManager

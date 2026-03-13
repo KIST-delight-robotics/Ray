@@ -6,6 +6,8 @@ import threading
 import time
 from unittest.mock import MagicMock
 
+import pytest
+
 from voice_pipeline.core.config import SessionConfig
 from voice_pipeline.core.types import (
     AudioFrame,
@@ -39,6 +41,7 @@ def _make_session_manager(
     }
 
     # Defaults
+    mocks["audio_input"].error = None
     mocks["wakeword"].feed_audio.return_value = False
     mocks["bridge"].poll_event.return_value = None
     mocks["orchestrator"].request_stop = MagicMock()
@@ -243,6 +246,18 @@ class TestSleep:
 
         # Should exit without transitioning
         assert sm._mode == SystemMode.SLEEP
+
+
+class TestAudioInputError:
+    def test_mic_failure_propagates_error(self) -> None:
+        """Mic capture thread death raises the stored error in SLEEP loop."""
+        sm, mocks = _make_session_manager()
+
+        mic_error = OSError("No such device")
+        mocks["audio_input"].error = mic_error
+
+        with pytest.raises(OSError, match="No such device"):
+            sm._run_sleep()
 
 
 class TestActive:

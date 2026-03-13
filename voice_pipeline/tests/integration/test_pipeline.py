@@ -290,6 +290,10 @@ class FakeAudioInput(IAudioInput):
     def stop(self) -> None:
         pass
 
+    @property
+    def error(self) -> Exception | None:
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Helpers
