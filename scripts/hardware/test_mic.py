@@ -28,7 +28,11 @@ def list_devices() -> None:
     for i in range(pa.get_device_count()):
         info = pa.get_device_info_by_index(i)
         if info["maxInputChannels"] > 0:
-            print(f"  [{i}] {info['name']}  (channels={info['maxInputChannels']}, rate={info['defaultSampleRate']})")
+            print(
+                f"  [{i}] {info['name']}"
+                f"  (channels={info['maxInputChannels']},"
+                f" rate={info['defaultSampleRate']})"
+            )
     print()
     pa.terminate()
 
@@ -62,8 +66,10 @@ def main() -> None:
     input_config = AudioInputConfig(device_index=args.device)
     audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
 
-    print(f"Recording for {args.seconds}s  (rate={audio_config.sample_rate}, "
-          f"frame={audio_config.frame_duration_ms}ms, device={args.device or 'default'})")
+    print(
+        f"Recording for {args.seconds}s  (rate={audio_config.sample_rate}, "
+        f"frame={audio_config.frame_duration_ms}ms, device={args.device or 'default'})"
+    )
     print("Speak into the microphone...\n")
 
     audio_input = AudioInput(audio_queue, audio_config, input_config)
@@ -83,7 +89,11 @@ def main() -> None:
                 rms = compute_rms(frame)
                 bar = "#" * min(int(rms / 200), 50)
                 elapsed = time.monotonic() - start
-                print(f"\r  [{elapsed:5.1f}s] frames={frame_count:4d}  rms={rms:6.0f}  {bar:<50s}", end="", flush=True)
+                print(
+                    f"\r  [{elapsed:5.1f}s] frames={frame_count:4d}  rms={rms:6.0f}  {bar:<50s}",
+                    end="",
+                    flush=True,
+                )
             except queue.Empty:
                 dropped += 1
     except KeyboardInterrupt:
@@ -91,7 +101,8 @@ def main() -> None:
     finally:
         audio_input.stop()
 
-    print(f"\n\nDone. Captured {frame_count} frames ({len(frames) * audio_config.frame_duration_ms / 1000:.1f}s)")
+    duration_s = len(frames) * audio_config.frame_duration_ms / 1000
+    print(f"\n\nDone. Captured {frame_count} frames ({duration_s:.1f}s)")
 
     if audio_input._error:
         print(f"ERROR: {audio_input._error}")

@@ -68,6 +68,7 @@ def pytorch_cache_to_numpy(
     cache: dict | None, n_ch_layers: int, n_cross_layers: int, num_heads: int, head_dim: int
 ) -> dict[str, np.ndarray]:
     """Convert PyTorch dict cache → flat numpy arrays for ORT."""
+
     def _stack_or_empty(cache_entry, n_layers):
         if cache_entry is None:
             return (
@@ -84,12 +85,18 @@ def pytorch_cache_to_numpy(
         empty_ch = np.zeros((n_ch_layers, 1, num_heads, 0, head_dim), dtype=np.float32)
         empty_cr = np.zeros((n_cross_layers, 1, num_heads, 0, head_dim), dtype=np.float32)
         return {
-            "ar1_k": empty_ch, "ar1_v": empty_ch.copy(),
-            "ar2_k": empty_ch.copy(), "ar2_v": empty_ch.copy(),
-            "cross1_k": empty_cr, "cross1_v": empty_cr.copy(),
-            "cross2_k": empty_cr.copy(), "cross2_v": empty_cr.copy(),
-            "cross1_c_k": empty_cr.copy(), "cross1_c_v": empty_cr.copy(),
-            "cross2_c_k": empty_cr.copy(), "cross2_c_v": empty_cr.copy(),
+            "ar1_k": empty_ch,
+            "ar1_v": empty_ch.copy(),
+            "ar2_k": empty_ch.copy(),
+            "ar2_v": empty_ch.copy(),
+            "cross1_k": empty_cr,
+            "cross1_v": empty_cr.copy(),
+            "cross2_k": empty_cr.copy(),
+            "cross2_v": empty_cr.copy(),
+            "cross1_c_k": empty_cr.copy(),
+            "cross1_c_v": empty_cr.copy(),
+            "cross2_c_k": empty_cr.copy(),
+            "cross2_c_v": empty_cr.copy(),
         }
 
     ar1_k, ar1_v = _stack_or_empty(cache.get("ar1"), n_ch_layers)
@@ -100,12 +107,18 @@ def pytorch_cache_to_numpy(
     c2c_k, c2c_v = _stack_or_empty(cache.get("cross2_c"), n_cross_layers)
 
     return {
-        "ar1_k": ar1_k, "ar1_v": ar1_v,
-        "ar2_k": ar2_k, "ar2_v": ar2_v,
-        "cross1_k": c1_k, "cross1_v": c1_v,
-        "cross2_k": c2_k, "cross2_v": c2_v,
-        "cross1_c_k": c1c_k, "cross1_c_v": c1c_v,
-        "cross2_c_k": c2c_k, "cross2_c_v": c2c_v,
+        "ar1_k": ar1_k,
+        "ar1_v": ar1_v,
+        "ar2_k": ar2_k,
+        "ar2_v": ar2_v,
+        "cross1_k": c1_k,
+        "cross1_v": c1_v,
+        "cross2_k": c2_k,
+        "cross2_v": c2_v,
+        "cross1_c_k": c1c_k,
+        "cross1_c_v": c1c_v,
+        "cross2_c_k": c2c_k,
+        "cross2_c_v": c2c_v,
     }
 
 
@@ -120,27 +133,37 @@ def run_ort_frame(
     outputs = sess.run(None, inputs)
 
     out_names = [o.name for o in sess.get_outputs()]
-    result = dict(zip(out_names, outputs))
+    result = dict(zip(out_names, outputs, strict=False))
 
     scalar_out = {
-        "p_now": result["p_now"].tolist(),      # list of 2 floats
-        "p_future": result["p_future"].tolist(), # list of 2 floats
+        "p_now": result["p_now"].tolist(),  # list of 2 floats
+        "p_future": result["p_future"].tolist(),  # list of 2 floats
         "vad": [float(result["vad1"]), float(result["vad2"])],
     }
 
     new_cache = {
-        "ar1_k": result["out_ar1_k"], "ar1_v": result["out_ar1_v"],
-        "ar2_k": result["out_ar2_k"], "ar2_v": result["out_ar2_v"],
-        "cross1_k": result["out_cross1_k"], "cross1_v": result["out_cross1_v"],
-        "cross2_k": result["out_cross2_k"], "cross2_v": result["out_cross2_v"],
-        "cross1_c_k": result["out_cross1_c_k"], "cross1_c_v": result["out_cross1_c_v"],
-        "cross2_c_k": result["out_cross2_c_k"], "cross2_c_v": result["out_cross2_c_v"],
+        "ar1_k": result["out_ar1_k"],
+        "ar1_v": result["out_ar1_v"],
+        "ar2_k": result["out_ar2_k"],
+        "ar2_v": result["out_ar2_v"],
+        "cross1_k": result["out_cross1_k"],
+        "cross1_v": result["out_cross1_v"],
+        "cross2_k": result["out_cross2_k"],
+        "cross2_v": result["out_cross2_v"],
+        "cross1_c_k": result["out_cross1_c_k"],
+        "cross1_c_v": result["out_cross1_c_v"],
+        "cross2_c_k": result["out_cross2_c_k"],
+        "cross2_c_v": result["out_cross2_c_v"],
     }
 
     return scalar_out, new_cache
 
 
-def get_encoder_embeddings(maai, x1_audio: np.ndarray, x2_audio: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+def get_encoder_embeddings(
+    maai,
+    x1_audio: np.ndarray,
+    x2_audio: np.ndarray,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Get encoder embeddings from audio using MaAI's encoder."""
     vap = maai.vap
     with torch.inference_mode():
@@ -159,7 +182,7 @@ def run_verification(
     max_seconds: float | None = None,
 ):
     print(f"\n{'=' * 70}")
-    print(f"  VAP Transformer ONNX Equivalence Verification")
+    print("  VAP Transformer ONNX Equivalence Verification")
     print(f"{'=' * 70}")
     print(f"  Mode        : {'Real audio' if audio_path else 'Synthetic'}")
     print(f"  Frame rate  : {frame_rate}Hz")
@@ -178,8 +201,10 @@ def run_verification(
     head_dim = conf.dim // num_heads
     n_ch_layers = len(list(vap.ar_channel.layers))
     n_cross_layers = len(list(vap.ar.layers))
-    print(f"  Model       : dim={conf.dim}, heads={num_heads}, "
-          f"ch_layers={n_ch_layers}, cross_layers={n_cross_layers}")
+    print(
+        f"  Model       : dim={conf.dim}, heads={num_heads}, "
+        f"ch_layers={n_ch_layers}, cross_layers={n_cross_layers}"
+    )
 
     # Export ONNX transformer
     print("  Exporting transformer ONNX...")
@@ -198,6 +223,7 @@ def run_verification(
     # Prepare audio frames
     if audio_path:
         import soundfile as sf
+
         data, sr = sf.read(audio_path, dtype="float32")
         if data.ndim == 1:
             raise ValueError(f"Expected stereo: {audio_path}")
@@ -223,11 +249,9 @@ def run_verification(
         # Feed audio through encoder in chunks matching frame size.
         padding = 320
         samples_per_frame = 16000 // frame_rate
-        audio_frame_size = samples_per_frame + padding
         n_frames = len(ch1_full) // samples_per_frame
         print(f"  Audio       : {total_sec:.1f}s, {n_frames} frames")
     else:
-        n_frames = n_frames
         print(f"  Frames      : {n_frames} (synthetic embeddings)")
 
     # Run comparison
@@ -281,7 +305,7 @@ def run_verification(
         # Compare (p_now/p_future are lists of 2 floats)
         def _max_diff(a, b):
             if isinstance(a, list) and isinstance(b, list):
-                return max(abs(ai - bi) for ai, bi in zip(a, b))
+                return max(abs(ai - bi) for ai, bi in zip(a, b, strict=False))
             return abs(a - b)
 
         d_pnow = _max_diff(pt_out["p_now"], ort_out["p_now"])
@@ -312,7 +336,7 @@ def run_verification(
         if (i + 1) % 100 == 0:
             elapsed = time.perf_counter() - t_start
             print(
-                f"    frame {i+1:5d} | "
+                f"    frame {i + 1:5d} | "
                 f"pnow={max(diffs_pnow):.7f} pfut={max(diffs_pfut):.7f} "
                 f"vad={max(diffs_vad):.7f} | {elapsed:.1f}s"
             )
@@ -333,7 +357,7 @@ def run_verification(
             f"p99={np.percentile(arr, 99):.7f}"
         )
 
-    print(f"\n  --- Numerical Equivalence ---")
+    print("\n  --- Numerical Equivalence ---")
     stats("p_now", diffs_pnow)
     stats("p_future", diffs_pfut)
     stats("vad", diffs_vad)
@@ -343,10 +367,14 @@ def run_verification(
     pt_arr = np.array(lats_pt) * 1000
     ort_arr = np.array(lats_ort) * 1000
     print(f"\n  --- Latency (transformer only, budget={budget_ms:.0f}ms) ---")
-    print(f"  {'PyTorch':<12}: mean={pt_arr.mean():.1f}ms  "
-          f"median={np.median(pt_arr):.1f}ms  p95={np.percentile(pt_arr, 95):.1f}ms")
-    print(f"  {'ONNX ORT':<12}: mean={ort_arr.mean():.1f}ms  "
-          f"median={np.median(ort_arr):.1f}ms  p95={np.percentile(ort_arr, 95):.1f}ms")
+    print(
+        f"  {'PyTorch':<12}: mean={pt_arr.mean():.1f}ms  "
+        f"median={np.median(pt_arr):.1f}ms  p95={np.percentile(pt_arr, 95):.1f}ms"
+    )
+    print(
+        f"  {'ONNX ORT':<12}: mean={ort_arr.mean():.1f}ms  "
+        f"median={np.median(ort_arr):.1f}ms  p95={np.percentile(ort_arr, 95):.1f}ms"
+    )
 
     if ort_arr.mean() > 0:
         speedup = pt_arr.mean() / ort_arr.mean()
@@ -358,7 +386,7 @@ def run_verification(
         first_max = max(max(diffs_pnow[:mid]), max(diffs_pfut[:mid]), max(diffs_vad[:mid]))
         second_max = max(max(diffs_pnow[mid:]), max(diffs_pfut[mid:]), max(diffs_vad[mid:]))
         drift = second_max / first_max if first_max > 0 else 1.0
-        print(f"\n  Drift check:")
+        print("\n  Drift check:")
         print(f"    1st half max: {first_max:.7f}")
         print(f"    2nd half max: {second_max:.7f}")
         print(f"    Ratio       : {drift:.2f}x {'WARNING' if drift > 10 else 'OK'}")

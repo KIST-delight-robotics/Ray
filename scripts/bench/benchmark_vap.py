@@ -21,7 +21,6 @@ import time
 
 import torch
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -66,7 +65,8 @@ def print_stats(label: str, latencies: list[float], step_sec: float) -> None:
     print(f"  P95         : {p95 * 1000:8.1f} ms")
     print(f"  P99         : {p99 * 1000:8.1f} ms")
     print(f"  Step budget : {step_sec * 1000:8.1f} ms")
-    print(f"  RT factor   : {realtime_factor:8.2f}x  {'OK' if realtime_factor >= 1.0 else 'TOO SLOW'}")
+    rt_status = "OK" if realtime_factor >= 1.0 else "TOO SLOW"
+    print(f"  RT factor   : {realtime_factor:8.2f}x  {rt_status}")
     print(f"{'=' * 60}")
 
 
@@ -175,7 +175,7 @@ def main() -> None:
     warmup = int(os.environ.get("VAP_WARMUP", "5"))
     iterations = int(os.environ.get("VAP_ITERATIONS", "50"))
 
-    print(f"VAP Benchmark")
+    print("VAP Benchmark")
     print(f"  Model     : {model_path}")
     print(f"  Device    : {device}")
     print(f"  Warmup    : {warmup}")
@@ -231,16 +231,14 @@ def main() -> None:
     # 3. Sustained streaming simulation
     # -----------------------------------------------------------------------
     print(f"\n{'#' * 60}")
-    print(f"  Part 3: Sustained streaming (30s simulated audio)")
+    print("  Part 3: Sustained streaming (30s simulated audio)")
     print(f"{'#' * 60}")
 
     from voice_pipeline.core.config import AudioConfig, TTSConfig, VAPConfig
     from voice_pipeline.turn_taking.vap import VAPWrapper
 
     ctx = 5.0
-    vap_cfg = VAPConfig(
-        model_path=model_path, context_sec=ctx, step_sec=step_sec, device=device
-    )
+    vap_cfg = VAPConfig(model_path=model_path, context_sec=ctx, step_sec=step_sec, device=device)
     audio_cfg = AudioConfig(sample_rate=SAMPLE_RATE, channels=1, frame_duration_ms=30)
     tts_cfg = TTSConfig(output_sample_rate=24000)
     wrapper = VAPWrapper(vap_cfg, audio_cfg, tts_cfg)
@@ -252,7 +250,7 @@ def main() -> None:
     inference_latencies: list[float] = []
     total_start = time.perf_counter()
     samples_fed = 0
-    for i in range(n_frames):
+    for _i in range(n_frames):
         t0 = time.perf_counter()
         wrapper.feed_audio(frame)
         elapsed = time.perf_counter() - t0
@@ -270,14 +268,17 @@ def main() -> None:
     print(f"  Overall RTF : {overall_rtf:.2f}x  {'OK' if overall_rtf >= 1.0 else 'TOO SLOW'}")
     print(f"  Inferences  : {len(inference_latencies)}")
     if inference_latencies:
-        print_stats(f"Inference-only frames | context={ctx}s, stream={sim_duration}s",
-                    inference_latencies, step_sec)
+        print_stats(
+            f"Inference-only frames | context={ctx}s, stream={sim_duration}s",
+            inference_latencies,
+            step_sec,
+        )
 
     # -----------------------------------------------------------------------
     # 4. Different step_sec values (find feasible step)
     # -----------------------------------------------------------------------
     print(f"\n{'#' * 60}")
-    print(f"  Part 4: Finding feasible step_sec (context=5s)")
+    print("  Part 4: Finding feasible step_sec (context=5s)")
     print(f"{'#' * 60}")
 
     # Use the raw inference result for context=5s as baseline

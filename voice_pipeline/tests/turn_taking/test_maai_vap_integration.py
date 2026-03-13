@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import math
 import struct
+from typing import TYPE_CHECKING
 
 import pytest
 
 from voice_pipeline.core.config import AudioConfig, MaAIVAPConfig, TTSConfig
 from voice_pipeline.core.types import VAPResult
-from voice_pipeline.turn_taking.exceptions import VAPError
+
+if TYPE_CHECKING:
+    from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
 
 pytestmark = pytest.mark.requires_model
 
@@ -38,8 +41,7 @@ def _pcm_silence(n_samples: int = _FRAME_SAMPLES) -> bytes:
 def _pcm_tone(n_samples: int = _FRAME_SAMPLES, amplitude: int = 10000) -> bytes:
     """Sine wave PCM (simulated speech-like energy)."""
     samples = [
-        int(amplitude * math.sin(2 * math.pi * 440 * i / _SAMPLE_RATE))
-        for i in range(n_samples)
+        int(amplitude * math.sin(2 * math.pi * 440 * i / _SAMPLE_RATE)) for i in range(n_samples)
     ]
     return struct.pack(f"<{n_samples}h", *samples)
 
@@ -54,7 +56,7 @@ def _pcm_robot(n_samples: int = 720, amplitude: int = 5000) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def _make_wrapper(use_onnx_transformer: bool) -> "MaAIVAPWrapper":
+def _make_wrapper(use_onnx_transformer: bool) -> MaAIVAPWrapper:
     from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
 
     cfg = MaAIVAPConfig(
@@ -65,9 +67,7 @@ def _make_wrapper(use_onnx_transformer: bool) -> "MaAIVAPWrapper":
         use_onnx_transformer=use_onnx_transformer,
         use_torch_compile=False,
     )
-    audio_cfg = AudioConfig(
-        sample_rate=_SAMPLE_RATE, channels=1, frame_duration_ms=30
-    )
+    audio_cfg = AudioConfig(sample_rate=_SAMPLE_RATE, channels=1, frame_duration_ms=30)
     tts_cfg = TTSConfig(output_sample_rate=24000)
     return MaAIVAPWrapper(cfg, audio_cfg, tts_cfg)
 
@@ -125,7 +125,6 @@ class TestBasicOperation:
 
 
 class TestStereoInput:
-
     def test_robot_audio_accepted(self, onnx_wrapper):
         for _ in range(20):
             result = onnx_wrapper.feed_audio(_pcm_tone(), _pcm_robot())
@@ -145,7 +144,6 @@ class TestStereoInput:
 
 
 class TestReset:
-
     def test_reset_returns_default(self, onnx_wrapper):
         for _ in range(20):
             onnx_wrapper.feed_audio(_pcm_tone())
@@ -168,7 +166,6 @@ class TestReset:
 
 
 class TestTurnCycle:
-
     def test_two_turns_no_state_bleed(self, onnx_wrapper):
         frame = _pcm_tone()
 

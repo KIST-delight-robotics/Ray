@@ -60,13 +60,14 @@ def main():
     print("Loading VAP pipeline (ONNX)...")
     torch.set_num_threads(1)
     pipeline = VapOnnxPipeline(
-        frame_rate=args.frame_rate, context_len_sec=5.0, ort_threads=1,
+        frame_rate=args.frame_rate,
+        context_len_sec=5.0,
+        ort_threads=1,
     )
 
     spf = 16000 // args.frame_rate
     start_frame = int(args.start * args.frame_rate)
     end_frame = min(start_frame + int(args.duration * args.frame_rate), len(ch1) // spf)
-    interval = 1.0 / args.frame_rate
 
     # Feed audio from the beginning up to start_frame so LSTM state is warm
     print(f"Warming up LSTM state ({args.start:.0f}s of audio)...")
@@ -97,7 +98,8 @@ def main():
     # Start audio playback
     audio_proc = subprocess.Popen(
         ["aplay", "-q", mix_path],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     t_start = time.perf_counter()
 
@@ -132,7 +134,10 @@ def main():
             else:
                 shift_marker = ""
 
-            print(f"{t_sec:6.1f}s  {p_shift:7.3f} {bar(p_shift)}  {vad1:.2f}  {vad2:.2f}  {status}{shift_marker}")
+            print(
+                f"{t_sec:6.1f}s  {p_shift:7.3f} {bar(p_shift)}"
+                f"  {vad1:.2f}  {vad2:.2f}  {status}{shift_marker}"
+            )
             idx += 1
     except KeyboardInterrupt:
         pass

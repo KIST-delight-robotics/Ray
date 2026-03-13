@@ -75,9 +75,7 @@ class VapOnnxPipeline:
         self.frame_rate = frame_rate
         self.sampling_rate = 16000
         self.frame_contxt_padding = 320
-        self.audio_frame_size = (
-            self.sampling_rate // self.frame_rate + self.frame_contxt_padding
-        )
+        self.audio_frame_size = self.sampling_rate // self.frame_rate + self.frame_contxt_padding
         self.audio_context_len = int(context_len_sec * frame_rate)
 
         self.current_x1 = np.zeros(self.frame_contxt_padding, dtype=np.float32)

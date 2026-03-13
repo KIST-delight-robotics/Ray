@@ -60,7 +60,7 @@ def run_verification(
     max_seconds: float | None = None,
 ):
     print(f"\n{'=' * 70}")
-    print(f"  ONNX Equivalence Verification (Real Audio)")
+    print("  ONNX Equivalence Verification (Real Audio)")
     print(f"{'=' * 70}")
     print(f"  Audio       : {os.path.basename(audio_path)}")
     print(f"  Frame rate  : {frame_rate}Hz")
@@ -136,7 +136,7 @@ def run_verification(
         # Compute diffs
         def max_abs_diff(a, b):
             if isinstance(a, list) and isinstance(b, list):
-                return max(abs(ai - bi) for ai, bi in zip(a, b))
+                return max(abs(ai - bi) for ai, bi in zip(a, b, strict=False))
             return abs(a - b)
 
         d_pnow = max_abs_diff(maai_out["p_now"], custom_out["p_now"])
@@ -177,15 +177,19 @@ def run_verification(
             gaps = np.diff(spike_indices)
             if len(gaps) > 0:
                 print(f"  Spike count : {len(spike_indices)} / {len(custom_arr)} frames")
-                print(f"  Gap between spikes (frames): "
-                      f"mean={gaps.mean():.1f} median={np.median(gaps):.1f} "
-                      f"min={gaps.min()} max={gaps.max()}")
+                print(
+                    f"  Gap between spikes (frames): "
+                    f"mean={gaps.mean():.1f} median={np.median(gaps):.1f} "
+                    f"min={gaps.min()} max={gaps.max()}"
+                )
             # Top 10 worst frames
             worst = np.argsort(custom_arr)[-10:][::-1]
-            print(f"  Top 10 slowest (Custom):")
+            print("  Top 10 slowest (Custom):")
             for idx in worst:
-                print(f"    frame {idx:5d} ({idx/frame_rate:6.1f}s): "
-                      f"custom={custom_arr[idx]:.1f}ms  maai={maai_arr[idx]:.1f}ms")
+                print(
+                    f"    frame {idx:5d} ({idx / frame_rate:6.1f}s): "
+                    f"custom={custom_arr[idx]:.1f}ms  maai={maai_arr[idx]:.1f}ms"
+                )
 
     # Results
     print(f"\n{'=' * 70}")
@@ -206,7 +210,7 @@ def run_verification(
             f"last={arr[-1]:.7f}"
         )
 
-    print(f"\n  --- Numerical Equivalence ---")
+    print("\n  --- Numerical Equivalence ---")
     stats("p_now", diffs_pnow)
     stats("p_future", diffs_pfuture)
     stats("vad", diffs_vad)
@@ -243,14 +247,14 @@ def run_verification(
             max(diffs_pnow[mid:]), max(diffs_pfuture[mid:]), max(diffs_vad[mid:])
         )
         drift_ratio = second_half_max / first_half_max if first_half_max > 0 else 1.0
-        print(f"\n  Drift check:")
+        print("\n  Drift check:")
         print(f"    1st half max: {first_half_max:.7f}")
         print(f"    2nd half max: {second_half_max:.7f}")
         print(f"    Ratio       : {drift_ratio:.2f}x")
         if drift_ratio > 10:
-            print(f"    WARNING: significant drift detected!")
+            print("    WARNING: significant drift detected!")
         else:
-            print(f"    OK: no significant drift")
+            print("    OK: no significant drift")
 
     # Overall verdict
     threshold = 0.01
@@ -273,7 +277,7 @@ def run_solo_benchmark(
     import gc
 
     print(f"\n{'=' * 70}")
-    print(f"  Solo Benchmark: Custom ONNX Pipeline (Real Audio)")
+    print("  Solo Benchmark: Custom ONNX Pipeline (Real Audio)")
     print(f"{'=' * 70}")
     print(f"  Audio       : {os.path.basename(audio_path)}")
     print(f"  Frame rate  : {frame_rate}Hz")
@@ -363,10 +367,14 @@ def run_solo_benchmark(
     print(f"  P99         : {np.percentile(arr, 99):.1f}ms")
     print(f"  Max         : {arr.max():.1f}ms")
     print(f"  Min         : {arr.min():.1f}ms")
-    print(f"  RTF (mean)  : {budget_ms / arr.mean():.2f}x  "
-          f"{'OK' if budget_ms / arr.mean() >= 1.0 else 'TOO SLOW'}")
-    print(f"  RTF (p95)   : {budget_ms / np.percentile(arr, 95):.2f}x  "
-          f"{'OK' if budget_ms / np.percentile(arr, 95) >= 1.0 else 'TOO SLOW'}")
+    print(
+        f"  RTF (mean)  : {budget_ms / arr.mean():.2f}x  "
+        f"{'OK' if budget_ms / arr.mean() >= 1.0 else 'TOO SLOW'}"
+    )
+    print(
+        f"  RTF (p95)   : {budget_ms / np.percentile(arr, 95):.2f}x  "
+        f"{'OK' if budget_ms / np.percentile(arr, 95) >= 1.0 else 'TOO SLOW'}"
+    )
 
     # Spike analysis
     p90 = np.percentile(arr, 90)
@@ -375,8 +383,10 @@ def run_solo_benchmark(
     if len(spike_indices) > 1:
         gaps = np.diff(spike_indices)
         print(f"\n  Spikes (>{p90:.0f}ms): {spike_mask.sum()} frames")
-        print(f"    Gap: mean={gaps.mean():.1f} median={np.median(gaps):.1f} "
-              f"min={gaps.min()} max={gaps.max()}")
+        print(
+            f"    Gap: mean={gaps.mean():.1f} median={np.median(gaps):.1f} "
+            f"min={gaps.min()} max={gaps.max()}"
+        )
 
     # GC correlation
     if gc_events:
@@ -385,40 +395,70 @@ def run_solo_benchmark(
         gen_counts = {}
         for _, gen in gc_events:
             gen_counts[gen] = gen_counts.get(gen, 0) + 1
-        print(f"\n  GC events   : {len(gc_events)} total "
-              f"(gen0={gen_counts.get(0,0)} gen1={gen_counts.get(1,0)} gen2={gen_counts.get(2,0)})")
-        print(f"  GC on spike : {gc_on_spike} / {len(spike_indices)} "
-              f"({100*gc_on_spike/len(spike_indices):.0f}%)")
+        print(
+            f"\n  GC events   : {len(gc_events)} total "
+            f"(gen0={gen_counts.get(0, 0)}"
+            f" gen1={gen_counts.get(1, 0)}"
+            f" gen2={gen_counts.get(2, 0)})"
+        )
+        print(
+            f"  GC on spike : {gc_on_spike} / {len(spike_indices)} "
+            f"({100 * gc_on_spike / len(spike_indices):.0f}%)"
+        )
 
         # Latency of GC frames vs non-GC frames
         gc_lats = [arr[f] for f in gc_frames if f < len(arr)]
         non_gc_lats = [arr[f] for f in range(len(arr)) if f not in gc_frames]
         if gc_lats and non_gc_lats:
-            print(f"  GC frame lat: mean={np.mean(gc_lats):.1f}ms  "
-                  f"median={np.median(gc_lats):.1f}ms  max={np.max(gc_lats):.1f}ms")
-            print(f"  Non-GC lat  : mean={np.mean(non_gc_lats):.1f}ms  "
-                  f"median={np.median(non_gc_lats):.1f}ms  max={np.max(non_gc_lats):.1f}ms")
+            print(
+                f"  GC frame lat: mean={np.mean(gc_lats):.1f}ms  "
+                f"median={np.median(gc_lats):.1f}ms  max={np.max(gc_lats):.1f}ms"
+            )
+            print(
+                f"  Non-GC lat  : mean={np.mean(non_gc_lats):.1f}ms  "
+                f"median={np.median(non_gc_lats):.1f}ms  max={np.max(non_gc_lats):.1f}ms"
+            )
     else:
         print(f"\n  GC events   : 0 (GC {'disabled' if disable_gc else 'did not trigger'})")
 
     # Top 5 worst
     worst = np.argsort(arr)[-5:][::-1]
     gc_frames_set = set(f for f, _ in gc_events)
-    print(f"\n  Top 5 slowest:")
+    print("\n  Top 5 slowest:")
     for idx in worst:
         gc_marker = " [GC]" if idx in gc_frames_set else ""
-        print(f"    frame {idx:5d} ({(idx + warmup) / frame_rate:6.1f}s): {arr[idx]:.1f}ms{gc_marker}")
+        t_sec = (idx + warmup) / frame_rate
+        print(f"    frame {idx:5d} ({t_sec:6.1f}s): {arr[idx]:.1f}ms{gc_marker}")
     print(f"{'=' * 70}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Verify ONNX pipeline equivalence with real audio")
-    parser.add_argument("--audio", required=True, help="Path to stereo audio file (CANDOR mp3)")
+    parser = argparse.ArgumentParser(
+        description="Verify ONNX pipeline equivalence with real audio",
+    )
+    parser.add_argument(
+        "--audio",
+        required=True,
+        help="Path to stereo audio file (CANDOR mp3)",
+    )
     parser.add_argument("--frame-rate", type=int, default=10, help="Frame rate (default: 10)")
     parser.add_argument("--context", type=float, default=5.0, help="Context length in seconds")
-    parser.add_argument("--max-seconds", type=float, default=None, help="Max audio duration to test")
-    parser.add_argument("--solo", action="store_true", help="Run Custom ONNX pipeline alone (no MaAI)")
-    parser.add_argument("--no-gc", action="store_true", help="Disable Python GC during benchmark")
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help="Max audio duration to test",
+    )
+    parser.add_argument(
+        "--solo",
+        action="store_true",
+        help="Run Custom ONNX pipeline alone (no MaAI)",
+    )
+    parser.add_argument(
+        "--no-gc",
+        action="store_true",
+        help="Disable Python GC during benchmark",
+    )
     args = parser.parse_args()
 
     if args.solo:

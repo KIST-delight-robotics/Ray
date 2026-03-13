@@ -25,8 +25,8 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 from voice_pipeline.core.config import TurnGPTConfig
+from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
 sys.path.insert(0, os.path.dirname(__file__))
 from vap_onnx_pipeline import VapOnnxPipeline
@@ -95,9 +95,21 @@ def turngpt_worker(
     dialogs = [
         "Hello how are you doing today",
         "Hello how are you doing today <ts> I'm doing great thanks for asking",
-        "Hello how are you doing today <ts> I'm doing great thanks for asking <ts> That's wonderful to hear",
-        "Hello how are you doing today <ts> I'm doing great thanks for asking <ts> That's wonderful to hear <ts> Yeah it's been a really nice day so far",
-        "Hello how are you doing today <ts> I'm doing great thanks for asking <ts> That's wonderful to hear <ts> Yeah it's been a really nice day so far <ts> I agree the weather has been perfect",
+        (
+            "Hello how are you doing today <ts> I'm doing great"
+            " thanks for asking <ts> That's wonderful to hear"
+        ),
+        (
+            "Hello how are you doing today <ts> I'm doing great"
+            " thanks for asking <ts> That's wonderful to hear"
+            " <ts> Yeah it's been a really nice day so far"
+        ),
+        (
+            "Hello how are you doing today <ts> I'm doing great"
+            " thanks for asking <ts> That's wonderful to hear"
+            " <ts> Yeah it's been a really nice day so far"
+            " <ts> I agree the weather has been perfect"
+        ),
     ]
 
     interval = 0.33  # ~3 Hz (ASR interim updates)
@@ -237,7 +249,7 @@ def main():
 
     if "vap" in results:
         v = results["vap"]
-        print(f"\n  VAP (10Hz, budget=100ms):")
+        print("\n  VAP (10Hz, budget=100ms):")
         print(f"    Frames    : {len(v)}")
         print(f"    Mean      : {v.mean():.1f}ms")
         print(f"    Median    : {np.median(v):.1f}ms")
@@ -245,11 +257,11 @@ def main():
         print(f"    P99       : {np.percentile(v, 99):.1f}ms")
         print(f"    Max       : {v.max():.1f}ms")
         over_budget = (v > 100).sum()
-        print(f"    >100ms    : {over_budget}/{len(v)} ({100*over_budget/len(v):.1f}%)")
+        print(f"    >100ms    : {over_budget}/{len(v)} ({100 * over_budget / len(v):.1f}%)")
 
     if "turngpt" in results:
         g = results["turngpt"]
-        print(f"\n  TurnGPT (~3Hz):")
+        print("\n  TurnGPT (~3Hz):")
         print(f"    Calls     : {len(g)}")
         print(f"    Mean      : {g.mean():.1f}ms")
         print(f"    Median    : {np.median(g):.1f}ms")
@@ -260,7 +272,7 @@ def main():
         cpu = results["cpu_overall"]
         per_cpu = results["cpu_per_core"]
         if cpu:
-            print(f"\n  CPU Usage:")
+            print("\n  CPU Usage:")
             print(f"    Overall   : mean={np.mean(cpu):.1f}%  max={np.max(cpu):.1f}%")
             if per_cpu:
                 per_core_means = np.mean(per_cpu, axis=0)

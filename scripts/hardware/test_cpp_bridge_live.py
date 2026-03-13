@@ -27,10 +27,10 @@ from voice_pipeline.bridge.cpp_bridge import CppBridge
 from voice_pipeline.core.config import CppBridgeConfig
 from voice_pipeline.core.types import CppEventType
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _generate_sine_pcm(
     freq: float = 440.0,
@@ -82,6 +82,7 @@ def _drain_events(bridge: CppBridge, wait: float = 0.5) -> None:
 # ---------------------------------------------------------------------------
 # Test scenarios
 # ---------------------------------------------------------------------------
+
 
 def test_connection(bridge: CppBridge) -> bool:
     print("\n[Test 1] Connection")
@@ -164,14 +165,24 @@ def test_stop_interrupt(bridge: CppBridge) -> bool:
     print(f"    → Sent {chunks_sent} chunks, now interrupting")
 
     # Wait briefly for playback to start
-    ok_started = _poll_until(bridge, CppEventType.PLAYBACK_STARTED, timeout=5.0, label="stream started")
+    ok_started = _poll_until(
+        bridge,
+        CppEventType.PLAYBACK_STARTED,
+        timeout=5.0,
+        label="stream started",
+    )
 
     # Send stop
     bridge.send_stop()
     print("    → Sent stop")
 
     # Should get playback_complete (even on interrupt)
-    ok_complete = _poll_until(bridge, CppEventType.PLAYBACK_COMPLETE, timeout=10.0, label="stop complete")
+    ok_complete = _poll_until(
+        bridge,
+        CppEventType.PLAYBACK_COMPLETE,
+        timeout=10.0,
+        label="stop complete",
+    )
 
     if ok_started and ok_complete:
         print("    ✓ Stop/interrupt round-trip OK")
@@ -199,6 +210,7 @@ def test_play_file_farewell(bridge: CppBridge) -> bool:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Live C++↔Python bridge test")
     parser.add_argument(
@@ -225,7 +237,7 @@ def main() -> None:
             output = cpp_proc.stdout.read().decode() if cpp_proc.stdout else ""
             print(f"C++ process exited early (code {cpp_proc.returncode}):\n{output}")
             sys.exit(1)
-        print("C++ process started (PID %d)" % cpp_proc.pid)
+        print(f"C++ process started (PID {cpp_proc.pid})")
 
     config = CppBridgeConfig(host=args.host, port=args.port)
     bridge = CppBridge(config)

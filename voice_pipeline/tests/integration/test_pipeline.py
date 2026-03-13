@@ -14,14 +14,13 @@ Scenarios:
 
 from __future__ import annotations
 
+import contextlib
 import queue
 import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-
-import pytest
 
 from voice_pipeline.context.context_builder import ContextBuilder
 from voice_pipeline.core.config import (
@@ -59,8 +58,8 @@ from voice_pipeline.history.storage_backend import MemoryStorageBackend
 from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
 from voice_pipeline.orchestrator.orchestrator import Orchestrator
 from voice_pipeline.session.session_manager import SessionComponents, SessionManager
-from voice_pipeline.turn_taking.turn_detector import TurnDetector
 from voice_pipeline.tts.utterance_truncator import TimestampTruncator
+from voice_pipeline.turn_taking.turn_detector import TurnDetector
 
 # ---------------------------------------------------------------------------
 # Configs tuned for fast deterministic testing
@@ -95,7 +94,9 @@ SESSION_CONFIG = SessionConfig(
     frame_timeout_sec=0.05,
 )
 
-FRAME_BYTES = AUDIO_CONFIG.sample_rate * AUDIO_CONFIG.frame_duration_ms * AUDIO_CONFIG.sample_width // 1000
+FRAME_BYTES = (
+    AUDIO_CONFIG.sample_rate * AUDIO_CONFIG.frame_duration_ms * AUDIO_CONFIG.sample_width // 1000
+)
 SILENCE_FRAME: AudioFrame = b"\x00" * FRAME_BYTES
 
 
@@ -371,10 +372,8 @@ class FrameFeeder:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            try:
+            with contextlib.suppress(queue.Full):
                 self._queue.put(SILENCE_FRAME, timeout=0.01)
-            except queue.Full:
-                pass
             self._stop.wait(self._interval)
 
 
@@ -438,9 +437,7 @@ class TestSingleTurnConversation:
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        orchestrator, _, generator, _ = _make_orchestrator(
-            asr, bridge, led, llm=CapturingLLM()
-        )
+        orchestrator, _, generator, _ = _make_orchestrator(asr, bridge, led, llm=CapturingLLM())
 
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         feeder = FrameFeeder(audio_queue)
@@ -482,9 +479,7 @@ class TestMultiTurnConversation:
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        orchestrator, history, generator, _ = _make_orchestrator(
-            asr, bridge, led, llm=llm
-        )
+        orchestrator, history, generator, _ = _make_orchestrator(asr, bridge, led, llm=llm)
 
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         feeder = FrameFeeder(audio_queue)
@@ -521,9 +516,7 @@ class TestMultiTurnConversation:
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        orchestrator, _, generator, _ = _make_orchestrator(
-            asr, bridge, led, llm=CapturingLLM()
-        )
+        orchestrator, _, generator, _ = _make_orchestrator(asr, bridge, led, llm=CapturingLLM())
 
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         feeder = FrameFeeder(audio_queue)
@@ -563,9 +556,11 @@ class TestFullSessionLifecycle:
         executor = ThreadPoolExecutor(max_workers=2)
 
         def session_factory() -> SessionComponents:
-            _, history, generator, _ = _make_orchestrator.__wrapped__(
-                asr, bridge, led, executor=executor
-            ) if hasattr(_make_orchestrator, "__wrapped__") else (None, None, None, None)
+            _, history, generator, _ = (
+                _make_orchestrator.__wrapped__(asr, bridge, led, executor=executor)
+                if hasattr(_make_orchestrator, "__wrapped__")
+                else (None, None, None, None)
+            )
 
             # Build fresh components using the shared bridge/led/asr
             storage = MemoryStorageBackend()
@@ -611,7 +606,6 @@ class TestFullSessionLifecycle:
         feeder.start()
 
         # Run SessionManager in background, stop after one cycle
-        cycle_done = threading.Event()
         original_run_sleep = sm._run_sleep
 
         call_count = 0
@@ -660,7 +654,6 @@ class TestBargeIn:
         """Interrupt during PLAYING triggers barge-in truncation."""
         # First utterance triggers generation, then interrupt, then exit
         asr = ScriptedASR(["tell me a story", "goodbye"])
-        bridge = ScriptedBridge()
         led = FakeLED()
 
         # VAP that becomes interrupting after streaming starts
@@ -857,7 +850,6 @@ class TestGeneratorFailure:
 
         messages = history.get_messages()
         # First turn was skipped (empty response), second succeeded
-        user_msgs = [m for m in messages if m["role"] == "user"]
         assistant_msgs = [m for m in messages if m["role"] == "assistant"]
 
         # At least one successful exchange

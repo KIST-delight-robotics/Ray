@@ -153,7 +153,12 @@ def convert(
 def main():
     parser = argparse.ArgumentParser(description="Convert MaAI encoder to ONNX")
     parser.add_argument("--lang", default="en", help="Language (default: en)")
-    parser.add_argument("--context", type=float, default=20, help="Context length in seconds (default: 20)")
+    parser.add_argument(
+        "--context",
+        type=float,
+        default=20,
+        help="Context length in seconds (default: 20)",
+    )
     args = parser.parse_args()
 
     os.makedirs("models", exist_ok=True)

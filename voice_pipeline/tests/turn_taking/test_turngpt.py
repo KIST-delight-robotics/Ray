@@ -569,10 +569,7 @@ def _make_onnx_session_mock(*, has_kv: bool = True) -> MagicMock:
         outputs = [logits]
 
         if has_kv:
-            if "past_key_0" in feeds:
-                past_len = feeds["past_key_0"].shape[2]
-            else:
-                past_len = 0
+            past_len = feeds["past_key_0"].shape[2] if "past_key_0" in feeds else 0
             total_len = past_len + seq_len
             for _i in range(_ONNX_NL):
                 outputs.append(np.random.randn(1, 12, total_len, 64).astype(np.float32))
@@ -592,12 +589,10 @@ def _build_onnx_wrapper(**kwargs) -> MagicMock:
     mock_hf_tok = MagicMock()
     mock_hf_tok.side_effect = _onnx_char_tokenize
     mock_hf_tok.eos_token_id = _ONNX_EOS_ID
-    mock_hf_tok.convert_tokens_to_ids.side_effect = (
-        lambda t: {
-            "<speaker1>": _ONNX_SP1_ID,
-            "<speaker2>": _ONNX_SP2_ID,
-        }.get(t, 0)
-    )
+    mock_hf_tok.convert_tokens_to_ids.side_effect = lambda t: {
+        "<speaker1>": _ONNX_SP1_ID,
+        "<speaker2>": _ONNX_SP2_ID,
+    }.get(t, 0)
 
     mock_so = MagicMock()
 
@@ -617,6 +612,7 @@ def _build_onnx_wrapper(**kwargs) -> MagicMock:
     mock_transformers.GPT2TokenizerFast.from_pretrained.return_value = mock_hf_tok
 
     import sys
+
     saved_ort = sys.modules.get("onnxruntime")
     saved_tf = sys.modules.get("transformers")
     sys.modules["onnxruntime"] = mock_ort_module

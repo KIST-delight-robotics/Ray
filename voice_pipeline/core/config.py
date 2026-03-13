@@ -127,7 +127,9 @@ class VAPConfig:
         vad_threshold: Threshold for user_is_speaking derivation.
     """
 
-    model_path: str = "external/VoiceActivityProjection/example/VAP_3mmz3t0u_50Hz_ad20s_134-epoch9-val_2.56.pt"
+    model_path: str = (
+        "external/VoiceActivityProjection/example/VAP_3mmz3t0u_50Hz_ad20s_134-epoch9-val_2.56.pt"
+    )
     context_sec: float = 20.0
     step_sec: float = 0.1
     tt_time: float = 0.5

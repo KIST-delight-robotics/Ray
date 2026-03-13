@@ -18,7 +18,6 @@ import sys
 import time
 
 import numpy as np
-import onnxruntime as ort
 import soundfile as sf
 import torch
 
@@ -101,8 +100,8 @@ class ProfiledPipeline(VapOnnxPipeline):
         timings["cache_trim"] = time.perf_counter() - t0
 
         # 6. Buffer trim
-        self.current_x1 = self.current_x1[-self.frame_contxt_padding:].copy()
-        self.current_x2 = self.current_x2[-self.frame_contxt_padding:].copy()
+        self.current_x1 = self.current_x1[-self.frame_contxt_padding :].copy()
+        self.current_x2 = self.current_x2[-self.frame_contxt_padding :].copy()
 
         timings["total"] = timings["encoder"] + timings["transformer"] + timings["cache_trim"]
         return timings
@@ -110,6 +109,7 @@ class ProfiledPipeline(VapOnnxPipeline):
 
 def measure_memory_mb() -> float:
     import psutil
+
     return psutil.Process().memory_info().rss / 1024 / 1024
 
 
@@ -141,7 +141,9 @@ def main():
     print("  Loading VAP pipeline...")
     torch.set_num_threads(args.pt_threads)
     pipeline = ProfiledPipeline(
-        frame_rate=args.frame_rate, context_len_sec=5.0, ort_threads=args.ort_threads,
+        frame_rate=args.frame_rate,
+        context_len_sec=5.0,
+        ort_threads=args.ort_threads,
     )
 
     # Warmup
@@ -159,7 +161,6 @@ def main():
     interval = 1.0 / args.frame_rate
 
     records: list[dict] = []
-    gc_counts_start = gc.get_count()
     gc.disable()  # Disable GC to test if it causes spikes
 
     print(f"\n  Running {args.duration}s ({n_frames} frames)...")
@@ -185,8 +186,10 @@ def main():
             m = int(elapsed // 60)
             s = int(elapsed % 60)
             total_ms = timings.get("total", 0) * 1000
-            print(f"    [{m:02d}:{s:02d}] frame={i}, last={total_ms:.1f}ms, "
-                  f"rss={measure_memory_mb():.1f}MB")
+            print(
+                f"    [{m:02d}:{s:02d}] frame={i}, last={total_ms:.1f}ms, "
+                f"rss={measure_memory_mb():.1f}MB"
+            )
 
         # Pace to real-time
         frame_elapsed = time.perf_counter() - t_frame
@@ -210,18 +213,25 @@ def main():
     print(f"  Results ({total_elapsed:.1f}s, {len(records)} frames)")
     print(f"{'=' * 70}")
 
-    print(f"\n  Per-stage latency (ms):")
+    print("\n  Per-stage latency (ms):")
     print(f"    {'Stage':<14s} {'Mean':>7s} {'Median':>7s} {'P95':>7s} {'Max':>7s}")
-    for name, arr in [("Encoder", enc), ("Transformer", tfm), ("Cache trim", trim), ("Total", total)]:
-        print(f"    {name:<14s} {arr.mean():7.1f} {np.median(arr):7.1f} "
-              f"{np.percentile(arr, 95):7.1f} {arr.max():7.1f}")
+    for name, arr in [
+        ("Encoder", enc),
+        ("Transformer", tfm),
+        ("Cache trim", trim),
+        ("Total", total),
+    ]:
+        print(
+            f"    {name:<14s} {arr.mean():7.1f} {np.median(arr):7.1f} "
+            f"{np.percentile(arr, 95):7.1f} {arr.max():7.1f}"
+        )
 
     print(f"\n  Budget ({budget:.0f}ms) analysis:")
     over = total > budget
     print(f"    Over budget  : {over.sum()}/{len(total)} ({100 * over.sum() / len(total):.1f}%)")
 
     # Spike analysis
-    print(f"\n  Spike analysis:")
+    print("\n  Spike analysis:")
     for threshold in [budget * 0.8, budget, budget * 1.5]:
         mask = total > threshold
         n = mask.sum()
@@ -229,7 +239,6 @@ def main():
             print(f"    >{threshold:.0f}ms : 0/{len(total)} (0.0%)")
             continue
         pct = 100 * n / len(total)
-        spike_total = total[mask]
         spike_enc = enc[mask]
         spike_tfm = tfm[mask]
         spike_trim = trim[mask]
@@ -240,15 +249,17 @@ def main():
         else:
             gap_info = ""
         print(f"    >{threshold:.0f}ms : {n}/{len(total)} ({pct:.1f}%){gap_info}")
-        print(f"          enc={spike_enc.mean():.1f}  tfm={spike_tfm.mean():.1f}  "
-              f"trim={spike_trim.mean():.1f}ms (avg breakdown)")
+        print(
+            f"          enc={spike_enc.mean():.1f}  tfm={spike_tfm.mean():.1f}  "
+            f"trim={spike_trim.mean():.1f}ms (avg breakdown)"
+        )
 
     # Distribution
-    print(f"\n  Percentile ladder (total ms):")
+    print("\n  Percentile ladder (total ms):")
     for p in [50, 75, 80, 85, 90, 95, 97, 99, 99.5]:
         print(f"    P{p:<5} : {np.percentile(total, p):.1f}ms")
 
-    print(f"\n  Histogram (total ms):")
+    print("\n  Histogram (total ms):")
     bins = list(range(0, int(total.max()) + 20, 10))
     counts, edges = np.histogram(total, bins=bins)
     cum = 0
@@ -257,9 +268,12 @@ def main():
         if counts[j] == 0:
             continue
         bar = "#" * min(counts[j], 80)
-        print(f"    {edges[j]:5.0f}–{edges[j+1]:5.0f}ms : {counts[j]:4d} ({100*cum/len(total):5.1f}%) {bar}")
+        pct = 100 * cum / len(total)
+        print(
+            f"    {edges[j]:5.0f}\u2013{edges[j + 1]:5.0f}ms : {counts[j]:4d} ({pct:5.1f}%) {bar}"
+        )
 
-    print(f"\n  Transformer histogram (ms):")
+    print("\n  Transformer histogram (ms):")
     tfm_bins = list(range(0, int(tfm.max()) + 20, 10))
     tfm_counts, tfm_edges = np.histogram(tfm, bins=tfm_bins)
     cum = 0
@@ -268,7 +282,11 @@ def main():
         if tfm_counts[j] == 0:
             continue
         bar = "#" * min(tfm_counts[j], 80)
-        print(f"    {tfm_edges[j]:5.0f}–{tfm_edges[j+1]:5.0f}ms : {tfm_counts[j]:4d} ({100*cum/len(tfm):5.1f}%) {bar}")
+        pct = 100 * cum / len(tfm)
+        print(
+            f"    {tfm_edges[j]:5.0f}\u2013{tfm_edges[j + 1]:5.0f}ms :"
+            f" {tfm_counts[j]:4d} ({pct:5.1f}%) {bar}"
+        )
 
     # Top spikes detail
     p99 = np.percentile(total, 99)
@@ -278,21 +296,24 @@ def main():
         print(f"    {'Time':>7s} {'Total':>7s} {'Enc':>7s} {'Tfm':>7s} {'Trim':>7s}")
         idxs = np.where(outlier_mask)[0]
         for i in idxs[:10]:
-            print(f"    {times[i]:6.1f}s {total[i]:7.1f} {enc[i]:7.1f} "
-                  f"{tfm[i]:7.1f} {trim[i]:7.1f}")
+            print(
+                f"    {times[i]:6.1f}s {total[i]:7.1f} {enc[i]:7.1f} {tfm[i]:7.1f} {trim[i]:7.1f}"
+            )
 
     # Drift per 30s
-    print(f"\n  Latency drift (per 30s):")
+    print("\n  Latency drift (per 30s):")
     print(f"    {'Sec':>6s} {'N':>5s} {'Mean':>7s} {'P95':>7s} {'Max':>7s}")
     for bucket_start in range(0, int(times[-1]) + 1, 30):
         mask = (times >= bucket_start) & (times < bucket_start + 30)
         if mask.sum() == 0:
             continue
         b = total[mask]
-        print(f"    {bucket_start:5d}s {mask.sum():5d} {b.mean():7.1f} "
-              f"{np.percentile(b, 95):7.1f} {b.max():7.1f}")
+        print(
+            f"    {bucket_start:5d}s {mask.sum():5d} {b.mean():7.1f} "
+            f"{np.percentile(b, 95):7.1f} {b.max():7.1f}"
+        )
 
-    print(f"\n  Memory:")
+    print("\n  Memory:")
     print(f"    RSS start    : {mem_start:.1f} MB")
     print(f"    RSS end      : {mem_end:.1f} MB")
     print(f"    RSS delta    : {mem_end - mem_start:+.1f} MB")

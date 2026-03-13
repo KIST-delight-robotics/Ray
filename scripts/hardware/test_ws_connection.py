@@ -111,7 +111,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Test WebSocket connection to C++ on RPi")
     parser.add_argument("--host", required=True, help="Raspberry Pi IP address")
     parser.add_argument("--port", type=int, default=8765, help="WebSocket port (default: 8765)")
-    parser.add_argument("--send-tone", action="store_true", help="Send a 1s sine tone to test audio playback")
+    parser.add_argument(
+        "--send-tone",
+        action="store_true",
+        help="Send a 1s sine tone to test audio playback",
+    )
     args = parser.parse_args()
 
     test_connection(args.host, args.port, args.send_tone)

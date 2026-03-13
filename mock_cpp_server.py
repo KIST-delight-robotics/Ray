@@ -243,6 +243,7 @@ class MockCppServer:
     @staticmethod
     def _monitor_completion(player: AudioPlayer, rq: queue.Queue[str]) -> None:
         """Start a daemon thread that enqueues playback_complete when done."""
+
         def _wait() -> None:
             player.wait_done()
             rq.put(json.dumps({"type": "playback_complete"}))

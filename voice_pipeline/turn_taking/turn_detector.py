@@ -100,7 +100,11 @@ class TurnDetector(ITurnDetector):
         self._last_asr_change_elapsed_sec += elapsed
 
         # --- Turn-shift check (only when user NOT speaking and text exists) ---
-        if not vap_result.user_is_speaking and asr_text and self._check_turn_shift(vap_result, elapsed):
+        if (
+            not vap_result.user_is_speaking
+            and asr_text
+            and self._check_turn_shift(vap_result, elapsed)
+        ):
             self._turn_state = _TurnState.ROBOT_TURN
             self._reset_per_frame_state()
             return TurnDecision(turn_shift=True)

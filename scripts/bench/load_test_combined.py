@@ -25,21 +25,18 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 from voice_pipeline.core.config import TurnGPTConfig
+from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
 sys.path.insert(0, os.path.dirname(__file__))
 from vap_onnx_pipeline import VapOnnxPipeline
-
 
 # ---------------------------------------------------------------------------
 # Histogram
 # ---------------------------------------------------------------------------
 
 
-def print_histogram(
-    lats: np.ndarray, label: str, bin_width: float = 5, max_bar: int = 50
-) -> None:
+def print_histogram(lats: np.ndarray, label: str, bin_width: float = 5, max_bar: int = 50) -> None:
     # Clip to P99 for display, note outliers separately
     p99 = float(np.percentile(lats, 99))
     clipped = lats[lats <= p99]
@@ -57,11 +54,11 @@ def print_histogram(
 
     print(f"\n  {label} (n={len(lats)}, bin={bin_width:.0f}ms)")
     print(f"  {'ms':>8}  {'count':>5}  distribution")
-    print(f"  {'-'*8}  {'-'*5}  {'-'*max_bar}")
+    print(f"  {'-' * 8}  {'-' * 5}  {'-' * max_bar}")
     for i, c in enumerate(counts):
         bar_len = int(c / max_count * max_bar)
         bar = "#" * bar_len
-        rng = f"{bins[i]:>3}-{bins[i+1]:<3}"
+        rng = f"{bins[i]:>3}-{bins[i + 1]:<3}"
         print(f"  {rng:>8}  {c:>5}  {bar}")
     if n_outliers > 0:
         print(f"  {'(tail)':>8}  {n_outliers:>5}  (>{p99:.0f}ms, clipped)")
@@ -78,7 +75,7 @@ def print_stats(lats: np.ndarray, label: str, budget_ms: float | None = None) ->
     print(f"    Max       : {lats.max():.1f}ms")
     if budget_ms is not None:
         over = (lats > budget_ms).sum()
-        print(f"    >{budget_ms:.0f}ms    : {over}/{len(lats)} ({100*over/len(lats):.1f}%)")
+        print(f"    >{budget_ms:.0f}ms    : {over}/{len(lats)} ({100 * over / len(lats):.1f}%)")
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +97,7 @@ def vap_worker(
 
         lats = []
         n_frames = int(duration * frame_rate)
-        for i in range(n_frames):
+        for _i in range(n_frames):
             if stop_event.is_set():
                 break
 
@@ -131,10 +128,22 @@ def turngpt_worker(
     try:
         dialogs = [
             "Hello how are you doing today",
-            "Hello how are you doing today <ts> I'm doing great thanks for asking",
-            "Hello how are you doing today <ts> I'm doing great thanks for asking <ts> That's wonderful",
-            "Hello how are you doing today <ts> I'm doing great thanks for asking <ts> That's wonderful <ts> Yeah it's been a really nice day so far",
-            "Hello how are you doing today <ts> I'm doing great thanks for asking <ts> That's wonderful <ts> Yeah it's been a really nice day so far <ts> I agree the weather has been perfect",
+            ("Hello how are you doing today <ts> I'm doing great thanks for asking"),
+            (
+                "Hello how are you doing today <ts> I'm doing great"
+                " thanks for asking <ts> That's wonderful"
+            ),
+            (
+                "Hello how are you doing today <ts> I'm doing great"
+                " thanks for asking <ts> That's wonderful"
+                " <ts> Yeah it's been a really nice day so far"
+            ),
+            (
+                "Hello how are you doing today <ts> I'm doing great"
+                " thanks for asking <ts> That's wonderful"
+                " <ts> Yeah it's been a really nice day so far"
+                " <ts> I agree the weather has been perfect"
+            ),
         ]
 
         interval = 0.33  # ~3 Hz
@@ -200,7 +209,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Load test: VAP + TurnGPT concurrent")
     parser.add_argument("--duration", type=float, default=30, help="Test duration (default: 30s)")
     parser.add_argument("--vap-compile", action="store_true", help="Enable torch.compile for VAP")
-    parser.add_argument("--vap-no-compile", action="store_true", help="Disable torch.compile for VAP")
+    parser.add_argument(
+        "--vap-no-compile",
+        action="store_true",
+        help="Disable torch.compile for VAP",
+    )
     parser.add_argument("--turngpt-model", default="models/turngpt/turngpt_v2_kvcache_int8.onnx")
     parser.add_argument("--turngpt-threads", type=int, default=2)
     parser.add_argument("--vap-frame-rate", type=int, default=10)
@@ -243,10 +256,10 @@ def main() -> None:
 
     # Compile + warmup VAP (slow first time, do before timed test)
     if use_compile:
-        print(f"\n  Compiling + warming up VAP (this takes ~90s on first run)...")
+        print("\n  Compiling + warming up VAP (this takes ~90s on first run)...")
         vap.vap.forward = torch.compile(vap.vap.forward, mode="default")
     else:
-        print(f"\n  Warming up VAP...")
+        print("\n  Warming up VAP...")
 
     t_warm = time.perf_counter()
     spf = 16000 // args.vap_frame_rate
@@ -322,12 +335,12 @@ def main() -> None:
     if "cpu_overall" in results and results["cpu_overall"]:
         cpu = results["cpu_overall"]
         per_cpu = results["cpu_per_core"]
-        print(f"\n  CPU Usage (during test):")
+        print("\n  CPU Usage (during test):")
         print(f"    Overall   : mean={np.mean(cpu):.1f}%  max={np.max(cpu):.1f}%")
         if per_cpu:
             per_core_means = np.mean(per_cpu, axis=0)
             per_core_maxs = np.max(per_cpu, axis=0)
-            for i, (m, mx) in enumerate(zip(per_core_means, per_core_maxs)):
+            for i, (m, mx) in enumerate(zip(per_core_means, per_core_maxs, strict=False)):
                 print(f"    Core {i}    : mean={m:.1f}%  max={mx:.1f}%")
 
     print(f"\n{'=' * 70}")

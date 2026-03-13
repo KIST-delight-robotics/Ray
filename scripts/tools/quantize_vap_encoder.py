@@ -49,10 +49,14 @@ def print_stats(label: str, latencies: list[float], budget_ms: float) -> None:
     rtf = (budget_ms / 1000) / mean if mean > 0 else float("inf")
 
     print(f"  {label}")
-    print(f"    Mean: {mean * 1000:7.1f} ms | Median: {median * 1000:7.1f} ms | "
-          f"P95: {p95 * 1000:7.1f} ms | P99: {p99 * 1000:7.1f} ms")
-    print(f"    Min: {s[0] * 1000:7.1f} ms | Max: {s[-1] * 1000:7.1f} ms | "
-          f"Budget: {budget_ms:.0f} ms | RTF: {rtf:.2f}x {'OK' if rtf >= 1.0 else 'SLOW'}")
+    print(
+        f"    Mean: {mean * 1000:7.1f} ms | Median: {median * 1000:7.1f} ms | "
+        f"P95: {p95 * 1000:7.1f} ms | P99: {p99 * 1000:7.1f} ms"
+    )
+    print(
+        f"    Min: {s[0] * 1000:7.1f} ms | Max: {s[-1] * 1000:7.1f} ms | "
+        f"Budget: {budget_ms:.0f} ms | RTF: {rtf:.2f}x {'OK' if rtf >= 1.0 else 'SLOW'}"
+    )
 
 
 def make_session(onnx_path: str, threads: int = 1) -> ort.InferenceSession:
@@ -100,9 +104,7 @@ def quantize_encoder(fp32_path: str, int8_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def verify_accuracy(
-    fp32_path: str, int8_path: str, frame_rate: int, n_trials: int = 100
-) -> None:
+def verify_accuracy(fp32_path: str, int8_path: str, frame_rate: int, n_trials: int = 100) -> None:
     """Compare fp32 vs int8 encoder outputs."""
     print(f"\n--- Numerical accuracy ({n_trials} random inputs) ---")
 
@@ -144,7 +146,7 @@ def verify_accuracy(
     c_int8 = np.zeros((1, 1, 256), dtype=np.float32)
 
     emb_drifts = []
-    for i in range(n_frames):
+    for _i in range(n_frames):
         wav = np.random.randn(1, 1, input_size).astype(np.float32) * 0.1
 
         e_fp32, h_fp32, c_fp32 = sess_fp32.run(
@@ -221,8 +223,10 @@ def benchmark_pipeline(
 
     torch.set_num_threads(threads)
 
-    print(f"\n--- Full pipeline ({frame_rate}Hz, context={context_len_sec}s, "
-          f"{iterations} iters, pt_threads={threads}) ---")
+    print(
+        f"\n--- Full pipeline ({frame_rate}Hz, context={context_len_sec}s, "
+        f"{iterations} iters, pt_threads={threads}) ---"
+    )
 
     from scripts.bench.vap_onnx_pipeline import VapOnnxPipeline
 
@@ -275,18 +279,26 @@ def benchmark_pipeline(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Quantize and benchmark VAP ONNX encoder")
-    parser.add_argument("--frame-rates", nargs="+", type=int, default=[5, 10],
-                        help="Frame rates to test (default: 5 10)")
-    parser.add_argument("--context", type=float, default=5.0,
-                        help="Context length in seconds (default: 5.0)")
-    parser.add_argument("--warmup", type=int, default=10,
-                        help="Warmup iterations (default: 10)")
-    parser.add_argument("--iterations", type=int, default=50,
-                        help="Timed iterations (default: 50)")
-    parser.add_argument("--threads", type=int, default=1,
-                        help="Threads for ORT and PyTorch (default: 1)")
-    parser.add_argument("--skip-pipeline", action="store_true",
-                        help="Skip full pipeline benchmark (requires MaAI)")
+    parser.add_argument(
+        "--frame-rates",
+        nargs="+",
+        type=int,
+        default=[5, 10],
+        help="Frame rates to test (default: 5 10)",
+    )
+    parser.add_argument(
+        "--context", type=float, default=5.0, help="Context length in seconds (default: 5.0)"
+    )
+    parser.add_argument("--warmup", type=int, default=10, help="Warmup iterations (default: 10)")
+    parser.add_argument(
+        "--iterations", type=int, default=50, help="Timed iterations (default: 50)"
+    )
+    parser.add_argument(
+        "--threads", type=int, default=1, help="Threads for ORT and PyTorch (default: 1)"
+    )
+    parser.add_argument(
+        "--skip-pipeline", action="store_true", help="Skip full pipeline benchmark (requires MaAI)"
+    )
     args = parser.parse_args()
 
     models_dir = os.path.join(os.path.dirname(__file__), "..", "..", "models")
@@ -328,8 +340,13 @@ def main() -> None:
         if not args.skip_pipeline:
             try:
                 benchmark_pipeline(
-                    fp32_path, int8_path, fr, args.context,
-                    args.warmup, args.iterations, args.threads,
+                    fp32_path,
+                    int8_path,
+                    fr,
+                    args.context,
+                    args.warmup,
+                    args.iterations,
+                    args.threads,
                 )
             except Exception as e:
                 print(f"\n  Pipeline benchmark failed: {e}")

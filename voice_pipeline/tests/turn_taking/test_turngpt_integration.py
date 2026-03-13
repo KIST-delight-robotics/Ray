@@ -172,7 +172,11 @@ class TestErrorHandling:
     """Invalid checkpoint path raises TurnGPTError."""
 
     def test_invalid_checkpoint_path_raises(self):
-        config = TurnGPTConfig(checkpoint_path="/nonexistent/model.ckpt", onnx_model_path="", device="cpu")
+        config = TurnGPTConfig(
+            checkpoint_path="/nonexistent/model.ckpt",
+            onnx_model_path="",
+            device="cpu",
+        )
 
         from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 

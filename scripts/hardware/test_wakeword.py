@@ -75,7 +75,9 @@ def main() -> None:
             # Periodic status
             if frame_count % 333 == 0:  # ~every 10s
                 elapsed = time.monotonic() - start
-                print(f"  [{elapsed:.0f}s] {frame_count} frames processed, {detections} detections")
+                print(
+                    f"  [{elapsed:.0f}s] {frame_count} frames processed, {detections} detections"
+                )
 
     except KeyboardInterrupt:
         elapsed = time.monotonic() - start

@@ -77,9 +77,7 @@ class TurnGPTWrapper(ITurnGPT):
 
     def _init_onnx(self, config: TurnGPTConfig) -> None:
         if not config.tokenizer_path:
-            raise TurnGPTError(
-                "tokenizer_path is required when onnx_model_path is set"
-            )
+            raise TurnGPTError("tokenizer_path is required when onnx_model_path is set")
         try:
             import onnxruntime as ort
             from transformers import GPT2TokenizerFast
@@ -88,7 +86,9 @@ class TurnGPTWrapper(ITurnGPT):
             so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
             so.intra_op_num_threads = config.onnx_threads
             self._ort_session = ort.InferenceSession(
-                config.onnx_model_path, so, providers=["CPUExecutionProvider"],
+                config.onnx_model_path,
+                so,
+                providers=["CPUExecutionProvider"],
             )
             self._hf_tokenizer = GPT2TokenizerFast.from_pretrained(
                 config.tokenizer_path,
@@ -182,7 +182,10 @@ class TurnGPTWrapper(ITurnGPT):
         encoded = self._hf_tokenizer(text, return_tensors="pt")
         input_ids = encoded["input_ids"]
         speaker_ids = _build_speaker_ids(
-            input_ids, self._eos_token_id, self._sp1_id, self._sp2_id,
+            input_ids,
+            self._eos_token_id,
+            self._sp1_id,
+            self._sp2_id,
         )
         return input_ids, speaker_ids
 
@@ -191,7 +194,9 @@ class TurnGPTWrapper(ITurnGPT):
     # ------------------------------------------------------------------
 
     def _pytorch_forward_with_cache(
-        self, input_ids: Tensor, speaker_ids: Tensor,
+        self,
+        input_ids: Tensor,
+        speaker_ids: Tensor,
     ) -> float:
         cached = self._cached_input_ids
         past = self._past_key_values
@@ -233,7 +238,9 @@ class TurnGPTWrapper(ITurnGPT):
     # ------------------------------------------------------------------
 
     def _onnx_forward_with_cache(
-        self, input_ids: Tensor, speaker_ids: Tensor,
+        self,
+        input_ids: Tensor,
+        speaker_ids: Tensor,
     ) -> float:
         cached = self._cached_input_ids
         past = self._past_key_values
@@ -250,7 +257,10 @@ class TurnGPTWrapper(ITurnGPT):
                     new_speaker = speaker_ids[:, prefix_len:]
 
                     trp, presents = self._onnx_run(
-                        new_ids, new_speaker, prefix_len, sliced_past,
+                        new_ids,
+                        new_speaker,
+                        prefix_len,
+                        sliced_past,
                     )
                     self._cached_input_ids = input_ids
                     self._past_key_values = presents
@@ -262,7 +272,10 @@ class TurnGPTWrapper(ITurnGPT):
 
         if self._onnx_has_kv:
             trp, presents = self._onnx_run(
-                input_ids, speaker_ids, 0, _empty_past(),
+                input_ids,
+                speaker_ids,
+                0,
+                _empty_past(),
             )
             self._cached_input_ids = input_ids
             self._past_key_values = presents
@@ -287,7 +300,9 @@ class TurnGPTWrapper(ITurnGPT):
         sp_np = speaker_ids.numpy()
         seq_len = ids_np.shape[1]
         pos_np = np.arange(
-            position_offset, position_offset + seq_len, dtype=np.int64,
+            position_offset,
+            position_offset + seq_len,
+            dtype=np.int64,
         ).reshape(1, -1)
 
         feeds = {
@@ -307,7 +322,9 @@ class TurnGPTWrapper(ITurnGPT):
         return trp, presents
 
     def _onnx_run_no_cache(
-        self, input_ids: Tensor, speaker_ids: Tensor,
+        self,
+        input_ids: Tensor,
+        speaker_ids: Tensor,
     ) -> float:
         """Run ONNX no-cache model. Returns trp."""
         feeds = {
@@ -346,7 +363,10 @@ def _common_prefix_length(a: Tensor, b: Tensor) -> int:
 
 
 def _build_speaker_ids(
-    input_ids: Tensor, eos_id: int, sp1_id: int, sp2_id: int,
+    input_ids: Tensor,
+    eos_id: int,
+    sp1_id: int,
+    sp2_id: int,
 ) -> Tensor:
     """Build speaker_ids tensor from input_ids, alternating at <ts> tokens."""
     speaker_ids = torch.full_like(input_ids, sp1_id)
@@ -379,24 +399,24 @@ def _empty_past() -> dict[str, np.ndarray]:
     d: dict[str, np.ndarray] = {}
     for i in range(_NUM_LAYERS):
         d[f"past_key_{i}"] = np.zeros(
-            (1, _NUM_HEADS, 0, _HEAD_DIM), dtype=np.float32,
+            (1, _NUM_HEADS, 0, _HEAD_DIM),
+            dtype=np.float32,
         )
         d[f"past_value_{i}"] = np.zeros(
-            (1, _NUM_HEADS, 0, _HEAD_DIM), dtype=np.float32,
+            (1, _NUM_HEADS, 0, _HEAD_DIM),
+            dtype=np.float32,
         )
     return d
 
 
 def _slice_past_pytorch(past_key_values: tuple, prefix_len: int) -> tuple:
     """Slice PyTorch KV cache to keep only the first ``prefix_len`` positions."""
-    return tuple(
-        (k[:, :, :prefix_len, :], v[:, :, :prefix_len, :])
-        for k, v in past_key_values
-    )
+    return tuple((k[:, :, :prefix_len, :], v[:, :, :prefix_len, :]) for k, v in past_key_values)
 
 
 def _slice_past_onnx(
-    past: dict[str, np.ndarray], prefix_len: int,
+    past: dict[str, np.ndarray],
+    prefix_len: int,
 ) -> dict[str, np.ndarray]:
     """Slice ONNX KV cache to keep only the first ``prefix_len`` positions."""
     return {k: v[:, :, :prefix_len, :] for k, v in past.items()}

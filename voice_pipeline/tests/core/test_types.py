@@ -230,6 +230,7 @@ class TestCppEvent:
     def test_frozen(self) -> None:
         event = CppEvent(event_type=CppEventType.PLAYBACK_STARTED)
         import pytest
+
         with pytest.raises(AttributeError):
             event.event_type = CppEventType.PLAYBACK_COMPLETE  # type: ignore[misc]
 

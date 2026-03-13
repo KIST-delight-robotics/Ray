@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import struct
+
 import numpy as np
 import onnxruntime as ort
 import torch
@@ -104,9 +105,7 @@ class MaAIVAPWrapper(IVAP):
                 os.unlink(tfm_path)
                 logger.info("ONNX transformer loaded")
             except Exception as exc:
-                raise VAPError(
-                    f"Failed to create ONNX transformer session: {exc}"
-                ) from exc
+                raise VAPError(f"Failed to create ONNX transformer session: {exc}") from exc
 
             # Cache shape constants for ONNX transformer
             conf = self._vap.conf
@@ -120,9 +119,7 @@ class MaAIVAPWrapper(IVAP):
             # PyTorch transformer with optional torch.compile
             if config.use_torch_compile:
                 try:
-                    self._vap_forward = torch.compile(
-                        self._vap.forward, mode="reduce-overhead"
-                    )
+                    self._vap_forward = torch.compile(self._vap.forward, mode="reduce-overhead")
                     logger.info("torch.compile enabled for transformer")
                 except Exception:
                     logger.warning(
@@ -196,9 +193,7 @@ class MaAIVAPWrapper(IVAP):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _process_frame(
-        self, x1: np.ndarray, x2: np.ndarray
-    ) -> VAPResult | None:
+    def _process_frame(self, x1: np.ndarray, x2: np.ndarray) -> VAPResult | None:
         """Run one frame through ONNX encoder + transformer."""
         # Audio buffering
         self._buf_x1 = np.concatenate([self._buf_x1, x1])
@@ -235,27 +230,27 @@ class MaAIVAPWrapper(IVAP):
 
         return VAPResult(p_now, p_fut, user_is_speaking)
 
-    def _process_transformer_onnx(
-        self, e1_np: np.ndarray, e2_np: np.ndarray
-    ) -> dict:
+    def _process_transformer_onnx(self, e1_np: np.ndarray, e2_np: np.ndarray) -> dict:
         """Run transformer via ONNX Runtime."""
         limit = self._audio_context_len - 1
 
         # Build cache inputs
         if self._vap_cache is None:
-            empty_ch = np.zeros(
-                (self._n_ch_layers, 1, self._nh, 0, self._hd), dtype=np.float32
-            )
-            empty_cr = np.zeros(
-                (self._n_cross_layers, 1, self._nh, 0, self._hd), dtype=np.float32
-            )
+            empty_ch = np.zeros((self._n_ch_layers, 1, self._nh, 0, self._hd), dtype=np.float32)
+            empty_cr = np.zeros((self._n_cross_layers, 1, self._nh, 0, self._hd), dtype=np.float32)
             cache = {
-                "ar1_k": empty_ch, "ar1_v": empty_ch.copy(),
-                "ar2_k": empty_ch.copy(), "ar2_v": empty_ch.copy(),
-                "cross1_k": empty_cr, "cross1_v": empty_cr.copy(),
-                "cross2_k": empty_cr.copy(), "cross2_v": empty_cr.copy(),
-                "cross1_c_k": empty_cr.copy(), "cross1_c_v": empty_cr.copy(),
-                "cross2_c_k": empty_cr.copy(), "cross2_c_v": empty_cr.copy(),
+                "ar1_k": empty_ch,
+                "ar1_v": empty_ch.copy(),
+                "ar2_k": empty_ch.copy(),
+                "ar2_v": empty_ch.copy(),
+                "cross1_k": empty_cr,
+                "cross1_v": empty_cr.copy(),
+                "cross2_k": empty_cr.copy(),
+                "cross2_v": empty_cr.copy(),
+                "cross1_c_k": empty_cr.copy(),
+                "cross1_c_v": empty_cr.copy(),
+                "cross2_c_k": empty_cr.copy(),
+                "cross2_c_v": empty_cr.copy(),
             }
         else:
             cache = self._vap_cache
@@ -264,14 +259,18 @@ class MaAIVAPWrapper(IVAP):
         inputs = {"x1": e1_np, "x2": e2_np, **cache}
         outputs = self._tfm_sess.run(None, inputs)
         out_names = [o.name for o in self._tfm_sess.get_outputs()]
-        result = dict(zip(out_names, outputs))
+        result = dict(zip(out_names, outputs, strict=False))
 
         # Update cache with trimming
         new_cache = {
-            "ar1_k": result["out_ar1_k"], "ar1_v": result["out_ar1_v"],
-            "ar2_k": result["out_ar2_k"], "ar2_v": result["out_ar2_v"],
-            "cross1_k": result["out_cross1_k"], "cross1_v": result["out_cross1_v"],
-            "cross2_k": result["out_cross2_k"], "cross2_v": result["out_cross2_v"],
+            "ar1_k": result["out_ar1_k"],
+            "ar1_v": result["out_ar1_v"],
+            "ar2_k": result["out_ar2_k"],
+            "ar2_v": result["out_ar2_v"],
+            "cross1_k": result["out_cross1_k"],
+            "cross1_v": result["out_cross1_v"],
+            "cross2_k": result["out_cross2_k"],
+            "cross2_v": result["out_cross2_v"],
             "cross1_c_k": result["out_cross1_c_k"],
             "cross1_c_v": result["out_cross1_c_v"],
             "cross2_c_k": result["out_cross2_c_k"],
@@ -288,17 +287,13 @@ class MaAIVAPWrapper(IVAP):
             "vad": [float(result["vad1"]), float(result["vad2"])],
         }
 
-    def _process_transformer_pytorch(
-        self, e1_np: np.ndarray, e2_np: np.ndarray
-    ) -> dict:
+    def _process_transformer_pytorch(self, e1_np: np.ndarray, e2_np: np.ndarray) -> dict:
         """Run transformer via PyTorch (fallback path)."""
         e1 = torch.from_numpy(e1_np)
         e2 = torch.from_numpy(e2_np)
 
         with torch.inference_mode():
-            out, self._vap_cache = self._vap_forward(
-                e1, e2, cache=self._vap_cache
-            )
+            out, self._vap_cache = self._vap_forward(e1, e2, cache=self._vap_cache)
 
         # Cache trimming
         if self._vap_cache is not None:
