@@ -144,8 +144,8 @@ RTF: 4.16x (100ms budget). Budget exceeded: 0%.
 turn_taking/
 ├── __init__.py
 ├── exceptions.py       # TurnTakingError, VAPError, TurnGPTError, TurnDetectorError
-├── vap.py              # VAPWrapper(IVAP) — VAP-Realtime
-├── maai_vap.py         # MaAIVAPWrapper(IVAP) — MaAI VAP (ONNX)
+├── vap.py              # VAPWrapper(IVAP) — VoiceActivityProjection
+├── maai_vap.py         # MaAIVAPWrapper(IVAP) — MaAI (ONNX)
 ├── onnx_export.py      # ONNX export wrappers (encoder + transformer)
 ├── turngpt.py          # TurnGPTWrapper(ITurnGPT)
 ├── turn_detector.py    # TurnDetector(ITurnDetector)
