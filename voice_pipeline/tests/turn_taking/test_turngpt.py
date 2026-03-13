@@ -110,6 +110,8 @@ def _build_wrapper(mock_cls: MagicMock, **kwargs) -> tuple:
 
     config = TurnGPTConfig(
         checkpoint_path=kwargs.get("checkpoint_path", "/fake/turngpt.ckpt"),
+        onnx_model_path="",
+        tokenizer_path="",
         device=kwargs.get("device", "cpu"),
         max_context_tokens=kwargs.get("max_context_tokens", 1024),
     )
@@ -180,7 +182,7 @@ class TestInit:
         mock_cls = _inject_turngpt_module
         mock_cls.load_from_checkpoint.side_effect = FileNotFoundError("no file")
 
-        config = TurnGPTConfig(checkpoint_path="/missing.ckpt")
+        config = TurnGPTConfig(checkpoint_path="/missing.ckpt", onnx_model_path="")
         from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
         with pytest.raises(TurnGPTError, match="Failed to load TurnGPT model"):
@@ -190,7 +192,7 @@ class TestInit:
         mock_cls = _inject_turngpt_module
         mock_cls.load_from_checkpoint.side_effect = RuntimeError("corrupt checkpoint")
 
-        config = TurnGPTConfig(checkpoint_path="/bad.ckpt")
+        config = TurnGPTConfig(checkpoint_path="/bad.ckpt", onnx_model_path="")
         from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
         with pytest.raises(TurnGPTError, match="Failed to load TurnGPT model"):
@@ -349,7 +351,7 @@ class TestErrorHandling:
         builtins.__import__ = _fail_import
         try:
             sys.modules.pop("voice_pipeline.turn_taking.turngpt", None)
-            config = TurnGPTConfig(checkpoint_path="/fake.ckpt")
+            config = TurnGPTConfig(checkpoint_path="/fake.ckpt", onnx_model_path="")
             from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
             with pytest.raises(TurnGPTError, match="Failed to load TurnGPT model"):

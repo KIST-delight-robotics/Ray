@@ -99,7 +99,7 @@ class TestLEDConfig:
 class TestVAPConfig:
     def test_defaults(self) -> None:
         cfg = VAPConfig()
-        assert cfg.model_path == ""
+        assert cfg.model_path
         assert cfg.context_sec == 20.0
         assert cfg.step_sec == 0.1
         assert cfg.tt_time == 0.5
@@ -111,6 +111,8 @@ class TestTurnGPTConfig:
     def test_defaults(self) -> None:
         cfg = TurnGPTConfig()
         assert cfg.checkpoint_path == ""
+        assert cfg.onnx_model_path
+        assert cfg.tokenizer_path
         assert cfg.device == "cpu"
         assert cfg.max_context_tokens == 1024
 

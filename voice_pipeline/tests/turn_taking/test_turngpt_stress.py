@@ -37,7 +37,7 @@ def checkpoint_path() -> str:
 @pytest.fixture(scope="module")
 def wrapper(checkpoint_path: str):
     """Create a TurnGPTWrapper with real model (shared across module tests)."""
-    config = TurnGPTConfig(checkpoint_path=checkpoint_path, device="cpu")
+    config = TurnGPTConfig(checkpoint_path=checkpoint_path, onnx_model_path="", device="cpu")
 
     from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
