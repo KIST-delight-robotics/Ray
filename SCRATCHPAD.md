@@ -4,7 +4,40 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 
 ## Current Status
 
-배치 드레인 + mock C++ 서버 + config 기본값 작업 완료. 531 tests pass.
+#2 robot_audio 비대칭 수정 + 마이크 에러 전파 완료. 538 tests pass.
+
+### 완료된 작업 (2026-03-13, robot_audio 비대칭 + 마이크 에러)
+
+**1. robot_audio 배치 비대칭 수정 (#2)**
+- **문제**: 배치 드레인 시 user_audio=N*30ms이지만 robot_audio=30ms 1개 → VAP에 (N-1)*30ms 무음
+- **해결**: `_get_robot_audio_combined(frame_count)` 추가 — 재생 버퍼에서 N개 연속 프레임 추출
+- 기존 `get_robot_audio_chunk()` 샘플 정렬 버그 수정: `int(elapsed*rate*width)` → `int(elapsed*rate)*width`
+- IVAP docstring을 멀티프레임 사용에 맞게 보정
+- 6개 테스트 추가 (TestRobotAudioCombined)
+
+**2. 마이크 캡처 스레드 에러 전파**
+- **문제**: 캡처 스레드 사망 시 `_error`에 저장만 하고 SessionManager SLEEP 루프 무한 대기
+- **해결**: `IAudioInput.error` 프로퍼티 추가, `_run_sleep`에서 queue 타임아웃마다 체크 → 에러 raise
+
+**3. config 기본값 설정** (이전 세션 미커밋분)
+- VAP/TurnGPT 모델 경로 기본값 설정, PyTorch 테스트에 `onnx_model_path=""` 명시
+
+**4. mock C++ WebSocket 서버** (이전 세션 미커밋분)
+- `mock_cpp_server.py` 커밋
+
+### 미완료 — 다음 세션에서 진행
+
+**#5 배치 내 상태 전이 누락** (실측 후 판단)
+- 배치 N프레임에서 VAP 결과 1개로 타이머를 N*30ms 증분 → 배치 중간 발화 상태 변화 반영 안 됨
+- VAP 추론 주기(100ms ≈ 3프레임)이고 배치가 주로 2-3프레임이므로 영향 제한적
+- **실제 파이프라인 실행해서 조기 turn_shift 발생 여부 확인 필요**
+
+**prepare → turn_shift 텍스트 불일치 문제 (코드 리뷰에서 발견)**
+- 유사도 게이트가 prepare 업데이트를 차단한 상태에서 turn_shift가 오면, generator는 이전 텍스트로 응답 생성
+- `_handle_turn_shift`에서 generator가 PREPARING일 때 prepare를 재호출하지 않음 (line 353: IDLE일 때만)
+- 히스토리에는 최종 텍스트가 기록되지만 응답은 이전 텍스트 기반 → 응답-입력 불일치
+- `_handle_prepare`의 `_awaiting_response` 분기는 데드 코드 (turn_shift 후 TurnDetector가 ROBOT_TURN으로 전이해서 prepare 반환 불가)
+- **수정 방향**: `_handle_turn_shift`에서 PREPARING이고 텍스트가 다르면 `generator.prepare(text)` 재호출
 
 ### 완료된 작업 (2026-03-12, 배치 드레인 + mock 서버 + config)
 
