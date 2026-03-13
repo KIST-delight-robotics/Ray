@@ -90,6 +90,7 @@ class Orchestrator:
         self._pending_truncation: _PendingTruncation | None = None
         self._user_msg_id: int | None = None
         self._assistant_msg_id: int | None = None
+        self._prepared_text = ""
 
     # ------------------------------------------------------------------
     # Public API
@@ -190,6 +191,7 @@ class Orchestrator:
         self._pending_truncation = None
         self._user_msg_id = None
         self._assistant_msg_id = None
+        self._prepared_text = ""
 
         self._asr.start()
         self._set_led(LEDState.LISTENING)
@@ -330,9 +332,7 @@ class Orchestrator:
         frame_count: int = 1,
     ) -> TurnDecision | None:
         try:
-            return self._turn_detector.process_frame(
-                audio, asr_text, robot_audio, frame_count
-            )
+            return self._turn_detector.process_frame(audio, asr_text, robot_audio, frame_count)
         except Exception:
             logger.warning("TurnDetector error", exc_info=True)
             return None
@@ -352,6 +352,7 @@ class Orchestrator:
             # Start generation if not already preparing
             if self._generator.state == GeneratorState.IDLE:
                 self._generator.prepare(text)
+                self._prepared_text = text
         return False
 
     def _handle_prepare(self, text: str) -> None:
@@ -362,6 +363,7 @@ class Orchestrator:
             combined = text
         self._pending_truncation = None
         self._generator.prepare(combined)
+        self._prepared_text = combined
 
     def _handle_interrupt(self) -> None:
         """Handle interrupt signal from TurnDetector."""
@@ -378,6 +380,7 @@ class Orchestrator:
             self._turn_detector.reset()
             self._awaiting_response = False
             self._saved_user_text = ""
+            self._prepared_text = ""
             self._audio_end_sent = False
             self._set_led(LEDState.LISTENING)
 
@@ -387,12 +390,8 @@ class Orchestrator:
 
     def _begin_streaming(self, text: str) -> None:
         """Start sending audio to bridge. Save user message to history."""
-        # Combine text if awaiting
-        if self._awaiting_response:
-            parts = [p for p in (self._saved_user_text, text) if p]
-            final_text = " ".join(parts) if parts else ""
-        else:
-            final_text = text
+        # Use prepared text for history — matches what LLM actually saw
+        final_text = self._prepared_text if self._prepared_text else text
 
         self._user_msg_id = self._history.add_user_message(final_text)
         self._turn_detector.notify_turn_complete("user", final_text)
@@ -402,6 +401,7 @@ class Orchestrator:
 
         self._awaiting_response = False
         self._saved_user_text = ""
+        self._prepared_text = ""
         self._current_response = None
         self._sent_audio_buffer = bytearray()
         self._playback_start_time = 0.0
@@ -588,6 +588,7 @@ class Orchestrator:
             self._generator.reset()
             self._awaiting_response = False
             self._saved_user_text = ""
+            self._prepared_text = ""
             self._turn_detector.reset()
             self._set_led(LEDState.LISTENING)
 
