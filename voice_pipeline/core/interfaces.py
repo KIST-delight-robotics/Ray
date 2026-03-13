@@ -411,13 +411,15 @@ class IVAP(ABC):
     def feed_audio(
         self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None
     ) -> VAPResult:
-        """Feed one pipeline frame and return voice activity estimates.
+        """Feed pipeline audio and return voice activity estimates.
 
         Args:
-            user_audio: 30ms PCM chunk at 16kHz (pipeline AudioConfig rate).
-            robot_audio: 30ms PCM chunk at TTS output sample rate (24kHz).
-                None when the robot is not speaking. Wrapper resamples
-                internally to 16kHz.
+            user_audio: PCM audio at pipeline rate (16kHz). One or more
+                concatenated 30ms frames when batch-draining.
+            robot_audio: PCM audio at TTS output sample rate (24kHz).
+                Length should match user_audio duration. None when the
+                robot is not speaking. Wrapper resamples internally
+                to 16kHz.
 
         Returns:
             VAPResult with p_now, p_fut, and user_is_speaking.
@@ -476,14 +478,19 @@ class ITurnDetector(ABC):
         user_audio: AudioFrame,
         asr_text: str,
         robot_audio: AudioFrame | None = None,
+        frame_count: int = 1,
     ) -> TurnDecision:
         """Process one pipeline frame and return a turn decision.
 
         Args:
-            user_audio: 30ms PCM chunk at 16kHz.
+            user_audio: PCM audio at 16kHz. May be a single 30ms frame
+                or multiple concatenated frames when batch-draining.
             asr_text: Current ASR transcription (interim or final).
-            robot_audio: 30ms PCM chunk at TTS output sample rate (24kHz).
+            robot_audio: PCM chunk at TTS output sample rate (24kHz).
                 None when the robot is not speaking.
+            frame_count: Number of pipeline frames represented by this
+                call. Used to advance internal timers correctly when
+                multiple frames are processed in a single call.
 
         Returns:
             TurnDecision with at most one signal active.

@@ -129,12 +129,48 @@ class Orchestrator:
         if elapsed < 0:
             return None
         frame_bytes = sample_rate * frame_ms * sample_width // 1000
-        start = int(elapsed * sample_rate * sample_width)
+        start = int(elapsed * sample_rate) * sample_width
         end = start + frame_bytes
 
         if end > len(self._sent_audio_buffer):
             return None
         return bytes(self._sent_audio_buffer[start:end])
+
+    def _get_robot_audio_combined(self, frame_count: int) -> AudioFrame | None:
+        """Extract N consecutive frames from sent audio buffer ending at playback position.
+
+        Unlike get_robot_audio_chunk() which returns a single 30ms frame,
+        this returns frame_count * 30ms of audio to match batch-drained
+        user audio length.
+
+        Returns None if not playing, not enough buffer, or batch_start < 0.
+        """
+        if self._playback_state != PlaybackState.PLAYING:
+            return None
+        if self._playback_start_time == 0.0:
+            return None
+
+        sample_rate = self._tts_config.output_sample_rate
+        sample_width = 2  # 16-bit PCM
+        frame_ms = self._audio_config.frame_duration_ms
+        frame_bytes = sample_rate * frame_ms * sample_width // 1000
+
+        elapsed = time.monotonic() - self._playback_start_time
+        if elapsed < 0:
+            return None
+
+        # Sample-aligned current playback position
+        current_start = int(elapsed * sample_rate) * sample_width
+        # Back-track to cover the entire batch
+        batch_start = current_start - frame_bytes * (frame_count - 1)
+
+        if batch_start < 0:
+            return None  # Playback just started, buffer doesn't cover full batch
+        batch_end = current_start + frame_bytes
+
+        if batch_end > len(self._sent_audio_buffer):
+            return None
+        return bytes(self._sent_audio_buffer[batch_start:batch_end])
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -172,18 +208,23 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _run_frame(self, audio_queue: queue.Queue[AudioFrame]) -> bool:
-        """Process one frame. Returns True to exit the loop."""
+        """Process one frame (or batch of frames). Returns True to exit the loop."""
         # 0. Check external stop signal
         if self._stop_event.is_set():
             logger.info("External stop requested — exiting")
             return True
 
-        # 1. Get audio frame
+        # 1. Get audio frame + drain any backed-up frames
         frame = self._get_frame(audio_queue)
-
-        # 2. Feed to ASR
         if frame is not None:
-            self._feed_asr(frame)
+            frames = [frame]
+            self._drain_available_frames(audio_queue, frames)
+        else:
+            frames = []
+
+        # 2. Feed all frames to ASR
+        for f in frames:
+            self._feed_asr(f)
 
         # 3. Get current text
         current_text = self._get_asr_text()
@@ -193,10 +234,21 @@ class Orchestrator:
             self._last_asr_text = current_text
             self._last_text_change_time = time.monotonic()
 
-        # 5. Turn detection (only when we have a frame)
-        if frame is not None:
-            robot_audio = self.get_robot_audio_chunk()
-            decision = self._process_turn_detector(frame, current_text, robot_audio)
+        # 5. Turn detection (only when we have frames)
+        if frames:
+            frame_count = len(frames)
+            if frame_count > 1:
+                logger.debug("Batch-drained %d frames", frame_count)
+            # Concatenate all user audio for VAP buffer
+            combined_audio: AudioFrame = b"".join(frames)
+            robot_audio = (
+                self._get_robot_audio_combined(frame_count)
+                if frame_count > 1
+                else self.get_robot_audio_chunk()
+            )
+            decision = self._process_turn_detector(
+                combined_audio, current_text, robot_audio, frame_count
+            )
             if decision is not None:
                 if decision.turn_shift:
                     if self._handle_turn_shift(current_text):
@@ -235,6 +287,20 @@ class Orchestrator:
         except queue.Empty:
             return None
 
+    _MAX_BATCH_FRAMES = 10
+    """Upper bound on frames drained per iteration to prevent timer spikes."""
+
+    @staticmethod
+    def _drain_available_frames(
+        audio_queue: queue.Queue[AudioFrame], frames: list[AudioFrame]
+    ) -> None:
+        """Non-blocking drain of queued frames into *frames* (capped)."""
+        while len(frames) < Orchestrator._MAX_BATCH_FRAMES:
+            try:
+                frames.append(audio_queue.get_nowait())
+            except queue.Empty:
+                break
+
     # ------------------------------------------------------------------
     # ASR helpers
     # ------------------------------------------------------------------
@@ -258,12 +324,15 @@ class Orchestrator:
 
     def _process_turn_detector(
         self,
-        frame: AudioFrame,
+        audio: AudioFrame,
         asr_text: str,
         robot_audio: AudioFrame | None,
+        frame_count: int = 1,
     ) -> TurnDecision | None:
         try:
-            return self._turn_detector.process_frame(frame, asr_text, robot_audio)
+            return self._turn_detector.process_frame(
+                audio, asr_text, robot_audio, frame_count
+            )
         except Exception:
             logger.warning("TurnDetector error", exc_info=True)
             return None

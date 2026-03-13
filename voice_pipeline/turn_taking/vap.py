@@ -100,7 +100,7 @@ class VAPWrapper(IVAP):
             self._samples_since_inference += n
             if self._samples_since_inference >= self._step_samples:
                 self._cached_result = self._run_inference()
-                self._samples_since_inference = 0
+                self._samples_since_inference %= self._step_samples
 
             return self._cached_result
         except Exception:

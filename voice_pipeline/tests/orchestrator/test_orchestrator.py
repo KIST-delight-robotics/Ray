@@ -505,6 +505,81 @@ class TestRobotAudioChunk:
 
 
 # ---------------------------------------------------------------------------
+# Robot audio combined tests
+# ---------------------------------------------------------------------------
+
+
+class TestRobotAudioCombined:
+    """Tests for _get_robot_audio_combined (batch robot audio extraction)."""
+
+    def test_combined_extracts_n_frames(self) -> None:
+        """Combined extraction returns frame_count * frame_bytes of audio."""
+        orch, _ = _make_orchestrator(output_sample_rate=24000)
+        orch._playback_state = PlaybackState.PLAYING
+        # 30ms @ 24kHz 16-bit = 1440 bytes per frame
+        frame_bytes = 1440
+        frame_count = 3
+        total_bytes = frame_bytes * (frame_count + 2)  # extra buffer
+        orch._sent_audio_buffer = bytearray(b"\xAB" * total_bytes)
+        # Set playback start so elapsed covers frame_count frames
+        # elapsed ≈ frame_count * 30ms → current_start at frame_count * frame_bytes
+        elapsed_sec = frame_count * 0.030
+        orch._playback_start_time = time.monotonic() - elapsed_sec
+
+        result = orch._get_robot_audio_combined(frame_count)
+        assert result is not None
+        assert len(result) == frame_bytes * frame_count
+
+    def test_not_playing_returns_none(self) -> None:
+        """Returns None when not in PLAYING state."""
+        orch, _ = _make_orchestrator()
+        orch._playback_state = PlaybackState.IDLE
+        assert orch._get_robot_audio_combined(3) is None
+
+    def test_no_playback_start_returns_none(self) -> None:
+        """Returns None if playback_started event was never received."""
+        orch, _ = _make_orchestrator(output_sample_rate=24000)
+        orch._playback_state = PlaybackState.PLAYING
+        orch._playback_start_time = 0.0
+        orch._sent_audio_buffer = bytearray(b"\x00" * 10000)
+        assert orch._get_robot_audio_combined(3) is None
+
+    def test_batch_start_negative_returns_none(self) -> None:
+        """Returns None when playback just started and batch can't cover full range."""
+        orch, _ = _make_orchestrator(output_sample_rate=24000)
+        orch._playback_state = PlaybackState.PLAYING
+        frame_bytes = 1440
+        # elapsed ≈ 10ms → only ~0.33 frames elapsed, batch of 3 needs 3 frames back
+        orch._playback_start_time = time.monotonic() - 0.010
+        orch._sent_audio_buffer = bytearray(b"\x00" * frame_bytes * 10)
+        assert orch._get_robot_audio_combined(3) is None
+
+    def test_insufficient_buffer_returns_none(self) -> None:
+        """Returns None when buffer doesn't have enough data for batch_end."""
+        orch, _ = _make_orchestrator(output_sample_rate=24000)
+        orch._playback_state = PlaybackState.PLAYING
+        # elapsed far exceeds buffer
+        orch._playback_start_time = time.monotonic() - 5.0
+        orch._sent_audio_buffer = bytearray(b"\x00" * 100)
+        assert orch._get_robot_audio_combined(2) is None
+
+    def test_frame_count_one_matches_single_chunk_length(self) -> None:
+        """frame_count=1 returns same length as get_robot_audio_chunk."""
+        orch, _ = _make_orchestrator(output_sample_rate=24000)
+        orch._playback_state = PlaybackState.PLAYING
+        frame_bytes = 1440
+        orch._sent_audio_buffer = bytearray(b"\x01" * frame_bytes * 5)
+        orch._playback_start_time = time.monotonic() - 0.060  # ~2 frames in
+
+        single = orch.get_robot_audio_chunk()
+        combined = orch._get_robot_audio_combined(1)
+
+        assert single is not None
+        assert combined is not None
+        assert len(single) == len(combined) == frame_bytes
+
+
+# ---------------------------------------------------------------------------
 # Exit keyword tests
 # ---------------------------------------------------------------------------
 

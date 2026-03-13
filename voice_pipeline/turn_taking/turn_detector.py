@@ -72,6 +72,7 @@ class TurnDetector(ITurnDetector):
         user_audio: AudioFrame,
         asr_text: str,
         robot_audio: AudioFrame | None = None,
+        frame_count: int = 1,
     ) -> TurnDecision:
         """Process one pipeline frame and return a turn decision."""
         vap_result = self._vap.feed_audio(user_audio, robot_audio)
@@ -80,6 +81,8 @@ class TurnDetector(ITurnDetector):
             return self._process_robot_turn(vap_result, robot_audio)
 
         # --- USER_TURN ---
+        elapsed = self._frame_duration_sec * frame_count
+
         # Track ASR text changes
         text_changed = asr_text != self._prev_asr_text
         if text_changed and asr_text:
@@ -88,16 +91,16 @@ class TurnDetector(ITurnDetector):
             self._asr_has_changed = True
         self._prev_asr_text = asr_text
 
-        # Update timers
+        # Update timers (scaled by frame_count)
         if not vap_result.user_is_speaking:
-            self._silence_elapsed_sec += self._frame_duration_sec
+            self._silence_elapsed_sec += elapsed
         else:
             self._silence_elapsed_sec = 0.0
             self._vap_favor_robot_elapsed_sec = 0.0
-        self._last_asr_change_elapsed_sec += self._frame_duration_sec
+        self._last_asr_change_elapsed_sec += elapsed
 
         # --- Turn-shift check (only when user NOT speaking and text exists) ---
-        if not vap_result.user_is_speaking and asr_text and self._check_turn_shift(vap_result):
+        if not vap_result.user_is_speaking and asr_text and self._check_turn_shift(vap_result, elapsed):
             self._turn_state = _TurnState.ROBOT_TURN
             self._reset_per_frame_state()
             return TurnDecision(turn_shift=True)
@@ -136,7 +139,7 @@ class TurnDetector(ITurnDetector):
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _check_turn_shift(self, vap_result: VAPResult) -> bool:
+    def _check_turn_shift(self, vap_result: VAPResult, elapsed: float) -> bool:
         """Check two OR paths for turn-shift.
 
         Path 1: VAP sustained robot-favor.
@@ -146,7 +149,7 @@ class TurnDetector(ITurnDetector):
 
         # Path 1 — VAP: both p_now and p_fut favor robot (below user threshold)
         if vap_result.p_now < cfg.vap_user_threshold and vap_result.p_fut < cfg.vap_user_threshold:
-            self._vap_favor_robot_elapsed_sec += self._frame_duration_sec
+            self._vap_favor_robot_elapsed_sec += elapsed
             if self._vap_favor_robot_elapsed_sec >= cfg.min_gap_time_sec:
                 return True
         else:
