@@ -577,7 +577,7 @@ class Orchestrator:
         """Check if the generator is ready while awaiting_response."""
         state = self._generator.state
         if state == GeneratorState.STREAMING:
-            # Pass empty text — _begin_streaming uses _saved_user_text when awaiting
+            # Pass empty text — _begin_streaming uses _prepared_text for history
             self._begin_streaming("")
         elif state == GeneratorState.FAILED:
             logger.warning("Generator failed while awaiting — skipping turn")

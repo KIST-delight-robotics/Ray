@@ -120,7 +120,7 @@ class SessionManager(ISessionManager):
             except queue.Empty:
                 if self._audio_input.error is not None:
                     logger.error("Audio capture thread died: %s", self._audio_input.error)
-                    raise self._audio_input.error from self._audio_input.error
+                    raise self._audio_input.error from None
                 continue
 
             if self._wakeword.feed_audio(frame):

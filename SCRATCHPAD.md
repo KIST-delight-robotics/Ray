@@ -4,7 +4,21 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 
 ## Current Status
 
-VAP transformer ONNX 변환 완료. 전체 ONNX 파이프라인(enc+tfm) 프로덕션 통합. 538 unit + 15 integration tests pass.
+History 텍스트 일관성 수정 + 데드 코드 정리 + 프로젝트 전체 lint 정리 완료. 539 tests pass, ruff 0 errors.
+
+### 완료된 작업 (2026-03-13, history 일관성 + lint 정리)
+
+**1. history 텍스트 일관성 수정**
+- **문제**: 유사도 게이트가 re-prepare 차단 시, history에는 최종 ASR 텍스트가 기록되지만 응답은 prepare 시점 텍스트 기반 → 불일치
+- **해결**: `_prepared_text` 필드 추가. `generator.prepare()` 호출 시점의 텍스트를 추적, `_begin_streaming`에서 history 기록에 사용
+- 리셋 지점: `_begin_streaming`, `_handle_interrupt` awaiting, `_check_generator_completion` FAILED, `_start_session`
+
+**2. `_handle_prepare` 데드 코드 제거**
+- `_awaiting_response` 분기 (saved_user_text 결합 로직) 제거 — turn_shift 후 TurnDetector가 ROBOT_TURN으로 전이해서 prepare 시그널 도달 불가
+- 관련 테스트 (`test_prepare_combines_text_during_awaiting`) 삭제
+
+**3. 프로젝트 전체 ruff lint 정리**
+- 27 파일, 56 errors 수정 (E501, F841, F821, B007, B905, SIM102, SIM105, SIM108, SIM115)
 
 ### 완료된 작업 (2026-03-13, VAP transformer ONNX)
 
@@ -70,12 +84,7 @@ VAP transformer ONNX 변환 완료. 전체 ONNX 파이프라인(enc+tfm) 프로�
 - VAP 추론 주기(100ms ≈ 3프레임)이고 배치가 주로 2-3프레임이므로 영향 제한적
 - **실제 파이프라인 실행해서 조기 turn_shift 발생 여부 확인 필요**
 
-**prepare → turn_shift 텍스트 불일치 문제 (코드 리뷰에서 발견)**
-- 유사도 게이트가 prepare 업데이트를 차단한 상태에서 turn_shift가 오면, generator는 이전 텍스트로 응답 생성
-- `_handle_turn_shift`에서 generator가 PREPARING일 때 prepare를 재호출하지 않음 (line 353: IDLE일 때만)
-- 히스토리에는 최종 텍스트가 기록되지만 응답은 이전 텍스트 기반 → 응답-입력 불일치
-- `_handle_prepare`의 `_awaiting_response` 분기는 데드 코드 (turn_shift 후 TurnDetector가 ROBOT_TURN으로 전이해서 prepare 반환 불가)
-- **수정 방향**: `_handle_turn_shift`에서 PREPARING이고 텍스트가 다르면 `generator.prepare(text)` 재호출
+**prepare → turn_shift 텍스트 불일치 문제** — ✅ 해결 (2026-03-13, `_prepared_text` 도입)
 
 ### 완료된 작업 (2026-03-12, 배치 드레인 + mock 서버 + config)
 
