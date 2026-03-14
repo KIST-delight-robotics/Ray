@@ -1,17 +1,29 @@
-"""ONNX export utilities for MaAI VAP.
+"""Export MaAI VAP encoder and transformer to ONNX files.
 
-Provides encoder and transformer ONNX wrappers and export functions
-used by both the production MaAIVAPWrapper and benchmark scripts.
+Usage:
+    uv run python scripts/export_maai_onnx.py [--lang en] [--frame-rate 10] [--context-len 5.0]
+
+Outputs saved to models/maai/:
+    encoder_{frame_rate}hz.onnx
+    transformer_{lang}.onnx
 """
 
 from __future__ import annotations
 
+import argparse
 import math
+import os
+import shutil
 import tempfile
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+# =====================================================================
+# Encoder ONNX wrapper
+# =====================================================================
 
 
 class EncoderONNXWrapper(nn.Module):
@@ -45,14 +57,9 @@ class EncoderONNXWrapper(nn.Module):
         return z, h_out, c_out
 
 
-# ---------------------------------------------------------------------------
+# =====================================================================
 # Transformer ONNX wrapper
-# ---------------------------------------------------------------------------
-
-# Cache layout: 6 groups, each (k_stack, v_stack).
-# ar1/ar2: shape (n_ch_layers, B, nh, T, hd)
-# cross1/cross2/cross1_c/cross2_c: shape (n_cross_layers, B, nh, T, hd)
-_CACHE_GROUPS = ("ar1", "ar2", "cross1", "cross2", "cross1_c", "cross2_c")
+# =====================================================================
 
 
 def _build_alibi_mask(num_heads: int, max_T: int) -> torch.Tensor:
@@ -232,42 +239,23 @@ class TransformerONNXWrapper(nn.Module):
         self,
         x1: torch.Tensor,
         x2: torch.Tensor,
-        # ar1 cache
         ar1_k: torch.Tensor,
         ar1_v: torch.Tensor,
-        # ar2 cache
         ar2_k: torch.Tensor,
         ar2_v: torch.Tensor,
-        # cross1 cache (self-attn of speaker 1 in stereo)
         cross1_k: torch.Tensor,
         cross1_v: torch.Tensor,
-        # cross2 cache (self-attn of speaker 2 in stereo)
         cross2_k: torch.Tensor,
         cross2_v: torch.Tensor,
-        # cross1_c cache (cross-attn: speaker 1 <- speaker 2)
         cross1_c_k: torch.Tensor,
         cross1_c_v: torch.Tensor,
-        # cross2_c cache (cross-attn: speaker 2 <- speaker 1)
         cross2_c_k: torch.Tensor,
         cross2_c_v: torch.Tensor,
     ) -> tuple[
-        torch.Tensor,  # p_now
-        torch.Tensor,  # p_future
-        torch.Tensor,  # vad1
-        torch.Tensor,  # vad2
-        # 12 updated cache tensors
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
     ]:
         # --- Channel tower (shared weights, applied to each speaker) ---
         o1 = x1
@@ -276,12 +264,7 @@ class TransformerONNXWrapper(nn.Module):
         dummy = torch.zeros(1, 1, 0, 1)  # unused cross-attn placeholder
         for i, layer in enumerate(self.ch_layers):
             o1, k, v, _, _ = layer(
-                o1,
-                o1,  # src=self for no cross-attn
-                ar1_k[i],
-                ar1_v[i],
-                dummy,
-                dummy,
+                o1, o1, ar1_k[i], ar1_v[i], dummy, dummy,
             )
             new_ar1_k_list.append(k)
             new_ar1_v_list.append(v)
@@ -291,12 +274,7 @@ class TransformerONNXWrapper(nn.Module):
         new_ar2_v_list: list[torch.Tensor] = []
         for i, layer in enumerate(self.ch_layers):
             o2, k, v, _, _ = layer(
-                o2,
-                o2,
-                ar2_k[i],
-                ar2_v[i],
-                dummy,
-                dummy,
+                o2, o2, ar2_k[i], ar2_v[i], dummy, dummy,
             )
             new_ar2_k_list.append(k)
             new_ar2_v_list.append(v)
@@ -313,26 +291,12 @@ class TransformerONNXWrapper(nn.Module):
         new_c2c_v: list[torch.Tensor] = []
 
         for i, layer in enumerate(self.cross_layers):
-            # Save originals — TransformerStereoLayer uses original inputs
-            # as cross-attention sources, not the updated ones.
             z1_in, z2_in = z1, z2
-            # Speaker 1: self-attn on z1, cross-attn from original z2
             z1, k1, v1, k1c, v1c = layer(
-                z1_in,
-                z2_in,
-                cross1_k[i],
-                cross1_v[i],
-                cross1_c_k[i],
-                cross1_c_v[i],
+                z1_in, z2_in, cross1_k[i], cross1_v[i], cross1_c_k[i], cross1_c_v[i],
             )
-            # Speaker 2: self-attn on z2, cross-attn from original z1
             z2, k2, v2, k2c, v2c = layer(
-                z2_in,
-                z1_in,
-                cross2_k[i],
-                cross2_v[i],
-                cross2_c_k[i],
-                cross2_c_v[i],
+                z2_in, z1_in, cross2_k[i], cross2_v[i], cross2_c_k[i], cross2_c_v[i],
             )
             new_c1_k.append(k1)
             new_c1_v.append(v1)
@@ -348,157 +312,31 @@ class TransformerONNXWrapper(nn.Module):
         logits = self.vap_head(x_combined)
         probs = logits.softmax(dim=-1)
 
-        # p_now — output both speaker probabilities: (2,)
         p_now_all = torch.einsum("bid,dc->bic", probs, self.abp_now)
         p_now_all = p_now_all / (p_now_all.sum(-1, keepdim=True) + 1e-5)
-        p_now = p_now_all[0, -1]  # (2,): [speaker1, speaker2]
+        p_now = p_now_all[0, -1]
 
-        # p_future — same
         p_fut_all = torch.einsum("bid,dc->bic", probs, self.abp_fut)
         p_fut_all = p_fut_all / (p_fut_all.sum(-1, keepdim=True) + 1e-5)
-        p_future = p_fut_all[0, -1]  # (2,)
+        p_future = p_fut_all[0, -1]
 
-        # VAD
         vad1 = self.va_classifier(o1).sigmoid()[0, -1, 0]
         vad2 = self.va_classifier(o2).sigmoid()[0, -1, 0]
 
-        # Stack cache outputs
-        out_ar1_k = torch.stack(new_ar1_k_list)
-        out_ar1_v = torch.stack(new_ar1_v_list)
-        out_ar2_k = torch.stack(new_ar2_k_list)
-        out_ar2_v = torch.stack(new_ar2_v_list)
-        out_c1_k = torch.stack(new_c1_k)
-        out_c1_v = torch.stack(new_c1_v)
-        out_c2_k = torch.stack(new_c2_k)
-        out_c2_v = torch.stack(new_c2_v)
-        out_c1c_k = torch.stack(new_c1c_k)
-        out_c1c_v = torch.stack(new_c1c_v)
-        out_c2c_k = torch.stack(new_c2c_k)
-        out_c2c_v = torch.stack(new_c2c_v)
-
         return (
-            p_now,
-            p_future,
-            vad1,
-            vad2,
-            out_ar1_k,
-            out_ar1_v,
-            out_ar2_k,
-            out_ar2_v,
-            out_c1_k,
-            out_c1_v,
-            out_c2_k,
-            out_c2_v,
-            out_c1c_k,
-            out_c1c_v,
-            out_c2c_k,
-            out_c2c_v,
+            p_now, p_future, vad1, vad2,
+            torch.stack(new_ar1_k_list), torch.stack(new_ar1_v_list),
+            torch.stack(new_ar2_k_list), torch.stack(new_ar2_v_list),
+            torch.stack(new_c1_k), torch.stack(new_c1_v),
+            torch.stack(new_c2_k), torch.stack(new_c2_v),
+            torch.stack(new_c1c_k), torch.stack(new_c1c_v),
+            torch.stack(new_c2c_k), torch.stack(new_c2c_v),
         )
 
 
-def export_transformer_onnx(
-    vap: nn.Module,
-    max_context: int = 256,
-) -> str:
-    """Export the VAP transformer to ONNX.
-
-    Returns the path to the temporary ONNX file. Caller is responsible
-    for cleanup (``os.unlink``).
-    """
-    wrapper = TransformerONNXWrapper(vap, max_context)
-    wrapper.eval()
-
-    conf = vap.conf
-    num_heads = conf.num_heads
-    head_dim = conf.dim // num_heads
-    n_ch = len(list(vap.ar_channel.layers))
-    n_cross = len(list(vap.ar.layers))
-
-    # Dummy inputs: 1-frame embedding + empty cache
-    dummy_x = torch.randn(1, 1, conf.dim)
-    dummy_ar_k = torch.zeros(n_ch, 1, num_heads, 0, head_dim)
-    dummy_ar_v = torch.zeros(n_ch, 1, num_heads, 0, head_dim)
-    dummy_cross_k = torch.zeros(n_cross, 1, num_heads, 0, head_dim)
-    dummy_cross_v = torch.zeros(n_cross, 1, num_heads, 0, head_dim)
-
-    dummy_inputs = (
-        dummy_x,
-        dummy_x,
-        dummy_ar_k,
-        dummy_ar_v,  # ar1
-        dummy_ar_k,
-        dummy_ar_v,  # ar2
-        dummy_cross_k,
-        dummy_cross_v,  # cross1
-        dummy_cross_k,
-        dummy_cross_v,  # cross2
-        dummy_cross_k,
-        dummy_cross_v,  # cross1_c
-        dummy_cross_k,
-        dummy_cross_v,  # cross2_c
-    )
-
-    input_names = [
-        "x1",
-        "x2",
-        "ar1_k",
-        "ar1_v",
-        "ar2_k",
-        "ar2_v",
-        "cross1_k",
-        "cross1_v",
-        "cross2_k",
-        "cross2_v",
-        "cross1_c_k",
-        "cross1_c_v",
-        "cross2_c_k",
-        "cross2_c_v",
-    ]
-    output_names = [
-        "p_now",
-        "p_future",
-        "vad1",
-        "vad2",
-        "out_ar1_k",
-        "out_ar1_v",
-        "out_ar2_k",
-        "out_ar2_v",
-        "out_cross1_k",
-        "out_cross1_v",
-        "out_cross2_k",
-        "out_cross2_v",
-        "out_cross1_c_k",
-        "out_cross1_c_v",
-        "out_cross2_c_k",
-        "out_cross2_c_v",
-    ]
-
-    # Dynamic axes: T_cached dimension (axis=3) for all cache tensors
-    dynamic_axes: dict[str, dict[int, str]] = {
-        "x1": {1: "T_new"},
-        "x2": {1: "T_new"},
-    }
-    cache_inputs = input_names[2:]
-    cache_outputs = output_names[4:]
-    for name in cache_inputs:
-        dynamic_axes[name] = {3: "T_cached"}
-    for name in cache_outputs:
-        dynamic_axes[name] = {3: "T_total"}
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".onnx", delete=False)  # noqa: SIM115
-    tmp.close()
-
-    torch.onnx.export(
-        wrapper,
-        dummy_inputs,
-        tmp.name,
-        input_names=input_names,
-        output_names=output_names,
-        dynamic_axes=dynamic_axes,
-        opset_version=17,
-        dynamo=False,
-    )
-    return tmp.name
+# =====================================================================
+# Export functions
+# =====================================================================
 
 
 def export_encoder_onnx(maai_instance: object, frame_rate: int) -> str:
@@ -534,3 +372,132 @@ def export_encoder_onnx(maai_instance: object, frame_rate: int) -> str:
         dynamo=False,
     )
     return tmp.name
+
+
+def export_transformer_onnx(
+    vap: nn.Module,
+    max_context: int = 256,
+) -> str:
+    """Export the VAP transformer to ONNX.
+
+    Returns the path to the temporary ONNX file. Caller is responsible
+    for cleanup (``os.unlink``).
+    """
+    wrapper = TransformerONNXWrapper(vap, max_context)
+    wrapper.eval()
+
+    conf = vap.conf
+    num_heads = conf.num_heads
+    head_dim = conf.dim // num_heads
+    n_ch = len(list(vap.ar_channel.layers))
+    n_cross = len(list(vap.ar.layers))
+
+    dummy_x = torch.randn(1, 1, conf.dim)
+    dummy_ar_k = torch.zeros(n_ch, 1, num_heads, 0, head_dim)
+    dummy_ar_v = torch.zeros(n_ch, 1, num_heads, 0, head_dim)
+    dummy_cross_k = torch.zeros(n_cross, 1, num_heads, 0, head_dim)
+    dummy_cross_v = torch.zeros(n_cross, 1, num_heads, 0, head_dim)
+
+    dummy_inputs = (
+        dummy_x, dummy_x,
+        dummy_ar_k, dummy_ar_v,
+        dummy_ar_k, dummy_ar_v,
+        dummy_cross_k, dummy_cross_v,
+        dummy_cross_k, dummy_cross_v,
+        dummy_cross_k, dummy_cross_v,
+        dummy_cross_k, dummy_cross_v,
+    )
+
+    input_names = [
+        "x1", "x2",
+        "ar1_k", "ar1_v", "ar2_k", "ar2_v",
+        "cross1_k", "cross1_v", "cross2_k", "cross2_v",
+        "cross1_c_k", "cross1_c_v", "cross2_c_k", "cross2_c_v",
+    ]
+    output_names = [
+        "p_now", "p_future", "vad1", "vad2",
+        "out_ar1_k", "out_ar1_v", "out_ar2_k", "out_ar2_v",
+        "out_cross1_k", "out_cross1_v", "out_cross2_k", "out_cross2_v",
+        "out_cross1_c_k", "out_cross1_c_v", "out_cross2_c_k", "out_cross2_c_v",
+    ]
+
+    dynamic_axes: dict[str, dict[int, str]] = {
+        "x1": {1: "T_new"},
+        "x2": {1: "T_new"},
+    }
+    for name in input_names[2:]:
+        dynamic_axes[name] = {3: "T_cached"}
+    for name in output_names[4:]:
+        dynamic_axes[name] = {3: "T_total"}
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".onnx", delete=False)  # noqa: SIM115
+    tmp.close()
+
+    torch.onnx.export(
+        wrapper,
+        dummy_inputs,
+        tmp.name,
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
+        opset_version=17,
+        dynamo=False,
+    )
+    return tmp.name
+
+
+# =====================================================================
+# CLI
+# =====================================================================
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Export MaAI VAP to ONNX")
+    parser.add_argument("--lang", default="en")
+    parser.add_argument("--frame-rate", type=int, default=10)
+    parser.add_argument("--context-len", type=float, default=5.0)
+    args = parser.parse_args()
+
+    out_dir = os.path.join(os.path.dirname(__file__), "..", "models", "maai")
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Load MaAI model
+    from maai import Maai, MaaiInput
+
+    print(f"Loading MaAI (lang={args.lang}, frame_rate={args.frame_rate}, "
+          f"context_len={args.context_len})...")
+    ch1 = MaaiInput.Chunk()
+    ch2 = MaaiInput.Chunk()
+    maai = Maai(
+        mode="vap",
+        lang=args.lang,
+        frame_rate=args.frame_rate,
+        context_len_sec=args.context_len,
+        audio_ch1=ch1,
+        audio_ch2=ch2,
+        device="cpu",
+        use_kv_cache=True,
+    )
+
+    # Export encoder
+    ctx = f"{args.context_len:.0f}s" if args.context_len == int(args.context_len) else f"{args.context_len}s"
+    enc_path = os.path.join(out_dir, f"encoder_{args.frame_rate}hz_{ctx}.onnx")
+    print(f"Exporting encoder → {enc_path}")
+    tmp = export_encoder_onnx(maai, args.frame_rate)
+    shutil.move(tmp, enc_path)
+    size_mb = os.path.getsize(enc_path) / 1024 / 1024
+    print(f"  Done ({size_mb:.1f} MB)")
+
+    # Export transformer
+    tfm_path = os.path.join(out_dir, f"transformer_{args.lang}_{ctx}.onnx")
+    print(f"Exporting transformer → {tfm_path}")
+    tmp = export_transformer_onnx(maai.vap)
+    shutil.move(tmp, tfm_path)
+    size_mb = os.path.getsize(tfm_path) / 1024 / 1024
+    print(f"  Done ({size_mb:.1f} MB)")
+
+    print("All exports complete.")
+
+
+if __name__ == "__main__":
+    main()
