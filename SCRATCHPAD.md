@@ -13,12 +13,20 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 - VAP 추론 주기(100ms ≈ 3프레임)이고 배치가 주로 2-3프레임이므로 영향 제한적
 - **실제 파이프라인 실행해서 조기 turn_shift 발생 여부 확인 필요**
 
-**VAP/TurnGPT 예산 초과 시 처리 미구현**
-- VAP budget 초과 20-25% (P95: 150ms, budget 100ms). 프레임 드롭 or 5Hz 폴백 설계 필요
-- 현재는 배치 드레인만 있고 명시적 budget 초과 처리 없음
+**VAP 추론을 별도 스레드로 분리 필요**
+- 현재 메인 루프에서 VAP blocking 추론 → ASR 공급 지연, TurnGPT와 직렬 실행
+- ONNX Runtime은 GIL 해제하므로 별도 스레드에서 진짜 병렬 실행 가능
+- 분리하면 budget 초과 문제도 구조적으로 해소
+
+**벤치마크 결과 (Ryzen 5 5600X)**:
+- VAP 10Hz: mean 7.5ms, P99 11.3ms (concurrent). Budget 100ms 대비 89% headroom.
+- TurnGPT 3Hz: mean 8.5ms, P99 12.0ms (concurrent). Budget 333ms 대비 96% headroom.
+- 동시 실행 간섭: P99 기준 +2-3ms (무시 가능).
+- **RPi 5에서 재측정 필요** — 데스크탑 수치와 큰 차이 예상.
 
 ### Next
+- **VAP 별도 스레드 분리** — orchestrator/turn_detector 구조 변경
 - **`uv run ray` 실행 테스트** — 하드웨어 + 외부 서비스 연결 상태에서 전체 파이프라인 검증
 - Phase 7 — Integration tests (Python ↔ C++ 실제 연결 테스트)
-- VAP budget 초과 20-25% 허용 설계 (프레임 드롭 or 5Hz 폴백)
+- RPi 5에서 벤치마크 재실행
 - TurnGPT: dialog 누적 시 비동기 cache prefill (선택적 최적화)
