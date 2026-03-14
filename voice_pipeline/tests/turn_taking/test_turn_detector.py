@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 from voice_pipeline.core.config import AudioConfig, TurnDetectorConfig
 from voice_pipeline.core.interfaces import IVAP, ITurnGPT
 from voice_pipeline.core.types import TurnDecision, VAPResult
+from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector, _TurnState
 
 # ---------------------------------------------------------------------------
@@ -43,7 +44,8 @@ def _make_detector(
     mock_turngpt.predict.return_value = turngpt_prob
 
     cfg = config or TurnDetectorConfig()
-    detector = TurnDetector(mock_vap, mock_turngpt, cfg, AUDIO_CFG)
+    adapter = SyncTurnGPTAdapter(mock_turngpt)
+    detector = TurnDetector(mock_vap, adapter, cfg, AUDIO_CFG)
     return detector, mock_vap, mock_turngpt
 
 
@@ -265,10 +267,19 @@ class TestInterruptWithoutRobotAudio:
 
 class TestPrepare:
     def test_prepare_on_turngpt_threshold(self):
-        """Text changed + TurnGPT prob > 0.2 -> prepare."""
-        detector, mock_vap, _ = _make_detector(turngpt_prob=0.3)
-        mock_vap.feed_audio.return_value = VAPResult(0.5, 0.5, True)  # user speaking
+        """Text changed + TurnGPT prob > 0.2 -> prepare.
 
+        With submit/poll, the TurnGPT result is available one frame after
+        the text change that triggered the submit.
+        """
+        n_frames = 3
+        vap_results = [VAPResult(0.5, 0.5, True)] * n_frames
+        detector, _, _ = _make_detector(vap_results=vap_results, turngpt_prob=0.3)
+
+        # Frame 1: text changes, submit fires (result not yet available)
+        detector.process_frame(FRAME, "hello")
+
+        # Frame 2: poll picks up prob=0.3, prepare fires
         decision = detector.process_frame(FRAME, "hello")
         assert decision.prepare
 
@@ -297,26 +308,42 @@ class TestPrepare:
 
 class TestPrepareSimilarityGate:
     def test_similar_text_skips_prepare(self):
-        """Similar text to last prepare -> skipped."""
-        detector, mock_vap, _ = _make_detector(turngpt_prob=0.5)
-        mock_vap.feed_audio.return_value = VAPResult(0.5, 0.5, True)
+        """Similar text to last prepare -> skipped.
 
-        # First prepare fires
+        With submit/poll, prepare fires one frame after text change.
+        """
+        n_frames = 5
+        vap_results = [VAPResult(0.5, 0.5, True)] * n_frames
+        detector, _, _ = _make_detector(vap_results=vap_results, turngpt_prob=0.5)
+
+        # Frame 1: text changes, submit fires
+        detector.process_frame(FRAME, "hello world")
+        # Frame 2: poll picks up prob=0.5, first prepare fires
         d1 = detector.process_frame(FRAME, "hello world")
         assert d1.prepare
 
-        # Very similar text -> should be skipped
+        # Frame 3: similar text change, submit fires
+        detector.process_frame(FRAME, "hello worlds")
+        # Frame 4: poll picks up prob=0.5, but similarity gate blocks
         d2 = detector.process_frame(FRAME, "hello worlds")
         assert not d2.prepare
 
     def test_different_text_fires_prepare(self):
-        """Sufficiently different text -> prepare fires again."""
-        detector, mock_vap, _ = _make_detector(turngpt_prob=0.5)
-        mock_vap.feed_audio.return_value = VAPResult(0.5, 0.5, True)
+        """Sufficiently different text -> prepare fires again.
 
+        With submit/poll, the previous turngpt_prob persists so prepare
+        can fire on the same frame as the text change (using the old prob).
+        """
+        n_frames = 4
+        vap_results = [VAPResult(0.5, 0.5, True)] * n_frames
+        detector, _, _ = _make_detector(vap_results=vap_results, turngpt_prob=0.5)
+
+        # Frame 1-2: first prepare fires
+        detector.process_frame(FRAME, "hello world")
         d1 = detector.process_frame(FRAME, "hello world")
         assert d1.prepare
 
+        # Frame 3: different text, prepare fires (old prob still high)
         d2 = detector.process_frame(FRAME, "completely different sentence here")
         assert d2.prepare
 
@@ -384,14 +411,17 @@ class TestNotifyTurnComplete:
 class TestPrepareEmptyText:
     def test_prepare_not_fired_on_empty_text(self):
         """If ASR text goes from non-empty to empty, prepare should not fire."""
-        detector, mock_vap, _ = _make_detector(turngpt_prob=0.5)
-        mock_vap.feed_audio.return_value = VAPResult(0.5, 0.5, True)
+        n_frames = 4
+        vap_results = [VAPResult(0.5, 0.5, True)] * n_frames
+        detector, _, _ = _make_detector(vap_results=vap_results, turngpt_prob=0.5)
 
-        # First frame: set text (triggers _asr_has_changed)
+        # Frame 1: text changes, submit fires
+        detector.process_frame(FRAME, "hello")
+        # Frame 2: poll picks up prob, prepare fires
         d1 = detector.process_frame(FRAME, "hello")
         assert d1.prepare
 
-        # Second frame: ASR clears to empty — should NOT fire prepare
+        # Frame 3: ASR clears to empty — should NOT fire prepare
         d2 = detector.process_frame(FRAME, "")
         assert not d2.prepare
 

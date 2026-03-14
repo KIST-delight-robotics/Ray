@@ -59,6 +59,7 @@ from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
 from voice_pipeline.orchestrator.orchestrator import Orchestrator
 from voice_pipeline.session.session_manager import SessionComponents, SessionManager
 from voice_pipeline.tts.utterance_truncator import TimestampTruncator
+from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
 
 # ---------------------------------------------------------------------------
@@ -333,8 +334,9 @@ def _make_orchestrator(
     context_builder = ContextBuilder(
         history, HISTORY_CONFIG, DEFAULT_SYSTEM_PROMPT, _simple_token_counter
     )
+    _turngpt_adapter = SyncTurnGPTAdapter(_turngpt)
     turn_detector = TurnDetector(
-        _vap, _turngpt, turn_detector_config or TURN_DETECTOR_CONFIG, AUDIO_CONFIG
+        _vap, _turngpt_adapter, turn_detector_config or TURN_DETECTOR_CONFIG, AUDIO_CONFIG
     )
     generator = SpeechGenerator(context_builder, _llm, _tts, GENERATOR_CONFIG, _executor)
     truncator = TimestampTruncator()
@@ -570,7 +572,8 @@ class TestFullSessionLifecycle:
             context_builder = ContextBuilder(
                 history, HISTORY_CONFIG, DEFAULT_SYSTEM_PROMPT, _simple_token_counter
             )
-            turn_detector = TurnDetector(vap, turngpt, TURN_DETECTOR_CONFIG, AUDIO_CONFIG)
+            turngpt_adapter = SyncTurnGPTAdapter(turngpt)
+            turn_detector = TurnDetector(vap, turngpt_adapter, TURN_DETECTOR_CONFIG, AUDIO_CONFIG)
             generator = SpeechGenerator(
                 context_builder, FakeLLM(), FakeTTS(), GENERATOR_CONFIG, executor
             )
