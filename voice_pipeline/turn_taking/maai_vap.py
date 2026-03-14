@@ -58,6 +58,7 @@ class MaAIVAPWrapper(IVAP):
         self._audio_config = audio_config
         self._robot_sample_rate = tts_config.output_sample_rate
         self._use_onnx_transformer = config.use_onnx_transformer
+        self._use_torch_compile = not config.use_onnx_transformer and config.use_torch_compile
 
         # Set thread counts before loading anything
         torch.set_num_threads(config.pt_threads)
@@ -146,6 +147,10 @@ class MaAIVAPWrapper(IVAP):
         self._vap_cache: dict | None = None
         self._cached_result = _DEFAULT_RESULT
 
+        # Warmup: pre-allocate ORT buffers / trigger torch.compile
+        self._warmup()
+        self.reset()
+
         mode = "onnx" if self._use_onnx_transformer else "pytorch"
         logger.info(
             "MaAIVAPWrapper initialized: frame_rate=%d, context=%.1fs, "
@@ -186,8 +191,62 @@ class MaAIVAPWrapper(IVAP):
         self._c2[:] = 0
         self._buf_x1 = np.zeros(self._frame_contxt_padding, dtype=np.float32)
         self._buf_x2 = np.zeros(self._frame_contxt_padding, dtype=np.float32)
-        self._vap_cache = None
+
+        if self._use_torch_compile:
+            # torch.compile: zero values but keep tensor shapes
+            # to avoid recompilation on shape change
+            self._zero_pytorch_cache()
+        else:
+            # ONNX and PyTorch eager: safe to clear entirely
+            self._vap_cache = None
+
         self._cached_result = _DEFAULT_RESULT
+
+    def _zero_pytorch_cache(self) -> None:
+        """Zero PyTorch KV cache values, preserving tensor shapes.
+
+        Replaces inference-mode tensors with normal zero tensors of the
+        same shape, since inference tensors cannot be modified in-place.
+        """
+        if self._vap_cache is None:
+            return
+        for key, (k_list, v_list) in self._vap_cache.items():
+            self._vap_cache[key] = (
+                [torch.zeros_like(t) if isinstance(t, torch.Tensor) else t for t in k_list],
+                [torch.zeros_like(t) if isinstance(t, torch.Tensor) else t for t in v_list],
+            )
+
+    def _warmup(self) -> None:
+        """Run dummy inference to pre-allocate ORT buffers / trigger torch.compile."""
+        if self._use_onnx_transformer:
+            n_frames = 2
+        else:
+            # torch.compile needs cache to reach stable shape
+            n_frames = self._audio_context_len
+
+        logger.info(
+            "Warmup: %d frames (transformer=%s)...",
+            n_frames,
+            "onnx" if self._use_onnx_transformer else "pytorch",
+        )
+
+        # Warmup encoder ORT sessions
+        dummy_wav = np.zeros((1, 1, self._audio_frame_size), dtype=np.float32)
+        dummy_h = np.zeros((1, 1, 256), dtype=np.float32)
+        dummy_c = np.zeros((1, 1, 256), dtype=np.float32)
+        for sess in (self._sess1, self._sess2):
+            sess.run(None, {"waveform": dummy_wav, "h_in": dummy_h, "c_in": dummy_c})
+
+        # Warmup transformer
+        dim = self._vap.conf.dim
+        dummy_e = np.zeros((1, 1, dim), dtype=np.float32)
+        for _ in range(n_frames):
+            if self._use_onnx_transformer:
+                self._process_transformer_onnx(dummy_e, dummy_e)
+            else:
+                self._process_transformer_pytorch(dummy_e, dummy_e)
+
+        logger.info("Warmup complete")
 
     # ------------------------------------------------------------------
     # Internal helpers
