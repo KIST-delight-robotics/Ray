@@ -1,15 +1,13 @@
-"""MaAI VAP wrapper with full ONNX or hybrid (ONNX encoder + PyTorch transformer).
+"""MaAI VAP wrapper with ONNX encoder and transformer.
 
-When ``use_onnx_transformer=True`` (default), both encoder and transformer
-run via ONNX Runtime — no PyTorch dependency at inference time.
-Mean latency ~24ms on RPi 5 (4.2x RTF at 10Hz).
-
-When ``use_onnx_transformer=False``, falls back to ONNX encoder + PyTorch
-transformer with optional ``torch.compile``.
+Loads pre-exported ONNX files for both encoder and transformer by default.
+If ``transformer_onnx_path`` is empty, falls back to PyTorch transformer
+via MaAI (requires ``maai`` package).
 
 Optimal RPi 5 config: ort_threads=1 (single-threaded).
 
-External dependency: ``maai`` package (cloned at ``external/MaAI/``).
+External dependency: ``maai`` package (cloned at ``external/MaAI/``),
+only required when using PyTorch transformer fallback.
 """
 
 from __future__ import annotations
@@ -20,20 +18,27 @@ import struct
 
 import numpy as np
 import onnxruntime as ort
-import torch
+
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore[assignment]
 
 from voice_pipeline.core.config import AudioConfig, MaAIVAPConfig, TTSConfig
 from voice_pipeline.core.interfaces import IVAP
 from voice_pipeline.core.types import AudioFrame, VAPResult
 from voice_pipeline.turn_taking.exceptions import VAPError
-from voice_pipeline.turn_taking.onnx_export import (
-    export_encoder_onnx,
-    export_transformer_onnx,
-)
 
 logger = logging.getLogger("voice_pipeline.turn_taking.maai_vap")
 
 _DEFAULT_RESULT = VAPResult(0.0, 0.0, False)
+
+# MaAI model architecture constants (fixed for all lang/frame_rate variants)
+_MAAI_DIM = 256
+_MAAI_NUM_HEADS = 4
+_MAAI_HEAD_DIM = _MAAI_DIM // _MAAI_NUM_HEADS
+_MAAI_CH_LAYERS = 1
+_MAAI_CROSS_LAYERS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -57,67 +62,71 @@ class MaAIVAPWrapper(IVAP):
         self._config = config
         self._audio_config = audio_config
         self._robot_sample_rate = tts_config.output_sample_rate
-        self._use_onnx_transformer = config.use_onnx_transformer
-        self._use_torch_compile = not config.use_onnx_transformer and config.use_torch_compile
-
-        # Set thread counts before loading anything
-        torch.set_num_threads(config.pt_threads)
-
-        # Load MaAI (creates the full model, we extract parts from it)
-        try:
-            from maai import Maai, MaaiInput
-
-            ch1 = MaaiInput.Chunk()
-            ch2 = MaaiInput.Chunk()
-            self._maai = Maai(
-                mode="vap",
-                lang=config.lang,
-                frame_rate=config.frame_rate,
-                context_len_sec=config.context_len_sec,
-                audio_ch1=ch1,
-                audio_ch2=ch2,
-                device="cpu",
-                use_kv_cache=True,
-            )
-        except Exception as exc:
-            raise VAPError(f"Failed to load MaAI: {exc}") from exc
-
-        self._vap = self._maai.vap
+        self._use_onnx_transformer = bool(config.transformer_onnx_path)
+        self._use_torch_compile = (
+            not self._use_onnx_transformer and config.use_torch_compile
+        )
 
         # ORT session options (shared by encoder and transformer)
         sess_opts = ort.SessionOptions()
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         sess_opts.intra_op_num_threads = config.ort_threads
 
-        # Export and load ONNX encoder sessions
+        # Encoder (ONNX from file)
+        if not config.encoder_onnx_path:
+            raise VAPError("encoder_onnx_path is required")
+        if not os.path.isfile(config.encoder_onnx_path):
+            raise VAPError(f"Encoder ONNX file not found: {config.encoder_onnx_path}")
         try:
-            onnx_path = export_encoder_onnx(self._maai, config.frame_rate)
-            self._sess1 = ort.InferenceSession(onnx_path, sess_opts)
-            self._sess2 = ort.InferenceSession(onnx_path, sess_opts)
-            os.unlink(onnx_path)
+            self._sess1 = ort.InferenceSession(config.encoder_onnx_path, sess_opts)
+            self._sess2 = ort.InferenceSession(config.encoder_onnx_path, sess_opts)
         except Exception as exc:
-            raise VAPError(f"Failed to create ONNX encoder sessions: {exc}") from exc
+            raise VAPError(f"Failed to load ONNX encoder: {exc}") from exc
 
-        # Transformer setup
+        # Transformer
         if self._use_onnx_transformer:
+            if not os.path.isfile(config.transformer_onnx_path):
+                raise VAPError(
+                    f"Transformer ONNX file not found: {config.transformer_onnx_path}"
+                )
             try:
-                tfm_path = export_transformer_onnx(self._vap)
-                self._tfm_sess = ort.InferenceSession(tfm_path, sess_opts)
-                os.unlink(tfm_path)
-                logger.info("ONNX transformer loaded")
+                self._tfm_sess = ort.InferenceSession(config.transformer_onnx_path, sess_opts)
+                logger.info("ONNX transformer loaded from %s", config.transformer_onnx_path)
             except Exception as exc:
-                raise VAPError(f"Failed to create ONNX transformer session: {exc}") from exc
+                raise VAPError(f"Failed to load ONNX transformer: {exc}") from exc
 
-            # Cache shape constants for ONNX transformer
-            conf = self._vap.conf
-            nh = conf.num_heads
-            hd = conf.dim // nh
-            self._n_ch_layers = len(list(self._vap.ar_channel.layers))
-            self._n_cross_layers = len(list(self._vap.ar.layers))
-            self._nh = nh
-            self._hd = hd
+            self._n_ch_layers = _MAAI_CH_LAYERS
+            self._n_cross_layers = _MAAI_CROSS_LAYERS
+            self._nh = _MAAI_NUM_HEADS
+            self._hd = _MAAI_HEAD_DIM
         else:
-            # PyTorch transformer with optional torch.compile
+            # PyTorch transformer requires torch
+            if torch is None:
+                raise VAPError(
+                    "torch is required when transformer_onnx_path is not set"
+                )
+            torch.set_num_threads(config.pt_threads)
+
+            # Load MaAI for PyTorch transformer
+            try:
+                from maai import Maai, MaaiInput
+
+                ch1 = MaaiInput.Chunk()
+                ch2 = MaaiInput.Chunk()
+                self._maai = Maai(
+                    mode="vap",
+                    lang=config.lang,
+                    frame_rate=config.frame_rate,
+                    context_len_sec=config.context_len_sec,
+                    audio_ch1=ch1,
+                    audio_ch2=ch2,
+                    device="cpu",
+                    use_kv_cache=True,
+                )
+            except Exception as exc:
+                raise VAPError(f"Failed to load MaAI: {exc}") from exc
+
+            self._vap = self._maai.vap
             if config.use_torch_compile:
                 try:
                     self._vap_forward = torch.compile(self._vap.forward, mode="reduce-overhead")
@@ -221,7 +230,6 @@ class MaAIVAPWrapper(IVAP):
         if self._use_onnx_transformer:
             n_frames = 2
         else:
-            # torch.compile needs cache to reach stable shape
             n_frames = self._audio_context_len
 
         logger.info(
@@ -238,8 +246,7 @@ class MaAIVAPWrapper(IVAP):
             sess.run(None, {"waveform": dummy_wav, "h_in": dummy_h, "c_in": dummy_c})
 
         # Warmup transformer
-        dim = self._vap.conf.dim
-        dummy_e = np.zeros((1, 1, dim), dtype=np.float32)
+        dummy_e = np.zeros((1, 1, _MAAI_DIM), dtype=np.float32)
         for _ in range(n_frames):
             if self._use_onnx_transformer:
                 self._process_transformer_onnx(dummy_e, dummy_e)

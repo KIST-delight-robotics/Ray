@@ -148,9 +148,11 @@ class MaAIVAPConfig:
         vad_threshold: Threshold for user_is_speaking derivation.
         ort_threads: ONNX Runtime intra-op thread count.
         pt_threads: PyTorch intra-op thread count.
+        encoder_onnx_path: Path to pre-exported encoder ONNX file.
+        transformer_onnx_path: Path to pre-exported transformer ONNX file.
+            If empty, falls back to PyTorch transformer via MaAI.
         use_torch_compile: Enable torch.compile for transformer (PyTorch mode only).
-        use_onnx_transformer: Use ONNX transformer instead of PyTorch.
-            When True, use_torch_compile is ignored.
+            Only applies when transformer_onnx_path is empty.
     """
 
     lang: str = "en"
@@ -159,8 +161,9 @@ class MaAIVAPConfig:
     vad_threshold: float = 0.5
     ort_threads: int = 1
     pt_threads: int = 1
+    encoder_onnx_path: str = "models/maai/encoder_10hz_5s.onnx"
+    transformer_onnx_path: str = "models/maai/transformer_en_5s.onnx"
     use_torch_compile: bool = True
-    use_onnx_transformer: bool = True
 
 
 @dataclass

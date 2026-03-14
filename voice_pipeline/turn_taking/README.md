@@ -107,13 +107,21 @@ git clone https://github.com/Seongbuming/MaAI.git external/MaAI
 uv pip install -e external/MaAI
 ```
 
+#### ONNX Export
+
+ONNX models must be pre-exported before use. Export script:
+
+```bash
+uv run python -m scripts.export_maai_onnx [--lang en] [--frame-rate 10]
+```
+
+Output: `models/maai/encoder_{frame_rate}hz.onnx`, `models/maai/transformer_{lang}.onnx`
+
 #### Backends
 
-**Full ONNX** (default, recommended): Both CPC encoder and GPT transformer run via ONNX Runtime. No PyTorch inference at runtime. Mean latency ~24ms on RPi 5.
+**Full ONNX** (default, recommended): Both CPC encoder and GPT transformer run via ONNX Runtime. No PyTorch dependency at inference time. Mean latency ~24ms on RPi 5.
 
-**Hybrid** (`use_onnx_transformer=False`): ONNX encoder + PyTorch transformer. Optional `torch.compile` for ~22% speedup. Useful if ONNX export fails for a new model variant.
-
-Both ONNX models are auto-exported from the loaded MaAI weights at initialization. No manual export step needed.
+**Hybrid** (`transformer_onnx_path=""`): ONNX encoder + PyTorch transformer. Optional `torch.compile` for ~22% speedup. Requires `maai` package and `torch`.
 
 #### Config
 
@@ -124,8 +132,9 @@ Both ONNX models are auto-exported from the loaded MaAI weights at initializatio
 | `context_len_sec` | `5.0` | KV cache context length (seconds) |
 | `vad_threshold` | `0.5` | Threshold for `user_is_speaking` |
 | `ort_threads` | `1` | ONNX Runtime intra-op threads. 1 is optimal on RPi 5 |
-| `pt_threads` | `1` | PyTorch threads (minimal impact in full ONNX mode) |
-| `use_onnx_transformer` | `True` | Use ONNX transformer (True) or PyTorch (False) |
+| `pt_threads` | `1` | PyTorch threads (PyTorch transformer mode only) |
+| `encoder_onnx_path` | `"models/maai/encoder_10hz_5s.onnx"` | Path to pre-exported encoder ONNX file |
+| `transformer_onnx_path` | `"models/maai/transformer_en_5s.onnx"` | Path to pre-exported transformer ONNX. Empty = PyTorch fallback |
 | `use_torch_compile` | `True` | Enable torch.compile (PyTorch mode only) |
 
 #### RPi 5 Performance (full ONNX, ort_threads=1)
@@ -141,13 +150,19 @@ RTF: 4.16x (100ms budget). Budget exceeded: 0%.
 ## Module Structure
 
 ```
-turn_taking/
+voice_pipeline/turn_taking/
 ├── __init__.py
 ├── exceptions.py       # TurnTakingError, VAPError, TurnGPTError, TurnDetectorError
 ├── vap.py              # VAPWrapper(IVAP) — VoiceActivityProjection
 ├── maai_vap.py         # MaAIVAPWrapper(IVAP) — MaAI (ONNX)
-├── onnx_export.py      # ONNX export wrappers (encoder + transformer)
 ├── turngpt.py          # TurnGPTWrapper(ITurnGPT)
 ├── turn_detector.py    # TurnDetector(ITurnDetector)
 └── README.md
+
+scripts/
+├── export_maai_onnx.py     # MaAI ONNX export (wrappers + CLI)
+├── generate_test_wav.py    # Test audio file generator
+├── bench/
+│   └── benchmark_compare.py
+└── hardware/               # Live hardware test scripts
 ```

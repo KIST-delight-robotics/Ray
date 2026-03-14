@@ -1,6 +1,6 @@
 """Integration tests for MaAIVAPWrapper with real MaAI model.
 
-Tests both ONNX transformer and PyTorch transformer modes through the
+Tests both full ONNX and PyTorch transformer fallback modes through the
 IVAP interface, verifying that outputs are numerically equivalent.
 
 Requires:
@@ -56,7 +56,7 @@ def _pcm_robot(n_samples: int = 720, amplitude: int = 5000) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def _make_wrapper(use_onnx_transformer: bool) -> MaAIVAPWrapper:
+def _make_wrapper(transformer_onnx_path: str = "") -> MaAIVAPWrapper:
     from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
 
     cfg = MaAIVAPConfig(
@@ -64,7 +64,7 @@ def _make_wrapper(use_onnx_transformer: bool) -> MaAIVAPWrapper:
         context_len_sec=5.0,
         ort_threads=1,
         pt_threads=1,
-        use_onnx_transformer=use_onnx_transformer,
+        transformer_onnx_path=transformer_onnx_path,
         use_torch_compile=False,
     )
     audio_cfg = AudioConfig(sample_rate=_SAMPLE_RATE, channels=1, frame_duration_ms=30)
@@ -75,13 +75,13 @@ def _make_wrapper(use_onnx_transformer: bool) -> MaAIVAPWrapper:
 @pytest.fixture(scope="module")
 def onnx_wrapper():
     """MaAIVAPWrapper with ONNX encoder + ONNX transformer."""
-    return _make_wrapper(use_onnx_transformer=True)
+    return _make_wrapper(transformer_onnx_path=MaAIVAPConfig.transformer_onnx_path)
 
 
 @pytest.fixture(scope="module")
 def pytorch_wrapper():
     """MaAIVAPWrapper with ONNX encoder + PyTorch transformer."""
-    return _make_wrapper(use_onnx_transformer=False)
+    return _make_wrapper(transformer_onnx_path="")
 
 
 @pytest.fixture(autouse=True)
