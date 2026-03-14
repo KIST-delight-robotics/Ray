@@ -81,7 +81,6 @@ class Orchestrator:
         self._awaiting_response = False
         self._current_response: ResponseData | None = None
         self._sent_audio_buffer = bytearray()
-        self._saved_user_text = ""
         self._last_asr_text = ""
         self._last_text_change_time = time.monotonic()
         self._playback_start_time = 0.0
@@ -90,7 +89,6 @@ class Orchestrator:
         self._pending_truncation: _PendingTruncation | None = None
         self._user_msg_id: int | None = None
         self._assistant_msg_id: int | None = None
-        self._prepared_text = ""
 
     # ------------------------------------------------------------------
     # Public API
@@ -183,7 +181,6 @@ class Orchestrator:
         self._awaiting_response = False
         self._current_response = None
         self._sent_audio_buffer = bytearray()
-        self._saved_user_text = ""
         self._last_asr_text = ""
         self._playback_start_time = 0.0
         self._stop_pending_time = 0.0
@@ -191,7 +188,6 @@ class Orchestrator:
         self._pending_truncation = None
         self._user_msg_id = None
         self._assistant_msg_id = None
-        self._prepared_text = ""
 
         self._asr.start()
         self._set_led(LEDState.LISTENING)
@@ -343,23 +339,20 @@ class Orchestrator:
             return True
 
         if self._generator.state == GeneratorState.STREAMING:
-            self._begin_streaming(text)
+            self._begin_streaming()
         else:
             # Not ready yet — set awaiting
             self._awaiting_response = True
-            self._saved_user_text = text
             self._set_led(LEDState.THINKING)
             # Start generation if not already preparing
             if self._generator.state == GeneratorState.IDLE:
                 self._generator.prepare(text)
-                self._prepared_text = text
         return False
 
     def _handle_prepare(self, text: str) -> None:
         """Start speculative generation with current text."""
         self._pending_truncation = None
         self._generator.prepare(text)
-        self._prepared_text = text
 
     def _handle_interrupt(self) -> None:
         """Handle interrupt signal from TurnDetector."""
@@ -375,8 +368,6 @@ class Orchestrator:
             self._generator.cancel()
             self._turn_detector.reset()
             self._awaiting_response = False
-            self._saved_user_text = ""
-            self._prepared_text = ""
             self._audio_end_sent = False
             self._set_led(LEDState.LISTENING)
 
@@ -384,20 +375,17 @@ class Orchestrator:
     # Streaming / playback
     # ------------------------------------------------------------------
 
-    def _begin_streaming(self, text: str) -> None:
+    def _begin_streaming(self) -> None:
         """Start sending audio to bridge. Save user message to history."""
-        # Use prepared text for history — matches what LLM actually saw
-        final_text = self._prepared_text if self._prepared_text else text
+        user_text = self._generator.input_text
 
-        self._user_msg_id = self._history.add_user_message(final_text)
-        self._turn_detector.notify_turn_complete("user", final_text)
+        self._user_msg_id = self._history.add_user_message(user_text)
+        self._turn_detector.notify_turn_complete("user", user_text)
 
         self._asr.reset()
         self._last_asr_text = ""
 
         self._awaiting_response = False
-        self._saved_user_text = ""
-        self._prepared_text = ""
         self._current_response = None
         self._sent_audio_buffer = bytearray()
         self._playback_start_time = 0.0
@@ -577,14 +565,11 @@ class Orchestrator:
         """Check if the generator is ready while awaiting_response."""
         state = self._generator.state
         if state == GeneratorState.STREAMING:
-            # Pass empty text — _begin_streaming uses _prepared_text for history
-            self._begin_streaming("")
+            self._begin_streaming()
         elif state == GeneratorState.FAILED:
             logger.warning("Generator failed while awaiting — skipping turn")
             self._generator.reset()
             self._awaiting_response = False
-            self._saved_user_text = ""
-            self._prepared_text = ""
             self._turn_detector.reset()
             self._set_led(LEDState.LISTENING)
 

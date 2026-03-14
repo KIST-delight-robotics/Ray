@@ -116,16 +116,12 @@ class TestLifecycle:
         # Simulate dirty state from a previous session
         orch._playback_state = PlaybackState.PLAYING
         orch._awaiting_response = True
-        orch._saved_user_text = "leftover"
-        orch._prepared_text = "leftover"
         orch._sent_audio_buffer = bytearray(b"\xff" * 100)
 
         orch.run(_audio_queue_with())
 
         # After run(), state should have been reset at start
         # (end_session also resets some, but start must handle it)
-        assert orch._saved_user_text == ""
-        assert orch._prepared_text == ""
         assert orch._awaiting_response is False
 
 
@@ -136,21 +132,21 @@ class TestLifecycle:
 
 class TestTurnShift:
     def test_turn_shift_streaming_ready(self) -> None:
-        """When generator is STREAMING on turn_shift, history records prepared text."""
+        """When generator is STREAMING on turn_shift, history records input_text."""
         orch, mocks = _make_orchestrator()
         mocks["asr"].get_text.return_value = "hello world"
         mocks["turn_detector"].process_frame.return_value = TurnDecision(turn_shift=True)
         mocks["generator"].state = GeneratorState.STREAMING
         mocks["generator"].poll_audio.return_value = None
         mocks["generator"].stream_done = False
+        # Simulate earlier prepare with partial text
+        mocks["generator"].input_text = "hello"
 
         q = _audio_queue_with(_frame())
         orch._start_session()
-        # Simulate earlier prepare with partial text
-        orch._prepared_text = "hello"
         orch._run_frame(q)
 
-        # History records prepared text, not current ASR text
+        # History records generator.input_text, not current ASR text
         mocks["history"].add_user_message.assert_called_once_with("hello")
         mocks["asr"].reset.assert_called_once()
         assert orch._playback_state == PlaybackState.PLAYING
@@ -171,7 +167,6 @@ class TestTurnShift:
         orch._run_frame(q)
 
         assert orch._awaiting_response is True
-        assert orch._saved_user_text == "hello"
         mocks["generator"].prepare.assert_called_once_with("hello")
 
         led_calls = [c.args[0] for c in mocks["led"].set_state.call_args_list]
@@ -199,13 +194,12 @@ class TestTurnShift:
 
 class TestAwaitingResponse:
     def test_awaiting_completion_begins_streaming(self) -> None:
-        """When awaiting and generator becomes STREAMING, history records prepared text."""
+        """When awaiting and generator becomes STREAMING, history records input_text."""
         orch, mocks = _make_orchestrator()
         orch._start_session()
         orch._awaiting_response = True
-        orch._saved_user_text = "hello"
-        orch._prepared_text = "hello"
         mocks["generator"].state = GeneratorState.STREAMING
+        mocks["generator"].input_text = "hello"
         mocks["generator"].poll_audio.return_value = None
         mocks["generator"].stream_done = False
 
@@ -214,29 +208,27 @@ class TestAwaitingResponse:
 
         assert orch._awaiting_response is False
         assert orch._playback_state == PlaybackState.PLAYING
-        # Uses prepared_text — matches what LLM actually saw
+        # Uses generator.input_text — matches what LLM actually saw
         mocks["history"].add_user_message.assert_called_once_with("hello")
 
-    def test_begin_streaming_uses_prepared_text(self) -> None:
-        """When prepared_text differs from current text, history records prepared_text."""
+    def test_begin_streaming_uses_generator_input_text(self) -> None:
+        """History records generator.input_text (what LLM actually saw)."""
         orch, mocks = _make_orchestrator()
         orch._start_session()
-        orch._prepared_text = "earlier partial"
+        mocks["generator"].input_text = "earlier partial"
         mocks["generator"].state = GeneratorState.STREAMING
         mocks["generator"].poll_audio.return_value = None
         mocks["generator"].stream_done = False
 
-        orch._begin_streaming("later full text")
+        orch._begin_streaming()
 
         mocks["history"].add_user_message.assert_called_once_with("earlier partial")
-        assert orch._prepared_text == ""
 
     def test_awaiting_interrupt_cancels(self) -> None:
         """Interrupt during awaiting cancels generator and resets."""
         orch, mocks = _make_orchestrator()
         orch._start_session()
         orch._awaiting_response = True
-        orch._saved_user_text = "hello"
         mocks["asr"].get_text.return_value = ""
         mocks["turn_detector"].process_frame.return_value = TurnDecision(interrupt=True)
 
@@ -246,14 +238,12 @@ class TestAwaitingResponse:
         mocks["generator"].cancel.assert_called_once()
         mocks["turn_detector"].reset.assert_called_once()
         assert orch._awaiting_response is False
-        assert orch._saved_user_text == ""
 
     def test_awaiting_generator_failed_skips_turn(self) -> None:
         """Generator FAILED during awaiting skips turn and resets turn_detector."""
         orch, mocks = _make_orchestrator()
         orch._start_session()
         orch._awaiting_response = True
-        orch._saved_user_text = "hello"
         mocks["generator"].state = GeneratorState.FAILED
 
         q = _audio_queue_with()
@@ -283,7 +273,6 @@ class TestPrepare:
         orch._run_frame(q)
 
         mocks["generator"].prepare.assert_called_once_with("how are you")
-
 
 
 # ---------------------------------------------------------------------------

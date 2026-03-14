@@ -550,6 +550,16 @@ class ISpeechGenerator(ABC):
         empty queue from stream end.
         """
 
+    @property
+    @abstractmethod
+    def input_text(self) -> str:
+        """The user text passed to the most recent prepare() call.
+
+        Set when prepare() is called, cleared on cancel() or reset().
+        Used by Orchestrator to record what the LLM actually saw
+        when saving to conversation history.
+        """
+
     @abstractmethod
     def prepare(self, current_text: str) -> None:
         """Start background generation for the given user text.

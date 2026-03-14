@@ -4,7 +4,39 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 
 ## Current Status
 
-History 텍스트 일관성 수정 + 데드 코드 정리 + 프로젝트 전체 lint 정리 완료. 539 tests pass, ruff 0 errors.
+`_prepared_text`를 SpeechGenerator `input_text`로 이동 완료. 538 tests pass, ruff 0 errors.
+
+### 완료된 작업 (2026-03-14, input_text 리팩토링)
+
+**`_prepared_text` → `SpeechGenerator.input_text` 이동**
+- `ISpeechGenerator`에 `input_text` abstract property 추가
+- `SpeechGenerator`: `_input_text` 필드, `prepare()`에서 저장, `cancel()`/`reset()`에서 클리어
+- Orchestrator: `_prepared_text`, `_saved_user_text` 완전 제거, `_begin_streaming()` 파라미터 제거 → `generator.input_text` 읽기
+- 수동 리셋 7군데 → 0 (generator lifecycle이 자동 관리)
+- 테스트 7개 업데이트
+
+### 미완료 — 다음 세션에서 진행
+
+**Codex + 직접 분석 발견 사항 (2026-03-14)**
+
+1. **Medium: `_begin_streaming()`에 빈 `input_text` 가드 없음**
+   - `generator.input_text`가 빈 경우 history에 `""` 기록 가능
+   - 구조적으로 발생 불가 (prepare 없이 STREAMING 불가), 하지만 이전 `text` 파라미터 폴백 제거로 방어 레이어 감소
+   - 방어 코드 추가 권장: `if not user_text: logger.warning(...); return`
+
+2. **Medium: `_handle_prepare`에 `_awaiting_response` 가드 없음**
+   - 다른 ITurnDetector 구현이 awaiting 중 prepare 시그널 보내면 `input_text` 덮어씀
+   - `if self._awaiting_response: return` 가드 추가 필요
+
+3. **Low: `input_text` lifecycle 단위 테스트 부재**
+   - `test_speech_generator.py`에 `input_text` property 검증 없음
+   - prepare→set, cancel→clear, reset→clear, 연속 prepare 덮어쓰기 테스트 필요
+
+4. **Low: turn_shift 시 generator FAILED → 턴 소실**
+   - prepare 재시도 없이 스킵. 의도된 동작이지만 재시도 옵션 고려 가능
+
+5. **Info: `get_response_data()` 후 `_input_text` 잔류**
+   - IDLE 전이 시 `_input_text` 클리어 안 함. 기능 문제 없으나 stale 값 노출 가능
 
 ### 완료된 작업 (2026-03-13, history 일관성 + lint 정리)
 
@@ -77,12 +109,22 @@ History 텍스트 일관성 수정 + 데드 코드 정리 + 프로젝트 전체 
 **4. mock C++ WebSocket 서버** (이전 세션 미커밋분)
 - `mock_cpp_server.py` 커밋
 
-### 미완료 — 다음 세션에서 진행
+### 이전 Codex 리뷰 발견 사항 (2026-03-13) — 해결 상태
+
+1. ~~**High: awaiting 경로에서 `_prepared_text` 빈 경우 history에 `""` 기록 가능**~~ → ✅ `input_text` 리팩토링으로 구조 개선 (방어 가드는 아직 미추가, 위 미완료 #1 참고)
+2. **Medium: `_handle_prepare`에 `_awaiting_response` 가드 없음** → 미해결 (위 미완료 #2)
+3. **Low: turn_shift 시 generator FAILED → 턴 소실** → 미해결 (위 미완료 #4)
+
+~~**해결 방안: `_prepared_text`를 SpeechGenerator `input_text`로 이동**~~ → ✅ 완료 (2026-03-14)
 
 **#5 배치 내 상태 전이 누락** (실측 후 판단)
 - 배치 N프레임에서 VAP 결과 1개로 타이머를 N*30ms 증분 → 배치 중간 발화 상태 변화 반영 안 됨
 - VAP 추론 주기(100ms ≈ 3프레임)이고 배치가 주로 2-3프레임이므로 영향 제한적
 - **실제 파이프라인 실행해서 조기 turn_shift 발생 여부 확인 필요**
+
+**VAP/TurnGPT 예산 초과 시 처리 미구현**
+- VAP budget 초과 20-25% (P95: 150ms, budget 100ms). 프레임 드롭 or 5Hz 폴백 설계 필요
+- 현재는 배치 드레인만 있고 명시적 budget 초과 처리 없음
 
 **prepare → turn_shift 텍스트 불일치 문제** — ✅ 해결 (2026-03-13, `_prepared_text` 도입)
 

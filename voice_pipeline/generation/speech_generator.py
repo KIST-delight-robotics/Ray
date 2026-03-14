@@ -41,6 +41,7 @@ class SpeechGenerator(ISpeechGenerator):
         self._cancel_event = threading.Event()
         self._owns_executor = executor is None
         self._executor = executor or ThreadPoolExecutor(max_workers=self._config.max_workers)
+        self._input_text = ""
         self._text = ""
         self._audio_queue: queue.Queue[bytes] = queue.Queue()
         self._response_data: ResponseData | None = None
@@ -58,6 +59,11 @@ class SpeechGenerator(ISpeechGenerator):
         with self._lock:
             return self._stream_done
 
+    @property
+    def input_text(self) -> str:
+        with self._lock:
+            return self._input_text
+
     # -- Public methods ------------------------------------------------------
 
     def prepare(self, current_text: str) -> None:
@@ -74,6 +80,7 @@ class SpeechGenerator(ISpeechGenerator):
             audio_queue = self._audio_queue
 
             self._state = GeneratorState.PREPARING
+            self._input_text = current_text
             self._text = ""
             self._response_data = None
             self._stream_done = False
@@ -86,6 +93,7 @@ class SpeechGenerator(ISpeechGenerator):
             self._run_id += 1
             self._state = GeneratorState.IDLE
             self._audio_queue = queue.Queue()
+            self._input_text = ""
             self._text = ""
             self._response_data = None
             self._stream_done = False
@@ -121,6 +129,7 @@ class SpeechGenerator(ISpeechGenerator):
             self._run_id += 1
             self._state = GeneratorState.IDLE
             self._audio_queue = queue.Queue()
+            self._input_text = ""
             self._text = ""
             self._response_data = None
             self._stream_done = False
