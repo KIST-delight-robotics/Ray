@@ -23,10 +23,10 @@ Cross-module end-to-end flows with mocked external services. Key scenarios:
 
 ### Before real hardware testing
 
-These known limitations should be addressed:
-- **`generator.shutdown()` reuse** — Orchestrator calls `shutdown()` at session end, killing the ThreadPoolExecutor. Second session will fail. Fix: re-create executor in `prepare()` if shut down, or don't call `shutdown()` in `_end_session()`.
-- **CppBridge reconnect** — Bridge only connected once at `run()` start. Needs reconnect before greeting or periodic health check.
-- **Signal handling** — Add SIGINT/SIGTERM handler that calls `SessionManager.shutdown()`.
+Known limitations:
+- ~~`generator.shutdown()` reuse~~ — Not a bug. `_end_session()` calls `reset()`, not `shutdown()`. Executor is process-level singleton injected with `_owns_executor=False`.
+- **CppBridge reconnect** — Bridge connects once at `run()` start. If C++ process dies, all subsequent sessions fail silently. Localhost WebSocket이라 C++ 생존 시 끊길 일 없음. C++ 재시작 시 Python도 재시작하면 됨. 자동 reconnect는 필요 시 추가.
+- ~~Signal handling~~ — Already implemented in `__main__.py` (SIGINT + SIGBREAK).
 
 ## Module quick reference
 
