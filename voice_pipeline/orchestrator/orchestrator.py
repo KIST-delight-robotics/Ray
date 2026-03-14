@@ -351,6 +351,8 @@ class Orchestrator:
 
     def _handle_prepare(self, text: str) -> None:
         """Start speculative generation with current text."""
+        if self._awaiting_response:
+            return
         self._pending_truncation = None
         self._generator.prepare(text)
 
@@ -378,6 +380,9 @@ class Orchestrator:
     def _begin_streaming(self) -> None:
         """Start sending audio to bridge. Save user message to history."""
         user_text = self._generator.input_text
+        if not user_text:
+            logger.warning("_begin_streaming called with empty input_text — skipping")
+            return
 
         self._user_msg_id = self._history.add_user_message(user_text)
         self._turn_detector.notify_turn_complete("user", user_text)

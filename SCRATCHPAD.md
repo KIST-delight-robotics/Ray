@@ -4,7 +4,16 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 
 ## Current Status
 
-`_prepared_text`를 SpeechGenerator `input_text`로 이동 완료. 538 tests pass, ruff 0 errors.
+`input_text` 리팩토링 + 방어 가드 + 테스트 완료. 543 tests pass, ruff 0 errors.
+
+### 완료된 작업 (2026-03-14, input_text 방어 가드 + 테스트)
+
+**Codex + 직접 분석 발견 사항 해결**
+1. ~~**`_begin_streaming()`에 빈 `input_text` 가드 없음**~~ → ✅ 방어 가드 추가 (`if not user_text: return`)
+2. ~~**`_handle_prepare`에 `_awaiting_response` 가드 없음**~~ → ✅ 가드 추가 (`if self._awaiting_response: return`)
+3. ~~**`input_text` lifecycle 단위 테스트 부재**~~ → ✅ 5개 테스트 추가 (prepare→set, cancel→clear, reset→clear, 연속 덮어쓰기, get_response_data→clear)
+4. **turn_shift 시 generator FAILED → 턴 소실** → 변경 불필요 (의도된 에러 정책)
+5. ~~**`get_response_data()` 후 `_input_text` 잔류**~~ → ✅ `get_response_data()`에서 `_input_text = ""` 클리어
 
 ### 완료된 작업 (2026-03-14, input_text 리팩토링)
 
@@ -14,29 +23,6 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 - Orchestrator: `_prepared_text`, `_saved_user_text` 완전 제거, `_begin_streaming()` 파라미터 제거 → `generator.input_text` 읽기
 - 수동 리셋 7군데 → 0 (generator lifecycle이 자동 관리)
 - 테스트 7개 업데이트
-
-### 미완료 — 다음 세션에서 진행
-
-**Codex + 직접 분석 발견 사항 (2026-03-14)**
-
-1. **Medium: `_begin_streaming()`에 빈 `input_text` 가드 없음**
-   - `generator.input_text`가 빈 경우 history에 `""` 기록 가능
-   - 구조적으로 발생 불가 (prepare 없이 STREAMING 불가), 하지만 이전 `text` 파라미터 폴백 제거로 방어 레이어 감소
-   - 방어 코드 추가 권장: `if not user_text: logger.warning(...); return`
-
-2. **Medium: `_handle_prepare`에 `_awaiting_response` 가드 없음**
-   - 다른 ITurnDetector 구현이 awaiting 중 prepare 시그널 보내면 `input_text` 덮어씀
-   - `if self._awaiting_response: return` 가드 추가 필요
-
-3. **Low: `input_text` lifecycle 단위 테스트 부재**
-   - `test_speech_generator.py`에 `input_text` property 검증 없음
-   - prepare→set, cancel→clear, reset→clear, 연속 prepare 덮어쓰기 테스트 필요
-
-4. **Low: turn_shift 시 generator FAILED → 턴 소실**
-   - prepare 재시도 없이 스킵. 의도된 동작이지만 재시도 옵션 고려 가능
-
-5. **Info: `get_response_data()` 후 `_input_text` 잔류**
-   - IDLE 전이 시 `_input_text` 클리어 안 함. 기능 문제 없으나 stale 값 노출 가능
 
 ### 완료된 작업 (2026-03-13, history 일관성 + lint 정리)
 

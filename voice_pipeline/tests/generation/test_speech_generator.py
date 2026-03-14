@@ -568,6 +568,86 @@ class TestExternalExecutor:
         executor.shutdown(wait=True)
 
 
+class TestInputTextLifecycle:
+    """input_text property: set on prepare, cleared on cancel/reset/get_response_data."""
+
+    def test_prepare_sets_input_text(self):
+        cb, llm, tts = _make_deps()
+        gen = SpeechGenerator(cb, llm, tts)
+
+        assert gen.input_text == ""
+        gen.prepare("hello")
+        assert gen.input_text == "hello"
+
+        _wait_for_stream_done(gen)
+        gen.shutdown()
+
+    def test_cancel_clears_input_text(self):
+        cb, llm, tts = _make_deps()
+        gen = SpeechGenerator(cb, llm, tts)
+
+        gen.prepare("hello")
+        assert gen.input_text == "hello"
+
+        gen.cancel()
+        assert gen.input_text == ""
+
+        gen.shutdown()
+
+    def test_reset_clears_input_text(self):
+        cb, llm, tts = _make_deps()
+        gen = SpeechGenerator(cb, llm, tts)
+
+        gen.prepare("hello")
+        assert gen.input_text == "hello"
+
+        gen.reset()
+        assert gen.input_text == ""
+
+        gen.shutdown()
+
+    def test_consecutive_prepare_overwrites(self):
+        cb = MagicMock(spec=IContextBuilder)
+        cb.build.return_value = [{"role": "user", "content": "hi"}]
+
+        block_event = threading.Event()
+
+        def slow_generate(messages):
+            block_event.wait(timeout=2.0)
+            return iter(["text"])
+
+        llm = MagicMock(spec=ILLM)
+        llm.generate.side_effect = slow_generate
+
+        tts = MagicMock(spec=ITTS)
+        tts.synthesize.return_value = _make_tts_stream([b"\x00" * 50])
+
+        gen = SpeechGenerator(cb, llm, tts, SpeechGeneratorConfig(max_workers=2))
+
+        gen.prepare("first")
+        assert gen.input_text == "first"
+
+        gen.prepare("second")
+        assert gen.input_text == "second"
+
+        block_event.set()
+        gen.shutdown()
+
+    def test_get_response_data_clears_input_text(self):
+        cb, llm, tts = _make_deps()
+        gen = SpeechGenerator(cb, llm, tts)
+
+        gen.prepare("hello")
+        _wait_for_stream_done(gen)
+        _drain_audio(gen)
+
+        assert gen.input_text == "hello"
+        gen.get_response_data()
+        assert gen.input_text == ""
+
+        gen.shutdown()
+
+
 class TestCancelDoesNotSetFailed:
     """Cancelled run's late exception doesn't flip to FAILED."""
 

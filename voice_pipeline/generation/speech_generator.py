@@ -120,6 +120,7 @@ class SpeechGenerator(ISpeechGenerator):
                 raise RuntimeError("No response data available")
             data = self._response_data
             self._state = GeneratorState.IDLE
+            self._input_text = ""
             return data
 
     def reset(self) -> None:
