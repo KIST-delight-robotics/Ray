@@ -50,7 +50,7 @@ from voice_pipeline.core.config import (
     TTSConfig,
     TurnGPTConfig,
     VAPConfig,
-)
+)  # noqa: E402
 
 
 # =====================================================================
@@ -307,6 +307,8 @@ def create_vap_variant(
     frame_rate: int = 10,
     context_len_sec: float = 5.0,
     vap_model_path: str = "",
+    encoder_onnx: str = "",
+    transformer_onnx: str = "",
 ):
     """Create a VAP wrapper for the given variant."""
     import torch
@@ -331,7 +333,8 @@ def create_vap_variant(
             context_len_sec=context_len_sec,
             ort_threads=ort_threads,
             pt_threads=pt_threads,
-            use_onnx_transformer=False,
+            encoder_onnx_path=encoder_onnx or MaAIVAPConfig.encoder_onnx_path,
+            transformer_onnx_path="",
             use_torch_compile=False,
         )
     elif variant == "maai-compile":
@@ -340,7 +343,8 @@ def create_vap_variant(
             context_len_sec=context_len_sec,
             ort_threads=ort_threads,
             pt_threads=pt_threads,
-            use_onnx_transformer=False,
+            encoder_onnx_path=encoder_onnx or MaAIVAPConfig.encoder_onnx_path,
+            transformer_onnx_path="",
             use_torch_compile=True,
         )
     elif variant == "maai-full-onnx":
@@ -349,7 +353,8 @@ def create_vap_variant(
             context_len_sec=context_len_sec,
             ort_threads=ort_threads,
             pt_threads=pt_threads,
-            use_onnx_transformer=True,
+            encoder_onnx_path=encoder_onnx or MaAIVAPConfig.encoder_onnx_path,
+            transformer_onnx_path=transformer_onnx or MaAIVAPConfig.transformer_onnx_path,
         )
     else:
         raise ValueError(f"Unknown VAP variant: {variant}")
@@ -364,14 +369,24 @@ def create_vap_variant(
 TURNGPT_VARIANTS = ["turngpt-pytorch", "turngpt-onnx-fp32", "turngpt-onnx-int8"]
 
 
+_TURNGPT_ONNX_PATHS = {
+    "turngpt-onnx-fp32": "models/turngpt/turngpt_v2_kvcache.onnx",
+    "turngpt-onnx-int8": "models/turngpt/turngpt_v2_kvcache_int8.onnx",
+}
+
+
 def create_turngpt_variant(
     variant: str,
     *,
     onnx_threads: int = 2,
     checkpoint_path: str = "",
+    turngpt_onnx: str = "",
+    tokenizer_path: str = "",
 ):
     """Create a TurnGPT wrapper for the given variant."""
     from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
+
+    tok = tokenizer_path or TurnGPTConfig.tokenizer_path
 
     if variant == "turngpt-pytorch":
         path = checkpoint_path or os.environ.get("TURNGPT_CHECKPOINT_PATH", "")
@@ -384,16 +399,10 @@ def create_turngpt_variant(
             onnx_model_path="",
             onnx_threads=onnx_threads,
         )
-    elif variant == "turngpt-onnx-fp32":
+    elif variant in _TURNGPT_ONNX_PATHS:
         config = TurnGPTConfig(
-            onnx_model_path="models/turngpt/turngpt_v2_kvcache.onnx",
-            tokenizer_path="models/turngpt/tokenizer",
-            onnx_threads=onnx_threads,
-        )
-    elif variant == "turngpt-onnx-int8":
-        config = TurnGPTConfig(
-            onnx_model_path="models/turngpt/turngpt_v2_kvcache_int8.onnx",
-            tokenizer_path="models/turngpt/tokenizer",
+            onnx_model_path=turngpt_onnx or _TURNGPT_ONNX_PATHS[variant],
+            tokenizer_path=tok,
             onnx_threads=onnx_threads,
         )
     else:
@@ -789,6 +798,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Path to original VAP model state_dict (for vap-original variant)",
     )
+    vap_group.add_argument(
+        "--encoder-onnx",
+        type=str,
+        default=MaAIVAPConfig.encoder_onnx_path,
+        help=f"MaAI encoder ONNX path (default: {MaAIVAPConfig.encoder_onnx_path})",
+    )
+    vap_group.add_argument(
+        "--transformer-onnx",
+        type=str,
+        default=MaAIVAPConfig.transformer_onnx_path,
+        help=f"MaAI transformer ONNX path (default: {MaAIVAPConfig.transformer_onnx_path})",
+    )
 
     # TurnGPT options
     tgpt_group = p.add_argument_group("TurnGPT options")
@@ -809,6 +830,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="",
         help="Path to TurnGPT PyTorch checkpoint (for turngpt-pytorch variant)",
+    )
+    tgpt_group.add_argument(
+        "--turngpt-onnx",
+        type=str,
+        default="",
+        help="TurnGPT ONNX model path (overrides variant default)",
+    )
+    tgpt_group.add_argument(
+        "--tokenizer-path",
+        type=str,
+        default=TurnGPTConfig.tokenizer_path,
+        help=f"TurnGPT tokenizer path (default: {TurnGPTConfig.tokenizer_path})",
     )
 
     return p
@@ -876,6 +909,8 @@ def main() -> None:
                     pt_threads=args.pt_threads,
                     context_len_sec=args.context_len,
                     vap_model_path=args.vap_model_path,
+                    encoder_onnx=args.encoder_onnx,
+                    transformer_onnx=args.transformer_onnx,
                 )
                 results.append(result)
             except Exception as e:
@@ -896,6 +931,8 @@ def main() -> None:
                     track_memory=args.memory,
                     onnx_threads=args.onnx_threads,
                     checkpoint_path=args.checkpoint_path,
+                    turngpt_onnx=args.turngpt_onnx,
+                    tokenizer_path=args.tokenizer_path,
                 )
                 results.append(result)
             except Exception as e:
