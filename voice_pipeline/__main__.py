@@ -29,9 +29,11 @@ from voice_pipeline.orchestrator.orchestrator import Orchestrator
 from voice_pipeline.session.session_manager import SessionComponents, SessionManager
 from voice_pipeline.tts.tts import OpenAITTS
 from voice_pipeline.tts.utterance_truncator import TimestampTruncator
+from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT
+from voice_pipeline.turn_taking.async_vap import AsyncVAP
+from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
 from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
-from voice_pipeline.turn_taking.vap import VAPWrapper
 
 
 def main() -> None:
@@ -46,7 +48,7 @@ def main() -> None:
     asr = GoogleCloudASR(config.asr, config.audio)
     llm = OpenAILLM(config.llm)
     tts = OpenAITTS(config.tts)
-    vap = VAPWrapper(config.vap, config.audio, config.tts)
+    vap = MaAIVAPWrapper(config.maai_vap, config.audio, config.tts)
     turngpt = TurnGPTWrapper(config.turngpt)
     bridge = CppBridge(config.cpp_bridge)
     wakeword = WakewordDetector(config.wakeword, config.audio)
@@ -60,14 +62,26 @@ def main() -> None:
     audio_input = AudioInput(audio_queue, config.audio, config.audio_input)
 
     # --- Session factory: creates fresh per-session components ---
+    prev_async: list[AsyncVAP | AsyncTurnGPT] = []
+
     def session_factory() -> SessionComponents:
+        # Stop async wrappers from the previous session
+        for wrapper in prev_async:
+            wrapper.stop()
+        prev_async.clear()
+
         vap.reset()
         turngpt.reset()
+
+        async_vap = AsyncVAP(vap)
+        async_turngpt = AsyncTurnGPT(turngpt)
+        prev_async.extend([async_vap, async_turngpt])
+
         history = ConversationHistory(storage)
         context_builder = ContextBuilder(
             history, config.history, DEFAULT_SYSTEM_PROMPT, token_counter
         )
-        turn_detector = TurnDetector(vap, turngpt, config.turn_detector, config.audio)
+        turn_detector = TurnDetector(async_vap, async_turngpt, config.turn_detector, config.audio)
         generator = SpeechGenerator(context_builder, llm, tts, config.speech_generator, executor)
         truncator = TimestampTruncator()
         orchestrator = Orchestrator(
@@ -107,6 +121,9 @@ def main() -> None:
     try:
         sm.run()
     finally:
+        for wrapper in prev_async:
+            wrapper.stop()
+        prev_async.clear()
         executor.shutdown(wait=True)
         asr.stop()
         bridge.disconnect()

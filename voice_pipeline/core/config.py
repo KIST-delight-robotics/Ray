@@ -311,6 +311,7 @@ class PipelineConfig:
     wakeword: WakewordConfig = field(default_factory=WakewordConfig)
     led: LEDConfig = field(default_factory=LEDConfig)
     vap: VAPConfig = field(default_factory=VAPConfig)
+    maai_vap: MaAIVAPConfig = field(default_factory=MaAIVAPConfig)
     turngpt: TurnGPTConfig = field(default_factory=TurnGPTConfig)
     turn_detector: TurnDetectorConfig = field(default_factory=TurnDetectorConfig)
     speech_generator: SpeechGeneratorConfig = field(default_factory=SpeechGeneratorConfig)

@@ -15,8 +15,9 @@ from difflib import SequenceMatcher
 from typing import Literal
 
 from voice_pipeline.core.config import AudioConfig, TurnDetectorConfig
-from voice_pipeline.core.interfaces import IVAP, ITurnDetector, ITurnGPT
+from voice_pipeline.core.interfaces import IVAP, ITurnDetector
 from voice_pipeline.core.types import AudioFrame, TurnDecision, VAPResult
+from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT, SyncTurnGPTAdapter
 
 logger = logging.getLogger("voice_pipeline.turn_taking")
 
@@ -40,7 +41,7 @@ class TurnDetector(ITurnDetector):
     def __init__(
         self,
         vap: IVAP,
-        turngpt: ITurnGPT,
+        turngpt: AsyncTurnGPT | SyncTurnGPTAdapter,
         config: TurnDetectorConfig,
         audio_config: AudioConfig,
     ) -> None:
@@ -83,10 +84,15 @@ class TurnDetector(ITurnDetector):
         # --- USER_TURN ---
         elapsed = self._frame_duration_sec * frame_count
 
+        # Poll latest TurnGPT result (non-blocking)
+        latest_prob = self._turngpt.poll_result()
+        if latest_prob is not None:
+            self._turngpt_prob = latest_prob
+
         # Track ASR text changes
         text_changed = asr_text != self._prev_asr_text
         if text_changed and asr_text:
-            self._turngpt_prob = self._turngpt.predict(self._build_dialog(asr_text))
+            self._turngpt.submit(self._build_dialog(asr_text))
             self._last_asr_change_elapsed_sec = 0.0
             self._asr_has_changed = True
         self._prev_asr_text = asr_text
@@ -131,6 +137,7 @@ class TurnDetector(ITurnDetector):
 
     def _reset_per_frame_state(self) -> None:
         """Clear all per-frame tracking variables."""
+        self._turngpt.clear_pending()
         self._prev_asr_text = ""
         self._vap_favor_robot_elapsed_sec = 0.0
         self._silence_elapsed_sec = 0.0
