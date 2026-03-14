@@ -220,6 +220,8 @@ class MockCppServer:
                 elif msg_type == "stop":
                     logger.info("[stop] interrupting playback")
                     player.stop()
+                    ws.send(json.dumps({"type": "playback_complete"}))
+                    logger.info("  → playback_complete (after stop)")
 
                 elif msg_type == "play_file":
                     file_path = msg.get("file_path", "")
