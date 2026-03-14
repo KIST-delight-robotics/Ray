@@ -4,7 +4,9 @@ Claude's working memory. Read at session start, update freely.
 
 ## Current State
 
-Phase 1–6 complete. All modules implemented and unit-tested (488 tests pass).
+Phase 1–6 complete. All modules implemented and unit-tested (567 tests pass).
+Async thread separation for VAP + TurnGPT complete.
+`__main__.py` uses MaAIVAPWrapper (ONNX) as default VAP.
 
 Remaining: Phase 7 (integration tests).
 
@@ -38,7 +40,10 @@ These known limitations should be addressed:
 | CppBridge | `bridge/cpp_bridge.py` | `ICppBridge` | `CppBridgeConfig` |
 | LED | `led/led_controller.py` | `ILEDController` | `LEDConfig` |
 | VAP | `turn_taking/vap.py` | `IVAP` | `VAPConfig` |
+| MaAI VAP | `turn_taking/maai_vap.py` | `IVAP` | `MaAIVAPConfig` |
+| AsyncVAP | `turn_taking/async_vap.py` | `IVAP` | — (wraps IVAP) |
 | TurnGPT | `turn_taking/turngpt.py` | `ITurnGPT` | `TurnGPTConfig` |
+| AsyncTurnGPT | `turn_taking/async_turngpt.py` | submit/poll | — (wraps ITurnGPT) |
 | TurnDetector | `turn_taking/turn_detector.py` | `ITurnDetector` | `TurnDetectorConfig` |
 | SpeechGenerator | `generation/speech_generator.py` | `ISpeechGenerator` | `SpeechGeneratorConfig` |
 | ContextBuilder | `context/context_builder.py` | `IContextBuilder` | — |

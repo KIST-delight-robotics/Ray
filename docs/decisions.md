@@ -104,6 +104,17 @@
 - **`notify_turn_complete` ignores `role`**: TurnGPT's `<ts>` format marks turn boundaries without speaker identity. The `role` parameter exists in the interface contract for potential future use but is not needed by the current TurnGPT model.
 - **VAP error default behavior**: `VAPResult(0, 0, False)` on errors looks like "robot favored," which could accumulate toward false turn_shift via Path 1. Accepted because transient errors won't sustain for 500ms, and persistent VAP failure falls back to Path 2 (TurnGPT + silence timing) which operates independently.
 
+### Async thread separation (`turn_taking/async_vap.py`, `async_turngpt.py`)
+
+- **Both VAP and TurnGPT on dedicated threads**: RPi 5 worst case VAP 24ms + TurnGPT 30ms = 54ms, exceeding 30ms frame budget by 80%. ONNX Runtime releases GIL during inference, so separate threads achieve true parallelism. Frame loop now fully decoupled from inference latency.
+- **AsyncVAP implements IVAP**: Drop-in replacement. `feed_audio()` buffers audio pairs and returns latest cached result (non-blocking). Background thread runs at configurable rate (default 10Hz), drains buffer, concatenates frames, and runs inference. Works with any `IVAP` implementation (VAPWrapper, MaAIVAPWrapper).
+- **AsyncTurnGPT uses submit/poll pattern (not IVAP-like)**: TurnGPT's usage pattern (text input, infrequent calls) differs from VAP's (audio input, every frame). submit/poll is more natural than pretending it's the same interface. `SyncTurnGPTAdapter` wraps sync `ITurnGPT` for unit test compatibility.
+- **1-frame TurnGPT delay accepted**: `process_frame()` polls at the top, submits at the bottom. Result from frame N's submit arrives at frame N+1's poll. 30ms delay is negligible for turn-taking decisions that operate on 500ms+ timescales.
+- **`_pending_text = None` guards stale results**: If `clear_pending()` is called (turn transition) before inference completes, the background thread checks `_pending_text is not None` before storing the result. Stale predictions are silently discarded.
+- **Reset delegated to background thread**: `AsyncTurnGPT.reset()` sets `_pending_reset` flag. The background thread calls `turngpt.reset()` — KV cache access stays on the same thread as `predict()`, avoiding races.
+- **Session-scoped threads**: Created per session in `session_factory()`, stopped on next session start and program exit. Model objects remain process-level singletons (warmup preserved).
+- **`__main__.py` switched to MaAIVAPWrapper**: Full ONNX pipeline (encoder + transformer) as default. `PipelineConfig.maai_vap` field added. Old `VAPWrapper` (PyTorch) still available for testing.
+
 ### SpeechGenerator (`generation/speech_generator.py`)
 
 - **Streaming API over batch**: Replaced `get_result() -> ResponseData` with `poll_audio() -> bytes | None` + `stream_done` + `get_text()` + `get_response_data()`. Allows Orchestrator to stream TTS chunks to CppBridge as they arrive instead of waiting for full synthesis. `GeneratorState.READY` renamed to `STREAMING`.

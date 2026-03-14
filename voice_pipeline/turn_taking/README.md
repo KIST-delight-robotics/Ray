@@ -98,12 +98,12 @@ Combines VAP and TurnGPT outputs with timing heuristics. No external dependencie
 
 ### MaAI VAP
 
-Repository: <https://github.com/Seongbuming/MaAI>
+Repository: <https://github.com/MaAI-Kyoto/MaAI>
 
 #### Setup
 
 ```bash
-git clone https://github.com/Seongbuming/MaAI.git external/MaAI
+git clone https://github.com/MaAI-Kyoto/MaAI.git external/MaAI
 uv pip install -e external/MaAI
 ```
 
@@ -155,7 +155,9 @@ voice_pipeline/turn_taking/
 ├── exceptions.py       # TurnTakingError, VAPError, TurnGPTError, TurnDetectorError
 ├── vap.py              # VAPWrapper(IVAP) — VoiceActivityProjection
 ├── maai_vap.py         # MaAIVAPWrapper(IVAP) — MaAI (ONNX)
+├── async_vap.py        # AsyncVAP(IVAP) — background thread wrapper (10Hz)
 ├── turngpt.py          # TurnGPTWrapper(ITurnGPT)
+├── async_turngpt.py    # AsyncTurnGPT + SyncTurnGPTAdapter — background thread wrapper
 ├── turn_detector.py    # TurnDetector(ITurnDetector)
 └── README.md
 
@@ -163,6 +165,7 @@ scripts/
 ├── export_maai_onnx.py     # MaAI ONNX export (wrappers + CLI)
 ├── generate_test_wav.py    # Test audio file generator
 ├── bench/
-│   └── benchmark_compare.py
+│   ├── benchmark_compare.py
+│   └── benchmark_concurrent.py
 └── hardware/               # Live hardware test scripts
 ```
