@@ -38,7 +38,7 @@ import platform
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import numpy as np
 
@@ -51,7 +51,6 @@ from voice_pipeline.core.config import (
     TurnGPTConfig,
     VAPConfig,
 )  # noqa: E402
-
 
 # =====================================================================
 # Data types
@@ -673,7 +672,7 @@ def print_comparison(results: list[BenchmarkResult], settings: dict) -> None:
 
     # Drift (if duration >= 60s)
     if any(len(r.drift_buckets) > 1 for r in results):
-        print(f"\n  Drift Analysis (mean / P95 per 30s window):")
+        print("\n  Drift Analysis (mean / P95 per 30s window):")
         print(f"  {thin}")
         # Find the variant with most buckets for labels
         max_buckets = max(len(r.drift_buckets) for r in results)
@@ -699,7 +698,7 @@ def print_comparison(results: list[BenchmarkResult], settings: dict) -> None:
 def write_json(results: list[BenchmarkResult], settings: dict, path: str) -> None:
     """Write results as JSON."""
     output = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "platform": f"{platform.system()} {platform.release()} {platform.machine()}",
         "settings": settings,
         "results": [],

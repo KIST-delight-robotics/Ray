@@ -32,6 +32,7 @@ from benchmark_compare import (  # noqa: E402
     get_rss_mb,
     numpy_to_pcm16,
 )
+
 from voice_pipeline.core.config import (  # noqa: E402
     AudioConfig,
     MaAIVAPConfig,
@@ -245,7 +246,7 @@ def print_concurrent_results(
     print(sep)
 
     # VAP comparison
-    print(f"\n  VAP (maai-full-onnx)")
+    print("\n  VAP (maai-full-onnx)")
     print(f"  {thin}")
     label_w = 18
     col_w = 22
@@ -269,7 +270,7 @@ def print_concurrent_results(
         print(f"  {label:<{label_w}}{s_val:>{col_w}}{c_val:>{col_w}}{delta:>{col_w}}")
 
     # TurnGPT comparison
-    print(f"\n  TurnGPT (onnx-int8)")
+    print("\n  TurnGPT (onnx-int8)")
     print(f"  {thin}")
     header = f"  {'Metric':<{label_w}}{'Solo':>{col_w}}{'Concurrent':>{col_w}}{'Delta':>{col_w}}"
     print(header)
@@ -290,7 +291,7 @@ def print_concurrent_results(
         print(f"  {label:<{label_w}}{s_val:>{col_w}}{c_val:>{col_w}}{delta:>{col_w}}")
 
     # Budget headroom summary
-    print(f"\n  Budget Headroom Summary")
+    print("\n  Budget Headroom Summary")
     print(f"  {thin}")
     vap_budget = 1000 / settings["vap_frame_rate"]
     tgpt_budget = 1000 / settings["tgpt_rate"]
