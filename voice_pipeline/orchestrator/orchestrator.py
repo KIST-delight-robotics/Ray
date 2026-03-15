@@ -359,6 +359,7 @@ class Orchestrator:
     def _handle_interrupt(self) -> None:
         """Handle interrupt signal from TurnDetector."""
         if self._playback_state == PlaybackState.PLAYING:
+            logger.info("Interrupt → send_stop (playback PLAYING)")
             try:
                 self._bridge.send_stop()
             except Exception:
@@ -367,11 +368,14 @@ class Orchestrator:
             self._playback_state = PlaybackState.STOP_PENDING
             self._stop_pending_time = time.monotonic()
         elif self._awaiting_response:
+            logger.info("Interrupt → cancel generator (awaiting_response)")
             self._generator.cancel()
             self._turn_detector.reset()
             self._awaiting_response = False
             self._audio_end_sent = False
             self._set_led(LEDState.LISTENING)
+        else:
+            logger.debug("Interrupt ignored (state=%s)", self._playback_state.value)
 
     # ------------------------------------------------------------------
     # Streaming / playback
@@ -400,6 +404,8 @@ class Orchestrator:
         self._bridge.send_stream_start()
         self._drain_audio_to_bridge()
         self._playback_state = PlaybackState.PLAYING
+        buf_sec = len(self._sent_audio_buffer) / (self._tts_config.output_sample_rate * 2)
+        logger.info("begin_streaming: %.1fs audio buffered → PLAYING", buf_sec)
         self._set_led(LEDState.SPEAKING)
 
     def _drain_audio_to_bridge(self) -> None:
@@ -457,6 +463,7 @@ class Orchestrator:
 
     def _on_playback_complete(self) -> None:
         """Normal playback completion — save full response to history."""
+        logger.info("Playback complete (normal)")
         text = self._get_response_text()
         if text:
             self._assistant_msg_id = self._history.add_assistant_message(text)
@@ -476,6 +483,7 @@ class Orchestrator:
         else:
             stop_pos = 0.0
         text = self._get_response_text()
+        logger.info("Playback interrupted (barge-in): stop_pos=%.2fs full=%r", stop_pos, text)
 
         if not text:
             self._turn_detector.reset()
@@ -489,6 +497,7 @@ class Orchestrator:
                 truncated = self._truncator.truncate(
                     text, stop_pos, self._current_response.timestamps
                 )
+                trunc_method = "timestamps"
             else:
                 # Case B: duration ratio
                 total_dur = len(self._current_response.audio) / (
@@ -496,8 +505,10 @@ class Orchestrator:
                 )
                 ratio_truncator = DurationRatioTruncator(total_dur)
                 truncated = ratio_truncator.truncate(text, stop_pos, [])
+                trunc_method = "ratio"
 
             if truncated:
+                logger.info("Truncated (%s): %r", trunc_method, truncated)
                 self._assistant_msg_id = self._history.add_assistant_message(truncated)
                 self._turn_detector.notify_turn_complete("robot", truncated)
         else:
@@ -505,8 +516,10 @@ class Orchestrator:
             total_dur = len(self._sent_audio_buffer) / (self._tts_config.output_sample_rate * 2)
             ratio_truncator = DurationRatioTruncator(total_dur)
             truncated = ratio_truncator.truncate(text, stop_pos, [])
+            trunc_method = "ratio-pending"
 
             if truncated:
+                logger.info("Truncated (%s): %r", trunc_method, truncated)
                 msg_id = self._history.add_assistant_message(truncated)
                 self._assistant_msg_id = msg_id
                 self._turn_detector.notify_turn_complete("robot", truncated)
@@ -586,6 +599,7 @@ class Orchestrator:
         elapsed = time.monotonic() - self._stop_pending_time
         if elapsed >= self._config.stop_pending_timeout_sec:
             logger.warning("STOP_PENDING watchdog timeout — forcing IDLE")
+            self._turn_detector.reset()
             self._reset_playback_state()
 
     # ------------------------------------------------------------------
