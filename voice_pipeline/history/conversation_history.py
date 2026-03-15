@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from voice_pipeline.core.interfaces import IConversationHistory, IStorageBackend
@@ -24,6 +25,7 @@ class ConversationHistory(IConversationHistory):
         self._session_id: str | None = None
         self._messages: list[dict[str, Any]] = []
         self._next_id: int = 0
+        self._started_at: str = ""
 
     def _require_session(self) -> str:
         if self._session_id is None:
@@ -35,6 +37,7 @@ class ConversationHistory(IConversationHistory):
         self._session_id = session_id
         self._messages = []
         self._next_id = 0
+        self._started_at = datetime.now(UTC).isoformat()
         logger.info("Started new session: %s", session_id)
 
     def _allocate_id(self) -> int:
@@ -79,4 +82,5 @@ class ConversationHistory(IConversationHistory):
         """Persist the current session to the storage backend."""
         session_id = self._require_session()
         clean = [{k: v for k, v in msg.items() if k != "_id"} for msg in self._messages]
-        self._backend.save(session_id, clean)
+        metadata = {"started_at": self._started_at}
+        self._backend.save(session_id, clean, metadata)
