@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from voice_pipeline.core.config import AudioConfig, TurnDetectorConfig
-from voice_pipeline.core.interfaces import IVAP, ITurnGPT
+from voice_pipeline.core.config import AudioConfig, SimilarityConfig, TurnDetectorConfig
+from voice_pipeline.core.interfaces import IVAP, ISimilarity, ITurnGPT
 from voice_pipeline.core.types import TurnDecision, VAPResult
 from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector, _TurnState
@@ -27,6 +27,7 @@ def _make_detector(
     config: TurnDetectorConfig | None = None,
     vap_results: list[VAPResult] | None = None,
     turngpt_prob: float = 0.0,
+    similarity: ISimilarity | None = None,
 ) -> tuple[TurnDetector, MagicMock, MagicMock]:
     """Create a TurnDetector with mocked VAP and TurnGPT.
 
@@ -44,8 +45,13 @@ def _make_detector(
     mock_turngpt.predict.return_value = turngpt_prob
 
     cfg = config or TurnDetectorConfig()
+    sim_cfg = SimilarityConfig()
+    if similarity is None:
+        # Default mock: always return 0.0 (everything is different)
+        similarity = MagicMock(spec=ISimilarity)
+        similarity.compare.return_value = 0.0
     adapter = SyncTurnGPTAdapter(mock_turngpt)
-    detector = TurnDetector(mock_vap, adapter, cfg, AUDIO_CFG)
+    detector = TurnDetector(mock_vap, adapter, similarity, cfg, sim_cfg, AUDIO_CFG)
     return detector, mock_vap, mock_turngpt
 
 
@@ -217,13 +223,22 @@ class TestRobotTurnTransition:
 
 class TestInterruptWithRobotAudio:
     def test_both_favor_user_triggers_interrupt(self):
-        """Both p_now and p_fut favor user -> interrupt."""
+        """Both p_now and p_fut favor user + speaking -> interrupt."""
         detector, mock_vap, _ = _make_detector()
         detector._turn_state = _TurnState.ROBOT_TURN
         mock_vap.feed_audio.return_value = VAPResult(0.8, 0.8, True)
 
         decision = detector.process_frame(FRAME, "", ROBOT_FRAME)
         assert decision.interrupt
+
+    def test_not_speaking_no_interrupt(self):
+        """user_is_speaking=False -> no interrupt even if p_now/p_fut favor user."""
+        detector, mock_vap, _ = _make_detector()
+        detector._turn_state = _TurnState.ROBOT_TURN
+        mock_vap.feed_audio.return_value = VAPResult(0.8, 0.8, False)
+
+        decision = detector.process_frame(FRAME, "", ROBOT_FRAME)
+        assert decision == TurnDecision.none()
 
     def test_backchannel_no_interrupt(self):
         """p_now favors user, p_fut favors robot -> backchannel, no interrupt."""
@@ -308,42 +323,43 @@ class TestPrepare:
 
 class TestPrepareSimilarityGate:
     def test_similar_text_skips_prepare(self):
-        """Similar text to last prepare -> skipped.
-
-        With submit/poll, prepare fires one frame after text change.
-        """
+        """Similar text to last prepare -> skipped."""
         n_frames = 5
         vap_results = [VAPResult(0.5, 0.5, True)] * n_frames
-        detector, _, _ = _make_detector(vap_results=vap_results, turngpt_prob=0.5)
+        mock_sim = MagicMock(spec=ISimilarity)
+        mock_sim.compare.return_value = 0.9  # very similar
+        detector, _, _ = _make_detector(
+            vap_results=vap_results, turngpt_prob=0.5, similarity=mock_sim,
+        )
 
         # Frame 1: text changes, submit fires
         detector.process_frame(FRAME, "hello world")
-        # Frame 2: poll picks up prob=0.5, first prepare fires
+        # Frame 2: first prepare fires (no last_prepare_text yet)
         d1 = detector.process_frame(FRAME, "hello world")
         assert d1.prepare
 
         # Frame 3: similar text change, submit fires
         detector.process_frame(FRAME, "hello worlds")
-        # Frame 4: poll picks up prob=0.5, but similarity gate blocks
+        # Frame 4: similarity gate blocks (0.9 >= 0.8 threshold)
         d2 = detector.process_frame(FRAME, "hello worlds")
         assert not d2.prepare
 
     def test_different_text_fires_prepare(self):
-        """Sufficiently different text -> prepare fires again.
-
-        With submit/poll, the previous turngpt_prob persists so prepare
-        can fire on the same frame as the text change (using the old prob).
-        """
+        """Sufficiently different text -> prepare fires again."""
         n_frames = 4
         vap_results = [VAPResult(0.5, 0.5, True)] * n_frames
-        detector, _, _ = _make_detector(vap_results=vap_results, turngpt_prob=0.5)
+        mock_sim = MagicMock(spec=ISimilarity)
+        mock_sim.compare.return_value = 0.3  # very different
+        detector, _, _ = _make_detector(
+            vap_results=vap_results, turngpt_prob=0.5, similarity=mock_sim,
+        )
 
         # Frame 1-2: first prepare fires
         detector.process_frame(FRAME, "hello world")
         d1 = detector.process_frame(FRAME, "hello world")
         assert d1.prepare
 
-        # Frame 3: different text, prepare fires (old prob still high)
+        # Frame 3: different text, prepare fires (similarity low)
         d2 = detector.process_frame(FRAME, "completely different sentence here")
         assert d2.prepare
 

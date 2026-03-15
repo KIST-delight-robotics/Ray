@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import enum
 import logging
-from difflib import SequenceMatcher
 from typing import Literal
 
-from voice_pipeline.core.config import AudioConfig, TurnDetectorConfig
-from voice_pipeline.core.interfaces import IVAP, ITurnDetector
+from voice_pipeline.core.config import AudioConfig, SimilarityConfig, TurnDetectorConfig
+from voice_pipeline.core.interfaces import IVAP, ISimilarity, ITurnDetector
 from voice_pipeline.core.types import AudioFrame, TurnDecision, VAPResult
 from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT, SyncTurnGPTAdapter
 
@@ -42,12 +41,16 @@ class TurnDetector(ITurnDetector):
         self,
         vap: IVAP,
         turngpt: AsyncTurnGPT | SyncTurnGPTAdapter,
+        similarity: ISimilarity,
         config: TurnDetectorConfig,
+        similarity_config: SimilarityConfig,
         audio_config: AudioConfig,
     ) -> None:
         self._vap = vap
         self._turngpt = turngpt
+        self._similarity = similarity
         self._config = config
+        self._similarity_threshold = similarity_config.threshold
 
         self._frame_duration_sec = audio_config.frame_duration_ms / 1000.0
 
@@ -111,12 +114,26 @@ class TurnDetector(ITurnDetector):
             and asr_text
             and self._check_turn_shift(vap_result, elapsed)
         ):
+            logger.info(
+                "TURN_SHIFT: p_now=%.2f p_fut=%.2f turngpt=%.2f silence=%.2fs text=%r",
+                vap_result.p_now, vap_result.p_fut,
+                self._turngpt_prob, self._silence_elapsed_sec,
+                asr_text[:60],
+            )
             self._turn_state = _TurnState.ROBOT_TURN
             self._reset_per_frame_state()
             return TurnDecision(turn_shift=True)
 
         # --- Prepare check ---
         if self._check_prepare(asr_text):
+            prob = self._turngpt_prob
+            thresh = self._config.prepare_turngpt_threshold
+            reason = (
+                f"turngpt={prob:.2f}>{thresh:.2f}"
+                if prob > thresh
+                else f"timeout={self._last_asr_change_elapsed_sec:.2f}s"
+            )
+            logger.info("PREPARE (%s): text=%r", reason, asr_text[:60])
             return TurnDecision(prepare=True)
 
         return TurnDecision.none()
@@ -181,7 +198,16 @@ class TurnDetector(ITurnDetector):
     def _process_robot_turn(
         self, vap_result: VAPResult, robot_audio: AudioFrame | None
     ) -> TurnDecision:
-        """Interrupt detection during ROBOT_TURN."""
+        """Interrupt detection during ROBOT_TURN.
+
+        Follows Skantze & Irfan (2025) pseudocode: user_is_speaking is a
+        prerequisite for interrupt checking. When user IS speaking:
+        - With robot_audio: use p_now/p_fut to distinguish interrupt vs backchannel.
+        - Without robot_audio: treat as interrupt (no VAP context to distinguish).
+        """
+        if not vap_result.user_is_speaking:
+            return TurnDecision.none()
+
         cfg = self._config
 
         if robot_audio is not None:
@@ -190,12 +216,19 @@ class TurnDetector(ITurnDetector):
                 vap_result.p_now > cfg.interrupt_user_threshold
                 and vap_result.p_fut > cfg.interrupt_user_threshold
             ):
+                logger.info(
+                    "INTERRUPT (vap): p_now=%.2f p_fut=%.2f",
+                    vap_result.p_now, vap_result.p_fut,
+                )
                 return TurnDecision(interrupt=True)
             # p_now > threshold but p_fut <= threshold -> backchannel, no action
         else:
             # No robot audio (gap before playback starts)
-            if vap_result.user_is_speaking:
-                return TurnDecision(interrupt=True)
+            logger.info(
+                "INTERRUPT (no_robot_audio): p_now=%.2f p_fut=%.2f",
+                vap_result.p_now, vap_result.p_fut,
+            )
+            return TurnDecision(interrupt=True)
 
         return TurnDecision.none()
 
@@ -214,8 +247,13 @@ class TurnDetector(ITurnDetector):
 
         # Similarity gate: skip if text is too similar to last prepare
         if self._last_prepare_text:
-            similarity = SequenceMatcher(None, self._last_prepare_text, asr_text).ratio()
-            if similarity >= cfg.prepare_similarity_threshold:
+            similarity = self._similarity.compare(self._last_prepare_text, asr_text)
+            if similarity >= self._similarity_threshold:
+                logger.info(
+                    "PREPARE skipped (similarity=%.2f): %r → %r",
+                    similarity, self._last_prepare_text[:40], asr_text[:40],
+                )
+                self._asr_has_changed = False
                 return False
 
         self._last_prepare_text = asr_text

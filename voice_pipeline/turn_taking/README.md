@@ -94,7 +94,6 @@ Combines VAP and TurnGPT outputs with timing heuristics. No external dependencie
 | `interrupt_user_threshold` | `0.5` | p_now/p_fut above this = "favors user" |
 | `prepare_turngpt_threshold` | `0.2` | TurnGPT prob above this triggers prepare |
 | `prepare_timeout_sec` | `0.2` | Time since last ASR change to trigger prepare |
-| `prepare_similarity_threshold` | `0.8` | Skip prepare if text similarity ≥ this |
 
 ### MaAI VAP
 
