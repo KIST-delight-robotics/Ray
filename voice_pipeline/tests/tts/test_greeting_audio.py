@@ -17,7 +17,6 @@ from voice_pipeline.tts.greeting_audio import (
     synthesize_to_wav,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -220,7 +219,7 @@ class TestEnsureGreetingAudio:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return TTSStream((c for c in [PCM_SILENCE]))
+                return TTSStream(c for c in [PCM_SILENCE])
             raise RuntimeError("API down")
 
         tts = MagicMock()

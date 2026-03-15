@@ -62,7 +62,7 @@ def _cache_key(tts_config: TTSConfig, text: str) -> str:
     """Short hash of voice-affecting settings + text."""
     source = (
         f"{tts_config.voice}|{tts_config.model}"
-        f"|{tts_config.speed}|{tts_config.instructions}|{text}"
+        f"|{tts_config.speed}|{tts_config.instructions or ''}|{text}"
     )
     return hashlib.sha256(source.encode()).hexdigest()[:8]
 

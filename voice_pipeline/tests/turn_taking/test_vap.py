@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from voice_pipeline.core.config import AudioConfig, TTSConfig, VAPConfig
+from voice_pipeline.core.exceptions import ConfigurationError
 from voice_pipeline.core.types import VAPResult
 from voice_pipeline.turn_taking.exceptions import VAPError
 
@@ -187,7 +188,7 @@ class TestInit:
 
     def test_zero_context_raises(self, _patches):
         mock_cls, mock_load = _patches
-        with pytest.raises(VAPError, match="All must be >= 1"):
+        with pytest.raises(ConfigurationError, match="context_sec must be positive"):
             _build_wrapper(mock_cls, mock_load, context_sec=0.0)
 
 

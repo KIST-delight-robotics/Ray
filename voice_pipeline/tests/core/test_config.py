@@ -70,7 +70,7 @@ class TestTTSConfig:
         assert cfg.speed == 1.0
         assert cfg.timeout_sec == 30.0
         assert cfg.max_retries == 2
-        assert cfg.instructions == ""
+        assert cfg.instructions is None
 
 
 class TestCppBridgeConfig:
@@ -110,7 +110,7 @@ class TestVAPConfig:
 class TestTurnGPTConfig:
     def test_defaults(self) -> None:
         cfg = TurnGPTConfig()
-        assert cfg.checkpoint_path == ""
+        assert cfg.checkpoint_path is None
         assert cfg.onnx_model_path
         assert cfg.tokenizer_path
         assert cfg.device == "cpu"

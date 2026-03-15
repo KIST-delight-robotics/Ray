@@ -386,6 +386,9 @@ class Orchestrator:
         user_text = self._generator.input_text
         if not user_text:
             logger.warning("_begin_streaming called with empty input_text — skipping")
+            self._generator.reset()
+            self._awaiting_response = False
+            self._set_led(LEDState.LISTENING)
             return
 
         self._user_msg_id = self._history.add_user_message(user_text)

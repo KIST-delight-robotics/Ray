@@ -7,6 +7,9 @@ Current: Phase 1–3 + Phase 4 + Phase 5 + Phase 6.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
+
+from voice_pipeline.core.exceptions import ConfigurationError
 
 
 @dataclass
@@ -22,10 +25,27 @@ class AudioConfig:
     frame_duration_ms: int = 30
     sample_width: int = 2
 
+    def __post_init__(self) -> None:
+        if self.sample_rate <= 0:
+            raise ConfigurationError(f"sample_rate must be positive, got {self.sample_rate}")
+        if self.channels <= 0:
+            raise ConfigurationError(f"channels must be positive, got {self.channels}")
+        if self.frame_duration_ms <= 0:
+            raise ConfigurationError(
+                f"frame_duration_ms must be positive, got {self.frame_duration_ms}"
+            )
+        if self.sample_width <= 0:
+            raise ConfigurationError(f"sample_width must be positive, got {self.sample_width}")
+
     @property
     def frame_size_samples(self) -> int:
         """Number of samples per frame."""
         return self.sample_rate * self.frame_duration_ms // 1000
+
+    @property
+    def frame_size_bytes(self) -> int:
+        """Number of bytes per frame."""
+        return self.frame_size_samples * self.sample_width * self.channels
 
 
 @dataclass
@@ -33,7 +53,7 @@ class ConversationHistoryConfig:
     """Configuration for ConversationHistory and StorageBackend."""
 
     max_context_tokens: int = 4096
-    storage_backend: str = "file"
+    storage_backend: Literal["memory", "file"] = "file"
     storage_path: str = "logs/sessions"
 
 
@@ -68,7 +88,7 @@ class TTSConfig:
     speed: float = 1.0
     timeout_sec: float = 30.0
     max_retries: int = 2
-    instructions: str = ""
+    instructions: str | None = None
 
 
 @dataclass
@@ -81,6 +101,10 @@ class CppBridgeConfig:
     recv_timeout_sec: float = 1.0
     connect_timeout_sec: float = 5.0
     close_timeout_sec: float = 5.0
+
+    def __post_init__(self) -> None:
+        if not (1 <= self.port <= 65535):
+            raise ConfigurationError(f"port must be in [1, 65535], got {self.port}")
 
 
 @dataclass
@@ -95,6 +119,12 @@ class WakewordConfig:
     min_speech_duration_ms: int = 100
     max_speech_duration_sec: float = 3.0
     stt_timeout_sec: float = 5.0
+
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.vad_threshold <= 1.0):
+            raise ConfigurationError(
+                f"vad_threshold must be in [0, 1], got {self.vad_threshold}"
+            )
 
 
 @dataclass
@@ -112,6 +142,12 @@ class LEDConfig:
     ring_count: int = 16
     spi_pin: int = 10
     brightness: int = 128
+
+    def __post_init__(self) -> None:
+        if not (0 <= self.brightness <= 255):
+            raise ConfigurationError(
+                f"brightness must be in [0, 255], got {self.brightness}"
+            )
 
 
 @dataclass
@@ -135,6 +171,18 @@ class VAPConfig:
     tt_time: float = 0.5
     device: str = "cpu"
     vad_threshold: float = 0.5
+
+    def __post_init__(self) -> None:
+        if self.context_sec <= 0:
+            raise ConfigurationError(
+                f"context_sec must be positive, got {self.context_sec}"
+            )
+        if self.step_sec <= 0:
+            raise ConfigurationError(f"step_sec must be positive, got {self.step_sec}")
+        if not (0.0 <= self.vad_threshold <= 1.0):
+            raise ConfigurationError(
+                f"vad_threshold must be in [0, 1], got {self.vad_threshold}"
+            )
 
 
 @dataclass
@@ -165,6 +213,20 @@ class MaAIVAPConfig:
     transformer_onnx_path: str = "models/maai/transformer_en_5s.onnx"
     use_torch_compile: bool = True
 
+    def __post_init__(self) -> None:
+        if self.frame_rate <= 0:
+            raise ConfigurationError(
+                f"frame_rate must be positive, got {self.frame_rate}"
+            )
+        if self.context_len_sec <= 0:
+            raise ConfigurationError(
+                f"context_len_sec must be positive, got {self.context_len_sec}"
+            )
+        if not (0.0 <= self.vad_threshold <= 1.0):
+            raise ConfigurationError(
+                f"vad_threshold must be in [0, 1], got {self.vad_threshold}"
+            )
+
 
 @dataclass
 class TurnGPTConfig:
@@ -172,6 +234,7 @@ class TurnGPTConfig:
 
     Attributes:
         checkpoint_path: Path to the TurnGPT checkpoint file (PyTorch mode).
+            None when not using PyTorch mode.
         onnx_model_path: Path to ONNX model file. When set, uses ONNX Runtime
             instead of PyTorch for inference.
         tokenizer_path: Path to saved tokenizer directory (required for ONNX mode).
@@ -185,7 +248,7 @@ class TurnGPTConfig:
         onnx_threads: Number of intra-op threads for ONNX Runtime.
     """
 
-    checkpoint_path: str = ""
+    checkpoint_path: str | None = None
     onnx_model_path: str = "models/turngpt/turngpt_v2_kvcache_int8.onnx"
     tokenizer_path: str = "models/turngpt/tokenizer"
     device: str = "cpu"
@@ -229,6 +292,22 @@ class TurnDetectorConfig:
     prepare_turngpt_threshold: float = 0.2
     prepare_timeout_sec: float = 0.2
 
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.vap_user_threshold <= 1.0):
+            raise ConfigurationError(
+                f"vap_user_threshold must be in [0, 1], got {self.vap_user_threshold}"
+            )
+        if not (0.0 <= self.interrupt_user_threshold <= 1.0):
+            raise ConfigurationError(
+                f"interrupt_user_threshold must be in [0, 1], got "
+                f"{self.interrupt_user_threshold}"
+            )
+        if not (0.0 <= self.prepare_turngpt_threshold <= 1.0):
+            raise ConfigurationError(
+                f"prepare_turngpt_threshold must be in [0, 1], got "
+                f"{self.prepare_turngpt_threshold}"
+            )
+
 
 @dataclass
 class SimilarityConfig:
@@ -247,6 +326,12 @@ class SimilarityConfig:
     model: str = "all-MiniLM-L6-v2"
     threshold: float = 0.8
     use_onnx: bool = False
+
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.threshold <= 1.0):
+            raise ConfigurationError(
+                f"threshold must be in [0, 1], got {self.threshold}"
+            )
 
 
 @dataclass
@@ -277,6 +362,12 @@ class SpeechGeneratorConfig:
     """
 
     max_workers: int = 2
+
+    def __post_init__(self) -> None:
+        if self.max_workers < 1:
+            raise ConfigurationError(
+                f"max_workers must be at least 1, got {self.max_workers}"
+            )
 
 
 @dataclass

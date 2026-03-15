@@ -217,6 +217,9 @@ class IASR(ABC):
 
     Lifecycle: Orchestrator calls start() on ACTIVE entry, feed_audio()/get_text()
     per frame, reset() after turn confirmation, stop() on ACTIVE exit.
+
+    Threading: all methods are called from the Orchestrator (main) thread only.
+    Implementations do not need to be thread-safe.
     """
 
     @abstractmethod
@@ -309,6 +312,12 @@ class ICppBridge(ABC):
     send_audio takes raw bytes (not ResponseData) — bridge doesn't need text.
     poll_event is non-blocking (returns None if empty) — fits frame-driven
     sync loop.
+
+    Threading: send_*() and poll_event() are called from the Orchestrator
+    (main) thread. The implementation runs an internal receiver thread that
+    reads WebSocket messages and enqueues CppEvents. poll_event() reads from
+    a thread-safe queue. disconnect() must join the receiver thread before
+    returning.
     """
 
     @abstractmethod
@@ -378,6 +387,10 @@ class IWakewordDetector(ABC):
             True if the wakeword was detected in this frame.
         """
 
+    @abstractmethod
+    def close(self) -> None:
+        """Release resources held by the detector."""
+
 
 # ---------------------------------------------------------------------------
 # LEDController
@@ -397,6 +410,10 @@ class ILEDController(ABC):
         Args:
             state: The desired LED display state.
         """
+
+    @abstractmethod
+    def close(self) -> None:
+        """Stop animations and release hardware resources."""
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +574,13 @@ class ISpeechGenerator(ABC):
     State flow: IDLE → PREPARING → STREAMING → IDLE (normal)
                 PREPARING → FAILED (LLM/TTS error, empty text)
                 STREAMING → FAILED (TTS stream error mid-stream)
+
+    Threading: prepare() submits work to a ThreadPoolExecutor. The
+    background thread updates internal state (guarded by Lock).
+    state, stream_done, poll_audio(), get_text(), get_response_data()
+    are polled from the Orchestrator (main) thread. cancel(), reset(),
+    and shutdown() are called from the main thread only. Implementations
+    must synchronize internal state with threading.Lock.
     """
 
     @property
@@ -653,7 +677,14 @@ class ISpeechGenerator(ABC):
 class IAudioInput(ABC):
     """Microphone capture interface.
 
-    Runs on a separate daemon thread, pushing AudioFrame to a shared queue.
+    Runs on a separate daemon thread, pushing AudioFrame to a shared
+    queue (queue.Queue[AudioFrame], injected via constructor).
+
+    Threading: start() and stop() are called from the main thread.
+    The capture thread pushes frames to the queue; the Orchestrator
+    (main) thread consumes them. The ``error`` property is set by the
+    capture thread and read by the main thread (use threading.Event
+    or equivalent for safe cross-thread signalling).
     """
 
     @abstractmethod

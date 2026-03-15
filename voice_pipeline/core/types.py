@@ -127,6 +127,12 @@ class VAPResult:
     p_fut: float
     user_is_speaking: bool
 
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.p_now <= 1.0):
+            raise ValueError(f"p_now must be in [0, 1], got {self.p_now}")
+        if not (0.0 <= self.p_fut <= 1.0):
+            raise ValueError(f"p_fut must be in [0, 1], got {self.p_fut}")
+
 
 # ---------------------------------------------------------------------------
 # TTS / response types
@@ -147,6 +153,16 @@ class WordTimestamp:
     start_sec: float
     end_sec: float
 
+    def __post_init__(self) -> None:
+        if self.start_sec < 0:
+            raise ValueError(f"start_sec must be non-negative, got {self.start_sec}")
+        if self.end_sec < 0:
+            raise ValueError(f"end_sec must be non-negative, got {self.end_sec}")
+        if self.start_sec > self.end_sec:
+            raise ValueError(
+                f"start_sec ({self.start_sec}) must not exceed end_sec ({self.end_sec})"
+            )
+
 
 @dataclass(frozen=True)
 class TTSResult:
@@ -166,7 +182,10 @@ class TTSStream(Iterator[bytes]):
 
     After full iteration, ``.audio`` / ``.timestamps`` / ``.result`` become
     available.  Must be closed (full iteration or ``.close()``) to release
-    resources.
+    resources.  Supports ``with`` statement for automatic cleanup.
+
+    Threading: consume from a single thread only. If cancellation from
+    another thread is needed, call ``.close()`` which sets the closed flag.
     """
 
     __slots__ = ("_gen", "_close_fn", "_ts_fn", "_audio", "_done", "_closed", "_ts_cache")
@@ -199,6 +218,12 @@ class TTSStream(Iterator[bytes]):
 
     def __iter__(self) -> TTSStream:
         return self
+
+    def __enter__(self) -> TTSStream:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     def close(self) -> None:
         """Close the generator and release resources."""

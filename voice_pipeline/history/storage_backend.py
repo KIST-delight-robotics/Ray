@@ -51,7 +51,11 @@ class FileStorageBackend(IStorageBackend):
         logger.info("File storage: %s", self._dir)
 
     def _path(self, session_id: str) -> Path:
-        return self._dir / f"{session_id}.json"
+        safe_id = session_id.replace("/", "_").replace("\\", "_").replace("..", "_")
+        path = (self._dir / f"{safe_id}.json").resolve()
+        if not path.is_relative_to(self._dir.resolve()):
+            raise ValueError(f"Invalid session_id would escape storage directory: {session_id!r}")
+        return path
 
     def load(self, session_id: str) -> list[dict[str, Any]]:
         """Load messages from JSON file."""
