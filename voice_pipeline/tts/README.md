@@ -64,12 +64,14 @@ first_chunk = next(stream)
 stream.close()
 ```
 
-### Save to file (testing utility)
+### Save to file
 
-Non-streaming convenience method (not on the ITTS interface):
+Use `synthesize_to_wav()` to collect PCM from `synthesize()` and write a WAV file:
 
 ```python
-tts.save_to_file("Hello world", "output.wav")
+from voice_pipeline.tts.greeting_audio import synthesize_to_wav
+
+synthesize_to_wav(tts, "Hello world", Path("output.wav"), 24000)
 ```
 
 ### Model-specific instructions

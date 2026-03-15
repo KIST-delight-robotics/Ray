@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Generator
-from pathlib import Path
 from typing import Any
 
 import openai
@@ -85,40 +84,6 @@ class OpenAITTS(ITTS):
         gen = _iter_chunks(response, safe_exit)
         return TTSStream(gen, close_fn=lambda: _safe_close(safe_exit))
 
-    def save_to_file(self, text: str, path: str | Path) -> None:
-        """Non-streaming: synthesize and save as WAV file.
-
-        Convenience method for testing and utility use. Not part of the
-        ITTS interface.
-
-        Args:
-            text: Text to synthesize.
-            path: Output file path.
-
-        Raises:
-            TTSError: On API error.
-        """
-        _validate_input(text, self._config.speed)
-
-        try:
-            kwargs: dict[str, Any] = {
-                "model": self._config.model,
-                "voice": self._config.voice,
-                "input": text,
-                "response_format": "wav",
-                "speed": self._config.speed,
-            }
-            if self._config.instructions:
-                if self._config.model in _SUPPORTS_INSTRUCTIONS:
-                    kwargs["instructions"] = self._config.instructions
-                else:
-                    logger.warning("instructions ignored for model %s", self._config.model)
-
-            response = self._client.audio.speech.create(**kwargs)
-            response.write_to_file(path)
-        except openai.OpenAIError as exc:
-            logger.warning("OpenAI TTS API error: %s", exc)
-            raise TTSError(str(exc)) from exc
 
 
 def _iter_chunks(response: Any, safe_exit: Callable[..., None]) -> Generator[bytes, None, None]:

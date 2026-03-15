@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from voice_pipeline.core.config import TTSConfig
+from voice_pipeline.tts.greeting_audio import synthesize_to_wav
 from voice_pipeline.tts.tts import OpenAITTS
 
 # Known phrases paired with their expected ASR transcription.
@@ -63,7 +64,7 @@ def main() -> None:
     for phrase in PHRASES:
         out_path = output_dir / f"{phrase['filename']}.wav"
         print(f'Generating: {out_path}  ←  "{phrase["text"]}"')
-        tts.save_to_file(phrase["text"], out_path)
+        synthesize_to_wav(tts, phrase["text"], out_path, config.output_sample_rate)
         print(f"  ✓ saved ({out_path.stat().st_size:,} bytes)")
 
     # Write a manifest so tests can read phrase<->file mapping

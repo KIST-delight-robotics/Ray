@@ -25,6 +25,7 @@ import pytest
 
 from voice_pipeline.asr.asr import GoogleCloudASR
 from voice_pipeline.core.config import ASRConfig, TTSConfig
+from voice_pipeline.tts.greeting_audio import synthesize_to_wav
 from voice_pipeline.tts.tts import OpenAITTS
 
 from .conftest import audio_config_from_wav, make_silence_frames, read_wav_frames
@@ -46,12 +47,11 @@ _SILENCE_SEC = 3.0
 def _tts_generate_wav(tts: OpenAITTS, text: str, path: Path) -> Path:
     """Generate WAV via TTS and convert to ASR-compatible format.
 
-    OpenAI TTS outputs 24 kHz WAV with potentially malformed headers
-    (n_frames = INT_MAX).  ffmpeg re-encodes to 16 kHz mono 16-bit PCM
-    with correct headers.
+    synthesize_to_wav produces a 24 kHz WAV with correct headers.
+    ffmpeg re-encodes to 16 kHz mono 16-bit PCM for ASR compatibility.
     """
     raw_path = path / "tts_raw.wav"
-    tts.save_to_file(text, raw_path)
+    synthesize_to_wav(tts, text, raw_path, TTSConfig().output_sample_rate)
 
     fixed_path = path / "tts_fixed.wav"
     subprocess.run(

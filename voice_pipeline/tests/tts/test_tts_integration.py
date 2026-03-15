@@ -5,10 +5,13 @@ Requires OPENAI_API_KEY environment variable.
 
 from __future__ import annotations
 
+import wave
+
 import pytest
 
 from voice_pipeline.core.config import TTSConfig
 from voice_pipeline.tts.exceptions import TTSError
+from voice_pipeline.tts.greeting_audio import synthesize_to_wav
 from voice_pipeline.tts.tts import OpenAITTS
 
 pytestmark = pytest.mark.requires_api
@@ -63,15 +66,17 @@ class TestStreamIteration:
         assert result.timestamps == ()
 
 
-class TestSaveToFile:
-    def test_save_creates_wav_file(self, tts: OpenAITTS, tmp_path) -> None:
+class TestSynthesizeToWav:
+    def test_creates_valid_wav_file(self, tts: OpenAITTS, tmp_path) -> None:
         out_path = tmp_path / "output.wav"
-        tts.save_to_file("Hello world", str(out_path))
+        synthesize_to_wav(tts, "Hello world", out_path, TTSConfig().output_sample_rate)
 
         assert out_path.exists()
-        content = out_path.read_bytes()
-        # WAV files start with RIFF header
-        assert content[:4] == b"RIFF"
+        with wave.open(str(out_path), "rb") as wf:
+            assert wf.getnchannels() == 1
+            assert wf.getsampwidth() == 2
+            assert wf.getframerate() == 24000
+            assert wf.getnframes() > 0
 
 
 class TestErrorRecovery:

@@ -404,7 +404,7 @@ class TestClientConfig:
 
         call_kwargs = client.audio.speech.with_streaming_response.create.call_args[1]
         assert call_kwargs["model"] == "tts-1"
-        assert call_kwargs["voice"] == "alloy"
+        assert call_kwargs["voice"] == "ash"
         assert call_kwargs["speed"] == 1.0
         assert call_kwargs["response_format"] == "pcm"
 
@@ -420,48 +420,3 @@ class TestClientConfig:
         assert call_kwargs["model"] == "tts-1-hd"
         assert call_kwargs["voice"] == "nova"
         assert call_kwargs["speed"] == 1.5
-
-
-# ---------------------------------------------------------------------------
-# TestSaveToFile
-# ---------------------------------------------------------------------------
-
-
-class TestSaveToFile:
-    def test_non_streaming_create_called(self, tts_config: TTSConfig, tmp_path) -> None:
-        client = create_mock_client()
-        tts = _build_tts(client, tts_config)
-
-        out_path = tmp_path / "output.wav"
-        tts.save_to_file("Hello", str(out_path))
-
-        client.audio.speech.create.assert_called_once()
-        call_kwargs = client.audio.speech.create.call_args[1]
-        assert call_kwargs["response_format"] == "wav"
-        assert call_kwargs["input"] == "Hello"
-
-    def test_file_written(self, tts_config: TTSConfig, tmp_path) -> None:
-        client = create_mock_client()
-        mock_response = MagicMock()
-        client.audio.speech.create.return_value = mock_response
-        tts = _build_tts(client, tts_config)
-
-        out_path = tmp_path / "output.wav"
-        tts.save_to_file("Hello", str(out_path))
-
-        mock_response.write_to_file.assert_called_once_with(str(out_path))
-
-    def test_save_to_file_validation(self, tts_config: TTSConfig, tmp_path) -> None:
-        client = create_mock_client()
-        tts = _build_tts(client, tts_config)
-
-        with pytest.raises(TTSError, match="empty"):
-            tts.save_to_file("", str(tmp_path / "output.wav"))
-
-    def test_save_to_file_api_error(self, tts_config: TTSConfig, tmp_path) -> None:
-        client = create_mock_client()
-        client.audio.speech.create.side_effect = openai.APIConnectionError(request=MagicMock())
-        tts = _build_tts(client, tts_config)
-
-        with pytest.raises(TTSError):
-            tts.save_to_file("Hello", str(tmp_path / "output.wav"))
