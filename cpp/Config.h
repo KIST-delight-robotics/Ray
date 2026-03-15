@@ -88,7 +88,7 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
         dest_vec.clear();
         
         for (size_t i = 0; i < arr->size(); i++) {
-            auto val = arr->get(i)->value<ValType>();
+            auto val = arr->get(i)->template value<ValType>();
             if (!val) {
                 std::cerr << "[Config Error] '" << key << "' 배열의 " << i << "번 인덱스 값이 잘못되었습니다.\n";
                 return false;
