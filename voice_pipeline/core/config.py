@@ -33,8 +33,8 @@ class ConversationHistoryConfig:
     """Configuration for ConversationHistory and StorageBackend."""
 
     max_context_tokens: int = 4096
-    storage_backend: str = "memory"
-    storage_path: str = ""
+    storage_backend: str = "file"
+    storage_path: str = "data/sessions"
 
 
 @dataclass
@@ -208,7 +208,6 @@ class TurnDetectorConfig:
         interrupt_user_threshold: p_now/p_fut above this means "favors user".
         prepare_turngpt_threshold: TurnGPT prob above this triggers prepare.
         prepare_timeout_sec: Time since last ASR change to trigger prepare.
-        prepare_similarity_threshold: Skip prepare if text similarity >= this.
     """
 
     # --- VAP turn-shift thresholds (Path 1) ---
@@ -229,7 +228,25 @@ class TurnDetectorConfig:
     # --- Prepare (speculative generation) ---
     prepare_turngpt_threshold: float = 0.2
     prepare_timeout_sec: float = 0.2
-    prepare_similarity_threshold: float = 0.8
+
+
+@dataclass
+class SimilarityConfig:
+    """Configuration for text similarity scoring.
+
+    Attributes:
+        backend: Similarity backend ("local" or "api").
+        model: Model name for the backend.
+            Local: sentence-transformers model (e.g. "all-MiniLM-L6-v2").
+            API: OpenAI embedding model (e.g. "text-embedding-3-small").
+        threshold: Skip re-prepare if similarity >= this value.
+        use_onnx: Use ONNX Runtime backend for local models (faster on CPU).
+    """
+
+    backend: str = "local"
+    model: str = "all-MiniLM-L6-v2"
+    threshold: float = 0.8
+    use_onnx: bool = False
 
 
 @dataclass
@@ -314,6 +331,7 @@ class PipelineConfig:
     maai_vap: MaAIVAPConfig = field(default_factory=MaAIVAPConfig)
     turngpt: TurnGPTConfig = field(default_factory=TurnGPTConfig)
     turn_detector: TurnDetectorConfig = field(default_factory=TurnDetectorConfig)
+    similarity: SimilarityConfig = field(default_factory=SimilarityConfig)
     speech_generator: SpeechGeneratorConfig = field(default_factory=SpeechGeneratorConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     audio_input: AudioInputConfig = field(default_factory=AudioInputConfig)

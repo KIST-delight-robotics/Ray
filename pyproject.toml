@@ -8,10 +8,14 @@ dependencies = [
     "openai>=1.66,<2.0",
     "psutil>=7.2.2",
     "pyaudio>=0.2.14",
+    "sentence-transformers>=3.0,<4.0",
     "silero-vad>=5.0",
     "tiktoken>=0.5",
     "websockets>=14.0,<17.0",
 ]
+
+[project.optional-dependencies]
+onnx-similarity = ["optimum[onnxruntime]"]
 
 [dependency-groups]
 dev = [

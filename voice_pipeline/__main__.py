@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import signal
 from concurrent.futures import ThreadPoolExecutor
@@ -18,9 +19,10 @@ from voice_pipeline.audio.wakeword import WakewordDetector
 from voice_pipeline.bridge.cpp_bridge import CppBridge
 from voice_pipeline.context.context_builder import ContextBuilder
 from voice_pipeline.core.config import PipelineConfig
+from voice_pipeline.core.similarity import create_similarity
 from voice_pipeline.generation.speech_generator import SpeechGenerator
 from voice_pipeline.history.conversation_history import ConversationHistory
-from voice_pipeline.history.storage_backend import MemoryStorageBackend
+from voice_pipeline.history.storage_backend import create_storage_backend
 from voice_pipeline.led.led_controller import LEDController
 from voice_pipeline.llm.llm import OpenAILLM
 from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
@@ -40,8 +42,14 @@ def main() -> None:
     """Launch the voice pipeline."""
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        format="%(asctime)s %(name)-40s %(levelname)-7s %(message)s",
     )
+    # Per-module log level: LOG_LEVEL="voice_pipeline.turn_taking=DEBUG"
+    for entry in os.environ.get("LOG_LEVEL", "").split(","):
+        entry = entry.strip()
+        if "=" in entry:
+            name, level = entry.split("=", 1)
+            logging.getLogger(name.strip()).setLevel(level.strip().upper())
     config = PipelineConfig()
 
     # --- Process-level singletons (expensive init, reused across sessions) ---
@@ -53,7 +61,8 @@ def main() -> None:
     bridge = CppBridge(config.cpp_bridge)
     wakeword = WakewordDetector(config.wakeword, config.audio)
     led = LEDController(config.led)
-    storage = MemoryStorageBackend()
+    storage = create_storage_backend(config.history)
+    similarity = create_similarity(config.similarity)
     executor = ThreadPoolExecutor(max_workers=config.speech_generator.max_workers)
     token_counter = create_token_counter(config.llm.model)
 
@@ -81,7 +90,10 @@ def main() -> None:
         context_builder = ContextBuilder(
             history, config.history, DEFAULT_SYSTEM_PROMPT, token_counter
         )
-        turn_detector = TurnDetector(async_vap, async_turngpt, config.turn_detector, config.audio)
+        turn_detector = TurnDetector(
+            async_vap, async_turngpt, similarity,
+            config.turn_detector, config.similarity, config.audio,
+        )
         generator = SpeechGenerator(context_builder, llm, tts, config.speech_generator, executor)
         truncator = TimestampTruncator()
         orchestrator = Orchestrator(

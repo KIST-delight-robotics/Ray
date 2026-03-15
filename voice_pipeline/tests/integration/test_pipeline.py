@@ -21,6 +21,7 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+from unittest.mock import MagicMock
 
 from voice_pipeline.context.context_builder import ContextBuilder
 from voice_pipeline.core.config import (
@@ -28,6 +29,7 @@ from voice_pipeline.core.config import (
     ConversationHistoryConfig,
     OrchestratorConfig,
     SessionConfig,
+    SimilarityConfig,
     SpeechGeneratorConfig,
     TTSConfig,
     TurnDetectorConfig,
@@ -40,6 +42,7 @@ from voice_pipeline.core.interfaces import (
     IAudioInput,
     ICppBridge,
     ILEDController,
+    ISimilarity,
     ITurnGPT,
     IWakewordDetector,
 )
@@ -78,7 +81,6 @@ TURN_DETECTOR_CONFIG = TurnDetectorConfig(
     interrupt_user_threshold=0.5,
     prepare_turngpt_threshold=0.2,
     prepare_timeout_sec=0.06,
-    prepare_similarity_threshold=0.8,
 )
 
 ORCHESTRATOR_CONFIG = OrchestratorConfig(
@@ -335,8 +337,11 @@ def _make_orchestrator(
         history, HISTORY_CONFIG, DEFAULT_SYSTEM_PROMPT, _simple_token_counter
     )
     _turngpt_adapter = SyncTurnGPTAdapter(_turngpt)
+    _similarity = MagicMock(spec=ISimilarity)
+    _similarity.compare.return_value = 0.0
     turn_detector = TurnDetector(
-        _vap, _turngpt_adapter, turn_detector_config or TURN_DETECTOR_CONFIG, AUDIO_CONFIG
+        _vap, _turngpt_adapter, _similarity,
+        turn_detector_config or TURN_DETECTOR_CONFIG, SimilarityConfig(), AUDIO_CONFIG,
     )
     generator = SpeechGenerator(context_builder, _llm, _tts, GENERATOR_CONFIG, _executor)
     truncator = TimestampTruncator()
@@ -573,7 +578,12 @@ class TestFullSessionLifecycle:
                 history, HISTORY_CONFIG, DEFAULT_SYSTEM_PROMPT, _simple_token_counter
             )
             turngpt_adapter = SyncTurnGPTAdapter(turngpt)
-            turn_detector = TurnDetector(vap, turngpt_adapter, TURN_DETECTOR_CONFIG, AUDIO_CONFIG)
+            sim = MagicMock(spec=ISimilarity)
+            sim.compare.return_value = 0.0
+            turn_detector = TurnDetector(
+                vap, turngpt_adapter, sim,
+                TURN_DETECTOR_CONFIG, SimilarityConfig(), AUDIO_CONFIG,
+            )
             generator = SpeechGenerator(
                 context_builder, FakeLLM(), FakeTTS(), GENERATOR_CONFIG, executor
             )

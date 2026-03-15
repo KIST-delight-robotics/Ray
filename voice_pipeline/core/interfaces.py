@@ -47,12 +47,18 @@ class IStorageBackend(ABC):
         """
 
     @abstractmethod
-    def save(self, session_id: str, messages: list[dict[str, Any]]) -> None:
+    def save(
+        self,
+        session_id: str,
+        messages: list[dict[str, Any]],
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Persist messages for a session.
 
         Args:
             session_id: Unique session identifier.
             messages: List of message dicts to persist.
+            metadata: Optional session metadata (e.g. started_at).
         """
 
     @abstractmethod
@@ -458,6 +464,23 @@ class ITurnGPT(ABC):
     @abstractmethod
     def reset(self) -> None:
         """Reset internal state for a new conversation."""
+
+
+# ---------------------------------------------------------------------------
+# Similarity
+# ---------------------------------------------------------------------------
+
+
+class ISimilarity(ABC):
+    """Text similarity scorer.
+
+    Used by TurnDetector to decide whether a new prepare() is needed
+    when ASR text changes.
+    """
+
+    @abstractmethod
+    def compare(self, a: str, b: str) -> float:
+        """Return similarity score between *a* and *b* in [0.0, 1.0]."""
 
 
 # ---------------------------------------------------------------------------
