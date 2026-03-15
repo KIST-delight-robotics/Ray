@@ -248,7 +248,9 @@ class MockCppServer:
 
         def _wait() -> None:
             player.wait_done()
-            rq.put(json.dumps({"type": "playback_complete"}))
+            # Don't enqueue if playback was stopped (stop handler sends its own)
+            if not player._stop_event.is_set():
+                rq.put(json.dumps({"type": "playback_complete"}))
 
         threading.Thread(target=_wait, daemon=True).start()
 
