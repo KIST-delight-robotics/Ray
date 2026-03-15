@@ -6,6 +6,7 @@ import contextlib
 import logging
 import queue
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from voice_pipeline.core.config import SpeechGeneratorConfig
@@ -85,12 +86,14 @@ class SpeechGenerator(ISpeechGenerator):
             self._response_data = None
             self._stream_done = False
 
+        logger.info("prepare(%r) → PREPARING [run=%d]", current_text[:60], run_id)
         self._executor.submit(self._run_pipeline, current_text, run_id, cancel_event, audio_queue)
 
     def cancel(self) -> None:
         with self._lock:
             self._cancel_event.set()
             self._run_id += 1
+            logger.info("cancel → IDLE [run=%d]", self._run_id)
             self._state = GeneratorState.IDLE
             self._audio_queue = queue.Queue()
             self._input_text = ""
@@ -156,6 +159,8 @@ class SpeechGenerator(ISpeechGenerator):
         audio_queue: queue.Queue[bytes],
     ) -> None:
         try:
+            t0 = time.monotonic()
+
             # 1. Build context
             if cancel_event.is_set():
                 return
@@ -180,6 +185,8 @@ class SpeechGenerator(ISpeechGenerator):
                 raise
 
             full_text = "".join(text_chunks)
+            t_llm = time.monotonic()
+            logger.info("LLM done (%.1fs) [run=%d]: %r", t_llm - t0, run_id, full_text)
 
             # 3. Guard: empty text
             if not full_text.strip():
@@ -227,6 +234,13 @@ class SpeechGenerator(ISpeechGenerator):
                     if run_id == self._run_id:
                         self._state = GeneratorState.FAILED
                 return
+
+            t_tts = time.monotonic()
+            audio_sec = len(total_audio) / (24000 * 2)
+            logger.info(
+                "TTS done (%.1fs): %.1fs audio → STREAMING [run=%d]",
+                t_tts - t_llm, audio_sec, run_id,
+            )
 
             # 6. Build ResponseData
             try:
