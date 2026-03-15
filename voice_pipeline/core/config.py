@@ -62,7 +62,7 @@ class TTSConfig:
     """Configuration for the TTS module."""
 
     vendor: str = "openai"
-    voice: str = "alloy"
+    voice: str = "ash"
     model: str = "tts-1"
     output_sample_rate: int = 24000
     speed: float = 1.0
@@ -261,7 +261,7 @@ class OrchestratorConfig:
     """
 
     exit_keywords: tuple[str, ...] = ("bye", "goodbye")
-    session_timeout_sec: float = 30.0
+    session_timeout_sec: float = 60.0
     frame_timeout_sec: float = 0.1
     stop_pending_timeout_sec: float = 5.0
 
@@ -291,6 +291,25 @@ class AudioInputConfig:
 
 
 @dataclass
+class GreetingAudioConfig:
+    """Configuration for pre-generating greeting/farewell audio via TTS.
+
+    Attributes:
+        audio_dir: Directory for generated audio files (relative to C++ working dir).
+        greeting_text: Text to synthesize for greeting audio.
+        farewell_text: Text to synthesize for farewell audio.
+        fallback_greeting_path: Pre-recorded greeting file used when TTS generation fails.
+        fallback_farewell_path: Pre-recorded farewell file used when TTS generation fails.
+    """
+
+    audio_dir: str = "assets/audio"
+    greeting_text: str = "Yes, how can I help you?"
+    farewell_text: str = "Talk to you next time!"
+    fallback_greeting_path: str = "assets/audio/awake.wav"
+    fallback_farewell_path: str = "assets/audio/sleep.wav"
+
+
+@dataclass
 class SessionConfig:
     """Configuration for the SessionManager.
 
@@ -299,16 +318,12 @@ class SessionConfig:
         greeting_timeout_sec: Max wait for greeting playback completion.
         farewell_timeout_sec: Max wait for farewell playback completion.
         frame_timeout_sec: Queue.get() timeout for audio frames.
-        greeting_audio_path: Audio file path for greeting (relative to C++ working dir).
-        farewell_audio_path: Audio file path for farewell (relative to C++ working dir).
     """
 
     audio_queue_size: int = 300
     greeting_timeout_sec: float = 10.0
     farewell_timeout_sec: float = 10.0
     frame_timeout_sec: float = 0.1
-    greeting_audio_path: str = "assets/audio/awake.wav"
-    farewell_audio_path: str = "assets/audio/sleep.wav"
 
 
 @dataclass
@@ -331,6 +346,7 @@ class PipelineConfig:
     maai_vap: MaAIVAPConfig = field(default_factory=MaAIVAPConfig)
     turngpt: TurnGPTConfig = field(default_factory=TurnGPTConfig)
     turn_detector: TurnDetectorConfig = field(default_factory=TurnDetectorConfig)
+    greeting_audio: GreetingAudioConfig = field(default_factory=GreetingAudioConfig)
     similarity: SimilarityConfig = field(default_factory=SimilarityConfig)
     speech_generator: SpeechGeneratorConfig = field(default_factory=SpeechGeneratorConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)

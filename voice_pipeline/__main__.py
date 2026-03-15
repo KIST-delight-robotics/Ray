@@ -29,6 +29,7 @@ from voice_pipeline.llm.token_counter import create_token_counter
 from voice_pipeline.orchestrator.orchestrator import Orchestrator
 from voice_pipeline.session.session_manager import SessionComponents, SessionManager
 from voice_pipeline.similarity.similarity import create_similarity
+from voice_pipeline.tts.greeting_audio import ensure_greeting_audio
 from voice_pipeline.tts.tts import OpenAITTS
 from voice_pipeline.tts.utterance_truncator import TimestampTruncator
 from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT
@@ -65,6 +66,9 @@ def main() -> None:
     similarity = create_similarity(config.similarity)
     executor = ThreadPoolExecutor(max_workers=config.speech_generator.max_workers)
     token_counter = create_token_counter(config.llm.model)
+
+    # --- Pre-generate greeting/farewell audio ---
+    greeting_paths = ensure_greeting_audio(tts, config.tts, config.greeting_audio)
 
     # --- Audio queue + input ---
     audio_queue = queue.Queue(maxsize=config.session.audio_queue_size)
@@ -118,6 +122,8 @@ def main() -> None:
         cpp_bridge=bridge,
         led=led,
         config=config.session,
+        greeting_audio_path=greeting_paths.greeting,
+        farewell_audio_path=greeting_paths.farewell,
         audio_queue=audio_queue,
     )
 

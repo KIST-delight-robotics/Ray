@@ -48,6 +48,8 @@ class SessionManager(ISessionManager):
         cpp_bridge: ICppBridge,
         led: ILEDController,
         config: SessionConfig,
+        greeting_audio_path: str,
+        farewell_audio_path: str,
         audio_queue: queue.Queue[AudioFrame] | None = None,
     ) -> None:
         self._audio_input = audio_input
@@ -56,6 +58,8 @@ class SessionManager(ISessionManager):
         self._bridge = cpp_bridge
         self._led = led
         self._config = config
+        self._greeting_audio_path = greeting_audio_path
+        self._farewell_audio_path = farewell_audio_path
 
         self._audio_queue: queue.Queue[AudioFrame] = audio_queue or queue.Queue(
             maxsize=config.audio_queue_size
@@ -134,7 +138,7 @@ class SessionManager(ISessionManager):
         self._led.set_state(LEDState.LISTENING)
 
         try:
-            self._bridge.send_play_file(self._config.greeting_audio_path)
+            self._bridge.send_play_file(self._greeting_audio_path)
         except Exception:
             logger.warning("Failed to send greeting", exc_info=True)
 
@@ -190,7 +194,7 @@ class SessionManager(ISessionManager):
         self._flush_bridge_events()
 
         try:
-            self._bridge.send_play_file(self._config.farewell_audio_path)
+            self._bridge.send_play_file(self._farewell_audio_path)
         except Exception:
             logger.warning("Failed to send farewell", exc_info=True)
 

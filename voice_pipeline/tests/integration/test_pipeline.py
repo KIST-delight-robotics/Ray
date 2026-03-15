@@ -97,6 +97,9 @@ SESSION_CONFIG = SessionConfig(
     frame_timeout_sec=0.05,
 )
 
+GREETING_AUDIO_PATH = "assets/audio/greeting.wav"
+FAREWELL_AUDIO_PATH = "assets/audio/farewell.wav"
+
 FRAME_BYTES = (
     AUDIO_CONFIG.sample_rate * AUDIO_CONFIG.frame_duration_ms * AUDIO_CONFIG.sample_width // 1000
 )
@@ -612,6 +615,8 @@ class TestFullSessionLifecycle:
             cpp_bridge=bridge,
             led=led,
             config=SESSION_CONFIG,
+            greeting_audio_path=GREETING_AUDIO_PATH,
+            farewell_audio_path=FAREWELL_AUDIO_PATH,
             audio_queue=audio_queue,
         )
 
@@ -644,8 +649,8 @@ class TestFullSessionLifecycle:
         assert bridge._connected is False  # disconnect called in run() finally
 
         # Greeting and farewell files sent
-        assert SESSION_CONFIG.greeting_audio_path in bridge.play_files
-        assert SESSION_CONFIG.farewell_audio_path in bridge.play_files
+        assert GREETING_AUDIO_PATH in bridge.play_files
+        assert FAREWELL_AUDIO_PATH in bridge.play_files
 
         # Orchestrator ran (audio was streamed)
         assert bridge.stream_start_count >= 1
