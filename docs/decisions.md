@@ -205,3 +205,18 @@
 - **Thread model unchanged**: `stream_and_split`, `generate_motion`, `control_motor` structure untouched. Only message handling and WebSocket setup modified.
 - **`send_to_python()` helper**: Thread-safe send via `g_client_ws_mutex`. All `webSocket.sendText()` calls replaced.
 - **Interruption sends `playback_complete`**: After cleanup, C++ now also sends `playback_complete` on interrupt (previously only sent on normal completion). This lets Python's STOP_PENDING state resolve cleanly.
+
+## Runtime — Interrupt, Similarity, Storage
+
+### Interrupt detection (`turn_detector`)
+- **`user_is_speaking` prerequisite**: Paper pseudocode (Skantze & Irfan 2025, Appendix A lines 56-61) requires `user_is_speaking=True` before checking p_now/p_fut for interrupts. Without this guard, transient VAP probability spikes (e.g. right after turn-shift when VAP context is still user-biased) cause false interrupts even when nobody is speaking.
+- **STOP_PENDING watchdog reset**: Watchdog must call `turn_detector.reset()` alongside `_reset_playback_state()` to prevent orphaned ROBOT_TURN state when PLAYBACK_COMPLETE never arrives from bridge.
+
+### Similarity scoring (`core/similarity`)
+- **Sentence embedding over SequenceMatcher**: SequenceMatcher measures character overlap — `"what is your"` vs `"what is your name"` scores 0.87 (blocked by 0.8 threshold). Sentence embedding (all-MiniLM-L6-v2) scores 0.66 (correctly passes gate). The paper uses semantic similarity (all-MiniLM-L6-v2) for this comparison.
+- **sentence-transformers 3.x**: Pinned to 3.x for `optimum`/`transformers` compatibility. 5.x requires `transformers>=5.0` which conflicts with `optimum`'s ONNX runtime integration. No functional difference for inference-only usage.
+- **ONNX backend deferred**: At 22M params, torch inference (~4ms) matches or beats ONNX (~6ms) on desktop CPU. ONNX `use_onnx` config option preserved for RPi 5 testing.
+
+### File storage (`history/storage_backend`)
+- **Wrapped JSON format**: Sessions saved as `{"session_id": ..., "started_at": ..., "messages": [...]}` instead of bare list. `load()` handles both formats for backward compatibility.
+- **Default backend changed to file**: `data/sessions/` directory, auto-created. Memory backend still available via config.
