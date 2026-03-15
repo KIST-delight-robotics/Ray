@@ -39,7 +39,7 @@ class TestConversationHistoryConfig:
         cfg = ConversationHistoryConfig()
         assert cfg.max_context_tokens == 4096
         assert cfg.storage_backend == "file"
-        assert cfg.storage_path == "data/sessions"
+        assert cfg.storage_path == "logs/sessions"
 
 
 class TestASRConfig:
@@ -64,7 +64,7 @@ class TestTTSConfig:
     def test_defaults(self) -> None:
         cfg = TTSConfig()
         assert cfg.vendor == "openai"
-        assert cfg.voice == "alloy"
+        assert cfg.voice == "ash"
         assert cfg.model == "tts-1"
         assert cfg.output_sample_rate == 24000
         assert cfg.speed == 1.0

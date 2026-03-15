@@ -48,6 +48,17 @@ Thumbs.db
 #   git add -f models/turngpt/tokenizer/
 !models/turngpt/tokenizer/
 
+# TTS-generated greeting/farewell audio cache
+assets/audio/greeting_*.wav
+assets/audio/farewell_*.wav
+
+# TTS-generated greeting/farewell audio cache
+assets/audio/greeting_*.wav
+assets/audio/farewell_*.wav
+
+# Session logs
+logs/
+
 # Training artifacts
 runs/
 

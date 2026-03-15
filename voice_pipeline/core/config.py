@@ -34,7 +34,7 @@ class ConversationHistoryConfig:
 
     max_context_tokens: int = 4096
     storage_backend: str = "file"
-    storage_path: str = "data/sessions"
+    storage_path: str = "logs/sessions"
 
 
 @dataclass
@@ -305,8 +305,8 @@ class GreetingAudioConfig:
     audio_dir: str = "assets/audio"
     greeting_text: str = "Yes, how can I help you?"
     farewell_text: str = "Talk to you next time!"
-    fallback_greeting_path: str = "assets/audio/awake.wav"
-    fallback_farewell_path: str = "assets/audio/sleep.wav"
+    fallback_greeting_path: str = "assets/audio/greeting.wav"
+    fallback_farewell_path: str = "assets/audio/farewell.wav"
 
 
 @dataclass
