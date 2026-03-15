@@ -19,7 +19,6 @@ from voice_pipeline.audio.wakeword import WakewordDetector
 from voice_pipeline.bridge.cpp_bridge import CppBridge
 from voice_pipeline.context.context_builder import ContextBuilder
 from voice_pipeline.core.config import PipelineConfig
-from voice_pipeline.core.similarity import create_similarity
 from voice_pipeline.generation.speech_generator import SpeechGenerator
 from voice_pipeline.history.conversation_history import ConversationHistory
 from voice_pipeline.history.storage_backend import create_storage_backend
@@ -29,6 +28,7 @@ from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
 from voice_pipeline.llm.token_counter import create_token_counter
 from voice_pipeline.orchestrator.orchestrator import Orchestrator
 from voice_pipeline.session.session_manager import SessionComponents, SessionManager
+from voice_pipeline.similarity.similarity import create_similarity
 from voice_pipeline.tts.tts import OpenAITTS
 from voice_pipeline.tts.utterance_truncator import TimestampTruncator
 from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT

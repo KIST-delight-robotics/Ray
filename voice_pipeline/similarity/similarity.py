@@ -14,7 +14,7 @@ import numpy as np
 from voice_pipeline.core.config import SimilarityConfig
 from voice_pipeline.core.interfaces import ISimilarity
 
-logger = logging.getLogger("voice_pipeline.core.similarity")
+logger = logging.getLogger("voice_pipeline.similarity")
 
 
 class LocalEmbeddingSimilarity(ISimilarity):
