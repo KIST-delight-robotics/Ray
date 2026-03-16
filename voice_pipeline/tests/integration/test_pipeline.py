@@ -275,6 +275,9 @@ class FakeLED(ILEDController):
     def set_state(self, state: LEDState) -> None:
         self.states.append(state)
 
+    def close(self) -> None:
+        pass
+
 
 class FakeWakeword(IWakewordDetector):
     """Wakeword mock that triggers after N calls."""
@@ -286,6 +289,9 @@ class FakeWakeword(IWakewordDetector):
     def feed_audio(self, frame: AudioFrame) -> bool:
         self._count += 1
         return self._count >= self._trigger_after
+
+    def close(self) -> None:
+        pass
 
 
 class FakeAudioInput(IAudioInput):
