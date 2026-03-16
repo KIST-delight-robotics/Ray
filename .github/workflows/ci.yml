@@ -16,11 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.11"
-      - run: uv sync --dev --frozen
-      - run: uv run ruff check voice_pipeline/
-      - run: uv run ruff format --check voice_pipeline/
+      - run: uvx ruff check voice_pipeline/
+      - run: uvx ruff format --check voice_pipeline/
 
   test:
     runs-on: ubuntu-latest
@@ -31,5 +28,9 @@ jobs:
           python-version: "3.11"
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y portaudio19-dev
+      - name: Create stubs for editable-only packages
+        run: |
+          mkdir -p external/TurnGPT && echo -e '[project]\nname = "turngpt"\nversion = "0.1.0"' > external/TurnGPT/pyproject.toml
+          mkdir -p external/VoiceActivityProjection && echo -e '[project]\nname = "vap"\nversion = "0.0.0"' > external/VoiceActivityProjection/pyproject.toml
       - run: uv sync --dev --frozen
       - run: uv run pytest
