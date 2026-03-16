@@ -25,7 +25,7 @@ struct MotorState {
 #include <iostream>
 #include <iomanip>
 
-std::string create_log_directory(const std::string& base_dir = "output/motion_log/");
+std::string create_log_directory(const std::string& base_dir = "logs/motion/");
 
 // --- 1. 일반 로거 (40ms 주기) ---
 class DataLogger {

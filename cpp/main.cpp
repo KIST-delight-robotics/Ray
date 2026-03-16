@@ -1659,7 +1659,7 @@ void initialize_robot_posture() {
 
     // DataLogger MouthLogger
 
-    // std::string log_dir = create_log_directory("output/cail_log/");
+    // std::string log_dir = create_log_directory("logs/calibration/");
     // auto log_start_time = std::chrono::high_resolution_clock::now();
     // MouthLogger.start(log_start_time, log_dir);
 

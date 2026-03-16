@@ -5,7 +5,7 @@ std::string create_log_directory(const std::string& base_dir) {
     std::time_t t = std::chrono::system_clock::to_time_t(now);
     
     std::stringstream ss;
-    // 예: output/motion_log/20231215_173000/
+    // 예: logs/motion/20231215_173000/
     ss << base_dir << std::put_time(std::localtime(&t), "%Y%m%d_%H%M%S");
     
     std::string path_str = ss.str();
