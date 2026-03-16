@@ -20,8 +20,10 @@ env/
 *.swo
 *~
 
-# Claude Code local settings
-.claude/
+# Claude Code — track shared settings and hooks, ignore local/runtime files
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
 
 # OS
 .DS_Store
