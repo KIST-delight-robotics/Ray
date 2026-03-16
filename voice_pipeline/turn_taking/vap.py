@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import struct
+import time
 
 import torch
 import torchaudio.functional
@@ -121,10 +122,16 @@ class VAPWrapper(IVAP):
     def _run_inference(self) -> VAPResult:
         """Run VAP model inference on the current buffer."""
         try:
+            t0 = time.monotonic()
             out = self._model.probs(self._buffer.to(self._device))
             p_now = out["p_now"][0, -self._tt_frames :, 0].mean().item()
             p_fut = out["p_future"][0, -self._tt_frames :, 0].mean().item()
             user_is_speaking = out["vad"][0, -1, 0].item() > self._config.vad_threshold
+            elapsed_ms = (time.monotonic() - t0) * 1000
+            if elapsed_ms > self._config.step_sec * 1000:
+                logger.warning("VAP inference slow: %.0fms (step %.0fms)", elapsed_ms, self._config.step_sec * 1000)
+            else:
+                logger.debug("VAP inference: %.0fms", elapsed_ms)
             return VAPResult(p_now, p_fut, user_is_speaking)
         except Exception:
             logger.warning("VAP inference error, returning default result", exc_info=True)

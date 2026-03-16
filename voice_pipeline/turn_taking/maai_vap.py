@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import struct
+import time
 
 import numpy as np
 import onnxruntime as ort
@@ -268,6 +269,8 @@ class MaAIVAPWrapper(IVAP):
         if len(self._buf_x1) < self._audio_frame_size:
             return None
 
+        t0 = time.monotonic()
+
         # ONNX encoder (both channels)
         wav1 = self._buf_x1.reshape(1, 1, -1)
         wav2 = self._buf_x2.reshape(1, 1, -1)
@@ -284,6 +287,13 @@ class MaAIVAPWrapper(IVAP):
             out = self._process_transformer_onnx(e1_np, e2_np)
         else:
             out = self._process_transformer_pytorch(e1_np, e2_np)
+
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        budget_ms = 1000.0 / self._frame_rate
+        if elapsed_ms > budget_ms:
+            logger.warning("VAP inference slow: %.0fms (budget %.0fms)", elapsed_ms, budget_ms)
+        else:
+            logger.debug("VAP inference: %.0fms", elapsed_ms)
 
         # Buffer trimming
         self._buf_x1 = self._buf_x1[-self._frame_contxt_padding :].copy()

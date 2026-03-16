@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 from voice_pipeline.core.interfaces import ITurnGPT
 
@@ -97,12 +98,27 @@ class AsyncTurnGPT:
             if text is None:
                 continue
 
+            t0 = time.monotonic()
             prob = self._turngpt.predict(text)
+            elapsed_ms = (time.monotonic() - t0) * 1000
 
             with self._lock:
                 # Only store result if submission hasn't been cleared
                 if self._pending_text is not None:
                     self._latest_prob = prob
+                    if elapsed_ms > 100:
+                        logger.warning(
+                            "TurnGPT inference slow: %.0fms text=%r",
+                            elapsed_ms,
+                            text[:60],
+                        )
+                    else:
+                        logger.debug("TurnGPT inference: %.0fms", elapsed_ms)
+                else:
+                    logger.debug(
+                        "TurnGPT result discarded (cleared): %.0fms",
+                        elapsed_ms,
+                    )
 
 
 class SyncTurnGPTAdapter:

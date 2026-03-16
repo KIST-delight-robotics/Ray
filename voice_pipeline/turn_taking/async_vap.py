@@ -86,5 +86,12 @@ class AsyncVAP(IVAP):
 
             elapsed = time.monotonic() - start
             remaining = self._interval - elapsed
+            if audio_pairs and remaining <= 0:
+                logger.warning(
+                    "VAP cycle overrun: %.0fms (budget %.0fms, behind %.0fms)",
+                    elapsed * 1000,
+                    self._interval * 1000,
+                    -remaining * 1000,
+                )
             if remaining > 0:
                 self._stop_event.wait(remaining)
