@@ -56,6 +56,9 @@ assets/audio/farewell_*.wav
 assets/audio/greeting_*.wav
 assets/audio/farewell_*.wav
 
+# Script output (TTS wav files, etc.)
+output/
+
 # Session logs
 logs/
 
