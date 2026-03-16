@@ -4,7 +4,7 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 
 ## Current Status
 
-568 tests pass, ruff 0 errors. 첫 전체 파이프라인 실행 완료.
+592 tests pass, ruff 0 errors. 첫 전체 파이프라인 실행 완료.
 
 ### 미해결 사항
 
@@ -23,13 +23,18 @@ Claude's working memory. Free-form notes, observations, and context carried acro
 - Similarity (all-MiniLM-L6-v2, torch): ~4ms/호출, 모델 로드 ~2.7s
 - **RPi 5에서 재측정 필요** — 데스크탑 수치와 큰 차이 예상.
 
-### 해결된 사항 (이번 세션)
+### 해결된 사항 (이전 세션)
 - interrupt에 user_is_speaking 전제조건 누락 → 추가 (논문 준수)
 - mock 서버 double playback_complete → 수정
 - STOP_PENDING watchdog에서 turn_detector.reset() 누락 → 추가
 - 유사도 검사 SequenceMatcher → sentence embedding (의미 유사도)
 - 파일 저장 구현 (FileStorageBackend)
 - 로깅 체계 개선
+
+### 해결된 사항 (이번 세션)
+- CppBridge 재연결: `_run_greeting()`에서 `connect()` 호출 → C++ 크래시 후 자동 복구
+- Audio starvation timeout: Orchestrator에서 5초간 프레임 미도착 시 세션 종료
+- LED 테스트 16개 실패 → `rpi5-ws2812` optional 이동 + CppBridgeConfig 기본값 수정으로 해결
 
 ### Next
 - awaiting_response 중 false interrupt 문제 해결 방안 검토

@@ -201,7 +201,7 @@ SLEEP ──(wakeword)──▶ GREETING ──(playback done)──▶ ACTIVE �
 | Owns | AudioInput (thread + queue), WakewordDetector, Orchestrator, ConversationHistory |
 | References | CppBridge (greeting/farewell signals) |
 | SLEEP | Feed frames from audio_queue → WakewordDetector. On wakeword detection → transition to GREETING. |
-| GREETING | Send greeting signal via CppBridge → wait for playback completion → transition to ACTIVE. |
+| GREETING | Ensure bridge connected (reconnect if needed, return to SLEEP on failure) → send greeting signal → wait for playback completion → transition to ACTIVE. |
 | ACTIVE | Drain audio_queue → issue session_id, initialize ConversationHistory → call `Orchestrator.run(audio_queue)`. On return → transition to FAREWELL. |
 | FAREWELL | Send farewell signal via CppBridge → wait for playback completion → save ConversationHistory → transition to SLEEP. |
 | Startup | `run()` calls `bridge.connect()` then `audio_input.start()`. |
@@ -230,7 +230,8 @@ SLEEP ──(wakeword)──▶ GREETING ──(playback done)──▶ ACTIVE �
 8. If `awaiting_response`: check SpeechGenerator completion
 9. If pending truncation: check deferred truncation
 10. STOP_PENDING watchdog check
-11. Session timeout check
+11. Audio starvation check (terminate if no frames for `audio_starvation_timeout_sec`)
+12. Session timeout check
 
 **On `prepare`:**
 
@@ -451,17 +452,17 @@ voice_pipeline.core         # TTSStream
 | ASR | Log, skip frame, continue | N/A (Orchestrator handles) |
 | TurnDetector | Log, skip frame, continue | N/A |
 | SpeechGenerator | Skip turn, reset TurnDetector | N/A |
-| CppBridge | **Terminate session** | Greeting/farewell: log, break poll loop |
+| CppBridge | **Terminate session** | Greeting: reconnect or SLEEP; farewell: log, break poll loop |
 | History / LED | Log, continue | Log, continue |
 | WakewordDetector | N/A | **Crash** (real bug — should be fixed) |
-| AudioInput thread | Capture stops silently (`_error` set) | Not detected (queue starves) |
+| AudioInput thread | Audio starvation timeout (5s) → **terminate session** | SLEEP: detect via `error` property → crash |
 
 
 ## 7. Known Limitations
 
 - **`generator.shutdown()` reuse**: Orchestrator calls `generator.shutdown()` in `_end_session()`, terminating the ThreadPoolExecutor. If the same SpeechGenerator instance is reused for a second session, `prepare()` will fail unless the implementation re-creates the executor.
-- **AudioInput thread death undetected**: If the capture thread dies (device error, etc.), the audio queue starves. SessionManager stays in SLEEP waiting for frames that never come. No health-check mechanism exists.
-- **CppBridge reconnect**: `bridge.connect()` is only called once at `SessionManager.run()` start. If the bridge disconnects mid-session, Orchestrator terminates the session → FAREWELL → SLEEP. On the next wakeword, greeting is sent on a dead connection. Needs reconnect logic before greeting or in the SLEEP loop.
+- **AudioInput thread death in SLEEP mode**: If the capture thread dies, SessionManager detects it via `audio_input.error` and crashes. In ACTIVE mode, Orchestrator's audio starvation timeout (`audio_starvation_timeout_sec`, default 5s) terminates the session. After returning to SLEEP, SessionManager detects the error and crashes. Recovery depends on external process supervision (e.g. systemd `Restart=always`).
+- **CppBridge mid-session disconnect**: If the bridge disconnects during ACTIVE mode, Orchestrator terminates the session → FAREWELL → SLEEP. On the next wakeword, `_run_greeting()` calls `bridge.connect()` to reconnect. If reconnect fails (C++ process still down), SessionManager returns to SLEEP and retries on the next wakeword.
 - **Signal handling**: No SIGINT/SIGTERM handler. `Ctrl+C` kills the process without calling `shutdown()`, so `history.save()` is skipped.
 
 

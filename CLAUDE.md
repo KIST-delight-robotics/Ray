@@ -159,7 +159,8 @@ threading + `queue.Queue` based.
 - Inside modules: handle transient errors with retries. Raise module exception when retries exhausted.
 - Orchestrator fallback policy:
   - ASR / LLM / TTS failure → skip the current turn, stay in ACTIVE.
-  - CppBridge disconnect → terminate session (→ FAREWELL → SLEEP).
+  - CppBridge disconnect → terminate session (→ FAREWELL → SLEEP). Reconnect attempted in GREETING before next session.
+  - Audio starvation (no frames for `audio_starvation_timeout_sec`) → terminate session (→ FAREWELL → SLEEP).
 
 
 ## Testing
@@ -222,20 +223,5 @@ Phase 7 — Integration tests
 ```
 
 
-## Codex Review Workflow
-
-### Plan review (before ExitPlanMode)
-Before calling ExitPlanMode, always run a Codex review of the plan first:
-1. Pass the full plan content to Codex via `bash ~/.claude/skills/codex/run_codex.sh`
-2. Ask Codex to review the plan for risks, blind spots, and missing considerations
-3. Present Codex's feedback alongside the plan to the user
-4. Only then call ExitPlanMode for user confirmation
-
-### Code review (after task completion)
-After marking a task as completed (TaskUpdate status=completed), run a Codex code review:
-1. Collect: brief task description + `git diff HEAD` output
-2. Pass both to Codex via `bash ~/.claude/skills/codex/run_codex.sh`
-3. Ask Codex to review for bugs, style issues, missing tests, and improvements
-4. Present the review to the user
 
 Add interfaces/types needed by the next Phase to `core/` before starting it. Phase 1 defines only confirmed shared types (TurnDecision, ResponseData, etc.).

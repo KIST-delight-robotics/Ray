@@ -177,6 +177,8 @@
 - **Greeting/farewell timeout**: Timeout expiry is treated as playback done (log warning, proceed). No error raised.
 - **`bridge.disconnect()` on exit**: `run()` finally block calls `bridge.disconnect()`, symmetric with `connect()` at startup.
 - **`SessionManager(ISessionManager)` inheritance**: Implements `ISessionManager` from `core/interfaces.py`. Follows the project's interface convention.
+- **CppBridge reconnect in GREETING**: `_run_greeting()` calls `bridge.connect()` before flush/send. `connect()` is no-op when already connected (line 78 guard). On disconnect, `_cleanup()` handles stale `_conn`/`_receiver_thread`/`_receiver_stop`. Reconnect failure → SLEEP (not FAREWELL, since no session has started). Prevents infinite GREETING→ACTIVE(fail)→FAREWELL→SLEEP cycle when C++ process restarts.
+- **Audio starvation timeout**: Orchestrator tracks `_last_frame_time`, updated on frame dequeue. `_check_audio_starvation()` runs as step 11 in the frame loop, before session timeout. Default 5s — AudioInput produces at 33Hz, so 5s without frames means the capture thread is dead. Unlike session timeout, NOT paused during PLAYING/awaiting — AudioInput must always produce frames regardless of pipeline state.
 
 ### Main Entry Point (`voice_pipeline/__main__.py`)
 
