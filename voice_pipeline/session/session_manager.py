@@ -135,7 +135,7 @@ class SessionManager(ISessionManager):
     def _run_greeting(self) -> None:
         """GREETING mode: send greeting, wait for playback completion."""
         self._flush_bridge_events()
-        self._led.set_state(LEDState.LISTENING)
+        self._led.set_state(LEDState.IDLE)
 
         try:
             self._bridge.send_play_file(self._greeting_audio_path)

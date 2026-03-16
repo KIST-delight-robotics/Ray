@@ -97,7 +97,7 @@ def _audio_queue_with(*frames: AudioFrame) -> queue.Queue[AudioFrame]:
 
 class TestLifecycle:
     def test_start_stop_session(self) -> None:
-        """start_session calls asr.start and LED LISTENING; end calls reset/OFF."""
+        """start_session calls asr.start and LED IDLE; end calls reset/OFF."""
         orch, mocks = _make_orchestrator(session_timeout_sec=0.0)
         # With 0 timeout, session ends immediately
         orch.run(_audio_queue_with())
@@ -105,9 +105,9 @@ class TestLifecycle:
         mocks["asr"].stop.assert_called_once()
         mocks["generator"].reset.assert_called_once()
 
-        # LED sequence: LISTENING (start) → OFF (end)
+        # LED sequence: IDLE (start) → OFF (end)
         led_calls = [c.args[0] for c in mocks["led"].set_state.call_args_list]
-        assert led_calls[0] == LEDState.LISTENING
+        assert led_calls[0] == LEDState.IDLE
         assert led_calls[-1] == LEDState.OFF
 
     def test_start_session_resets_internal_state(self) -> None:
@@ -152,9 +152,6 @@ class TestTurnShift:
         assert orch._playback_state == PlaybackState.PLAYING
         mocks["bridge"].send_stream_start.assert_called_once()
 
-        led_calls = [c.args[0] for c in mocks["led"].set_state.call_args_list]
-        assert LEDState.SPEAKING in led_calls
-
     def test_turn_shift_not_ready_sets_awaiting(self) -> None:
         """When generator not ready on turn_shift, set awaiting."""
         orch, mocks = _make_orchestrator()
@@ -168,9 +165,6 @@ class TestTurnShift:
 
         assert orch._awaiting_response is True
         mocks["generator"].prepare.assert_called_once_with("hello")
-
-        led_calls = [c.args[0] for c in mocks["led"].set_state.call_args_list]
-        assert LEDState.THINKING in led_calls
 
     def test_turn_shift_preparing_sets_awaiting_no_double_prepare(self) -> None:
         """When generator is PREPARING, set awaiting without calling prepare again."""
@@ -251,9 +245,6 @@ class TestAwaitingResponse:
 
         assert orch._awaiting_response is False
         mocks["turn_detector"].reset.assert_called_once()
-
-        led_calls = [c.args[0] for c in mocks["led"].set_state.call_args_list]
-        assert LEDState.LISTENING in led_calls
 
 
 # ---------------------------------------------------------------------------

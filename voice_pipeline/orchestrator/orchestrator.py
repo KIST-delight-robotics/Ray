@@ -190,7 +190,7 @@ class Orchestrator:
         self._assistant_msg_id = None
 
         self._asr.start()
-        self._set_led(LEDState.LISTENING)
+        self._set_led(LEDState.IDLE)
         self._last_text_change_time = time.monotonic()
         logger.info("Orchestrator session started")
 
@@ -343,7 +343,6 @@ class Orchestrator:
         else:
             # Not ready yet — set awaiting
             self._awaiting_response = True
-            self._set_led(LEDState.THINKING)
             # Start generation if not already preparing
             if self._generator.state == GeneratorState.IDLE:
                 self._generator.prepare(text)
@@ -373,7 +372,6 @@ class Orchestrator:
             self._turn_detector.reset()
             self._awaiting_response = False
             self._audio_end_sent = False
-            self._set_led(LEDState.LISTENING)
         else:
             logger.debug("Interrupt ignored (state=%s)", self._playback_state.value)
 
@@ -388,7 +386,6 @@ class Orchestrator:
             logger.warning("_begin_streaming called with empty input_text — skipping")
             self._generator.reset()
             self._awaiting_response = False
-            self._set_led(LEDState.LISTENING)
             return
 
         self._user_msg_id = self._history.add_user_message(user_text)
@@ -409,7 +406,6 @@ class Orchestrator:
         self._playback_state = PlaybackState.PLAYING
         buf_sec = len(self._sent_audio_buffer) / (self._tts_config.output_sample_rate * 2)
         logger.info("begin_streaming: %.1fs audio buffered → PLAYING", buf_sec)
-        self._set_led(LEDState.SPEAKING)
 
     def _drain_audio_to_bridge(self) -> None:
         """Poll audio chunks from generator and send to bridge."""
@@ -592,7 +588,6 @@ class Orchestrator:
             self._generator.reset()
             self._awaiting_response = False
             self._turn_detector.reset()
-            self._set_led(LEDState.LISTENING)
 
     # ------------------------------------------------------------------
     # STOP_PENDING watchdog
@@ -654,7 +649,6 @@ class Orchestrator:
         self._sent_audio_buffer = bytearray()
         self._playback_start_time = 0.0
         self._audio_end_sent = False
-        self._set_led(LEDState.LISTENING)
 
     def _set_led(self, state: LEDState) -> None:
         try:

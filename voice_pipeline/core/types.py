@@ -78,9 +78,7 @@ class LEDState(enum.Enum):
 
     OFF = "off"
     SLEEPING = "sleeping"
-    LISTENING = "listening"
-    THINKING = "thinking"
-    SPEAKING = "speaking"
+    IDLE = "idle"
 
 
 # ---------------------------------------------------------------------------

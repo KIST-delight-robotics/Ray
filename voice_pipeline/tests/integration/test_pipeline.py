@@ -434,10 +434,8 @@ class TestSingleTurnConversation:
         assert bridge.audio_end_count == 1
         assert len(bridge.audio_chunks) > 0
 
-        # LED transitions: LISTENING → THINKING → SPEAKING → LISTENING → OFF
-        assert LEDState.LISTENING in led.states
-        assert LEDState.THINKING in led.states
-        assert LEDState.SPEAKING in led.states
+        # LED transitions: IDLE (start) → OFF (end)
+        assert LEDState.IDLE in led.states
         assert led.states[-1] == LEDState.OFF
 
     def test_conversation_history_context_passed_to_llm(self) -> None:
@@ -663,7 +661,7 @@ class TestFullSessionLifecycle:
 
         # LED went through full lifecycle
         assert LEDState.SLEEPING in led.states
-        assert LEDState.LISTENING in led.states
+        assert LEDState.IDLE in led.states
 
 
 # ---------------------------------------------------------------------------

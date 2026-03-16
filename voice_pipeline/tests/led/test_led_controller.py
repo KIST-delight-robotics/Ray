@@ -12,7 +12,11 @@ import pytest
 
 from voice_pipeline.core.config import LEDConfig
 from voice_pipeline.core.types import LEDState
-from voice_pipeline.led.animations import LEDAnimation, StaticAnimation
+from voice_pipeline.led.animations import (
+    BreathingAnimation,
+    LEDAnimation,
+    StaticAnimation,
+)
 from voice_pipeline.led.exceptions import LEDError
 from voice_pipeline.led.led_controller import LEDController
 
@@ -77,6 +81,47 @@ class TestStaticAnimation:
 
 
 # ===================================================================
+# BreathingAnimation
+# ===================================================================
+
+
+class TestBreathingAnimation:
+    def test_render_returns_correct_length(self) -> None:
+        anim = BreathingAnimation()
+        frame = anim.render(0, bar_count=8, ring_count=16)
+        assert len(frame) == 24
+
+    def test_bar_leds_are_off(self) -> None:
+        anim = BreathingAnimation()
+        frame = anim.render(5, bar_count=4, ring_count=8)
+        for pixel in frame[:4]:
+            assert pixel == (0, 0, 0)
+
+    def test_ring_brightness_varies_with_tick(self) -> None:
+        anim = BreathingAnimation(color=(233, 233, 50), cycle_sec=4.0)
+        frames = [anim.render(t, 0, 1)[0] for t in range(200)]
+        # Not all frames should be the same — brightness changes
+        unique = set(frames)
+        assert len(unique) > 1
+
+    def test_min_brightness_floor(self) -> None:
+        anim = BreathingAnimation(color=(100, 100, 100), min_brightness=0.2)
+        # tick=0 → phase at minimum (sin starts at -pi/2 → phase=0)
+        frame = anim.render(0, 0, 1)
+        r, g, b = frame[0]
+        assert r == 20  # 100 * 0.2
+        assert g == 20
+        assert b == 20
+
+    def test_frame_interval_default(self) -> None:
+        anim = BreathingAnimation()
+        assert anim.frame_interval_sec == 0.03
+
+    def test_satisfies_protocol(self) -> None:
+        assert isinstance(BreathingAnimation(), LEDAnimation)
+
+
+# ===================================================================
 # LEDController — noop mode (no hardware driver)
 # ===================================================================
 
@@ -92,8 +137,8 @@ class TestControllerNoop:
     def test_set_state_changes_state(self) -> None:
         ctrl = _make_controller()
         try:
-            ctrl.set_state(LEDState.LISTENING)
-            assert ctrl._state == LEDState.LISTENING
+            ctrl.set_state(LEDState.IDLE)
+            assert ctrl._state == LEDState.IDLE
         finally:
             ctrl.close()
 
@@ -101,11 +146,11 @@ class TestControllerNoop:
         """Setting the same state twice should not reset tick."""
         ctrl = _make_controller()
         try:
-            ctrl.set_state(LEDState.LISTENING)
+            ctrl.set_state(LEDState.IDLE)
             # Let a few ticks accumulate
             time.sleep(0.15)
             tick_before = ctrl._tick
-            ctrl.set_state(LEDState.LISTENING)
+            ctrl.set_state(LEDState.IDLE)
             # Tick should not have been reset to 0 by the second call
             assert ctrl._tick >= tick_before
         finally:
@@ -114,10 +159,10 @@ class TestControllerNoop:
     def test_set_state_resets_tick(self) -> None:
         ctrl = _make_controller()
         try:
-            ctrl.set_state(LEDState.LISTENING)
+            ctrl.set_state(LEDState.IDLE)
             time.sleep(0.15)
             assert ctrl._tick > 0
-            ctrl.set_state(LEDState.THINKING)
+            ctrl.set_state(LEDState.SLEEPING)
             # Tick resets on state change; may have incremented slightly
             # but should be much smaller than before
             assert ctrl._tick < 5
@@ -144,11 +189,12 @@ class TestControllerNoop:
             ctrl.close()
 
     def test_strip_is_none_without_hardware(self) -> None:
-        ctrl = _make_controller()
-        try:
-            assert ctrl._strip is None
-        finally:
-            ctrl.close()
+        with patch(_DRIVER_PATH, None):
+            ctrl = _make_controller()
+            try:
+                assert ctrl._strip is None
+            finally:
+                ctrl.close()
 
     def test_animation_thread_is_daemon(self) -> None:
         ctrl = _make_controller()
@@ -170,11 +216,11 @@ class TestAnimationReset:
         mock_anim.render.return_value = [(0, 0, 0)] * 24
 
         animations = {state: StaticAnimation() for state in LEDState}
-        animations[LEDState.LISTENING] = mock_anim
+        animations[LEDState.IDLE] = mock_anim
 
         ctrl = _make_controller(animations=animations)
         try:
-            ctrl.set_state(LEDState.LISTENING)
+            ctrl.set_state(LEDState.IDLE)
             mock_anim.reset.assert_called_once()
         finally:
             ctrl.close()
@@ -185,11 +231,11 @@ class TestAnimationReset:
         mock_anim.render.return_value = [(0, 0, 0)] * 24
 
         animations = {state: StaticAnimation() for state in LEDState}
-        animations[LEDState.SPEAKING] = mock_anim
+        animations[LEDState.SLEEPING] = mock_anim
 
         ctrl = _make_controller(animations=animations)
         try:
-            ctrl.set_state(LEDState.SPEAKING)
+            ctrl.set_state(LEDState.SLEEPING)
             time.sleep(0.15)
             assert mock_anim.render.call_count > 0
         finally:
@@ -201,13 +247,13 @@ class TestAnimationReset:
         mock_anim.render.return_value = [(0, 0, 0)] * 24
 
         animations = {state: StaticAnimation() for state in LEDState}
-        animations[LEDState.LISTENING] = mock_anim
+        animations[LEDState.IDLE] = mock_anim
 
         ctrl = _make_controller(animations=animations)
         try:
-            ctrl.set_state(LEDState.LISTENING)
-            ctrl.set_state(LEDState.THINKING)
-            ctrl.set_state(LEDState.LISTENING)
+            ctrl.set_state(LEDState.IDLE)
+            ctrl.set_state(LEDState.SLEEPING)
+            ctrl.set_state(LEDState.IDLE)
             assert mock_anim.reset.call_count == 2
         finally:
             ctrl.close()
@@ -222,12 +268,12 @@ class TestCustomAnimations:
     def test_custom_animation_map(self) -> None:
         custom = StaticAnimation(bar_color=(99, 99, 99), ring_color=(11, 11, 11))
         animations = {state: StaticAnimation() for state in LEDState}
-        animations[LEDState.THINKING] = custom
+        animations[LEDState.SLEEPING] = custom
 
         ctrl = _make_controller(animations=animations)
         try:
-            ctrl.set_state(LEDState.THINKING)
-            anim = ctrl._animations[LEDState.THINKING]
+            ctrl.set_state(LEDState.SLEEPING)
+            anim = ctrl._animations[LEDState.SLEEPING]
             assert anim is custom
         finally:
             ctrl.close()
@@ -256,13 +302,13 @@ class TestHardwareInit:
 class TestMissingAnimation:
     def test_missing_animation_does_not_crash(self) -> None:
         """State with no registered animation should not raise."""
-        # Only register OFF, leave LISTENING unmapped
+        # Only register OFF, leave IDLE unmapped
         animations = {LEDState.OFF: StaticAnimation()}
         ctrl = _make_controller(animations=animations)
         try:
-            ctrl.set_state(LEDState.LISTENING)
+            ctrl.set_state(LEDState.IDLE)
             time.sleep(0.15)  # let animation loop run a few ticks
-            assert ctrl._state == LEDState.LISTENING
+            assert ctrl._state == LEDState.IDLE
         finally:
             ctrl.close()
 
@@ -280,11 +326,11 @@ class TestRenderError:
         bad_anim.render.side_effect = RuntimeError("render boom")
 
         animations = {state: StaticAnimation() for state in LEDState}
-        animations[LEDState.LISTENING] = bad_anim
+        animations[LEDState.IDLE] = bad_anim
 
         ctrl = _make_controller(animations=animations)
         try:
-            ctrl.set_state(LEDState.LISTENING)
+            ctrl.set_state(LEDState.IDLE)
             time.sleep(0.15)
             # Thread should still be alive despite render errors
             assert ctrl._thread.is_alive()
@@ -308,16 +354,16 @@ class TestStateChangeResponsiveness:
 
         animations = {state: StaticAnimation() for state in LEDState}
         animations[LEDState.SLEEPING] = slow
-        animations[LEDState.LISTENING] = fast
+        animations[LEDState.IDLE] = fast
 
         ctrl = _make_controller(animations=animations)
         try:
             ctrl.set_state(LEDState.SLEEPING)
             time.sleep(0.05)  # let it enter the slow sleep
 
-            ctrl.set_state(LEDState.LISTENING)
+            ctrl.set_state(LEDState.IDLE)
             time.sleep(0.1)
-            # Thread should have picked up LISTENING quickly, not after 1s
+            # Thread should have picked up IDLE quickly, not after 1s
             assert ctrl._tick > 0
         finally:
             ctrl.close()

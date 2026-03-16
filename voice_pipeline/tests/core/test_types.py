@@ -239,12 +239,10 @@ class TestLEDState:
     def test_values(self) -> None:
         assert LEDState.OFF.value == "off"
         assert LEDState.SLEEPING.value == "sleeping"
-        assert LEDState.LISTENING.value == "listening"
-        assert LEDState.THINKING.value == "thinking"
-        assert LEDState.SPEAKING.value == "speaking"
+        assert LEDState.IDLE.value == "idle"
 
     def test_member_count(self) -> None:
-        assert len(LEDState) == 5
+        assert len(LEDState) == 3
 
 
 class TestEnums:

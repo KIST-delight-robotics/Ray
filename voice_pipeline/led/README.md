@@ -2,6 +2,16 @@
 
 Visual feedback controller for the voice pipeline. Drives 24 WS2812 LEDs (8 bar + 16 ring) via SPI on Raspberry Pi 5. Falls back to logging-only mode when the hardware driver is not installed.
 
+## LED States
+
+| State | Animation | Description |
+|-------|-----------|-------------|
+| `OFF` | All black | Controller closed / inactive |
+| `SLEEPING` | Breathing (ring only) | Sleep mode, bar LEDs off, ring fades in/out |
+| `IDLE` | Static base color | Active session default |
+
+Base color: `(233, 233, 50)`.
+
 ## Usage
 
 ```python
@@ -11,9 +21,8 @@ from voice_pipeline.core.types import LEDState
 
 controller = LEDController(LEDConfig())
 
-controller.set_state(LEDState.LISTENING)
-controller.set_state(LEDState.THINKING)
-controller.set_state(LEDState.SPEAKING)
+controller.set_state(LEDState.SLEEPING)
+controller.set_state(LEDState.IDLE)
 controller.set_state(LEDState.OFF)
 
 controller.close()
@@ -61,7 +70,7 @@ Pass a custom map to the controller:
 from voice_pipeline.core.types import LEDState
 
 controller = LEDController(config, animations={
-    LEDState.LISTENING: PulseAnimation(),
+    LEDState.IDLE: PulseAnimation(),
     # ... other states
 })
 ```

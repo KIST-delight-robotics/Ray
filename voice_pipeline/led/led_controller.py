@@ -9,7 +9,7 @@ from typing import Any
 from voice_pipeline.core.config import LEDConfig
 from voice_pipeline.core.interfaces import ILEDController
 from voice_pipeline.core.types import LEDState
-from voice_pipeline.led.animations import RGB, LEDAnimation, StaticAnimation
+from voice_pipeline.led.animations import RGB, BreathingAnimation, LEDAnimation, StaticAnimation
 from voice_pipeline.led.exceptions import LEDError
 
 logger = logging.getLogger("voice_pipeline.led")
@@ -31,18 +31,13 @@ except ImportError:
 # Default animation map (placeholder colors)
 # ---------------------------------------------------------------------------
 
-_OFF = (0, 0, 0)
-_DIM_BLUE = (0, 0, 30)
-_GREEN = (0, 80, 0)
-_YELLOW = (80, 60, 0)
-_CYAN = (0, 60, 80)
+_OFF: RGB = (0, 0, 0)
+_BASE: RGB = (233, 233, 50)
 
 _DEFAULT_ANIMATIONS: dict[LEDState, LEDAnimation] = {
     LEDState.OFF: StaticAnimation(bar_color=_OFF, ring_color=_OFF),
-    LEDState.SLEEPING: StaticAnimation(bar_color=_OFF, ring_color=_DIM_BLUE),
-    LEDState.LISTENING: StaticAnimation(bar_color=_GREEN, ring_color=_GREEN),
-    LEDState.THINKING: StaticAnimation(bar_color=_YELLOW, ring_color=_YELLOW),
-    LEDState.SPEAKING: StaticAnimation(bar_color=_CYAN, ring_color=_CYAN),
+    LEDState.SLEEPING: BreathingAnimation(color=_BASE),
+    LEDState.IDLE: StaticAnimation(bar_color=_BASE, ring_color=_BASE),
 }
 
 

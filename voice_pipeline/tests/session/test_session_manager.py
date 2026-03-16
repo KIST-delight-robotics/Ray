@@ -378,15 +378,15 @@ class TestLED:
 
         mocks["led"].set_state.assert_called_with(LEDState.SLEEPING)
 
-    def test_greeting_sets_listening(self) -> None:
-        """GREETING mode sets LED to LISTENING."""
+    def test_greeting_sets_idle(self) -> None:
+        """GREETING mode sets LED to IDLE."""
         sm, mocks = _make_session_manager(greeting_timeout_sec=0.01)
         mocks["bridge"].poll_event.return_value = None
 
         sm._run_greeting()
 
         led_calls = [c.args[0] for c in mocks["led"].set_state.call_args_list]
-        assert LEDState.LISTENING in led_calls
+        assert LEDState.IDLE in led_calls
 
     def test_farewell_sets_sleeping(self) -> None:
         """FAREWELL sets LED back to SLEEPING."""
