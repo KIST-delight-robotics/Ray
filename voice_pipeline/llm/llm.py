@@ -11,6 +11,7 @@ import openai
 from voice_pipeline.core.config import LLMConfig
 from voice_pipeline.core.interfaces import ILLM
 from voice_pipeline.llm.exceptions import LLMError
+from voice_pipeline.llm.tools import resolve_tools
 
 logger = logging.getLogger("voice_pipeline.llm")
 
@@ -28,6 +29,7 @@ class OpenAILLM(ILLM):
 
     def __init__(self, config: LLMConfig) -> None:
         self._config = config
+        self._tools = resolve_tools(config.tools) if config.tools else []
         self._client = openai.OpenAI(
             max_retries=config.max_retries,
             timeout=config.timeout_sec,
@@ -61,6 +63,10 @@ class OpenAILLM(ILLM):
             }
             if instructions is not None:
                 kwargs["instructions"] = instructions
+            if self._config.reasoning_effort is not None:
+                kwargs["reasoning"] = {"effort": self._config.reasoning_effort}
+            if self._tools:
+                kwargs["tools"] = self._tools
 
             stream = self._client.responses.create(**kwargs)
         except openai.OpenAIError as exc:

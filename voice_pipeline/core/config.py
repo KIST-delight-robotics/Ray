@@ -7,7 +7,7 @@ Current: Phase 1–3 + Phase 4 + Phase 5 + Phase 6.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from voice_pipeline.core.exceptions import ConfigurationError
 
@@ -68,13 +68,26 @@ class ASRConfig:
 
 @dataclass
 class LLMConfig:
-    """Configuration for the LLM module."""
+    """Configuration for the LLM module.
+
+    Attributes:
+        reasoning_effort: Reasoning effort level for reasoning models.
+            None = omit the parameter (non-reasoning models like gpt-4o).
+            Valid values depend on the model:
+              gpt-5: "minimal", "low", "medium", "high"
+              gpt-5.1: "none", "low", "medium", "high"
+              gpt-5.4: "none", "low", "medium", "high", "xhigh"
+        tools: Tool names to enable (resolved via llm.tools at startup).
+            Available: "web_search".
+    """
 
     model: str = "gpt-4o"
     temperature: float = 0.7
     max_tokens: int = 256
     max_retries: int = 2
     timeout_sec: float = 30.0
+    reasoning_effort: str | None = None
+    tools: list[str] = field(default_factory=lambda: ["web_search"])
 
 
 @dataclass
@@ -96,7 +109,7 @@ class CppBridgeConfig:
     """Configuration for the C++ bridge WebSocket connection."""
 
     host: str = "localhost"
-    port: int = 8765
+    port: int = 9200
     reconnect_attempts: int = 3
     recv_timeout_sec: float = 1.0
     connect_timeout_sec: float = 5.0

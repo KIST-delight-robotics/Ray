@@ -282,3 +282,54 @@ class TestClientConfig:
         assert call_kwargs["model"] == "gpt-4o-mini"
         assert call_kwargs["temperature"] == 0.3
         assert call_kwargs["max_output_tokens"] == 100
+
+    def test_reasoning_effort_omitted_by_default(self, llm_config: LLMConfig) -> None:
+        """Default config (gpt-4o) should not send reasoning param."""
+        client = create_mock_client(make_stream_events(["ok"]))
+        llm = _build_llm(client, llm_config)
+
+        list(llm.generate([_user_msg("hi")]))
+
+        call_kwargs = client.responses.create.call_args[1]
+        assert "reasoning" not in call_kwargs
+
+    def test_reasoning_effort_passed_when_set(self) -> None:
+        config = LLMConfig(model="gpt-5.4", reasoning_effort="none")
+        client = create_mock_client(make_stream_events(["ok"]))
+        llm = _build_llm(client, config)
+
+        list(llm.generate([_user_msg("hi")]))
+
+        call_kwargs = client.responses.create.call_args[1]
+        assert call_kwargs["reasoning"] == {"effort": "none"}
+
+    def test_tools_omitted_when_empty(self) -> None:
+        """Empty tools list should not send tools param."""
+        config = LLMConfig(tools=[])
+        client = create_mock_client(make_stream_events(["ok"]))
+        llm = _build_llm(client, config)
+
+        list(llm.generate([_user_msg("hi")]))
+
+        call_kwargs = client.responses.create.call_args[1]
+        assert "tools" not in call_kwargs
+
+    def test_tools_resolved_from_names(self) -> None:
+        config = LLMConfig(tools=["web_search"])
+        client = create_mock_client(make_stream_events(["ok"]))
+        llm = _build_llm(client, config)
+
+        list(llm.generate([_user_msg("hi")]))
+
+        call_kwargs = client.responses.create.call_args[1]
+        assert call_kwargs["tools"] == [{"type": "web_search"}]
+
+    def test_unknown_tool_name_skipped(self) -> None:
+        config = LLMConfig(tools=["web_search", "nonexistent"])
+        client = create_mock_client(make_stream_events(["ok"]))
+        llm = _build_llm(client, config)
+
+        list(llm.generate([_user_msg("hi")]))
+
+        call_kwargs = client.responses.create.call_args[1]
+        assert call_kwargs["tools"] == [{"type": "web_search"}]
