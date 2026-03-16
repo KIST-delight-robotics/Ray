@@ -74,8 +74,6 @@ void save_audio_file(const std::string& filename, const float* audiodata, sf_cou
 
 std::pair<float, size_t> find_peak(const std::vector<float>& audio_buffer);
 
-float calculate_mouth(float up2mouth, float max_MOUTH, float min_MOUTH);
-
 void save_audio_segment(const std::string& outputFilePath, const std::vector<float>& audioData, size_t dataSize);
 
 std::vector<float> divide_channel(const std::vector<float>& audio_data, int channels, int frames);
@@ -116,3 +114,67 @@ float AM_fun(float min_open, float B, float r_k, float r_k_1, float r_k_2, float
 
 std::tuple<float, float, float> lin_fit_fun2(float S, float X_pre, float grad_up_pre, float grad_down_pre, float del_grad, float dt);
 
+// =======================
+// PART B : 실시간형 SG + prominence 보정
+// =======================
+struct PartBConfig
+{
+    int   hop_ms;
+    int   future_steps;
+    int   win_len;
+    int   half;
+    int   poly_order;
+    int   future_frames;
+
+    float peak_trigger_min;
+    float prominence_th;
+    float min_open;
+
+    std::vector<float> corr_alpha;
+};
+
+struct PendingCorrectionEvent
+{
+    long long start_g;
+    long long center_g_f;
+    long long end_g;
+    float scale;
+};
+
+struct PartBMouthState
+{
+    PartBConfig cfg;
+
+    std::vector<std::vector<double>> W;
+    std::vector<float> prev_raw_peaks;
+
+    bool current_valley_active;
+    float current_valley_min_val;
+    long long current_valley_min_idx;
+
+    float last_completed_valley_val;
+    long long last_completed_valley_idx;
+
+    bool prev_was_class3;
+    long long next_allowed_global_k;
+    long long global_frame_cursor;
+
+    std::vector<PendingCorrectionEvent> pending_events;
+};
+
+void init_partb_config(PartBConfig& cfg);
+void reset_partb_mouth_state(PartBMouthState& st);
+void init_partb_mouth_state(PartBMouthState& st);
+
+void build_partb_mouth_chunk(
+    const std::vector<float>& audio_curr,
+    const std::vector<float>& audio_future,
+    int channels,
+    int samplerate,
+    int num_motion_updates,
+    PartBMouthState& st,
+    std::vector<float>& out_a0_curr
+);
+
+// PART B 출력값(a0_scaled) -> mouth tick 변환
+float calculate_mouth(float a0_value, float max_MOUTH, float min_MOUTH);

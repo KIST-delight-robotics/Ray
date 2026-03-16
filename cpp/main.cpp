@@ -645,42 +645,29 @@ void read_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& 
 }
 
 
-// 두 번째 쓰레드: 녹음본을 가지고 모션 생성
 void generate_motion(int channels, int samplerate) {
 
     std::vector<float> audio_buffer;
-    const size_t MOVING_AVERAGE_WINDOW_SIZE = 5;
-    const size_t MAX_SAMPLE_WINDOW_SIZE = 40;
-    std::deque<float> moving_average_window;
 
-    // while(!audio_queue.empty()) {
-    //     std::cout << "@@ 오디오 큐가 비어있지 않습니다. 오디오 큐 크기: " << audio_queue.size() << std::endl;
-    //     audio_queue.pop();
-    // }
+    // -------------------------
+    // PART B mouth state
+    // -------------------------
+    PartBMouthState mouth_state;
+    init_partb_config(mouth_state.cfg);
 
-    int frames_per_update = samplerate * 40 / 1000; // 40ms에 해당하는 프레임 수
-    int find_peak_point = samplerate * 36 / 1000; // 36ms에서 시작하기 위한 위치
-    float v1_th = 0.05;
-    float s_max = 0.4;
-    int num_motion_size = 0;
-    float min_open = 0.25;
-    int B = 10;              // 끌어올리기 함수 기울기
-    float lim_delta_r = 0.1; //AM funtion에서 사용
-    float ex_v1_max_sc_avg = 0;
-    float exx_v1_max_sc_avg = 0;
-    float dt = 0.040;
-    // float del_grad = 0.1;
-    float del_grad = 25.0f; // 15.0f
-    float grad_up_pre = 0.0f;
-    float grad_down_pre = 0.0f;
-    float grad_up_now = 0.0f;
-    float grad_down_now = 0.0f;
-    float X_pre = 0.0f;
+    // 실제 실행용 튜닝값 설정
+    mouth_state.cfg.peak_trigger_min = 0.24f;
+    mouth_state.cfg.prominence_th    = 0.13f;
+    mouth_state.cfg.min_open         = 0.52f;
+    mouth_state.cfg.future_steps     = 9;
+    mouth_state.cfg.future_frames    = 9;   // peak center 9-point SG용 (360ms)
 
-    std::vector<float> v1_max;
+    init_partb_mouth_state(mouth_state);
+
+    int frames_per_update = samplerate * 40 / 1000;
 
     std::vector<double> prevEndOneBefore = {0.0, 0.0, 0.0};
-    std::vector<double> prevEnd = {0.0, 0.0, 0.0};
+    std::vector<double> prevEnd          = {0.0, 0.0, 0.0};
     std::vector<std::vector<double>> deliverSegment;
     std::vector<std::vector<double>> prevSegment;
     std::vector<double> boundaries = {0.01623224, 0.02907711, 0.04192197};
@@ -693,6 +680,7 @@ void generate_motion(int channels, int samplerate) {
             break;
         }
         wait_for_next_cycle(cycle_num);
+
         if (stop_flag && audio_queue.empty()) {
             std::cout << "generate motion break ------------------------" << std::endl;
             break;
@@ -704,137 +692,133 @@ void generate_motion(int channels, int samplerate) {
 
         int num_motion_updates = INTERVAL_MS / 40;
 
-        // 오디오 데이터 가져오기
-        std::unique_lock<std::mutex> lock(audio_queue_mutex);
-        audio_queue_cv.wait(lock, [] {return !audio_queue.empty() || stop_flag || user_interruption_flag;});
+        // ------------------------------------------------------------
+        // 오디오 데이터 pop + 미래 peek 확보
+        // ------------------------------------------------------------
+        std::vector<float> next_peek;
+        {
+            std::unique_lock<std::mutex> lock(audio_queue_mutex);
+            audio_queue_cv.wait(lock, [] { return !audio_queue.empty() || stop_flag || user_interruption_flag; });
 
-        if ((stop_flag || user_interruption_flag) && audio_queue.empty()) {
-            std::cout << "generate motion break ------------------------" << std::endl;
-            break;
+            if ((stop_flag || user_interruption_flag) && audio_queue.empty()) {
+                std::cout << "generate motion break ------------------------" << std::endl;
+                break;
+            }
+
+            audio_buffer = std::move(audio_queue.front());
+            audio_queue.pop();
+
+            const int need_ms      = mouth_state.cfg.future_frames * mouth_state.cfg.hop_ms;
+            const int need_frames  = samplerate * need_ms / 1000;
+            const int need_samples = need_frames * channels;
+
+            next_peek.clear();
+            next_peek.reserve(std::max(0, need_samples));
+
+            if (!audio_queue.empty() && need_samples > 0) {
+                std::queue<std::vector<float>> tmp;
+                tmp.swap(audio_queue);
+
+                std::queue<std::vector<float>> restored;
+
+                while (!tmp.empty()) {
+                    auto& buf = tmp.front();
+
+                    if ((int)next_peek.size() < need_samples) {
+                        const int need = need_samples - (int)next_peek.size();
+                        const int take = std::min<int>(need, (int)buf.size());
+                        if (take > 0) {
+                            next_peek.insert(next_peek.end(), buf.begin(), buf.begin() + take);
+                        }
+                    }
+
+                    restored.push(std::move(buf));
+                    tmp.pop();
+                }
+
+                audio_queue.swap(restored);
+            }
         }
 
-        audio_buffer = std::move(audio_queue.front());
-        audio_queue.pop();
-        lock.unlock();
+        // ============================================================
+        // (A) PART B mouth trajectory 생성
+        // ============================================================
+        std::vector<float> out_a0_curr;
 
+        build_partb_mouth_chunk(
+            audio_buffer,
+            next_peek,
+            channels,
+            samplerate,
+            num_motion_updates,
+            mouth_state,
+            out_a0_curr
+        );
+
+        const int Ncurr = static_cast<int>(out_a0_curr.size());
+
+        // ============================================================
+        // (B) PART B a0 -> mouth tick
+        // ============================================================
         std::vector<float> motion_results;
+        motion_results.reserve(out_a0_curr.size());
 
-        for(int i = 0; i < num_motion_updates; ++i) {
-
-            num_motion_size++;
-
-            // 시작 인덱스와 끝 인덱스 계산
-            int start_frame = i * frames_per_update;
-            int end_frame = start_frame + frames_per_update;
-
-            int start_frame_mouth = i * frames_per_update + find_peak_point;
-            int end_frame_mouth = i * frames_per_update + frames_per_update;
-
-            // 범위 체크
-            if (end_frame > audio_buffer.size() / channels) {
-                end_frame = audio_buffer.size() / channels;
-                //i = num_motion_updates -1;
-            }
-            if (start_frame_mouth >= audio_buffer.size() / channels) {
-                // 마지막 구간이므로 더 이상 처리할 오디오가 없음
-                std::cout << "Cycle" << cycle_num << " stop flag : " << stop_flag << ", audio queue size : " << audio_queue.size() << std::endl;
-                break; 
-            }
-            // 범위 체크
-            if (end_frame_mouth > audio_buffer.size() / channels) {
-                end_frame_mouth = audio_buffer.size() / channels;
-                //i = num_motion_updates -1;
-            }
-
-            // 현재 업데이트에 해당하는 오디오 데이터 추출
-            std::vector<float> current_audio(audio_buffer.begin() + start_frame * channels,
-                                             audio_buffer.begin() + end_frame * channels);
-
-            std::vector<float> current_audio_mouth(audio_buffer.begin() + start_frame_mouth * channels,
-                                             audio_buffer.begin() + end_frame_mouth * channels);
-            // 채널 분리
-            std::vector<float> channel_divided = divide_channel(current_audio, channels, end_frame - start_frame);
-
-            // 채널 분리
-            std::vector<float> channel_divided_mouth = divide_channel(current_audio_mouth, channels, end_frame_mouth - start_frame_mouth);
-
-            // 최대값과 해당 인덱스 찾기
-            auto [max_sample, max_index] = find_peak(channel_divided_mouth);
-
-            if (max_sample < 0) max_sample = 0;
-            
-            v1_max.push_back(max_sample);
-            
-
-            //cp 사용시 아래 주석 해제 할 것.
-
-            std::tie(max_sample, grad_up_now, grad_down_now) = lin_fit_fun2(max_sample, X_pre, grad_up_pre, grad_down_pre, del_grad, dt);
-            X_pre = max_sample;
-            grad_up_pre = grad_up_now;
-            grad_down_pre = grad_down_now;
-
-            ////////////////////////////////////////////////////
-
-            // s_max 값 구하기 (s_max가 크면 scaling이 작아져 값이 전체적으로 작아지는 역할을 함)
-            if(num_motion_size > 2 && max_sample > v1_th && v1_max[v1_max.size()-2] < v1_th){
-                if(v1_max.size() < 100){
-                    for(float i = 0; i< v1_max.size(); i++){
-                        s_max = std::max(s_max, v1_max[i]);
-                    }
-                }
-                else{
-                    for(float i = v1_max.size() - 100; i< v1_max.size(); i++){
-                        s_max = std::max(s_max,v1_max[i]);
-                    }
-                }
-            }
-
-            double sc = 0.4/s_max;
-
-            //cout << "s_max : " << s_max << " sc: " << sc << '\n';
-            //cout << "raw_sample : " << max_sample << '\n';
-            max_sample = sc  * max_sample;
-            //cout << "sc_sample : " << max_sample << '\n';
-
-
-            // max_sample을 이전 5개값과 평균을 내서 평균값을 max_sample로 사용
-            if(num_motion_size > 5) max_sample = update_final_result(moving_average_window, MOVING_AVERAGE_WINDOW_SIZE, max_sample); 
-            else{
-                update_final_result(moving_average_window, MOVING_AVERAGE_WINDOW_SIZE, max_sample);
-            }
-
-            //cout << "AVG_sample : " << max_sample << '\n';
-
-            // max_sample 값이 min_open 값 이하일 때 하이퍼 탄젠트 적용해서 mouth 모션을 좀 더 역동적으로 만들어줌.
-            if(num_motion_size > 5){
-                if(max_sample > min_open) final_result = max_sample;
-                else{
-                    final_result = AM_fun(min_open,B, max_sample, ex_v1_max_sc_avg, exx_v1_max_sc_avg, lim_delta_r);
-                }
-            }else{
-                max_sample = 0;
-            }
-            //cout << "ex_v1_max_sc_avg : " << ex_v1_max_sc_avg << ", exx_v1_max_sc_avg : " << exx_v1_max_sc_avg << '\n';
-            exx_v1_max_sc_avg = ex_v1_max_sc_avg;
-            ex_v1_max_sc_avg = max_sample;
-
-            // cout << "final_result : " << final_result << '\n';
-            float calculate_result = calculate_mouth(final_result, cfg_robot.max_mouth, cfg_robot.min_mouth);
-            // cout<< "calculate result : " << calculate_result << '\n';   
-
-            motion_results.push_back(calculate_result);
-            
-            // -- 헤드 모션 생성을 위한 energy 저장 --
-            double rms_value = calculateRMS(channel_divided, 0, frames_per_update);
-            energy.push_back(rms_value);
+        for (float a0_val : out_a0_curr) {
+            float mouth_value = calculate_mouth(
+                std::max(0.0f, a0_val),
+                cfg_robot.max_mouth,
+                cfg_robot.min_mouth
+            );
+            motion_results.push_back(mouth_value);
         }
 
-        if(!energy.empty()) { // 마우스 모션 생성 완료 후 마지막에 한번만 헤드 모션 생성
+        // ============================================================
+        // (B-1) 전체 3점 스무딩
+        // ============================================================
+        if (motion_results.size() >= 3) {
+            std::vector<float> motion_results_smooth = motion_results;
 
-            if(first_segment_flag == 1) {
+            for (size_t j = 1; j + 1 < motion_results.size(); ++j) {
+                motion_results_smooth[j] =
+                    (motion_results[j - 1] +
+                    2.0f * motion_results[j] +
+                    motion_results[j + 1]) / 4.0f;
+            }
+
+            motion_results.swap(motion_results_smooth);
+        }
+
+        // ============================================================
+        // Head energy 계산
+        // ============================================================
+        energy.reserve(Ncurr);
+
+        for (int i = 0; i < Ncurr; ++i) {
+            int start_frame = i * frames_per_update;
+            int end_frame   = start_frame + frames_per_update;
+
+            int total_frames = static_cast<int>(audio_buffer.size()) / channels;
+            if (end_frame > total_frames) end_frame = total_frames;
+            if (start_frame >= total_frames) break;
+
+            std::vector<float> current_audio(
+                audio_buffer.begin() + start_frame * channels,
+                audio_buffer.begin() + end_frame   * channels
+            );
+
+            std::vector<float> channel_divided =
+                divide_channel(current_audio, channels, end_frame - start_frame);
+
+            double rms_value = calculateRMS(channel_divided, 0, end_frame - start_frame);
+            energy.push_back(static_cast<float>(rms_value));
+        }
+
+        // ============================================================
+        // 첫 세그먼트 입 시작값 블렌딩
+        // ============================================================
+        if (!energy.empty()) {
+            if (first_segment_flag == 1) {
                 double start_mouth = 0.0;
-
-                // 첫 세그먼트일 경우 prevSegment를 이전 값들로 초기화
                 {
                     std::lock_guard<std::mutex> lock(prev_values_mutex);
                     prevSegment.clear();
@@ -844,35 +828,30 @@ void generate_motion(int channels, int samplerate) {
                     start_mouth = prevValues.back()[3];
                 }
 
-                // 말을 시작하는 시점의 입모양 보정
-                int blend_frames = 5; // 보정할 프레임 수 (5프레임 = 약 200ms)
-
+                int blend_frames = std::min<int>(5, motion_results.size());
                 for (int k = 0; k < blend_frames; ++k) {
-                    // 0.0 ~ 1.0 으로 증가하는 선형 비율 t
-                    double t = (double)(k + 1) / (double)(blend_frames);
-
-                    // Smoothstep 적용 (3차 곡선 효과)
+                    double t = static_cast<double>(k + 1) / static_cast<double>(blend_frames);
                     double alpha = t * t * (3.0 - 2.0 * t);
 
-                    // 보간: (시작값 * (1 - alpha)) + (목표값 * alpha)
-                    motion_results[k] = static_cast<float>(start_mouth * (1.0 - alpha) + motion_results[k] * alpha);
+                    motion_results[k] = static_cast<float>(
+                        start_mouth * (1.0 - alpha) + motion_results[k] * alpha
+                    );
                 }
             }
-            
-            if(cfg_robot.generate_head_motion) {
-                //평균 기울기 값 계산
-                avg_grad = getSegmentAverageGrad(energy, "one2one" , "abs");
 
-                // 평균 기울기 값이 4개 class 중 어디에 해당하는지 판단 
+            // ============================================================
+            // Head motion 생성
+            // ============================================================
+            if (cfg_robot.generate_head_motion) {
+                avg_grad = getSegmentAverageGrad(energy, "one2one", "abs");
                 segClass = assignClassWith1DMiddleBoundary(avg_grad, boundaries);
-                //cout << "Assigned class : " << segClass << endl;
-                std::string filePath;
 
+                std::string filePath;
                 switch (segClass) {
-                    case 0: filePath =  "segment_0.npy"; break;
-                    case 1: filePath =  "segment_1.npy"; break;
-                    case 2: filePath =  "segment_2.npy"; break;
-                    case 3: filePath =  "segment_3.npy"; break;
+                    case 0: filePath = "segment_0.npy"; break;
+                    case 1: filePath = "segment_1.npy"; break;
+                    case 2: filePath = "segment_2.npy"; break;
+                    case 3: filePath = "segment_3.npy"; break;
                     default:
                         std::cerr << "Invalid segClass: " << segClass << std::endl;
                         break;
@@ -881,69 +860,39 @@ void generate_motion(int channels, int samplerate) {
                 cnpy::NpyArray segment = cnpy::npy_load(SEGMENTS_DIR + "/" + filePath);
 
                 for (int j = 0; j < 3; j++) {
-                    prevEnd[j] = prevSegment[prevSegment.size() -1][j]; // prevSegment의 마지막 데이터 값
-                    prevEndOneBefore[j] = prevSegment[prevSegment.size() -2][j];
+                    prevEnd[j]          = prevSegment[prevSegment.size() - 1][j];
+                    prevEndOneBefore[j] = prevSegment[prevSegment.size() - 2][j];
                 }
 
-                //segment 선택
                 deliverSegment = getNextSegment_SegSeg(prevEndOneBefore, prevEnd, segment, true, true);
-
-                // segment 보정 (무성구간에 따라서 값 보정)
                 deliverSegment = multExpToSegment(energy, deliverSegment, 0.01, 10);
-                
-                // 말하는 동안 고개를 들기 위한 Pitch 오프셋 추가
-                double pitch_offset = -0.08; // 음수: 위쪽 방향
-                for(auto& frame : deliverSegment) {
-                    frame[1] += pitch_offset; // frame[1]은 Pitch
-                }
-
-                // 이전 세그먼트의 마지막 프레임과 현재 세그먼트의 첫 프레임을 부드럽게 연결
                 deliverSegment = connectTwoSegments(prevSegment, deliverSegment, 3, 3, 3);
-
-                // segment에 ratio 곱해주기
-                // for (auto& frame : deliverSegment) {
-                //     for (auto& value : frame) {
-                //         value *= cfg_robot.control_motor_rpy_ratio;
-                //     }
-                // }
-
-                // 현재 세그먼트를 다음 반복을 위해 저장
                 prevSegment = deliverSegment;
-            } 
-            else {
+            } else {
                 std::cout << "Idle motion 사용 중..." << std::endl;
-                deliverSegment = IdleMotionManager::getInstance().getNextSegment(energy.size(), cfg_robot.control_motor_rpy_ratio);
-                
-                // 말하는 동안 고개를 들기 위한 Pitch 오프셋 추가
-                double pitch_offset = -0.08; // 음수: 위쪽 방향
-                for(auto& frame : deliverSegment) {
-                    frame[1] += pitch_offset;
-                }
+                deliverSegment = IdleMotionManager::getInstance().getNextSegment(
+                    energy.size(), cfg_robot.control_motor_rpy_ratio
+                );
 
                 if (first_segment_flag == 1) {
-                    // 이전 세그먼트의 마지막 프레임과 현재 세그먼트의 첫 프레임을 부드럽게 연결
                     deliverSegment = connectTwoSegments(prevSegment, deliverSegment, 5, 3, 3);
                 }
             }
+
             first_segment_flag = 0;
         }
 
+        // ============================================================
+        // queue push
+        // ============================================================
         {
             std::lock_guard<std::mutex> lock(mouth_motion_queue_mutex);
-            for ( const auto& result : motion_results) {
+            for (const auto& result : motion_results) {
                 mouth_motion_queue.push(std::make_pair(cycle_num, result));
             }
             head_motion_queue.push(deliverSegment);
         }
         mouth_motion_queue_cv.notify_one();
-
-        // {
-        //     auto now = std::chrono::high_resolution_clock::now();
-        //     std::lock_guard<std::mutex> lock(cout_mutex);
-        //     std::cout << "Generate motion cycle " << cycle_num << " at "
-        //               << std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count()
-        //               << " ms" << std::endl;
-        // }
     }
 }
 
@@ -1026,11 +975,10 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
 
 
             
-            // 모터 제어 로직 구현
             float motor_value = motion_data.second;
-            double roll = current_motion_data[i][0];
-            double pitch = current_motion_data[i][1];
-            double yaw = current_motion_data[i][2];
+            double roll  = 0;
+            double pitch = 0;
+            double yaw   = 0;
             double mouth = motor_value;
 
             #ifdef MOTOR_ENABLED
@@ -1040,6 +988,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
                 first_move_flag = 0;
             } else {
                 for (int k = 0; k < DXL_NUM; k++) {
+                    if (k == 4) continue; // mouth 축은 추가 스무딩 없음
                     target_position[k] = (past_position[k] + target_position[k]) / 2;
                 }
             }
@@ -1100,7 +1049,7 @@ void wait_control_motor(){
 
     auto wait_start_time = std::chrono::high_resolution_clock::now();
     int step = 0;
-    constexpr auto FRAME_INTERVAL = std::chrono::milliseconds(40);
+    constexpr auto FRAME_INTERVAL = std::chrono::milliseconds(35);
 
     // -- 보간용 데이터 준비 --
     double ratio = cfg_robot.wait_mode_rpy_ratio;

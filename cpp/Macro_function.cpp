@@ -1,4 +1,809 @@
 #include "Macro_function.h"
+#include <algorithm>  // std::max, std::min
+#include <cmath>
+#include <iomanip>
+
+// =======================
+// PART B 설정 / 상태 초기화
+// =======================
+void init_partb_config(PartBConfig& cfg)
+{
+    cfg.hop_ms           = 40;
+    cfg.future_steps     = 9;     // 미래 9프레임(360ms) 내에서 peak 탐색
+    cfg.win_len          = 11;    // SG window
+    cfg.half             = 5;     // (11-1)/2
+    cfg.poly_order       = 3;
+    cfg.future_frames    = 9;     // current chunk 뒤 미래 9프레임 확보
+
+    cfg.peak_trigger_min = 0.24f;
+    cfg.prominence_th    = 0.13f;
+    cfg.min_open         = 0.52f;
+
+    // MATLAB corr_shape / max(corr_shape)
+    cfg.corr_alpha = {
+        0.222222f, 0.309333f, 0.440000f, 0.592000f, 0.801778f,
+        1.000000f,
+        0.801778f, 0.592000f, 0.440000f, 0.309333f, 0.222222f
+    };
+}
+
+void reset_partb_mouth_state(PartBMouthState& st)
+{
+    st.prev_raw_peaks.clear();
+
+    st.current_valley_active     = false;
+    st.current_valley_min_val    = std::numeric_limits<float>::quiet_NaN();
+    st.current_valley_min_idx    = -1;
+
+    st.last_completed_valley_val = std::numeric_limits<float>::quiet_NaN();
+    st.last_completed_valley_idx = -1;
+
+    st.prev_was_class3       = false;
+    st.next_allowed_global_k = 0;
+    st.global_frame_cursor   = 0;
+
+    st.pending_events.clear();
+}
+
+void init_partb_mouth_state(PartBMouthState& st)
+{
+    if (st.cfg.win_len <= 0) st.cfg.win_len = 11;
+    if (st.cfg.win_len % 2 == 0) st.cfg.win_len += 1;
+
+    st.cfg.half = (st.cfg.win_len - 1) / 2;
+
+    if (static_cast<int>(st.cfg.corr_alpha.size()) != st.cfg.win_len) {
+        if (st.cfg.win_len == 11) {
+            st.cfg.corr_alpha = {
+                0.222222f, 0.309333f, 0.440000f, 0.592000f, 0.801778f,
+                1.000000f,
+                0.801778f, 0.592000f, 0.440000f, 0.309333f, 0.222222f
+            };
+        } else {
+            st.cfg.corr_alpha.assign(static_cast<size_t>(st.cfg.win_len), 1.0f);
+        }
+    }
+
+    // SG 계수행렬 W = (A'A)^(-1) A'
+    // A = [x^3 x^2 x 1], x = -half ... +half
+    Eigen::MatrixXd A(st.cfg.win_len, 4);
+
+    for (int r = 0; r < st.cfg.win_len; ++r) {
+        double x = static_cast<double>(r - st.cfg.half);
+        A(r, 0) = x * x * x;
+        A(r, 1) = x * x;
+        A(r, 2) = x;
+        A(r, 3) = 1.0;
+    }
+
+    Eigen::MatrixXd ATA     = A.transpose() * A;
+    Eigen::MatrixXd ATA_inv = ATA.ldlt().solve(Eigen::MatrixXd::Identity(4, 4));
+    Eigen::MatrixXd Wmat    = ATA_inv * A.transpose();
+
+    st.W.assign(4, std::vector<double>(static_cast<size_t>(st.cfg.win_len), 0.0));
+
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < st.cfg.win_len; ++c) {
+            st.W[static_cast<size_t>(r)][static_cast<size_t>(c)] = Wmat(r, c);
+        }
+    }
+
+    reset_partb_mouth_state(st);
+}
+
+// =======================
+// PART B 출력값(a0_scaled) -> mouth tick 변환
+// =======================
+float calculate_mouth(float a0_value, float max_MOUTH, float min_MOUTH)
+{
+    float x = std::max(0.0f, a0_value);
+
+    float mouth_tick = max_MOUTH + x * min_MOUTH;
+
+    float lo = max_MOUTH;
+    float hi = max_MOUTH + min_MOUTH;
+    if (lo > hi) std::swap(lo, hi);
+
+    return std::clamp(mouth_tick, lo, hi);
+}
+
+// =======================
+// PART B 내부 helper
+// =======================
+namespace {
+
+constexpr int CLS_STABLE             = 0;
+constexpr int CLS_INCREASE           = 1;
+constexpr int CLS_DECREASE           = 2;
+constexpr int CLS_PEAK_CONVEX_UP     = 3;
+constexpr int CLS_VALLEY_CONVEX_DOWN = 4;
+constexpr int CLS_UNKNOWN            = 5;
+
+constexpr bool DEBUG_ACCEPTED_PEAK = true;
+
+inline float partb_nan()
+{
+    return std::numeric_limits<float>::quiet_NaN();
+}
+
+inline bool partb_is_valid_float(float x)
+{
+    return std::isfinite(static_cast<double>(x));
+}
+
+inline float partb_interleaved_to_mono_avg(
+    const std::vector<float>& interleaved,
+    int frame_idx,
+    int channels
+)
+{
+    if (channels <= 0) return 0.0f;
+
+    const int base = frame_idx * channels;
+    float s = 0.0f;
+
+    for (int c = 0; c < channels; ++c) {
+        s += interleaved[base + c];
+    }
+
+    return s / static_cast<float>(channels);
+}
+
+void compute_partb_maxabs_peak_frames(
+    const std::vector<float>& interleaved,
+    int channels,
+    int samplerate,
+    int max_frames_40ms,
+    int hop_ms,
+    std::vector<float>& out_peak
+)
+{
+    out_peak.clear();
+    out_peak.reserve(static_cast<size_t>(max_frames_40ms));
+
+    if (channels <= 0) return;
+
+    const int total_frames      = static_cast<int>(interleaved.size()) / channels;
+    const int frames_per_update = samplerate * hop_ms / 1000;
+
+    for (int i = 0; i < max_frames_40ms; ++i) {
+        const int start_frame = i * frames_per_update;
+        const int end_frame   = std::min(start_frame + frames_per_update, total_frames);
+
+        if (start_frame >= total_frames) break;
+
+        float max_abs_val = 0.0f;
+
+        for (int f = start_frame; f < end_frame; ++f) {
+            float x = std::fabs(partb_interleaved_to_mono_avg(interleaved, f, channels));
+            if (x > max_abs_val) {
+                max_abs_val = x;
+            }
+        }
+
+        out_peak.push_back(max_abs_val);
+    }
+}
+
+double partb_polyval3(const std::vector<double>& p, double x)
+{
+    // p = [a3 a2 a1 a0]
+    return ((p[0] * x + p[1]) * x + p[2]) * x + p[3];
+}
+
+int classify_partb_shape(
+    const std::vector<double>& coeff,
+    int future_steps,
+    int& peak_rel,
+    float& peak_pred
+)
+{
+    peak_rel  = -1;
+    peak_pred = partb_nan();
+
+    std::vector<double> pq(static_cast<size_t>(future_steps + 1), 0.0);
+
+    for (int i = 0; i <= future_steps; ++i) {
+        pq[static_cast<size_t>(i)] = partb_polyval3(coeff, static_cast<double>(i));
+    }
+
+    std::vector<int> sgn(static_cast<size_t>(future_steps), 0);
+
+    for (int i = 0; i < future_steps; ++i) {
+        double d = pq[static_cast<size_t>(i + 1)] - pq[static_cast<size_t>(i)];
+
+        if (d > 0.0) {
+            sgn[static_cast<size_t>(i)] = 1;
+        } else if (d < 0.0) {
+            sgn[static_cast<size_t>(i)] = -1;
+        } else {
+            sgn[static_cast<size_t>(i)] = 0;
+        }
+    }
+
+    bool all_zero = true;
+    for (int v : sgn) {
+        if (v != 0) {
+            all_zero = false;
+            break;
+        }
+    }
+
+    if (all_zero) {
+        return CLS_STABLE;
+    }
+
+    std::vector<int> tmp = sgn;
+
+    for (int i = 1; i < static_cast<int>(tmp.size()); ++i) {
+        if (tmp[static_cast<size_t>(i)] == 0) {
+            tmp[static_cast<size_t>(i)] = tmp[static_cast<size_t>(i - 1)];
+        }
+    }
+
+    for (int i = static_cast<int>(tmp.size()) - 2; i >= 0; --i) {
+        if (tmp[static_cast<size_t>(i)] == 0) {
+            tmp[static_cast<size_t>(i)] = tmp[static_cast<size_t>(i + 1)];
+        }
+    }
+
+    for (int& v : tmp) {
+        if (v == 0) v = 1;
+    }
+
+    bool all_pos = true;
+    bool all_neg = true;
+
+    for (int v : tmp) {
+        if (v != 1)  all_pos = false;
+        if (v != -1) all_neg = false;
+    }
+
+    if (all_pos) return CLS_INCREASE;
+    if (all_neg) return CLS_DECREASE;
+
+    std::vector<int> change_idx;
+    for (int i = 0; i < static_cast<int>(tmp.size()) - 1; ++i) {
+        if (tmp[static_cast<size_t>(i + 1)] != tmp[static_cast<size_t>(i)]) {
+            change_idx.push_back(i);
+        }
+    }
+
+    if (static_cast<int>(change_idx.size()) == 1) {
+        const int jchg = change_idx[0];
+
+        if (tmp[static_cast<size_t>(jchg)] == 1 &&
+            tmp[static_cast<size_t>(jchg + 1)] == -1) {
+            peak_rel  = jchg + 1;
+            peak_pred = static_cast<float>(pq[static_cast<size_t>(peak_rel)]);
+            return CLS_PEAK_CONVEX_UP;
+        }
+
+        if (tmp[static_cast<size_t>(jchg)] == -1 &&
+            tmp[static_cast<size_t>(jchg + 1)] == 1) {
+            return CLS_VALLEY_CONVEX_DOWN;
+        }
+    }
+
+    return CLS_UNKNOWN;
+}
+
+// 현재 11점 SG로 만든 3차 다항식에서 연속 peak 위치/값 계산
+bool compute_continuous_peak_from_cubic(
+    const std::vector<double>& coeff,
+    double x_min,
+    double x_max,
+    double& x_peak,
+    float& y_peak
+)
+{
+    x_peak = x_min;
+    y_peak = partb_nan();
+
+    const double a = 3.0 * coeff[0];
+    const double b = 2.0 * coeff[1];
+    const double c = coeff[2];
+
+    std::vector<double> candidates;
+
+    auto push_if_valid = [&](double x) {
+        if (x >= x_min && x <= x_max) {
+            candidates.push_back(x);
+        }
+    };
+
+    // 경계도 후보에 포함
+    push_if_valid(x_min);
+    push_if_valid(x_max);
+
+    const double eps = 1e-12;
+
+    if (std::fabs(a) < eps) {
+        if (std::fabs(b) >= eps) {
+            push_if_valid(-c / b);
+        }
+    } else {
+        const double D = b * b - 4.0 * a * c;
+        if (D >= 0.0) {
+            const double sqrtD = std::sqrt(D);
+            push_if_valid((-b + sqrtD) / (2.0 * a));
+            push_if_valid((-b - sqrtD) / (2.0 * a));
+        }
+    }
+
+    if (candidates.empty()) return false;
+
+    bool found_max = false;
+    double best_x = x_min;
+    double best_y = -1e18;
+
+    for (double x : candidates) {
+        const double y = partb_polyval3(coeff, x);
+        const double d2 = 6.0 * coeff[0] * x + 2.0 * coeff[1];
+
+        if (d2 < 0.0) {
+            if (!found_max || y > best_y) {
+                found_max = true;
+                best_x = x;
+                best_y = y;
+            }
+        }
+    }
+
+    // 최대점 못 찾으면 후보 중 최대값 사용
+    if (!found_max) {
+        for (double x : candidates) {
+            const double y = partb_polyval3(coeff, x);
+            if (y > best_y) {
+                best_x = x;
+                best_y = y;
+            }
+        }
+    }
+
+    x_peak = best_x;
+    y_peak = static_cast<float>(best_y);
+    return partb_is_valid_float(y_peak);
+}
+
+// 연속 center 위치에 대해 corr_alpha를 선형보간으로 샘플링
+float sample_corr_alpha_linear(
+    const std::vector<float>& alpha,
+    double pos
+)
+{
+    if (alpha.empty()) return 0.0f;
+
+    if (pos <= 0.0) return alpha.front();
+    if (pos >= static_cast<double>(alpha.size() - 1)) return alpha.back();
+
+    int i0 = static_cast<int>(std::floor(pos));
+    int i1 = i0 + 1;
+    double frac = pos - static_cast<double>(i0);
+
+    return static_cast<float>(
+        (1.0 - frac) * alpha[static_cast<size_t>(i0)] +
+        frac * alpha[static_cast<size_t>(i1)]
+    );
+}
+
+void apply_correction_event_to_current(
+    const PartBMouthState& st,
+    const PendingCorrectionEvent& ev,
+    long long curr_begin_g,
+    const std::vector<float>& a0_base_curr,
+    std::vector<float>& a0_target_curr,
+    std::vector<unsigned char>& apply_mask_curr
+)
+{
+    if (a0_base_curr.empty()) return;
+
+    const long long curr_end_g = curr_begin_g + static_cast<long long>(a0_base_curr.size()) - 1;
+
+    if (ev.end_g < curr_begin_g || ev.start_g > curr_end_g) return;
+
+    const long long from_g = std::max(ev.start_g, curr_begin_g);
+    const long long to_g   = std::min(ev.end_g, curr_end_g);
+
+    for (long long g = from_g; g <= to_g; ++g) {
+        const int local_idx = static_cast<int>(g - curr_begin_g);
+        if (local_idx < 0 || local_idx >= static_cast<int>(a0_base_curr.size())) continue;
+
+        // corr_alpha 중심 index = half
+        // 현재 프레임이 연속 center에서 얼마나 떨어졌는지로 alpha 샘플링
+        double alpha_pos = static_cast<double>(st.cfg.half) +
+                           (static_cast<double>(g) - ev.center_g_f);
+
+        float alpha = sample_corr_alpha_linear(st.cfg.corr_alpha, alpha_pos);
+        if (alpha <= 0.0f) continue;
+
+        const float base_val = a0_base_curr[static_cast<size_t>(local_idx)];
+
+        float target_val =
+            base_val * (1.0f + (ev.scale - 1.0f) * alpha);
+
+        a0_target_curr[static_cast<size_t>(local_idx)] =
+            std::max(a0_target_curr[static_cast<size_t>(local_idx)], target_val);
+
+        apply_mask_curr[static_cast<size_t>(local_idx)] = 1;
+    }
+}
+
+} // namespace
+
+// =======================
+// PART B 메인 처리
+// =======================
+void build_partb_mouth_chunk(
+    const std::vector<float>& audio_curr,
+    const std::vector<float>& audio_future,
+    int channels,
+    int samplerate,
+    int num_motion_updates,
+    PartBMouthState& st,
+    std::vector<float>& out_a0_curr
+)
+{
+    out_a0_curr.clear();
+
+    // 1) current / future 40ms peak 추출
+    std::vector<float> peak_curr;
+    std::vector<float> peak_future;
+
+    compute_partb_maxabs_peak_frames(
+        audio_curr,
+        channels,
+        samplerate,
+        num_motion_updates,
+        st.cfg.hop_ms,
+        peak_curr
+    );
+
+    compute_partb_maxabs_peak_frames(
+        audio_future,
+        channels,
+        samplerate,
+        st.cfg.future_frames,
+        st.cfg.hop_ms,
+        peak_future
+    );
+
+    const int Ncurr = static_cast<int>(peak_curr.size());
+    if (Ncurr <= 0) return;
+
+    // 2) ext_raw = prev_raw_peaks + curr + future
+    std::vector<float> ext_raw;
+    ext_raw.reserve(st.prev_raw_peaks.size() + peak_curr.size() + peak_future.size());
+
+    ext_raw.insert(ext_raw.end(), st.prev_raw_peaks.begin(), st.prev_raw_peaks.end());
+    ext_raw.insert(ext_raw.end(), peak_curr.begin(), peak_curr.end());
+    ext_raw.insert(ext_raw.end(), peak_future.begin(), peak_future.end());
+
+    const int prev_count = static_cast<int>(st.prev_raw_peaks.size());
+    const int extN       = static_cast<int>(ext_raw.size());
+
+    // 3) MA3와 비교해서 더 큰 값 사용
+    std::vector<float> peak_apply = ext_raw;
+
+    if (extN >= 3) {
+        for (int i = 1; i < extN - 1; ++i) {
+            float ma = (ext_raw[static_cast<size_t>(i - 1)] +
+                        ext_raw[static_cast<size_t>(i)] +
+                        ext_raw[static_cast<size_t>(i + 1)]) / 3.0f;
+
+            peak_apply[static_cast<size_t>(i)] =
+                std::max(ext_raw[static_cast<size_t>(i)], ma);
+        }
+    }
+
+    // 4) SG fitting / class / peak logic
+    std::vector<float> ext_a0(static_cast<size_t>(extN), partb_nan());
+    std::vector<int>   ext_cls(static_cast<size_t>(extN), CLS_UNKNOWN);
+    std::vector<int>   ext_peak_rel(static_cast<size_t>(extN), -1);
+    std::vector<float> ext_peak_pred(static_cast<size_t>(extN), partb_nan());
+
+    // 현재 프레임 11점 SG 다항식 coeff 저장 (연속 peak 계산용)
+    std::vector<std::vector<double>> ext_coeff(static_cast<size_t>(extN), std::vector<double>(4, 0.0));
+    std::vector<unsigned char> ext_coeff_valid(static_cast<size_t>(extN), 0);
+
+    if (extN >= st.cfg.win_len) {
+        for (int p = st.cfg.half; p <= extN - st.cfg.half - 1; ++p) {
+            std::vector<double> coeff(4, 0.0);
+
+            for (int r = 0; r < 4; ++r) {
+                double s = 0.0;
+                for (int c = 0; c < st.cfg.win_len; ++c) {
+                    const int idx = p - st.cfg.half + c;
+                    s += st.W[static_cast<size_t>(r)][static_cast<size_t>(c)] *
+                         peak_apply[static_cast<size_t>(idx)];
+                }
+                coeff[static_cast<size_t>(r)] = s;
+            }
+
+            ext_a0[static_cast<size_t>(p)] = static_cast<float>(coeff[3]);
+            ext_coeff[static_cast<size_t>(p)] = coeff;
+            ext_coeff_valid[static_cast<size_t>(p)] = 1;
+
+            int peak_rel = -1;
+            float peak_pred = partb_nan();
+
+            int cls = classify_partb_shape(
+                coeff,
+                st.cfg.future_steps,
+                peak_rel,
+                peak_pred
+            );
+
+            ext_cls[static_cast<size_t>(p)]       = cls;
+            ext_peak_rel[static_cast<size_t>(p)]  = peak_rel;
+            ext_peak_pred[static_cast<size_t>(p)] = peak_pred;
+        }
+    }
+
+    // 5) current chunk 기준 a0_base 추출
+    const int curr_p_begin = prev_count;
+
+    std::vector<float> a0_base_curr(static_cast<size_t>(Ncurr), 0.0f);
+    std::vector<float> prominence_curr(static_cast<size_t>(Ncurr), partb_nan());
+    std::vector<unsigned char> is_first_class3(static_cast<size_t>(Ncurr), 0);
+
+    for (int c = 0; c < Ncurr; ++c) {
+        const int p = curr_p_begin + c;
+
+        float v = 0.0f;
+
+        if (p >= 0 && p < extN && partb_is_valid_float(ext_a0[static_cast<size_t>(p)])) {
+            v = ext_a0[static_cast<size_t>(p)];
+        } else if (p >= 0 && p < extN) {
+            v = peak_apply[static_cast<size_t>(p)];
+        }
+
+        a0_base_curr[static_cast<size_t>(c)] = std::max(v, 0.0f);
+    }
+
+    // 6) valley tracking
+    for (int c = 0; c < Ncurr; ++c) {
+        const int p = curr_p_begin + c;
+        const long long g = st.global_frame_cursor + c;
+
+        int cls = CLS_UNKNOWN;
+        if (p >= 0 && p < extN) {
+            cls = ext_cls[static_cast<size_t>(p)];
+        }
+
+        if (cls == CLS_VALLEY_CONVEX_DOWN) {
+            if (!st.current_valley_active) {
+                st.current_valley_active  = true;
+                st.current_valley_min_val = a0_base_curr[static_cast<size_t>(c)];
+                st.current_valley_min_idx = g;
+            } else {
+                if (a0_base_curr[static_cast<size_t>(c)] < st.current_valley_min_val) {
+                    st.current_valley_min_val = a0_base_curr[static_cast<size_t>(c)];
+                    st.current_valley_min_idx = g;
+                }
+            }
+        } else {
+            if (st.current_valley_active) {
+                st.last_completed_valley_val = st.current_valley_min_val;
+                st.last_completed_valley_idx = st.current_valley_min_idx;
+
+                st.current_valley_active  = false;
+                st.current_valley_min_val = partb_nan();
+                st.current_valley_min_idx = -1;
+            }
+        }
+
+        if (partb_is_valid_float(st.last_completed_valley_val)) {
+            prominence_curr[static_cast<size_t>(c)] =
+                a0_base_curr[static_cast<size_t>(c)] - st.last_completed_valley_val;
+        }
+    }
+
+    // 7) 연속 class3 중 첫 지점만 표시
+    bool prev_class3 = st.prev_was_class3;
+
+    for (int c = 0; c < Ncurr; ++c) {
+        const int p = curr_p_begin + c;
+
+        bool now_class3 =
+            (p >= 0 && p < extN &&
+             ext_cls[static_cast<size_t>(p)] == CLS_PEAK_CONVEX_UP);
+
+        is_first_class3[static_cast<size_t>(c)] =
+            (now_class3 && !prev_class3) ? 1 : 0;
+
+        prev_class3 = now_class3;
+    }
+
+    st.prev_was_class3 = prev_class3;
+
+    // 8) pending correction 먼저 적용
+    std::vector<float> a0_target_curr = a0_base_curr;
+    std::vector<unsigned char> apply_mask_curr(static_cast<size_t>(Ncurr), 0);
+    std::vector<long long> enforce_centers;
+
+    const long long curr_begin_g = st.global_frame_cursor;
+    const long long curr_end_g   = st.global_frame_cursor + Ncurr - 1;
+
+    {
+        std::vector<PendingCorrectionEvent> remain_events;
+        remain_events.reserve(st.pending_events.size());
+
+        for (const auto& ev : st.pending_events) {
+            apply_correction_event_to_current(
+                st,
+                ev,
+                curr_begin_g,
+                a0_base_curr,
+                a0_target_curr,
+                apply_mask_curr
+            );
+
+            long long center_round = static_cast<long long>(std::llround(ev.center_g_f));
+            if (center_round >= curr_begin_g && center_round <= curr_end_g) {
+                enforce_centers.push_back(center_round);
+            }
+
+            if (ev.end_g > curr_end_g) {
+                remain_events.push_back(ev);
+            }
+        }
+
+        st.pending_events.swap(remain_events);
+    }
+
+    // 9) 새 이벤트 검출 + correction 적용
+    for (int c = 0; c < Ncurr; ++c) {
+        if (!is_first_class3[static_cast<size_t>(c)]) continue;
+
+        const long long g = st.global_frame_cursor + c;
+        if (g < st.next_allowed_global_k) continue;
+
+        const int p = curr_p_begin + c;
+        if (p < 0 || p >= extN) continue;
+
+        const float prominence = prominence_curr[static_cast<size_t>(c)];
+        if (!partb_is_valid_float(prominence) || prominence <= st.cfg.prominence_th) continue;
+
+        if (!ext_coeff_valid[static_cast<size_t>(p)]) continue;
+
+        // ------------------------------------------------------------
+        // 연속 peak 위치/값 계산 (현재 11점 SG 다항식 기준)
+        // ------------------------------------------------------------
+        double peak_rel_f = 0.0;
+        float peak_pred_f = partb_nan();
+
+        bool peak_ok = compute_continuous_peak_from_cubic(
+            ext_coeff[static_cast<size_t>(p)],
+            0.0,
+            static_cast<double>(st.cfg.future_steps),
+            peak_rel_f,
+            peak_pred_f
+        );
+
+        if (!peak_ok) continue;
+        if (!partb_is_valid_float(peak_pred_f) || peak_pred_f <= st.cfg.peak_trigger_min) continue;
+
+        const double center_g_f = static_cast<double>(g) + peak_rel_f;
+
+        // center amplitude는 연속 peak 값 기반
+        float center_base = std::max(0.0f, peak_pred_f);
+        if (!partb_is_valid_float(center_base)) {
+            center_base = a0_base_curr[static_cast<size_t>(c)];
+        }
+
+        if (center_base >= st.cfg.min_open) continue;
+
+        const float s = st.cfg.min_open / std::max(center_base, 1e-12f);
+
+        // current chunk 안에서만 correction 적용
+        const int min_left_ramp_frames = 3;
+        const double desired_left_steps =
+            std::max(peak_rel_f, static_cast<double>(min_left_ramp_frames));
+
+        long long start_g = static_cast<long long>(std::floor(center_g_f - desired_left_steps));
+        if (start_g < curr_begin_g) start_g = curr_begin_g;
+
+        long long end_g = static_cast<long long>(std::ceil(center_g_f + st.cfg.half));
+        if (end_g > curr_end_g) end_g = curr_end_g;
+
+        PendingCorrectionEvent ev;
+        ev.start_g    = start_g;
+        ev.center_g_f = center_g_f;
+        ev.end_g      = static_cast<long long>(std::ceil(center_g_f + st.cfg.half));
+        ev.scale      = s;
+
+        apply_correction_event_to_current(
+            st,
+            ev,
+            curr_begin_g,
+            a0_base_curr,
+            a0_target_curr,
+            apply_mask_curr
+        );
+
+        long long center_round = static_cast<long long>(std::llround(center_g_f));
+        if (center_round >= curr_begin_g && center_round <= curr_end_g) {
+            enforce_centers.push_back(center_round);
+        }
+
+        if (ev.end_g > curr_end_g) {
+            st.pending_events.push_back(ev);
+        }
+
+        if (DEBUG_ACCEPTED_PEAK) {
+            const double candidate_time_sec =
+                static_cast<double>(g * st.cfg.hop_ms) / 1000.0;
+
+            const double center_time_sec =
+                center_g_f * static_cast<double>(st.cfg.hop_ms) / 1000.0;
+
+            std::cout << std::fixed << std::setprecision(3)
+                      << "[PART B ACCEPTED PEAK] "
+                      << "candidate_t=" << candidate_time_sec << "s, "
+                      << "center_t="    << center_time_sec    << "s, "
+                      << "candidate_g=" << g << ", "
+                      << "center_g_f="  << center_g_f << ", "
+                      << "peak_rel_f="  << peak_rel_f << ", "
+                      << "peak_pred_f=" << peak_pred_f << ", "
+                      << "prominence="  << prominence << ", "
+                      << "center_base=" << center_base << ", "
+                      << "scale="       << s
+                      << std::endl;
+        }
+
+        st.next_allowed_global_k = ev.end_g + 1;
+    }
+
+    // 10) correction 적용된 부분만 약하게 smoothing
+    std::vector<float> a0_scaled = a0_target_curr;
+
+    for (int j = 2; j <= Ncurr - 3; ++j) {
+        int cnt = 0;
+
+        for (int t = j - 2; t <= j + 2; ++t) {
+            if (apply_mask_curr[static_cast<size_t>(t)]) cnt++;
+        }
+
+        if (cnt >= 2) {
+            a0_scaled[static_cast<size_t>(j)] =
+                (1.0f * a0_target_curr[static_cast<size_t>(j - 2)] +
+                 2.0f * a0_target_curr[static_cast<size_t>(j - 1)] +
+                 3.0f * a0_target_curr[static_cast<size_t>(j)]     +
+                 2.0f * a0_target_curr[static_cast<size_t>(j + 1)] +
+                 1.0f * a0_target_curr[static_cast<size_t>(j + 2)]) / 9.0f;
+        }
+    }
+
+    // 중심 peak는 min_open 이상 강제
+    for (long long center_g : enforce_centers) {
+        if (center_g >= curr_begin_g && center_g <= curr_end_g) {
+            const int local_idx = static_cast<int>(center_g - curr_begin_g);
+            a0_scaled[static_cast<size_t>(local_idx)] =
+                std::max(a0_scaled[static_cast<size_t>(local_idx)], st.cfg.min_open);
+        }
+    }
+
+    for (float& v : a0_scaled) {
+        if (!partb_is_valid_float(v) || v < 0.0f) {
+            v = 0.0f;
+        }
+    }
+
+    out_a0_curr = a0_scaled;
+
+    // 11) 다음 chunk용 이전 raw peak 저장
+    if (peak_curr.size() >= static_cast<size_t>(st.cfg.half)) {
+        st.prev_raw_peaks.assign(
+            peak_curr.end() - st.cfg.half,
+            peak_curr.end()
+        );
+    } else {
+        st.prev_raw_peaks = peak_curr;
+    }
+
+    st.global_frame_cursor += Ncurr;
+}
 
 
 //파일 경로 생성
@@ -75,12 +880,6 @@ std::pair<float, size_t> find_peak(const std::vector<float>& audio_buffer) {
     }
 
     return {max_sample, max_index};
-}
-
-float calculate_mouth(float up2mouth, float max_MOUTH, float min_MOUTH) {
-
-    float mouth = max_MOUTH * up2mouth - up2mouth * (max_MOUTH - min_MOUTH)/0.7;
-    return mouth;
 }
 
 void save_audio_segment(const std::string& outputFilePath, const std::vector<float>& audioData, size_t dataSize) {
