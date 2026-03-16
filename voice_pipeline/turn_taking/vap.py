@@ -11,8 +11,12 @@ import logging
 import struct
 import time
 
-import torch
-import torchaudio.functional
+try:
+    import torch
+    import torchaudio.functional
+except ImportError:
+    torch = None  # type: ignore[assignment]
+    torchaudio = None  # type: ignore[assignment]
 
 from voice_pipeline.core.config import AudioConfig, TTSConfig, VAPConfig
 from voice_pipeline.core.interfaces import IVAP
@@ -41,6 +45,11 @@ class VAPWrapper(IVAP):
         audio_config: AudioConfig,
         tts_config: TTSConfig,
     ) -> None:
+        if torch is None:
+            raise VAPError(
+                "torch and torchaudio are required for VAPWrapper. "
+                "Install with: uv sync --extra models-pytorch"
+            )
         self._config = vap_config
         self._audio_config = audio_config
         self._robot_sample_rate = tts_config.output_sample_rate

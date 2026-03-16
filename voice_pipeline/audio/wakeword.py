@@ -8,9 +8,14 @@ import logging
 import re
 import struct
 
-import torch
 from google.cloud import speech
-from silero_vad import load_silero_vad
+
+try:
+    import torch
+    from silero_vad import load_silero_vad
+except ImportError:
+    torch = None  # type: ignore[assignment]
+    load_silero_vad = None  # type: ignore[assignment]
 
 from voice_pipeline.audio.exceptions import WakewordError
 from voice_pipeline.core.config import AudioConfig, WakewordConfig
@@ -55,6 +60,12 @@ class WakewordDetector(IWakewordDetector):
     def __init__(self, config: WakewordConfig, audio_config: AudioConfig) -> None:
         self._config = config
         self._audio_config = audio_config
+
+        if torch is None or load_silero_vad is None:
+            raise WakewordError(
+                "torch and silero-vad are required for wakeword detection. "
+                "Install with: uv sync --extra models-pytorch"
+            )
 
         # Load Silero VAD model
         try:
