@@ -89,6 +89,7 @@ class Orchestrator:
         self._pending_truncation: _PendingTruncation | None = None
         self._user_msg_id: int | None = None
         self._assistant_msg_id: int | None = None
+        self._last_frame_time = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -191,7 +192,9 @@ class Orchestrator:
 
         self._asr.start()
         self._set_led(LEDState.IDLE)
-        self._last_text_change_time = time.monotonic()
+        now = time.monotonic()
+        self._last_text_change_time = now
+        self._last_frame_time = now
         logger.info("Orchestrator session started")
 
     def _end_session(self) -> None:
@@ -217,6 +220,7 @@ class Orchestrator:
         if frame is not None:
             frames = [frame]
             self._drain_available_frames(audio_queue, frames)
+            self._last_frame_time = time.monotonic()
         else:
             frames = []
 
@@ -276,7 +280,11 @@ class Orchestrator:
         if self._playback_state == PlaybackState.STOP_PENDING:
             self._check_stop_pending_watchdog()
 
-        # 11. Session timeout
+        # 11. Audio starvation check
+        if self._check_audio_starvation():
+            return True
+
+        # 12. Session timeout
         return self._check_session_timeout()
 
     def _get_frame(self, audio_queue: queue.Queue[AudioFrame]) -> AudioFrame | None:
@@ -599,6 +607,21 @@ class Orchestrator:
             logger.warning("STOP_PENDING watchdog timeout — forcing IDLE")
             self._turn_detector.reset()
             self._reset_playback_state()
+
+    # ------------------------------------------------------------------
+    # Audio starvation
+    # ------------------------------------------------------------------
+
+    def _check_audio_starvation(self) -> bool:
+        """Terminate if no audio frames arrived for too long."""
+        elapsed = time.monotonic() - self._last_frame_time
+        if elapsed >= self._config.audio_starvation_timeout_sec:
+            logger.error(
+                "Audio starvation (%.1fs without frames) — terminating session",
+                elapsed,
+            )
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Session timeout

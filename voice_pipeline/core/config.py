@@ -341,12 +341,16 @@ class OrchestratorConfig:
         session_timeout_sec: Inactivity timeout before auto-exit.
         frame_timeout_sec: audio_queue.get() timeout per frame.
         stop_pending_timeout_sec: Watchdog timeout for STOP_PENDING state.
+        audio_starvation_timeout_sec: Terminate session if no audio frames
+            arrive for this long. Detects AudioInput thread death regardless
+            of playback or generation state.
     """
 
     exit_keywords: tuple[str, ...] = ("bye", "goodbye")
     session_timeout_sec: float = 60.0
     frame_timeout_sec: float = 0.1
     stop_pending_timeout_sec: float = 5.0
+    audio_starvation_timeout_sec: float = 5.0
 
 
 @dataclass

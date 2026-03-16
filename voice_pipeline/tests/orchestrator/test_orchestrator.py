@@ -884,3 +884,52 @@ class TestDrainAudio:
         orch._drain_audio_to_bridge()
 
         mocks["bridge"].send_audio_end.assert_called_once()
+
+
+# ===================================================================
+# Audio starvation
+# ===================================================================
+
+
+class TestAudioStarvation:
+    def test_starvation_terminates_session(self) -> None:
+        """Session terminates when no audio frames arrive for starvation timeout."""
+        orch, mocks = _make_orchestrator()
+        orch._start_session()
+
+        # Push _last_frame_time back beyond the starvation threshold
+        orch._last_frame_time = time.monotonic() - (
+            orch._config.audio_starvation_timeout_sec + 0.1
+        )
+
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue()
+        assert orch._run_frame(audio_queue) is True
+
+    def test_starvation_resets_on_frame(self) -> None:
+        """Receiving a frame resets the starvation timer."""
+        orch, mocks = _make_orchestrator()
+        orch._start_session()
+
+        # Expire starvation timer
+        orch._last_frame_time = time.monotonic() - 100.0
+
+        # Push a frame — should reset timer and NOT terminate
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue()
+        audio_queue.put(b"\x00" * 960)
+
+        assert orch._run_frame(audio_queue) is False
+        # Timer was refreshed — verify by checking it's recent
+        assert time.monotonic() - orch._last_frame_time < 1.0
+
+    def test_starvation_not_paused_during_playback(self) -> None:
+        """Audio starvation fires even during PLAYING state."""
+        orch, mocks = _make_orchestrator()
+        orch._start_session()
+
+        orch._playback_state = PlaybackState.PLAYING
+        orch._last_frame_time = time.monotonic() - (
+            orch._config.audio_starvation_timeout_sec + 0.1
+        )
+
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue()
+        assert orch._run_frame(audio_queue) is True
