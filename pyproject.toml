@@ -4,24 +4,14 @@ version = "0.1.0"
 description = "Voice conversation robot pipeline"
 requires-python = ">=3.11"
 dependencies = [
-    "einops>=0.8",
     "google-cloud-speech>=2.0,<3.0",
-    "maai>=0.1",
-    "omegaconf>=2.3",
     "openai>=1.66,<2.0",
-    "onnxruntime>=1.24",
-    "psutil>=7.2.2",
-    "pyaudio>=0.2.14",
-    "pytorch-lightning>=2.0",
-    "sentence-transformers>=3.0,<4.0",
-    "silero-vad>=5.0",
-    "soundfile>=0.13",
-    "tiktoken>=0.5",
-    "torchmetrics>=1.8",
-    "turngpt",
-    "vap",
-    "wandb>=0.25",
     "websockets>=14.0,<17.0",
+    "tiktoken>=0.5",
+    "silero-vad>=5.0",
+    "pyaudio>=0.2.14",
+    "onnxruntime>=1.24",
+    "transformers>=4.0",
 ]
 
 [tool.uv.sources]
@@ -29,7 +19,20 @@ turngpt = { path = "external/TurnGPT", editable = true }
 vap = { path = "external/VoiceActivityProjection", editable = true }
 
 [project.optional-dependencies]
-led = ["rpi5-ws2812>=0.1.2"]
+models-pytorch = [
+    "turngpt",
+    "vap",
+    "maai>=0.1",
+    "torchaudio",
+    "einops>=0.8",
+    "omegaconf>=2.3",
+    "pytorch-lightning>=2.0",
+    "torchmetrics>=1.8",
+    "wandb>=0.25",
+    "soundfile>=0.13",
+]
+hardware = ["rpi5-ws2812>=0.1.2"]
+similarity = ["sentence-transformers>=3.0,<4.0"]
 onnx-similarity = ["optimum[onnxruntime]"]
 
 [dependency-groups]
