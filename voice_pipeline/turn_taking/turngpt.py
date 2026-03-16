@@ -15,15 +15,16 @@ Both backends use KV cache to avoid reprocessing stable prefix tokens.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import torch
-from torch import Tensor
 
 from voice_pipeline.core.config import TurnGPTConfig
 from voice_pipeline.core.interfaces import ITurnGPT
 from voice_pipeline.turn_taking.exceptions import TurnGPTError
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 logger = logging.getLogger("voice_pipeline.turn_taking.turngpt")
 
@@ -57,7 +58,7 @@ class TurnGPTWrapper(ITurnGPT):
             self._backend = "pytorch"
             self._init_pytorch(config)
 
-        self._cached_input_ids: Tensor | None = None
+        self._cached_input_ids: Tensor | np.ndarray | None = None
         self._past_key_values: Any = None  # tuple (pytorch) or dict (onnx)
         self._cached_trp_prob: float = _DEFAULT_PROBABILITY
 
@@ -67,8 +68,10 @@ class TurnGPTWrapper(ITurnGPT):
 
     def _init_pytorch(self, config: TurnGPTConfig) -> None:
         try:
+            import torch
             from turngpt import TurnGPT
 
+            self._torch = torch
             model = TurnGPT.load_from_checkpoint(config.checkpoint_path)
             self._model = model.to(config.device).eval()
             self._tokenizer = model.tokenizer
@@ -109,7 +112,6 @@ class TurnGPTWrapper(ITurnGPT):
     # Public interface
     # ------------------------------------------------------------------
 
-    @torch.no_grad()
     def predict(self, dialog_text: str) -> float:
         """Predict turn-shift probability for the given dialog.
 
@@ -142,7 +144,9 @@ class TurnGPTWrapper(ITurnGPT):
     # Tokenization (shared)
     # ------------------------------------------------------------------
 
-    def _tokenize_with_window(self, dialog_text: str) -> tuple[Tensor, Tensor]:
+    def _tokenize_with_window(
+        self, dialog_text: str
+    ) -> tuple[Tensor | np.ndarray, Tensor | np.ndarray]:
         """Tokenize dialog, evicting old turns if over max_context_tokens.
 
         Keeps the last ``keep_turns`` completed turns plus the current
@@ -173,13 +177,16 @@ class TurnGPTWrapper(ITurnGPT):
 
         return input_ids, speaker_ids
 
-    def _tokenize(self, text: str) -> tuple[Tensor, Tensor]:
-        """Tokenize text and return (input_ids, speaker_ids) as tensors."""
+    def _tokenize(self, text: str) -> tuple[Tensor | np.ndarray, Tensor | np.ndarray]:
+        """Tokenize text and return (input_ids, speaker_ids).
+
+        Returns torch Tensors for PyTorch backend, numpy arrays for ONNX.
+        """
         if self._backend == "pytorch":
             encoded = self._tokenizer(text, return_tensors="pt")
             return encoded["input_ids"], encoded["speaker_ids"]
 
-        encoded = self._hf_tokenizer(text, return_tensors="pt")
+        encoded = self._hf_tokenizer(text, return_tensors="np")
         input_ids = encoded["input_ids"]
         speaker_ids = _build_speaker_ids(
             input_ids,
@@ -194,6 +201,14 @@ class TurnGPTWrapper(ITurnGPT):
     # ------------------------------------------------------------------
 
     def _pytorch_forward_with_cache(
+        self,
+        input_ids: Tensor,
+        speaker_ids: Tensor,
+    ) -> float:
+        with self._torch.no_grad():
+            return self._pytorch_forward_with_cache_inner(input_ids, speaker_ids)
+
+    def _pytorch_forward_with_cache_inner(
         self,
         input_ids: Tensor,
         speaker_ids: Tensor,
@@ -239,8 +254,8 @@ class TurnGPTWrapper(ITurnGPT):
 
     def _onnx_forward_with_cache(
         self,
-        input_ids: Tensor,
-        speaker_ids: Tensor,
+        input_ids: np.ndarray,
+        speaker_ids: np.ndarray,
     ) -> float:
         cached = self._cached_input_ids
         past = self._past_key_values
@@ -290,15 +305,13 @@ class TurnGPTWrapper(ITurnGPT):
 
     def _onnx_run(
         self,
-        input_ids: Tensor,
-        speaker_ids: Tensor,
+        input_ids: np.ndarray,
+        speaker_ids: np.ndarray,
         position_offset: int,
         past: dict[str, np.ndarray],
     ) -> tuple[float, dict[str, np.ndarray]]:
         """Run ONNX KV-cache model. Returns (trp, presents)."""
-        ids_np = input_ids.numpy()
-        sp_np = speaker_ids.numpy()
-        seq_len = ids_np.shape[1]
+        seq_len = input_ids.shape[1]
         pos_np = np.arange(
             position_offset,
             position_offset + seq_len,
@@ -306,8 +319,8 @@ class TurnGPTWrapper(ITurnGPT):
         ).reshape(1, -1)
 
         feeds = {
-            "input_ids": ids_np,
-            "speaker_ids": sp_np,
+            "input_ids": input_ids,
+            "speaker_ids": speaker_ids,
             "position_ids": pos_np,
             **past,
         }
@@ -323,13 +336,13 @@ class TurnGPTWrapper(ITurnGPT):
 
     def _onnx_run_no_cache(
         self,
-        input_ids: Tensor,
-        speaker_ids: Tensor,
+        input_ids: np.ndarray,
+        speaker_ids: np.ndarray,
     ) -> float:
         """Run ONNX no-cache model. Returns trp."""
         feeds = {
-            "input_ids": input_ids.numpy(),
-            "speaker_ids": speaker_ids.numpy(),
+            "input_ids": input_ids,
+            "speaker_ids": speaker_ids,
         }
         outputs = self._ort_session.run(None, feeds)
         return _extract_trp_numpy(outputs[0], self._eos_token_id)
@@ -349,8 +362,14 @@ class TurnGPTWrapper(ITurnGPT):
 # ======================================================================
 
 
-def _common_prefix_length(a: Tensor, b: Tensor) -> int:
-    """Return the length of the common token prefix between two tensors."""
+def _common_prefix_length(
+    a: Tensor | np.ndarray, b: Tensor | np.ndarray
+) -> int:
+    """Return the length of the common token prefix between two arrays.
+
+    Works with both numpy arrays and torch tensors via duck typing:
+    both support .reshape(), .shape, ==, .all(), and .argmin().
+    """
     a_flat = a.reshape(-1)
     b_flat = b.reshape(-1)
     min_len = min(a_flat.shape[0], b_flat.shape[0])
@@ -359,19 +378,21 @@ def _common_prefix_length(a: Tensor, b: Tensor) -> int:
     matches = a_flat[:min_len] == b_flat[:min_len]
     if matches.all():
         return min_len
-    return int((~matches).nonzero(as_tuple=False)[0].item())
+    # First mismatch index. Multiply by 1 to convert bool→int
+    # (torch.argmax does not accept bool, numpy does; * 1 works for both).
+    return int((~matches * 1).argmax())
 
 
 def _build_speaker_ids(
-    input_ids: Tensor,
+    input_ids: np.ndarray,
     eos_id: int,
     sp1_id: int,
     sp2_id: int,
-) -> Tensor:
-    """Build speaker_ids tensor from input_ids, alternating at <ts> tokens."""
-    speaker_ids = torch.full_like(input_ids, sp1_id)
-    batch, eos_idx = torch.where(input_ids == eos_id)
-    for b in batch.unique():
+) -> np.ndarray:
+    """Build speaker_ids array from input_ids, alternating at <ts> tokens."""
+    speaker_ids = np.full_like(input_ids, sp1_id)
+    batch, eos_idx = np.where(input_ids == eos_id)
+    for b in np.unique(batch):
         tmp_eos = eos_idx[batch == b]
         if len(tmp_eos) == 1:
             speaker_ids[b, tmp_eos[0] + 1 :] = sp2_id
