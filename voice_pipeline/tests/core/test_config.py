@@ -77,7 +77,7 @@ class TestCppBridgeConfig:
     def test_defaults(self) -> None:
         cfg = CppBridgeConfig()
         assert cfg.host == "localhost"
-        assert cfg.port == 8765
+        assert cfg.port == 9200
 
 
 class TestWakewordConfig:

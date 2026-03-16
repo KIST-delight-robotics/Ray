@@ -13,7 +13,6 @@ dependencies = [
     "psutil>=7.2.2",
     "pyaudio>=0.2.14",
     "pytorch-lightning>=2.0",
-    "rpi5-ws2812>=0.1.2",
     "sentence-transformers>=3.0,<4.0",
     "silero-vad>=5.0",
     "soundfile>=0.13",
@@ -30,6 +29,7 @@ turngpt = { path = "external/TurnGPT", editable = true }
 vap = { path = "external/VoiceActivityProjection", editable = true }
 
 [project.optional-dependencies]
+led = ["rpi5-ws2812>=0.1.2"]
 onnx-similarity = ["optimum[onnxruntime]"]
 
 [dependency-groups]

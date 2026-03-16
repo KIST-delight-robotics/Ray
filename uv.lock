@@ -2582,7 +2582,6 @@ dependencies = [
     { name = "psutil" },
     { name = "pyaudio" },
     { name = "pytorch-lightning" },
-    { name = "rpi5-ws2812" },
     { name = "sentence-transformers" },
     { name = "silero-vad" },
     { name = "soundfile" },
@@ -2595,6 +2594,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+led = [
+    { name = "rpi5-ws2812" },
+]
 onnx-similarity = [
     { name = "optimum", extra = ["onnxruntime"] },
 ]
@@ -2617,7 +2619,7 @@ requires-dist = [
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pyaudio", specifier = ">=0.2.14" },
     { name = "pytorch-lightning", specifier = ">=2.0" },
-    { name = "rpi5-ws2812", specifier = ">=0.1.2" },
+    { name = "rpi5-ws2812", marker = "extra == 'led'", specifier = ">=0.1.2" },
     { name = "sentence-transformers", specifier = ">=3.0,<4.0" },
     { name = "silero-vad", specifier = ">=5.0" },
     { name = "soundfile", specifier = ">=0.13" },
@@ -2628,7 +2630,7 @@ requires-dist = [
     { name = "wandb", specifier = ">=0.25" },
     { name = "websockets", specifier = ">=14.0,<17.0" },
 ]
-provides-extras = ["onnx-similarity"]
+provides-extras = ["led", "onnx-similarity"]
 
 [package.metadata.requires-dev]
 dev = [
