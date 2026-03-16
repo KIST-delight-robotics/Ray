@@ -95,8 +95,12 @@ def main() -> None:
             history, config.history, DEFAULT_SYSTEM_PROMPT, token_counter
         )
         turn_detector = TurnDetector(
-            async_vap, async_turngpt, similarity,
-            config.turn_detector, config.similarity, config.audio,
+            async_vap,
+            async_turngpt,
+            similarity,
+            config.turn_detector,
+            config.similarity,
+            config.audio,
         )
         generator = SpeechGenerator(context_builder, llm, tts, config.speech_generator, executor)
         truncator = TimestampTruncator()

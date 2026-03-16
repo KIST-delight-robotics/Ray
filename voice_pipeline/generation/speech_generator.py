@@ -239,7 +239,9 @@ class SpeechGenerator(ISpeechGenerator):
             audio_sec = len(total_audio) / (24000 * 2)
             logger.info(
                 "TTS done (%.1fs): %.1fs audio → STREAMING [run=%d]",
-                t_tts - t_llm, audio_sec, run_id,
+                t_tts - t_llm,
+                audio_sec,
+                run_id,
             )
 
             # 6. Build ResponseData

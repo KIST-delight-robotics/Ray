@@ -116,8 +116,10 @@ class TurnDetector(ITurnDetector):
         ):
             logger.info(
                 "TURN_SHIFT: p_now=%.2f p_fut=%.2f turngpt=%.2f silence=%.2fs text=%r",
-                vap_result.p_now, vap_result.p_fut,
-                self._turngpt_prob, self._silence_elapsed_sec,
+                vap_result.p_now,
+                vap_result.p_fut,
+                self._turngpt_prob,
+                self._silence_elapsed_sec,
                 asr_text[:60],
             )
             self._turn_state = _TurnState.ROBOT_TURN
@@ -218,7 +220,8 @@ class TurnDetector(ITurnDetector):
             ):
                 logger.info(
                     "INTERRUPT (vap): p_now=%.2f p_fut=%.2f",
-                    vap_result.p_now, vap_result.p_fut,
+                    vap_result.p_now,
+                    vap_result.p_fut,
                 )
                 return TurnDecision(interrupt=True)
             # p_now > threshold but p_fut <= threshold -> backchannel, no action
@@ -226,7 +229,8 @@ class TurnDetector(ITurnDetector):
             # No robot audio (gap before playback starts)
             logger.info(
                 "INTERRUPT (no_robot_audio): p_now=%.2f p_fut=%.2f",
-                vap_result.p_now, vap_result.p_fut,
+                vap_result.p_now,
+                vap_result.p_fut,
             )
             return TurnDecision(interrupt=True)
 
@@ -251,7 +255,9 @@ class TurnDetector(ITurnDetector):
             if similarity >= self._similarity_threshold:
                 logger.info(
                     "PREPARE skipped (similarity=%.2f): %r → %r",
-                    similarity, self._last_prepare_text[:40], asr_text[:40],
+                    similarity,
+                    self._last_prepare_text[:40],
+                    asr_text[:40],
                 )
                 self._asr_has_changed = False
                 return False

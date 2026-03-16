@@ -7,7 +7,7 @@ Current: Phase 1–3 + Phase 4 + Phase 5 + Phase 6.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Literal
 
 from voice_pipeline.core.exceptions import ConfigurationError
 
@@ -135,9 +135,7 @@ class WakewordConfig:
 
     def __post_init__(self) -> None:
         if not (0.0 <= self.vad_threshold <= 1.0):
-            raise ConfigurationError(
-                f"vad_threshold must be in [0, 1], got {self.vad_threshold}"
-            )
+            raise ConfigurationError(f"vad_threshold must be in [0, 1], got {self.vad_threshold}")
 
 
 @dataclass
@@ -158,9 +156,7 @@ class LEDConfig:
 
     def __post_init__(self) -> None:
         if not (0 <= self.brightness <= 255):
-            raise ConfigurationError(
-                f"brightness must be in [0, 255], got {self.brightness}"
-            )
+            raise ConfigurationError(f"brightness must be in [0, 255], got {self.brightness}")
 
 
 @dataclass
@@ -187,15 +183,11 @@ class VAPConfig:
 
     def __post_init__(self) -> None:
         if self.context_sec <= 0:
-            raise ConfigurationError(
-                f"context_sec must be positive, got {self.context_sec}"
-            )
+            raise ConfigurationError(f"context_sec must be positive, got {self.context_sec}")
         if self.step_sec <= 0:
             raise ConfigurationError(f"step_sec must be positive, got {self.step_sec}")
         if not (0.0 <= self.vad_threshold <= 1.0):
-            raise ConfigurationError(
-                f"vad_threshold must be in [0, 1], got {self.vad_threshold}"
-            )
+            raise ConfigurationError(f"vad_threshold must be in [0, 1], got {self.vad_threshold}")
 
 
 @dataclass
@@ -228,17 +220,13 @@ class MaAIVAPConfig:
 
     def __post_init__(self) -> None:
         if self.frame_rate <= 0:
-            raise ConfigurationError(
-                f"frame_rate must be positive, got {self.frame_rate}"
-            )
+            raise ConfigurationError(f"frame_rate must be positive, got {self.frame_rate}")
         if self.context_len_sec <= 0:
             raise ConfigurationError(
                 f"context_len_sec must be positive, got {self.context_len_sec}"
             )
         if not (0.0 <= self.vad_threshold <= 1.0):
-            raise ConfigurationError(
-                f"vad_threshold must be in [0, 1], got {self.vad_threshold}"
-            )
+            raise ConfigurationError(f"vad_threshold must be in [0, 1], got {self.vad_threshold}")
 
 
 @dataclass
@@ -312,8 +300,7 @@ class TurnDetectorConfig:
             )
         if not (0.0 <= self.interrupt_user_threshold <= 1.0):
             raise ConfigurationError(
-                f"interrupt_user_threshold must be in [0, 1], got "
-                f"{self.interrupt_user_threshold}"
+                f"interrupt_user_threshold must be in [0, 1], got {self.interrupt_user_threshold}"
             )
         if not (0.0 <= self.prepare_turngpt_threshold <= 1.0):
             raise ConfigurationError(
@@ -342,9 +329,7 @@ class SimilarityConfig:
 
     def __post_init__(self) -> None:
         if not (0.0 <= self.threshold <= 1.0):
-            raise ConfigurationError(
-                f"threshold must be in [0, 1], got {self.threshold}"
-            )
+            raise ConfigurationError(f"threshold must be in [0, 1], got {self.threshold}")
 
 
 @dataclass
@@ -378,9 +363,7 @@ class SpeechGeneratorConfig:
 
     def __post_init__(self) -> None:
         if self.max_workers < 1:
-            raise ConfigurationError(
-                f"max_workers must be at least 1, got {self.max_workers}"
-            )
+            raise ConfigurationError(f"max_workers must be at least 1, got {self.max_workers}")
 
 
 @dataclass

@@ -184,16 +184,12 @@ class TestEnsureGreetingAudio:
         tts = _make_tts_mock()
         tts_config = TTSConfig(voice="alloy", model="tts-1")
 
-        config_v1 = GreetingAudioConfig(
-            audio_dir=str(tmp_path), greeting_text="안녕!"
-        )
+        config_v1 = GreetingAudioConfig(audio_dir=str(tmp_path), greeting_text="안녕!")
         paths_v1 = ensure_greeting_audio(tts, tts_config, config_v1)
         assert tts.synthesize.call_count == 2
 
         tts.synthesize.reset_mock()
-        config_v2 = GreetingAudioConfig(
-            audio_dir=str(tmp_path), greeting_text="반가워요!"
-        )
+        config_v2 = GreetingAudioConfig(audio_dir=str(tmp_path), greeting_text="반가워요!")
         paths_v2 = ensure_greeting_audio(tts, tts_config, config_v2)
         # greeting regenerated, farewell skipped (same text)
         assert tts.synthesize.call_count == 1

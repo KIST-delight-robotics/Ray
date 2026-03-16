@@ -137,8 +137,9 @@ class VAPWrapper(IVAP):
             p_fut = out["p_future"][0, -self._tt_frames :, 0].mean().item()
             user_is_speaking = out["vad"][0, -1, 0].item() > self._config.vad_threshold
             elapsed_ms = (time.monotonic() - t0) * 1000
-            if elapsed_ms > self._config.step_sec * 1000:
-                logger.warning("VAP inference slow: %.0fms (step %.0fms)", elapsed_ms, self._config.step_sec * 1000)
+            step_ms = self._config.step_sec * 1000
+            if elapsed_ms > step_ms:
+                logger.warning("VAP inference slow: %.0fms (step %.0fms)", elapsed_ms, step_ms)
             else:
                 logger.debug("VAP inference: %.0fms", elapsed_ms)
             return VAPResult(p_now, p_fut, user_is_speaking)

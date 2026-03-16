@@ -349,8 +349,12 @@ def _make_orchestrator(
     _similarity = MagicMock(spec=ISimilarity)
     _similarity.compare.return_value = 0.0
     turn_detector = TurnDetector(
-        _vap, _turngpt_adapter, _similarity,
-        turn_detector_config or TURN_DETECTOR_CONFIG, SimilarityConfig(), AUDIO_CONFIG,
+        _vap,
+        _turngpt_adapter,
+        _similarity,
+        turn_detector_config or TURN_DETECTOR_CONFIG,
+        SimilarityConfig(),
+        AUDIO_CONFIG,
     )
     generator = SpeechGenerator(context_builder, _llm, _tts, GENERATOR_CONFIG, _executor)
     truncator = TimestampTruncator()
@@ -588,8 +592,12 @@ class TestFullSessionLifecycle:
             sim = MagicMock(spec=ISimilarity)
             sim.compare.return_value = 0.0
             turn_detector = TurnDetector(
-                vap, turngpt_adapter, sim,
-                TURN_DETECTOR_CONFIG, SimilarityConfig(), AUDIO_CONFIG,
+                vap,
+                turngpt_adapter,
+                sim,
+                TURN_DETECTOR_CONFIG,
+                SimilarityConfig(),
+                AUDIO_CONFIG,
             )
             generator = SpeechGenerator(
                 context_builder, FakeLLM(), FakeTTS(), GENERATOR_CONFIG, executor

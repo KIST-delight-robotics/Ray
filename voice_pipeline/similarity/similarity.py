@@ -47,9 +47,7 @@ class APIEmbeddingSimilarity(ISimilarity):
         try:
             import openai
         except ImportError as exc:
-            raise ImportError(
-                "openai is required for API embedding similarity."
-            ) from exc
+            raise ImportError("openai is required for API embedding similarity.") from exc
         self._client = openai.OpenAI()
 
     def compare(self, a: str, b: str) -> float:

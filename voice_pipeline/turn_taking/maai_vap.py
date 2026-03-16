@@ -64,9 +64,7 @@ class MaAIVAPWrapper(IVAP):
         self._audio_config = audio_config
         self._robot_sample_rate = tts_config.output_sample_rate
         self._use_onnx_transformer = bool(config.transformer_onnx_path)
-        self._use_torch_compile = (
-            not self._use_onnx_transformer and config.use_torch_compile
-        )
+        self._use_torch_compile = not self._use_onnx_transformer and config.use_torch_compile
 
         # ORT session options (shared by encoder and transformer)
         sess_opts = ort.SessionOptions()
@@ -87,9 +85,7 @@ class MaAIVAPWrapper(IVAP):
         # Transformer
         if self._use_onnx_transformer:
             if not os.path.isfile(config.transformer_onnx_path):
-                raise VAPError(
-                    f"Transformer ONNX file not found: {config.transformer_onnx_path}"
-                )
+                raise VAPError(f"Transformer ONNX file not found: {config.transformer_onnx_path}")
             try:
                 self._tfm_sess = ort.InferenceSession(config.transformer_onnx_path, sess_opts)
                 logger.info("ONNX transformer loaded from %s", config.transformer_onnx_path)
@@ -103,9 +99,7 @@ class MaAIVAPWrapper(IVAP):
         else:
             # PyTorch transformer requires torch
             if torch is None:
-                raise VAPError(
-                    "torch is required when transformer_onnx_path is not set"
-                )
+                raise VAPError("torch is required when transformer_onnx_path is not set")
             torch.set_num_threads(config.pt_threads)
 
             # Load MaAI for PyTorch transformer
@@ -228,10 +222,7 @@ class MaAIVAPWrapper(IVAP):
 
     def _warmup(self) -> None:
         """Run dummy inference to pre-allocate ORT buffers / trigger torch.compile."""
-        if self._use_onnx_transformer:
-            n_frames = 2
-        else:
-            n_frames = self._audio_context_len
+        n_frames = 2 if self._use_onnx_transformer else self._audio_context_len
 
         logger.info(
             "Warmup: %d frames (transformer=%s)...",

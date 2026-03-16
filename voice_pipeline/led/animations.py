@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-
 from typing import Protocol, runtime_checkable
 
 # RGB tuple type alias

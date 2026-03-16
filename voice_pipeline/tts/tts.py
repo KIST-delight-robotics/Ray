@@ -85,7 +85,6 @@ class OpenAITTS(ITTS):
         return TTSStream(gen, close_fn=lambda: _safe_close(safe_exit))
 
 
-
 def _iter_chunks(response: Any, safe_exit: Callable[..., None]) -> Generator[bytes, None, None]:
     """Yield audio chunks from an already-entered streaming response.
 

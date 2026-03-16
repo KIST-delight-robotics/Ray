@@ -362,9 +362,7 @@ class TurnGPTWrapper(ITurnGPT):
 # ======================================================================
 
 
-def _common_prefix_length(
-    a: Tensor | np.ndarray, b: Tensor | np.ndarray
-) -> int:
+def _common_prefix_length(a: Tensor | np.ndarray, b: Tensor | np.ndarray) -> int:
     """Return the length of the common token prefix between two arrays.
 
     Works with both numpy arrays and torch tensors via duck typing:

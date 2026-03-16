@@ -329,7 +329,9 @@ class TestPrepareSimilarityGate:
         mock_sim = MagicMock(spec=ISimilarity)
         mock_sim.compare.return_value = 0.9  # very similar
         detector, _, _ = _make_detector(
-            vap_results=vap_results, turngpt_prob=0.5, similarity=mock_sim,
+            vap_results=vap_results,
+            turngpt_prob=0.5,
+            similarity=mock_sim,
         )
 
         # Frame 1: text changes, submit fires
@@ -351,7 +353,9 @@ class TestPrepareSimilarityGate:
         mock_sim = MagicMock(spec=ISimilarity)
         mock_sim.compare.return_value = 0.3  # very different
         detector, _, _ = _make_detector(
-            vap_results=vap_results, turngpt_prob=0.5, similarity=mock_sim,
+            vap_results=vap_results,
+            turngpt_prob=0.5,
+            similarity=mock_sim,
         )
 
         # Frame 1-2: first prepare fires
