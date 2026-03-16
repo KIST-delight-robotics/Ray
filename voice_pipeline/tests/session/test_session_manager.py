@@ -124,7 +124,7 @@ class TestFullCycle:
 
         sm.run()
 
-        mocks["bridge"].connect.assert_called_once()
+        assert mocks["bridge"].connect.call_count == 2  # startup + greeting reconnect
         mocks["audio_input"].start.assert_called_once()
         mocks["audio_input"].stop.assert_called_once()
         mocks["bridge"].send_play_file.assert_any_call(sm._greeting_audio_path)
@@ -458,3 +458,38 @@ class TestMultiSessionIsolation:
         assert len(orchestrators) == 2
         assert histories[0] is not histories[1]
         assert orchestrators[0] is not orchestrators[1]
+
+
+# ---------------------------------------------------------------------------
+# Bridge reconnect in greeting
+# ---------------------------------------------------------------------------
+
+
+class TestGreetingReconnect:
+    def test_greeting_reconnects_after_bridge_disconnect(self) -> None:
+        """If bridge is disconnected, _run_greeting() reconnects and proceeds."""
+        sm, mocks = _make_session_manager()
+
+        greeting_event = CppEvent(CppEventType.PLAYBACK_COMPLETE)
+        mocks["bridge"].poll_event.side_effect = [
+            None,  # flush
+            greeting_event,
+        ]
+
+        sm._run_greeting()
+
+        mocks["bridge"].connect.assert_called_once()
+        mocks["bridge"].send_play_file.assert_called_once_with(sm._greeting_audio_path)
+        assert sm._mode == SystemMode.ACTIVE
+
+    def test_greeting_reconnect_failure_returns_to_sleep(self) -> None:
+        """If reconnect fails, _run_greeting() returns to SLEEP without entering ACTIVE."""
+        from voice_pipeline.bridge.exceptions import BridgeError
+
+        sm, mocks = _make_session_manager()
+        mocks["bridge"].connect.side_effect = BridgeError("Connection refused")
+
+        sm._run_greeting()
+
+        assert sm._mode == SystemMode.SLEEP
+        mocks["bridge"].send_play_file.assert_not_called()

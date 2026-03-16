@@ -134,6 +134,13 @@ class SessionManager(ISessionManager):
 
     def _run_greeting(self) -> None:
         """GREETING mode: send greeting, wait for playback completion."""
+        try:
+            self._bridge.connect()
+        except Exception:
+            logger.error("Bridge connect failed — returning to SLEEP", exc_info=True)
+            self._mode = SystemMode.SLEEP
+            return
+
         self._flush_bridge_events()
         self._led.set_state(LEDState.IDLE)
 
