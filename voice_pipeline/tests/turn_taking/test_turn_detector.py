@@ -192,8 +192,12 @@ class TestTurnGPTTimeout:
 
 
 class TestRobotTurnTransition:
-    def test_after_turn_shift_user_speech_triggers_interrupt(self):
-        """After turn_shift, user speech triggers interrupt."""
+    def test_after_turn_shift_no_interrupt_without_robot_audio(self):
+        """After turn_shift, user speech without robot_audio produces no interrupt.
+
+        Without robot audio, VAP cannot distinguish interrupt from backchannel.
+        The orchestrator handles this case via awaiting cancel on ASR text change.
+        """
         n_shift = 20
         vap_shift = _silent_robot_favoring(n_shift)
         detector, mock_vap, _ = _make_detector(vap_results=vap_shift)
@@ -211,9 +215,9 @@ class TestRobotTurnTransition:
         mock_vap.feed_audio.side_effect = None
         mock_vap.feed_audio.return_value = VAPResult(0.8, 0.8, True)
 
-        # Now in ROBOT_TURN without robot_audio -> user_is_speaking -> interrupt
+        # In ROBOT_TURN without robot_audio -> no interrupt (deferred to orchestrator)
         decision = detector.process_frame(FRAME, "", None)
-        assert decision.interrupt
+        assert decision == TurnDecision.none()
 
 
 # ---------------------------------------------------------------------------
@@ -256,14 +260,18 @@ class TestInterruptWithRobotAudio:
 
 
 class TestInterruptWithoutRobotAudio:
-    def test_user_speaking_triggers_interrupt(self):
-        """In ROBOT_TURN without robot_audio, user_is_speaking -> interrupt."""
+    def test_user_speaking_no_interrupt_without_robot_audio(self):
+        """In ROBOT_TURN without robot_audio, user_is_speaking -> no interrupt.
+
+        Without robot audio, VAP cannot distinguish interrupt from backchannel.
+        No interrupt decision is made; orchestrator handles via awaiting cancel.
+        """
         detector, mock_vap, _ = _make_detector()
         detector._turn_state = _TurnState.ROBOT_TURN
         mock_vap.feed_audio.return_value = VAPResult(0.3, 0.3, True)
 
         decision = detector.process_frame(FRAME, "", None)
-        assert decision.interrupt
+        assert decision == TurnDecision.none()
 
     def test_no_user_speech_no_interrupt(self):
         """In ROBOT_TURN without robot_audio, no speech -> no interrupt."""

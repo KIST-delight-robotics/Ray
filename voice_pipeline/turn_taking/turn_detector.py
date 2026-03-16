@@ -203,32 +203,24 @@ class TurnDetector(ITurnDetector):
         """Interrupt detection during ROBOT_TURN.
 
         Follows Skantze & Irfan (2025) pseudocode: user_is_speaking is a
-        prerequisite for interrupt checking. When user IS speaking:
-        - With robot_audio: use p_now/p_fut to distinguish interrupt vs backchannel.
-        - Without robot_audio: treat as interrupt (no VAP context to distinguish).
+        prerequisite for interrupt checking. When user IS speaking and
+        robot_audio is available, use p_now/p_fut to distinguish interrupt
+        vs backchannel. Without robot_audio, VAP lacks the robot channel
+        to make this distinction, so no interrupt decision is made.
         """
         if not vap_result.user_is_speaking:
             return TurnDecision.none()
 
         cfg = self._config
 
-        if robot_audio is not None:
-            # VAP has both channels — distinguish interrupt vs backchannel
-            if (
-                vap_result.p_now > cfg.interrupt_user_threshold
-                and vap_result.p_fut > cfg.interrupt_user_threshold
-            ):
-                logger.info(
-                    "INTERRUPT (vap): p_now=%.2f p_fut=%.2f",
-                    vap_result.p_now,
-                    vap_result.p_fut,
-                )
-                return TurnDecision(interrupt=True)
-            # p_now > threshold but p_fut <= threshold -> backchannel, no action
-        else:
-            # No robot audio (gap before playback starts)
+        # VAP needs both channels to distinguish interrupt vs backchannel
+        if (
+            robot_audio is not None
+            and vap_result.p_now > cfg.interrupt_user_threshold
+            and vap_result.p_fut > cfg.interrupt_user_threshold
+        ):
             logger.info(
-                "INTERRUPT (no_robot_audio): p_now=%.2f p_fut=%.2f",
+                "INTERRUPT (vap): p_now=%.2f p_fut=%.2f",
                 vap_result.p_now,
                 vap_result.p_fut,
             )
