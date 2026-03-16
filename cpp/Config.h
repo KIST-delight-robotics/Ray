@@ -25,7 +25,7 @@ struct DynamixelConfig {
 };
 
 struct WebSocketConfig {
-    int port = 8765;
+    int port = 9200;
 };
 
 struct RobotConfig {

@@ -28,6 +28,7 @@ import base64
 import json
 import logging
 import queue
+import signal
 import threading
 import wave
 from pathlib import Path
@@ -176,12 +177,13 @@ class MockCppServer:
         self._sample_rate = sample_rate
 
     def run(self) -> None:
-        """Start the WebSocket server (blocking)."""
+        """Start the WebSocket server (blocking, Ctrl+C safe)."""
         logger.info("Mock C++ server starting on ws://%s:%d", self._host, self._port)
         logger.info("Audio output: %d Hz, 16-bit, mono", self._sample_rate)
         logger.info("Waiting for Python pipeline connection...")
 
         with serve(self._handle_client, self._host, self._port) as server:
+            self._server = server
             server.serve_forever()
 
     def _handle_client(self, ws: ServerConnection) -> None:
@@ -269,15 +271,22 @@ class MockCppServer:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Mock C++ audio playback server")
     parser.add_argument("--host", default="localhost")
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=9200)
     parser.add_argument("--sample-rate", type=int, default=24000, help="TTS output sample rate")
     args = parser.parse_args()
 
-    server = MockCppServer(args.host, args.port, args.sample_rate)
-    try:
-        server.run()
-    except KeyboardInterrupt:
+    srv = MockCppServer(args.host, args.port, args.sample_rate)
+
+    def _signal_handler(*_: object) -> None:
         logger.info("Server shutting down")
+        if hasattr(srv, "_server"):
+            srv._server.shutdown()
+
+    signal.signal(signal.SIGINT, _signal_handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _signal_handler)
+
+    srv.run()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 [websocket]
-port = 8765
+port = 9200
 
 [dynamixel]
 protocol_version = 2.0
