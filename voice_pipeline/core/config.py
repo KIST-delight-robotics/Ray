@@ -344,6 +344,9 @@ class OrchestratorConfig:
         audio_starvation_timeout_sec: Terminate session if no audio frames
             arrive for this long. Detects AudioInput thread death regardless
             of playback or generation state.
+        awaiting_cancel_grace_sec: Grace period after turn_shift before
+            ASR text changes trigger awaiting cancellation. Filters out
+            ASR finalization noise.
     """
 
     exit_keywords: tuple[str, ...] = ("bye", "goodbye")
@@ -351,6 +354,7 @@ class OrchestratorConfig:
     frame_timeout_sec: float = 0.1
     stop_pending_timeout_sec: float = 5.0
     audio_starvation_timeout_sec: float = 5.0
+    awaiting_cancel_grace_sec: float = 0.5
 
 
 @dataclass

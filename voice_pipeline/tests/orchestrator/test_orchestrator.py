@@ -933,3 +933,78 @@ class TestAudioStarvation:
 
         audio_queue: queue.Queue[AudioFrame] = queue.Queue()
         assert orch._run_frame(audio_queue) is True
+
+
+# ---------------------------------------------------------------------------
+# Awaiting cancel on ASR text change
+# ---------------------------------------------------------------------------
+
+
+class TestAwaitingCancel:
+    def test_cancel_on_text_change_after_grace(self) -> None:
+        """ASR text change after grace period cancels generation."""
+        orch, mocks = _make_orchestrator()
+        orch._start_session()
+        orch._awaiting_response = True
+        # Simulate turn_shift happened well before grace period
+        orch._turn_shift_time = time.monotonic() - 1.0
+        orch._last_asr_text = "hello"
+
+        mocks["asr"].get_text.return_value = "hello world"
+
+        q = _audio_queue_with(_frame())
+        orch._run_frame(q)
+
+        mocks["generator"].cancel.assert_called_once()
+        mocks["turn_detector"].reset.assert_called_once()
+        assert orch._awaiting_response is False
+
+    def test_no_cancel_within_grace_period(self) -> None:
+        """ASR text change within grace period does NOT cancel."""
+        orch, mocks = _make_orchestrator()
+        orch._start_session()
+        orch._awaiting_response = True
+        # turn_shift just happened (within grace period)
+        orch._turn_shift_time = time.monotonic()
+        orch._last_asr_text = "hello"
+
+        mocks["asr"].get_text.return_value = "hello world"
+
+        q = _audio_queue_with(_frame())
+        orch._run_frame(q)
+
+        mocks["generator"].cancel.assert_not_called()
+        assert orch._awaiting_response is True
+
+    def test_cancel_resets_state(self) -> None:
+        """After awaiting cancel, state returns to normal for new turn."""
+        orch, mocks = _make_orchestrator()
+        orch._start_session()
+        orch._awaiting_response = True
+        orch._audio_end_sent = True
+        orch._turn_shift_time = time.monotonic() - 1.0
+        orch._last_asr_text = "hello"
+
+        mocks["asr"].get_text.return_value = "hello world"
+
+        q = _audio_queue_with(_frame())
+        orch._run_frame(q)
+
+        assert orch._awaiting_response is False
+        assert orch._audio_end_sent is False
+        mocks["turn_detector"].reset.assert_called_once()
+
+    def test_no_cancel_when_not_awaiting(self) -> None:
+        """Text change without awaiting_response does not trigger cancel."""
+        orch, mocks = _make_orchestrator()
+        orch._start_session()
+        orch._awaiting_response = False
+        orch._turn_shift_time = time.monotonic() - 1.0
+        orch._last_asr_text = "hello"
+
+        mocks["asr"].get_text.return_value = "hello world"
+
+        q = _audio_queue_with(_frame())
+        orch._run_frame(q)
+
+        mocks["generator"].cancel.assert_not_called()

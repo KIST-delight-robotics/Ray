@@ -90,6 +90,7 @@ class Orchestrator:
         self._user_msg_id: int | None = None
         self._assistant_msg_id: int | None = None
         self._last_frame_time = 0.0
+        self._turn_shift_time = 0.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -189,6 +190,7 @@ class Orchestrator:
         self._pending_truncation = None
         self._user_msg_id = None
         self._assistant_msg_id = None
+        self._turn_shift_time = 0.0
 
         self._asr.start()
         self._set_led(LEDState.IDLE)
@@ -232,11 +234,25 @@ class Orchestrator:
         current_text = self._get_asr_text()
 
         # 4. Track text changes for timeout
-        if current_text != self._last_asr_text:
+        text_changed = current_text != self._last_asr_text
+        if text_changed:
             self._last_asr_text = current_text
             self._last_text_change_time = time.monotonic()
 
-        # 5. Turn detection (only when we have frames)
+        # 5. Cancel awaiting if user continues speaking after turn_shift
+        if (
+            self._awaiting_response
+            and text_changed
+            and time.monotonic() - self._turn_shift_time > self._config.awaiting_cancel_grace_sec
+        ):
+            logger.info("User continued speaking during awaiting — cancelling generation")
+            self._generator.cancel()
+            self._turn_detector.reset()
+            self._awaiting_response = False
+            self._audio_end_sent = False
+            self._pending_truncation = None
+
+        # 6. Turn detection (only when we have frames)
         if frames:
             frame_count = len(frames)
             if frame_count > 1:
@@ -260,31 +276,31 @@ class Orchestrator:
                 elif decision.prepare:
                     self._handle_prepare(current_text)
 
-        # 6. Poll C++ events
+        # 7. Poll C++ events
         if self._poll_cpp_events():
             return True  # Bridge error → terminate
 
-        # 7. Drain audio to bridge if PLAYING
+        # 8. Drain audio to bridge if PLAYING
         if self._playback_state == PlaybackState.PLAYING:
             self._drain_audio_to_bridge()
 
-        # 8. Check generator completion if awaiting
+        # 9. Check generator completion if awaiting
         if self._awaiting_response:
             self._check_generator_completion()
 
-        # 9. Check deferred truncation
+        # 10. Check deferred truncation
         if self._pending_truncation is not None:
             self._check_deferred_truncation()
 
-        # 10. STOP_PENDING watchdog
+        # 11. STOP_PENDING watchdog
         if self._playback_state == PlaybackState.STOP_PENDING:
             self._check_stop_pending_watchdog()
 
-        # 11. Audio starvation check
+        # 12. Audio starvation check
         if self._check_audio_starvation():
             return True
 
-        # 12. Session timeout
+        # 13. Session timeout
         return self._check_session_timeout()
 
     def _get_frame(self, audio_queue: queue.Queue[AudioFrame]) -> AudioFrame | None:
@@ -350,6 +366,7 @@ class Orchestrator:
             self._begin_streaming()
         else:
             # Not ready yet — set awaiting
+            self._turn_shift_time = time.monotonic()
             self._awaiting_response = True
             # Start generation if not already preparing
             if self._generator.state == GeneratorState.IDLE:
