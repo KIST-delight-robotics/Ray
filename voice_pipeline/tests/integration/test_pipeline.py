@@ -707,7 +707,9 @@ class TestBargeIn:
 
                 return TTSStream(gen(), timestamps_fn=ts_fn)
 
-        # Custom bridge that triggers interrupt after sending a few audio chunks
+        # Custom bridge that triggers interrupt after sending a few audio chunks.
+        # Overrides send_audio_end to defer PLAYBACK_COMPLETE, simulating
+        # real C++ behavior where remaining audio plays before completion.
         class InterruptBridge(ScriptedBridge):
             def __init__(self, vap_ref: InterruptableVAP) -> None:
                 super().__init__()
@@ -717,9 +719,14 @@ class TestBargeIn:
             def send_audio(self, audio: bytes) -> None:
                 super().send_audio(audio)
                 self._audio_count += 1
-                # After 2 audio chunks, simulate user starting to talk
+                # After 2 audio chunks, simulate user starting to talk.
                 if self._audio_count == 2:
                     self._vap_ref.interrupting = True
+
+            def send_audio_end(self) -> None:
+                # Don't enqueue PLAYBACK_COMPLETE immediately — real C++
+                # keeps playing buffered audio. Interrupt should arrive first.
+                self.audio_end_count += 1
 
         int_bridge = InterruptBridge(vap)
 
