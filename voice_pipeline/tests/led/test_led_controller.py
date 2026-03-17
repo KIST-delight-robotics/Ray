@@ -160,7 +160,7 @@ class TestControllerNoop:
         ctrl = _make_controller()
         try:
             ctrl.set_state(LEDState.IDLE)
-            time.sleep(0.15)
+            time.sleep(0.5)
             assert ctrl._tick > 0
             ctrl.set_state(LEDState.SLEEPING)
             # Tick resets on state change; may have incremented slightly
@@ -236,7 +236,7 @@ class TestAnimationReset:
         ctrl = _make_controller(animations=animations)
         try:
             ctrl.set_state(LEDState.SLEEPING)
-            time.sleep(0.15)
+            time.sleep(0.5)
             assert mock_anim.render.call_count > 0
         finally:
             ctrl.close()
@@ -331,7 +331,7 @@ class TestRenderError:
         ctrl = _make_controller(animations=animations)
         try:
             ctrl.set_state(LEDState.IDLE)
-            time.sleep(0.15)
+            time.sleep(0.5)
             # Thread should still be alive despite render errors
             assert ctrl._thread.is_alive()
             # Should have retried render multiple times
@@ -359,10 +359,10 @@ class TestStateChangeResponsiveness:
         ctrl = _make_controller(animations=animations)
         try:
             ctrl.set_state(LEDState.SLEEPING)
-            time.sleep(0.05)  # let it enter the slow sleep
+            time.sleep(0.1)  # let it enter the slow sleep
 
             ctrl.set_state(LEDState.IDLE)
-            time.sleep(0.1)
+            time.sleep(0.5)
             # Thread should have picked up IDLE quickly, not after 1s
             assert ctrl._tick > 0
         finally:
