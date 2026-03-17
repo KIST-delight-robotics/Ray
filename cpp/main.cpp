@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <tuple>
 #include <sstream>
+#include <filesystem>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -645,6 +646,202 @@ void read_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& 
 }
 
 
+// ============================================================
+// 로그 설정 / 로깅 파일 저장 경로: /home/limdaemin/LIM/Ray/assets/logs/
+// ============================================================
+
+constexpr float RAW_TO_MOTOR_SCALE = 450.0f; //로깅 파일에서 저장되는 음원 RAW 파일을 스케일링 할때 정할 최댓값
+constexpr float MOUTH_AUDIO_GAIN = 3.0f; // 입 모션에 음원 볼륨이 미치는 영향의 강도 조절용 상수 현재 3인 이유는 vocals.wav 기준 TTS 음원이 약 1/4라서 3정도가 적당하다고 판단했기 때문.
+
+inline void apply_mouth_audio_gain(std::vector<float>& buf, float gain) {
+    for (float& v : buf) {
+        float x = v * gain;
+        if (x > 1.0f) x = 1.0f;
+        if (x < -1.0f) x = -1.0f;
+        v = x;
+    }
+}
+
+// ============================================================
+// baseline
+// - 실행 시작 시 첫 target/actual 값을 각각 baseline으로 잡음
+// - 둘 다 0부터 시작하는 delta로 보기 위해 분리
+// ============================================================
+int g_target_pos4_baseline = std::numeric_limits<int>::min();
+int g_actual_pos4_baseline = std::numeric_limits<int>::min();
+
+// 전체 재생 기준 40ms tick index
+long long g_pos4_audio_global_tick = 0;
+
+// ============================================================
+// baseline 기준 delta 변환
+// - 입이 열릴수록 값이 작아지는 구조라고 가정: baseline - pos4
+// - 만약 반대면 pos4 - baseline 으로 바꾸면 됨
+// ============================================================
+inline float pos4_to_delta_up_from_baseline(int baseline, int pos4) {
+    float delta = static_cast<float>(baseline - pos4);
+    if (delta < 0.0f) delta = 0.0f;
+    return delta;
+}
+
+// ============================================================
+// 40ms raw chunk 전체를 motor scale로 스케일한 문자열로 저장
+// - 양수로 위로 올라가게 abs 사용
+// ============================================================
+inline std::string serialize_raw_audio_chunk_motor_scaled(const std::vector<float>& chunk) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < chunk.size(); ++i) {
+        float v = std::fabs(chunk[i]) * RAW_TO_MOTOR_SCALE;
+        if (i > 0) oss << ';';
+        oss << v;
+    }
+    return oss.str();
+}
+
+// ============================================================
+// 40ms raw chunk에서 점 1개 뽑기
+// - 대표값으로 abs peak 사용
+// - 이것이 MATLAB에서 40ms마다 찍히는 점이 됨
+// ============================================================
+inline float raw_chunk_to_motor_scaled_point(const std::vector<float>& chunk) {
+    float peak = 0.0f;
+    for (float v : chunk) {
+        float a = std::fabs(v);
+        if (a > peak) peak = a;
+    }
+    return peak * RAW_TO_MOTOR_SCALE;
+}
+
+// ============================================================
+// 로그 메타
+// ============================================================
+struct Pos4AudioLogMeta {
+    int cycle_num = -1;
+    int tick_idx_in_cycle = 0;
+    long long global_tick_idx = 0;
+
+    float target_pos4 = 0.0f;       // control_motor에서 delta target으로 덮어씀
+    float audio_raw_point_40ms = 0.0f; // 40ms 대표 raw 점 1개
+    std::string audio_raw_40ms;        // 40ms raw 전체 샘플 문자열
+};
+
+std::queue<Pos4AudioLogMeta> pos4_audio_log_queue;
+
+// ============================================================
+// 파일명 정리
+// ============================================================
+inline std::string sanitize_filename(const std::string& s) {
+    std::string out = s;
+    for (char& c : out) {
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')) {
+            c = '_';
+        }
+    }
+    return out;
+}
+
+inline std::string make_pos4_audio_log_path(const std::string& mode_label) {
+    auto now = std::chrono::system_clock::now();
+    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()
+    ).count();
+
+    std::string safe_mode = sanitize_filename(mode_label);
+
+    return "logs/pos4_audio/" +
+           safe_mode + "_pos4_audio_" + std::to_string(now_ms) + ".csv";
+}
+
+// ============================================================
+// CSV logger
+// ============================================================
+class Pos4AudioCsvLogger {
+    public:
+        void open(const std::string& path) {
+            std::lock_guard<std::mutex> lock(mtx_);
+
+            if (ofs_.is_open()) {
+                ofs_.flush();
+                ofs_.close();
+            }
+
+            std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+
+            ofs_.open(path);
+            if (!ofs_.is_open()) {
+                std::cerr << "[POS4 LOG] csv open failed: " << path << std::endl;
+                return;
+            }
+
+            started_ = false;
+
+            ofs_ << "wall_elapsed_ms,"
+                << "scheduled_ms,"
+                << "global_tick_idx,"
+                << "cycle_num,"
+                << "tick_idx_in_cycle,"
+                << "target_pos4,"
+                << "actual_pos4,"
+                << "audio_raw_point_40ms,"
+                << "audio_raw_40ms\n";
+
+            ofs_.flush();
+
+            std::cout << "[POS4 LOG] csv open: " << path << std::endl;
+        }
+
+        void mark_start_now() {
+            std::lock_guard<std::mutex> lock(mtx_);
+            start_tp_ = std::chrono::steady_clock::now();
+            started_ = true;
+        }
+
+        void log(const Pos4AudioLogMeta& meta, int actual_pos4) {
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (!ofs_.is_open()) return;
+
+            long long wall_elapsed_ms = 0;
+            if (started_) {
+                auto now = std::chrono::steady_clock::now();
+                wall_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - start_tp_
+                ).count();
+            }
+
+            long long scheduled_ms = meta.global_tick_idx * 40;
+
+            ofs_ << wall_elapsed_ms << ","
+                << scheduled_ms << ","
+                << meta.global_tick_idx << ","
+                << meta.cycle_num << ","
+                << meta.tick_idx_in_cycle << ","
+                << meta.target_pos4 << ","
+                << actual_pos4 << ","
+                << meta.audio_raw_point_40ms << ","
+                << "\""
+                << meta.audio_raw_40ms
+                << "\"\n";
+        }
+
+        void close() {
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (ofs_.is_open()) {
+                ofs_.flush();
+                ofs_.close();
+                std::cout << "[POS4 LOG] csv closed" << std::endl;
+            }
+        }
+
+    private:
+        std::ofstream ofs_;
+        std::mutex mtx_;
+        std::chrono::steady_clock::time_point start_tp_;
+        bool started_ = false;
+};
+
+Pos4AudioCsvLogger g_pos4_audio_logger;
+
+// 실제 모션 제어에는 영향을 주지 않도록, 로그용으로만 사용. generate_motion 함수 내에서 모션 결과와 40ms 오디오 데이터를 함께 캡처하여 g_pos4_audio_logger에 기록.
 void generate_motion(int channels, int samplerate) {
 
     std::vector<float> audio_buffer;
@@ -656,11 +853,18 @@ void generate_motion(int channels, int samplerate) {
     init_partb_config(mouth_state.cfg);
 
     // 실제 실행용 튜닝값 설정
-    mouth_state.cfg.peak_trigger_min = 0.24f;
-    mouth_state.cfg.prominence_th    = 0.13f;
+    // mouth_state.cfg.peak_trigger_min = 0.24f;
+    // mouth_state.cfg.prominence_th    = 0.13f;
+    // mouth_state.cfg.min_open         = 0.52f;
+    // mouth_state.cfg.future_steps     = 9;
+    // mouth_state.cfg.future_frames    = 9;   // peak center 9-point SG용 (360ms)
+
+    //온라인 대화용 파라미터
+    mouth_state.cfg.peak_trigger_min = 0.18f;
+    mouth_state.cfg.prominence_th    = 0.09f;
     mouth_state.cfg.min_open         = 0.52f;
     mouth_state.cfg.future_steps     = 9;
-    mouth_state.cfg.future_frames    = 9;   // peak center 9-point SG용 (360ms)
+    mouth_state.cfg.future_frames    = 9; 
 
     init_partb_mouth_state(mouth_state);
 
@@ -689,6 +893,8 @@ void generate_motion(int channels, int samplerate) {
         double avg_grad;
         int segClass;
         std::vector<float> energy;
+        std::vector<std::string> raw_audio_40ms_text;
+        std::vector<float> raw_audio_point_40ms;
 
         int num_motion_updates = INTERVAL_MS / 40;
 
@@ -739,6 +945,13 @@ void generate_motion(int channels, int samplerate) {
                 audio_queue.swap(restored);
             }
         }
+        // ============================================================
+        // PART B 입력 오디오 gain 적용
+        // - playback용 원본은 read_and_split에서 이미 soundStream으로 갔으므로
+        //   여기서는 mouth 생성용만 키워도 됨
+        // ============================================================
+        apply_mouth_audio_gain(audio_buffer, MOUTH_AUDIO_GAIN);
+        apply_mouth_audio_gain(next_peek,   MOUTH_AUDIO_GAIN);
 
         // ============================================================
         // (A) PART B mouth trajectory 생성
@@ -789,9 +1002,11 @@ void generate_motion(int channels, int samplerate) {
         }
 
         // ============================================================
-        // Head energy 계산
+        // Head energy 계산 + raw 저장
         // ============================================================
         energy.reserve(Ncurr);
+        raw_audio_40ms_text.reserve(Ncurr);
+        raw_audio_point_40ms.reserve(Ncurr);
 
         for (int i = 0; i < Ncurr; ++i) {
             int start_frame = i * frames_per_update;
@@ -806,11 +1021,16 @@ void generate_motion(int channels, int samplerate) {
                 audio_buffer.begin() + end_frame   * channels
             );
 
+            // head energy용 계산은 기존 유지
             std::vector<float> channel_divided =
                 divide_channel(current_audio, channels, end_frame - start_frame);
 
             double rms_value = calculateRMS(channel_divided, 0, end_frame - start_frame);
             energy.push_back(static_cast<float>(rms_value));
+
+            // 로그용 raw
+            raw_audio_point_40ms.push_back(raw_chunk_to_motor_scaled_point(current_audio));
+            raw_audio_40ms_text.push_back(serialize_raw_audio_chunk_motor_scaled(current_audio));
         }
 
         // ============================================================
@@ -887,13 +1107,33 @@ void generate_motion(int channels, int samplerate) {
         // ============================================================
         {
             std::lock_guard<std::mutex> lock(mouth_motion_queue_mutex);
-            for (const auto& result : motion_results) {
+
+            for (int i = 0; i < static_cast<int>(motion_results.size()); ++i) {
+                const float result = motion_results[i];
+
                 mouth_motion_queue.push(std::make_pair(cycle_num, result));
+
+                Pos4AudioLogMeta meta;
+                meta.cycle_num         = cycle_num;
+                meta.tick_idx_in_cycle = i;
+                meta.global_tick_idx   = g_pos4_audio_global_tick++;
+                meta.target_pos4       = 0.0f;
+                meta.audio_raw_point_40ms =
+                    (i < static_cast<int>(raw_audio_point_40ms.size())) ? raw_audio_point_40ms[i] : 0.0f;
+                meta.audio_raw_40ms =
+                    (i < static_cast<int>(raw_audio_40ms_text.size())) ? raw_audio_40ms_text[i] : "";
+
+                pos4_audio_log_queue.push(meta);
             }
+
             head_motion_queue.push(deliverSegment);
         }
+
         mouth_motion_queue_cv.notify_one();
     }
+
+    // interrupt/종료 시 control_motor가 wait에서 깨어날 수 있도록 notify
+    mouth_motion_queue_cv.notify_all();
 }
 
 
@@ -903,32 +1143,48 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
     std::vector<int32_t> target_position(DXL_NUM);
     std::vector<int32_t> target_velocity(DXL_NUM);
     std::vector<MotorState> current_state(DXL_NUM);
+    std::vector<MotorState> actual_state_after_write(DXL_NUM);
     #else
     std::cout << "[DUMMY MOTOR] control_motor (" << mode_label << ") start." << std::endl;
+    std::vector<int32_t> target_position(DXL_NUM, 0);
     #endif
 
     std::vector<std::vector<double>> current_motion_data(9, std::vector<double>(3, 0.0));
+
+    std::string log_path = make_pos4_audio_log_path(mode_label);
+    bool log_opened = false;
+
+    // 로그/queue/baseline 초기화
+    while (!pos4_audio_log_queue.empty()) pos4_audio_log_queue.pop();
+    g_pos4_audio_global_tick = 0;
+    g_target_pos4_baseline = std::numeric_limits<int>::min();
+    g_actual_pos4_baseline = std::numeric_limits<int>::min();
 
     for (int cycle_num = 0;; cycle_num++) {
         if (user_interruption_flag) {
             std::cout << "Interruption detected in control_motor." << std::endl;
             break;
         }
-        
+
         wait_for_next_cycle(cycle_num);
 
         std::pair<int, float> motion_data;
 
         std::unique_lock<std::mutex> lock(mouth_motion_queue_mutex);
         mouth_motion_queue_cv.wait(lock, [&] {
-            return (stop_flag && mouth_motion_queue.empty()) || (!mouth_motion_queue.empty() && !head_motion_queue.empty());
+            return user_interruption_flag || (stop_flag && mouth_motion_queue.empty()) || (!mouth_motion_queue.empty() && !head_motion_queue.empty());
         });
+        if (user_interruption_flag) {
+            std::cout << "Interruption detected in control_motor (outer wait)." << std::endl;
+            break;
+        }
+
         if(!head_motion_queue.empty()){
-            current_motion_data = head_motion_queue.front(); // 슬라이스 데이터 가져오기
+            current_motion_data = head_motion_queue.front();
             head_motion_queue.pop();
         }
         lock.unlock();
-        
+
         if (stop_flag && mouth_motion_queue.empty()) {
             std::cout << "control_motor break1 -------------------- " << get_time_str() << std::endl;
             break;
@@ -936,7 +1192,12 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
         int num_motor_updates = INTERVAL_MS / 40;
 
         if (cycle_num == 0) {
+            g_pos4_audio_logger.open(log_path);
+            log_opened = true;
+
             start_time = std::chrono::high_resolution_clock::now();
+            g_pos4_audio_logger.mark_start_now();
+
             soundStream.play(); // 첫 사이클에서 오디오 재생
             // Python에 playback_started 이벤트 전송
             send_to_python({{"type", "playback_started"}});
@@ -948,29 +1209,42 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
                         << "ms" << std::endl;
             }
         }
-        
+
         for (int i = 0; i < num_motor_updates; ++i) {
-            //cout << "stop flag : " << stop_flag << " motion queue size : " << mouth_motion_queue.size() << '\n';
+            Pos4AudioLogMeta log_meta;
+            bool has_log_meta = false;
+
             {
                 std::unique_lock<std::mutex> lock(mouth_motion_queue_mutex);
-                
+
                 if (stop_flag && mouth_motion_queue.empty()) {
                     std::cout << "motion queue size :  " << mouth_motion_queue.size() << ", control_motor (" << mode_label << ") break2 -------------------- " << get_time_str() << std::endl;
+                    if (log_opened) g_pos4_audio_logger.close();
                     return;
                 }
-                //cout << "cycle 에 들어옴 " << '\n';
-                // 현재 사이클 번호에 해당하는 모션 값이 큐에 있을 때까지 대기
-                // std::cout << "mouth_motion_queue front cycle: " << mouth_motion_queue.front().first 
-                //  << ", current cycle_num: " << cycle_num - 1 << '\n';
 
                 mouth_motion_queue_cv.wait(lock, [&] {
-                    return (stop_flag && mouth_motion_queue.empty()) || (!mouth_motion_queue.empty() && mouth_motion_queue.front().first == cycle_num - 1);
+                    return user_interruption_flag || (stop_flag && mouth_motion_queue.empty()) || (!mouth_motion_queue.empty() && mouth_motion_queue.front().first == cycle_num - 1);
                 });
-                
-                // 모션 값 가져오기
+
+                if (user_interruption_flag) {
+                    std::cout << "Interruption detected in control_motor (inner wait)." << std::endl;
+                    return;
+                }
+
+                if (stop_flag && mouth_motion_queue.empty()) {
+                    if (log_opened) g_pos4_audio_logger.close();
+                    return;
+                }
+
                 motion_data = mouth_motion_queue.front();
                 mouth_motion_queue.pop();
-                
+
+                if (!pos4_audio_log_queue.empty()) {
+                    log_meta = pos4_audio_log_queue.front();
+                    pos4_audio_log_queue.pop();
+                    has_log_meta = true;
+                }
             }
 
 
@@ -981,9 +1255,9 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
             double yaw   = 0;
             double mouth = motor_value;
 
-            #ifdef MOTOR_ENABLED
             target_position = RPY2DXL(roll, pitch, yaw, mouth, 0);
 
+            #ifdef MOTOR_ENABLED
             if (first_move_flag == 1) {
                 first_move_flag = 0;
             } else {
@@ -1009,6 +1283,10 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
                 dxl_driver->writeGoalPosition(target_position);
             }
 
+            int actual_pos4 = -1;
+            dxl_driver->readAllState(actual_state_after_write);
+            actual_pos4 = actual_state_after_write[4].position;
+
             // 과거 위치 업데이트
             past_position = target_position;
             updatePrevValues(roll, pitch, yaw, mouth);
@@ -1016,7 +1294,47 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
             // 로깅
             double DXL_goal_rpy[4] = {roll, pitch, yaw, mouth};
             motion_logger.log(mode_label, DXL_goal_rpy, target_position, current_state);
+
+            if (has_log_meta) {
+                if (g_target_pos4_baseline == std::numeric_limits<int>::min()) {
+                    g_target_pos4_baseline = target_position[4];
+                }
+                if (g_actual_pos4_baseline == std::numeric_limits<int>::min()) {
+                    g_actual_pos4_baseline = actual_pos4;
+                }
+
+                float target_delta_pos4 =
+                    pos4_to_delta_up_from_baseline(g_target_pos4_baseline, target_position[4]);
+
+                int actual_delta_pos4 = static_cast<int>(std::lround(
+                    pos4_to_delta_up_from_baseline(g_actual_pos4_baseline, actual_pos4)
+                ));
+
+                log_meta.target_pos4 = target_delta_pos4;
+                g_pos4_audio_logger.log(log_meta, actual_delta_pos4);
+            }
             #else
+            int actual_pos4 = target_position[4];
+
+            if (has_log_meta) {
+                if (g_target_pos4_baseline == std::numeric_limits<int>::min()) {
+                    g_target_pos4_baseline = target_position[4];
+                }
+                if (g_actual_pos4_baseline == std::numeric_limits<int>::min()) {
+                    g_actual_pos4_baseline = actual_pos4;
+                }
+
+                float target_delta_pos4 =
+                    pos4_to_delta_up_from_baseline(g_target_pos4_baseline, target_position[4]);
+
+                int actual_delta_pos4 = static_cast<int>(std::lround(
+                    pos4_to_delta_up_from_baseline(g_actual_pos4_baseline, actual_pos4)
+                ));
+
+                log_meta.target_pos4 = target_delta_pos4;
+                g_pos4_audio_logger.log(log_meta, actual_delta_pos4);
+            }
+
             updatePrevValues(roll, pitch, yaw, mouth);
             #endif
 
@@ -1025,7 +1343,385 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
             std::this_thread::sleep_until(start_time + std::chrono::milliseconds(cycle_num * INTERVAL_MS + i * 40 + 40));
         }
     }
+
+    if (log_opened) {
+        g_pos4_audio_logger.close();
+    }
 }
+
+// void generate_motion(int channels, int samplerate) {
+//
+//     std::vector<float> audio_buffer;
+//
+//     // -------------------------
+//     // PART B mouth state
+//     // -------------------------
+//     PartBMouthState mouth_state;
+//     init_partb_config(mouth_state.cfg);
+//
+//     // 여기서 실제 실행용 튜닝값 설정
+//     mouth_state.cfg.peak_trigger_min = 0.24f;
+//     mouth_state.cfg.prominence_th    = 0.13f;
+//     mouth_state.cfg.min_open         = 0.52f;
+//     mouth_state.cfg.future_steps     = 9;
+//     mouth_state.cfg.future_frames    = 9;   // peak center 9-point SG용 (360ms)
+//
+//     init_partb_mouth_state(mouth_state);
+//
+//     int frames_per_update = samplerate * 40 / 1000;
+//
+//     std::vector<double> prevEndOneBefore = {0.0, 0.0, 0.0};
+//     std::vector<double> prevEnd          = {0.0, 0.0, 0.0};
+//     std::vector<std::vector<double>> deliverSegment;
+//     std::vector<std::vector<double>> prevSegment;
+//     std::vector<double> boundaries = {0.01623224, 0.02907711, 0.04192197};
+//
+//     int first_segment_flag = 1;
+//
+//     for (int cycle_num = -1; ; ++cycle_num) {
+//         if (user_interruption_flag) {
+//             std::cout << "Interruption detected in generate_motion." << std::endl;
+//             break;
+//         }
+//         wait_for_next_cycle(cycle_num);
+//
+//         if (stop_flag && audio_queue.empty()) {
+//             std::cout << "generate motion break ------------------------" << std::endl;
+//             break;
+//         }
+//
+//         double avg_grad;
+//         int segClass;
+//         std::vector<float> energy;
+//
+//         int num_motion_updates = INTERVAL_MS / 40;
+//
+//         // ------------------------------------------------------------
+//         // 오디오 데이터 pop + 미래 peek 확보
+//         // ------------------------------------------------------------
+//         std::vector<float> next_peek;
+//         {
+//             std::unique_lock<std::mutex> lock(audio_queue_mutex);
+//             audio_queue_cv.wait(lock, [] { return !audio_queue.empty() || stop_flag; });
+//
+//             if (stop_flag && audio_queue.empty()) {
+//                 std::cout << "generate motion break ------------------------" << std::endl;
+//                 break;
+//             }
+//
+//             audio_buffer = std::move(audio_queue.front());
+//             audio_queue.pop();
+//
+//             const int need_ms      = mouth_state.cfg.future_frames * mouth_state.cfg.hop_ms;
+//             const int need_frames  = samplerate * need_ms / 1000;
+//             const int need_samples = need_frames * channels;
+//
+//             next_peek.clear();
+//             next_peek.reserve(std::max(0, need_samples));
+//
+//             if (!audio_queue.empty() && need_samples > 0) {
+//                 std::queue<std::vector<float>> tmp;
+//                 tmp.swap(audio_queue);
+//
+//                 std::queue<std::vector<float>> restored;
+//
+//                 while (!tmp.empty()) {
+//                     auto& buf = tmp.front();
+//
+//                     if ((int)next_peek.size() < need_samples) {
+//                         const int need = need_samples - (int)next_peek.size();
+//                         const int take = std::min<int>(need, (int)buf.size());
+//                         if (take > 0) {
+//                             next_peek.insert(next_peek.end(), buf.begin(), buf.begin() + take);
+//                         }
+//                     }
+//
+//                     restored.push(std::move(buf));
+//                     tmp.pop();
+//                 }
+//
+//                 audio_queue.swap(restored);
+//             }
+//         }
+//
+//         // ============================================================
+//         // (A) PART B mouth trajectory 생성
+//         // ============================================================
+//         std::vector<float> out_a0_curr;
+//
+//         build_partb_mouth_chunk(
+//             audio_buffer,
+//             next_peek,
+//             channels,
+//             samplerate,
+//             num_motion_updates,
+//             mouth_state,
+//             out_a0_curr
+//         );
+//
+//         const int Ncurr = static_cast<int>(out_a0_curr.size());
+//
+//         // ============================================================
+//         // (B) PART B a0 -> mouth tick
+//         // ============================================================
+//         std::vector<float> motion_results;
+//         motion_results.reserve(out_a0_curr.size());
+//
+//         for (float a0_val : out_a0_curr) {
+//             float mouth_value = calculate_mouth(
+//                 std::max(0.0f, a0_val),
+//                 cfg_robot.max_mouth,
+//                 cfg_robot.min_mouth
+//             );
+//             motion_results.push_back(mouth_value);
+//         }
+//
+//         // ============================================================
+//         // (B-1) 전체 3점 스무딩
+//         // ============================================================
+//         if (motion_results.size() >= 3) {
+//             std::vector<float> motion_results_smooth = motion_results;
+//
+//             for (size_t j = 1; j + 1 < motion_results.size(); ++j) {
+//                 motion_results_smooth[j] =
+//                     (motion_results[j - 1] +
+//                     2.0f * motion_results[j] +
+//                     motion_results[j + 1]) / 4.0f;
+//             }
+//
+//             motion_results.swap(motion_results_smooth);
+//         }
+//
+//         // ============================================================
+//         // Head energy 계산 (기존 유지)
+//         // ============================================================
+//         energy.reserve(Ncurr);
+//
+//         for (int i = 0; i < Ncurr; ++i) {
+//             int start_frame = i * frames_per_update;
+//             int end_frame   = start_frame + frames_per_update;
+//
+//             int total_frames = static_cast<int>(audio_buffer.size()) / channels;
+//             if (end_frame > total_frames) end_frame = total_frames;
+//             if (start_frame >= total_frames) break;
+//
+//             std::vector<float> current_audio(
+//                 audio_buffer.begin() + start_frame * channels,
+//                 audio_buffer.begin() + end_frame   * channels
+//             );
+//
+//             std::vector<float> channel_divided =
+//                 divide_channel(current_audio, channels, end_frame - start_frame);
+//
+//             double rms_value = calculateRMS(channel_divided, 0, end_frame - start_frame);
+//             energy.push_back(static_cast<float>(rms_value));
+//         }
+//
+//         // ============================================================
+//         // 첫 세그먼트 입 시작값 블렌딩 (기존 유지)
+//         // ============================================================
+//         if (!energy.empty()) {
+//             if (first_segment_flag == 1) {
+//                 double start_mouth = 0.0;
+//                 {
+//                     std::lock_guard<std::mutex> lock(prev_values_mutex);
+//                     prevSegment.clear();
+//                     for (const auto& val : prevValues) {
+//                         prevSegment.push_back({val[0], val[1], val[2]});
+//                     }
+//                     start_mouth = prevValues.back()[3];
+//                 }
+//
+//                 int blend_frames = std::min<int>(5, motion_results.size());
+//                 for (int k = 0; k < blend_frames; ++k) {
+//                     double t = static_cast<double>(k + 1) / static_cast<double>(blend_frames);
+//                     double alpha = t * t * (3.0 - 2.0 * t);
+//
+//                     motion_results[k] = static_cast<float>(
+//                         start_mouth * (1.0 - alpha) + motion_results[k] * alpha
+//                     );
+//                 }
+//             }
+//
+//             // ============================================================
+//             // Head motion 생성 (기존 유지)
+//             // ============================================================
+//             if (cfg_robot.generate_head_motion) {
+//                 avg_grad = getSegmentAverageGrad(energy, "one2one", "abs");
+//                 segClass = assignClassWith1DMiddleBoundary(avg_grad, boundaries);
+//
+//                 std::string filePath;
+//                 switch (segClass) {
+//                     case 0: filePath = "segment_0.npy"; break;
+//                     case 1: filePath = "segment_1.npy"; break;
+//                     case 2: filePath = "segment_2.npy"; break;
+//                     case 3: filePath = "segment_3.npy"; break;
+//                     default:
+//                         std::cerr << "Invalid segClass: " << segClass << std::endl;
+//                         break;
+//                 }
+//
+//                 cnpy::NpyArray segment = cnpy::npy_load(SEGMENTS_DIR + "/" + filePath);
+//
+//                 for (int j = 0; j < 3; j++) {
+//                     prevEnd[j]          = prevSegment[prevSegment.size() - 1][j];
+//                     prevEndOneBefore[j] = prevSegment[prevSegment.size() - 2][j];
+//                 }
+//
+//                 deliverSegment = getNextSegment_SegSeg(prevEndOneBefore, prevEnd, segment, true, true);
+//                 deliverSegment = multExpToSegment(energy, deliverSegment, 0.01, 10);
+//                 deliverSegment = connectTwoSegments(prevSegment, deliverSegment, 3, 3, 3);
+//                 prevSegment = deliverSegment;
+//             } else {
+//                 std::cout << "Idle motion 사용 중..." << std::endl;
+//                 deliverSegment = IdleMotionManager::getInstance().getNextSegment(
+//                     energy.size(), cfg_robot.control_motor_rpy_ratio
+//                 );
+//
+//                 if (first_segment_flag == 1) {
+//                     deliverSegment = connectTwoSegments(prevSegment, deliverSegment, 5, 3, 3);
+//                 }
+//             }
+//
+//             first_segment_flag = 0;
+//         }
+//
+//         // ============================================================
+//         // queue push (기존 유지)
+//         // ============================================================
+//         {
+//             std::lock_guard<std::mutex> lock(mouth_motion_queue_mutex);
+//             for (const auto& result : motion_results) {
+//                 mouth_motion_queue.push(std::make_pair(cycle_num, result));
+//             }
+//             head_motion_queue.push(deliverSegment);
+//         }
+//         mouth_motion_queue_cv.notify_one();
+//     }
+// }
+
+
+// void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
+//     #ifdef MOTOR_ENABLED
+//         std::vector<int32_t> past_position = dxl_driver->getLastGoalPosition();
+//         std::vector<int32_t> target_position(DXL_NUM);
+//         std::vector<int32_t> target_velocity(DXL_NUM);
+//         std::vector<MotorState> current_state(DXL_NUM);
+//     #else
+//         std::cout << "[DUMMY MOTOR] control_motor (" << mode_label << ") start." << std::endl;
+//     #endif
+//
+//         std::vector<std::vector<double>> current_motion_data(9, std::vector<double>(3, 0.0));
+//
+//         for (int cycle_num = 0;; cycle_num++) {
+//             if (user_interruption_flag) {
+//                 std::cout << "Interruption detected in control_motor." << std::endl;
+//                 break;
+//             }
+//
+//             wait_for_next_cycle(cycle_num);
+//
+//             std::pair<int, float> motion_data;
+//
+//             std::unique_lock<std::mutex> lock(mouth_motion_queue_mutex);
+//             mouth_motion_queue_cv.wait(lock, [&] {
+//                 return (stop_flag && mouth_motion_queue.empty()) ||
+//                     (!mouth_motion_queue.empty() && !head_motion_queue.empty());
+//             });
+//             if (!head_motion_queue.empty()) {
+//                 current_motion_data = head_motion_queue.front();
+//                 head_motion_queue.pop();
+//             }
+//             lock.unlock();
+//
+//             if (stop_flag && mouth_motion_queue.empty()) {
+//                 std::cout << "control_motor break1 -------------------- " << get_time_str() << std::endl;
+//                 break;
+//             }
+//
+//             int num_motor_updates = INTERVAL_MS / 40;
+//
+//             if (cycle_num == 0) {
+//                 start_time = std::chrono::high_resolution_clock::now();
+//                 soundStream.play();
+//
+//                 {
+//                     std::lock_guard<std::mutex> lock(cout_mutex);
+//                     std::cout << "[시간 측정] start → 오디오 재생 시작: "
+//                             << std::chrono::duration_cast<std::chrono::milliseconds>(
+//                                    std::chrono::high_resolution_clock::now() - start_time).count()
+//                             << "ms" << std::endl;
+//                 }
+//             }
+//
+//             for (int i = 0; i < num_motor_updates; ++i) {
+//                 {
+//                     std::unique_lock<std::mutex> lock(mouth_motion_queue_mutex);
+//
+//                     if (stop_flag && mouth_motion_queue.empty()) {
+//                         std::cout << "motion queue size :  " << mouth_motion_queue.size()
+//                                 << ", control_motor (" << mode_label << ") break2 -------------------- " << get_time_str() << std::endl;
+//                         return;
+//                     }
+//
+//                     mouth_motion_queue_cv.wait(lock, [&] {
+//                         return (stop_flag && mouth_motion_queue.empty()) ||
+//                             (!mouth_motion_queue.empty() &&
+//                                 mouth_motion_queue.front().first == cycle_num - 1);
+//                     });
+//
+//                     motion_data = mouth_motion_queue.front();
+//                     mouth_motion_queue.pop();
+//                 }
+//
+//                 float motor_value = motion_data.second;
+//                 double roll  = 0;
+//                 double pitch = 0;
+//                 double yaw   = 0;
+//                 double mouth = motor_value;
+//
+//                 target_position = RPY2DXL(roll, pitch, yaw, mouth, 0);
+//
+//     #ifdef MOTOR_ENABLED
+//                 if (first_move_flag == 1) {
+//                     first_move_flag = 0;
+//                 } else {
+//                     for (int k = 0; k < DXL_NUM; k++) {
+//                         if (k == 4) continue;
+//                         target_position[k] = (past_position[k] + target_position[k]) / 2;
+//                     }
+//                 }
+//
+//                 dxl_driver->readAllState(current_state);
+//
+//                 if (cfg_dxl.operating_mode == 1) {
+//                     for (int k = 0; k < DXL_NUM; k++) {
+//                         target_velocity[k] = calculateDXLGoalVelocity_timeBased_ds(
+//                             current_state[k].position,
+//                             target_position[k],
+//                             current_state[k].velocity,
+//                             cfg_dxl.profile_acceleration,
+//                             CONTROL_MS
+//                         );
+//                     }
+//                     dxl_driver->writeGoalVelocity(target_velocity);
+//                 } else {
+//                     dxl_driver->writeGoalPosition(target_position);
+//                 }
+//
+//                 past_position = target_position;
+//                 updatePrevValues(roll, pitch, yaw, mouth);
+//
+//                 double DXL_goal_rpy[4] = {roll, pitch, yaw, mouth};
+//                 motion_logger.log(mode_label, DXL_goal_rpy, target_position, current_state);
+//     #endif
+//
+//                 std::this_thread::sleep_until(
+//                     start_time + std::chrono::milliseconds(cycle_num * INTERVAL_MS + i * 40 + 40)
+//                 );
+//             }
+//         }
+// }
 
 void wait_control_motor(){
     // 모터 초기 설정 코드
