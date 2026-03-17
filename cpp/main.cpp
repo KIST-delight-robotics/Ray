@@ -1992,7 +1992,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
     }
 }
 
-int main() {
+int main(int argc, char* argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
@@ -2037,18 +2037,72 @@ int main() {
     tuning_logger = new HighFreqLogger(dxl_driver);
     #endif
 
-    
-    // == 테스트 오디오 재생 코드 ==
-    // std::string audioName = "responses";
+    // ===== CSV 재생 모드: ./build/Ray --csv <이름> =====
+    if (argc >= 3 && std::string(argv[1]) == "--csv") {
+        std::string audioName = argv[2];
+        std::cout << "[MAIN] CSV 재생 모드: " << audioName << std::endl;
 
-    // std::thread test_thread(csv_control_motor, audioName);
-    // test_thread.join();
+        std::string log_dir = create_log_directory();
+        auto log_start_time = std::chrono::high_resolution_clock::now();
+        motion_logger.start(log_start_time, log_dir);
+        #ifdef MOTOR_ENABLED
+        if (tuning_logger) tuning_logger->start(log_start_time, log_dir);
+        #endif
 
-    // cleanup_dynamixel();
-    // return 0;
-    // ===== 테스트 코드 끝 =====
-    
+        csv_control_motor(audioName);
 
+        #ifdef MOTOR_ENABLED
+        if (tuning_logger) tuning_logger->stop();
+        #endif
+        motion_logger.stop();
+        cleanup_dynamixel();
+        return 0;
+    }
+
+    // ===== 오디오 파일 재생 모드: ./build/Ray --play <파일경로> =====
+    if (argc >= 3 && std::string(argv[1]) == "--play") {
+        std::string filePath = argv[2];
+        std::cout << "[MAIN] 오디오 파일 재생 모드: " << filePath << std::endl;
+
+        SF_INFO sfinfo = {};
+        SNDFILE* sndfile = sf_open(filePath.c_str(), SFM_READ, &sfinfo);
+        if (!sndfile) {
+            std::cerr << "오디오 파일 열기 실패: " << filePath << std::endl;
+            cleanup_dynamixel();
+            return -1;
+        }
+
+        std::string log_dir = create_log_directory();
+        auto log_start_time = std::chrono::high_resolution_clock::now();
+        motion_logger.start(log_start_time, log_dir);
+        #ifdef MOTOR_ENABLED
+        if (tuning_logger) tuning_logger->start(log_start_time, log_dir);
+        #endif
+
+        CustomSoundStream soundStream(sfinfo.channels, sfinfo.samplerate);
+        start_time = std::chrono::high_resolution_clock::now();
+
+        std::thread t1(read_and_split, sndfile, sfinfo, std::ref(soundStream));
+        std::thread t2(generate_motion, sfinfo.channels, sfinfo.samplerate);
+        std::thread t3(control_motor, std::ref(soundStream), "PLAY_FILE");
+
+        t1.join();
+        t2.join();
+        t3.join();
+
+        soundStream.stop();
+        soundStream.clearBuffer();
+        sf_close(sndfile);
+
+        #ifdef MOTOR_ENABLED
+        if (tuning_logger) tuning_logger->stop();
+        #endif
+        motion_logger.stop();
+        cleanup_dynamixel();
+        return 0;
+    }
+
+    // ===== 기본 모드: 웹소켓 서버 =====
 
     // 웹소켓 서버 준비 (Python 클라이언트가 접속)
     std::future<void> server_ready_future = server_ready_promise.get_future();

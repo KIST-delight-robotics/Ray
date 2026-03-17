@@ -54,18 +54,17 @@ Thumbs.db
 assets/audio/greeting_*.wav
 assets/audio/farewell_*.wav
 
-# TTS-generated greeting/farewell audio cache
-assets/audio/greeting_*.wav
-assets/audio/farewell_*.wav
+# Audio/motion assets (music, vocal, motion data)
+assets/audio/music/
+assets/audio/vocal/
+assets/headMotion/
+assets/mouthMotion/
 
 # Script output (TTS wav files, etc.)
 output/
 
 # Session logs
 logs/
-
-# Training artifacts
-runs/
 
 # External model repositories
 external/
