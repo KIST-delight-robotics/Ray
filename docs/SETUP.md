@@ -13,22 +13,6 @@ sudo apt update && sudo apt install -y \
   libopenal-dev libvorbis-dev libflac-dev libogg-dev
 ```
 
-### WiringPi (GPIO 제어)
-
-Ubuntu 기본 패키지에 포함되어 있지 않으므로 수동 설치가 필요하다.
-
-```bash
-git clone https://github.com/WiringPi/WiringPi.git
-cd WiringPi
-./build
-```
-
-설치 확인:
-
-```bash
-gpio -v
-```
-
 
 ## 2. uv 설치 (Python 패키지 매니저)
 
@@ -43,15 +27,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 
-## 3. 프로젝트 클론
-
-```bash
-git clone <repo-url> Ray
-cd Ray
-```
-
-
-## 4. 외부 모델 저장소 클론
+## 3. 외부 모델 저장소 클론
 
 `pyproject.toml`의 `[tool.uv.sources]`가 이 경로를 참조하므로, `uv sync` 전에 반드시 클론해야 한다.
 
@@ -62,14 +38,14 @@ git clone https://github.com/ErikEkstedt/VoiceActivityProjection.git external/Vo
 git clone https://github.com/MaAI-Kyoto/MaAI.git external/MaAI
 ```
 
-> 네트워크가 느린 경우 `--depth 1`로 shallow clone 할 수 있다.
 
-
-## 5. Python 의존성 설치
+## 4. Python 의존성 설치
 
 ```bash
-uv sync
+uv sync --extra hardware
 ```
+
+> `--extra hardware`는 LED 드라이버(`rpi5-ws2812`) 등 하드웨어 의존성을 함께 설치한다. RPi가 아닌 환경에서는 `uv sync`만으로 충분하다.
 
 테스트로 설치 확인:
 
@@ -78,25 +54,30 @@ uv run pytest
 ```
 
 
-## 6. DynamixelSDK 빌드
+## 5. Third-party 라이브러리 (모터 사용 시)
+
+모터 없이 테스트만 하려면 이 단계를 건너뛰고 cmake에 `-DMOTOR_ENABLED=OFF`를 전달한다.
+
+### WiringPi (GPIO 제어)
+
+Ubuntu apt 버전(2.x)은 RPi 5를 지원하지 않으므로 수동 빌드가 필요하다.
 
 ```bash
-mkdir -p third_party
-git clone --branch 3.7.31 --depth 1 \
-  https://github.com/ROBOTIS-GIT/DynamixelSDK.git \
-  third_party/DynamixelSDK-3.7.31
+git clone https://github.com/WiringPi/WiringPi.git
+cd WiringPi && ./build && cd ..
 
-cd third_party/DynamixelSDK-3.7.31/c++/build/linux_sbc
-make
-cd ../../../../..
+# 설치 확인
+gpio -v
 ```
 
-> RPi 5 (aarch64)에서는 `linux_sbc` 디렉토리를 사용한다. `linux64`는 `-m64` 플래그 때문에 빌드되지 않는다. CMakeLists.txt에서 아키텍처별로 자동 분기된다.
+### DynamixelSDK
 
-모터 없이 테스트만 하려면 cmake에 `-DMOTOR_ENABLED=OFF`를 전달하면 DynamixelSDK와 WiringPi가 불필요하다.
+cmake 빌드 시 `ExternalProject`로 자동 클론 및 빌드된다. 별도 설치 불필요.
+
+> RPi 5 (aarch64)에서는 `linux_sbc` 디렉토리가 사용된다. CMakeLists.txt에서 아키텍처별로 자동 분기된다.
 
 
-## 7. C++ 빌드
+## 6. C++ 빌드
 
 ```bash
 mkdir -p build && cd build
@@ -114,7 +95,38 @@ cmake -DMOTOR_ENABLED=OFF ..
 ```
 
 
-## 8. WiFi 절전 모드 해제 (권장)
+## 7. 모델 체크포인트
+
+체크포인트 파일은 git에 포함되지 않으므로 별도로 다운로드하여 `models/`에 배치한다.
+
+```bash
+wget -O models.zip "https://kist.gov-dooray.com/share/drive-files/m1olidaukdr7.5LnEpNTcR1OgoDBYEyMAQA"
+unzip models.zip -d models/
+rm models.zip
+```
+
+
+## 8. API 인증 설정
+
+### Google Cloud (ASR)
+
+GCP 콘솔에서 서비스 계정 키(JSON)를 발급받고, 파일 경로를 환경변수에 등록한다.
+
+```bash
+# 파일 경로에 맞게 수정
+echo 'export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### OpenAI (LLM, TTS)
+
+```bash
+echo 'export OPENAI_API_KEY=sk-...' >> ~/.bashrc
+source ~/.bashrc
+```
+
+
+## 9. WiFi 절전 모드 해제 (권장)
 
 RPi 5의 WiFi는 기본적으로 Power Management가 켜져 있어, 유휴 시 속도가 크게 떨어진다.
 

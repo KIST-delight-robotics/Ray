@@ -17,8 +17,8 @@ Protocol (JSON over WebSocket):
     {"type": "playback_complete"}
 
 Usage:
-    uv run python mock_cpp_server.py
-    uv run python mock_cpp_server.py --port 8765 --sample-rate 24000
+    uv run python scripts/mock_cpp_server.py
+    uv run python scripts/mock_cpp_server.py --port 8765 --sample-rate 24000
 """
 
 from __future__ import annotations

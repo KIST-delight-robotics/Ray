@@ -122,13 +122,8 @@ target_link_libraries(Ray PRIVATE
 )
 target_include_directories(Ray PRIVATE ${SNDFILE_INCLUDE_DIRS})
 
-# 하드웨어 활성화 시: 컴파일 플래그 및 하드웨어 라이브러리 추가
+# 하드웨어 활성화 시: DynamixelSDK 자동 클론+빌드 및 하드웨어 라이브러리 추가
 if(MOTOR_ENABLED)
-    target_compile_definitions(Ray PRIVATE MOTOR_ENABLED)
-    target_include_directories(Ray PRIVATE
-        third_party/DynamixelSDK-3.7.31/c++/include/dynamixel_sdk
-        ${WIRINGPI_INCLUDE_DIR}
-    )
     # Detect architecture for DynamixelSDK variant
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm")
         set(DXL_BUILD_DIR "linux_sbc")
@@ -137,11 +132,31 @@ if(MOTOR_ENABLED)
         set(DXL_BUILD_DIR "linux64")
         set(DXL_LIB_NAME "dxl_x64_cpp")
     endif()
+
+    set(DXL_SOURCE_DIR ${CMAKE_SOURCE_DIR}/third_party/DynamixelSDK-3.7.31)
+
+    include(ExternalProject)
+    ExternalProject_Add(
+        DynamixelSDK
+        GIT_REPOSITORY https://github.com/ROBOTIS-GIT/DynamixelSDK.git
+        GIT_TAG 3.7.31
+        SOURCE_DIR ${DXL_SOURCE_DIR}
+        CONFIGURE_COMMAND ""
+        BUILD_COMMAND make -C ${DXL_SOURCE_DIR}/c++/build/${DXL_BUILD_DIR}
+        INSTALL_COMMAND ""
+    )
+
+    target_compile_definitions(Ray PRIVATE MOTOR_ENABLED)
+    target_include_directories(Ray PRIVATE
+        ${DXL_SOURCE_DIR}/c++/include/dynamixel_sdk
+        ${WIRINGPI_INCLUDE_DIR}
+    )
     target_link_directories(Ray PRIVATE
-        third_party/DynamixelSDK-3.7.31/c++/build/${DXL_BUILD_DIR}
+        ${DXL_SOURCE_DIR}/c++/build/${DXL_BUILD_DIR}
     )
     target_link_libraries(Ray PRIVATE
         ${DXL_LIB_NAME}
         ${WIRINGPI_LIBRARY}
     )
+    add_dependencies(Ray DynamixelSDK)
 endif()
