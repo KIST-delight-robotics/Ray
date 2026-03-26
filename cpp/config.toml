@@ -11,7 +11,7 @@ is_time_based = true    # true: Time-based, false: Velocity-based
 operating_mode = 4      # 1: Velocity, 3: Position, 4: Extended Position, 16: PWM
 return_delay_time = 0
 
-profile_velocity_homing = 2000   # 기기 부팅 시 초기 위치로 이동할 때 속도
+profile_velocity_homing = 500   # 기기 부팅 시 초기 위치로 이동할 때 속도
 profile_velocity = 60
 profile_acceleration = 0
 
