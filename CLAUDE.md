@@ -27,10 +27,6 @@ SessionManager (top-level state machine)
 ## Directory Structure
 
 ```
-docs/
-├── ARCHITECTURE.md
-└── decisions.md
-
 voice_pipeline/
 ├── core/
 │   ├── types.py               # Shared data types (TurnDecision, ResponseData, etc.)
@@ -40,7 +36,7 @@ voice_pipeline/
 │
 ├── audio/
 │   ├── audio_input.py         # Mic capture → audio_queue
-│   ├── wakeword.py            # Wakeword detection (may wrap external engine)
+│   ├── wakeword.py            # Wakeword detection (Silero VAD + Google STT)
 │   └── exceptions.py
 │
 ├── asr/
@@ -48,20 +44,24 @@ voice_pipeline/
 │   └── exceptions.py
 │
 ├── turn_taking/
-│   ├── vap.py                 # VAP wrapper (external model)
-│   ├── turngpt.py             # TurnGPT wrapper (external model)
-│   ├── turn_detector.py       # Combined turn decision
+│   ├── vap.py                 # VAPWrapper(IVAP) — VoiceActivityProjection
+│   ├── maai_vap.py            # MaAIVAPWrapper(IVAP) — MaAI ONNX (default)
+│   ├── async_vap.py           # AsyncVAP(IVAP) — background thread wrapper
+│   ├── turngpt.py             # TurnGPTWrapper(ITurnGPT)
+│   ├── async_turngpt.py       # AsyncTurnGPT — background thread wrapper
+│   ├── turn_detector.py       # TurnDetector — combined turn decision
 │   └── exceptions.py
 │
 ├── llm/
 │   ├── llm.py                 # LLM interface impl
 │   ├── prompts.py             # Prompt templates
-│   ├── tools.py               # Tool definitions & execution (planned)
+│   ├── tools.py               # Tool definitions & execution
 │   ├── token_counter.py       # Token counting utilities
 │   └── exceptions.py
 │
 ├── tts/
 │   ├── tts.py                 # TTS interface impl
+│   ├── greeting_audio.py      # Pre-generated greeting/farewell audio
 │   ├── utterance_truncator.py # Barge-in text truncation strategies
 │   └── exceptions.py
 │
@@ -84,6 +84,9 @@ voice_pipeline/
 │   ├── led_controller.py      # LED interface + impls (Direct / Bridge)
 │   ├── animations.py          # LED animation patterns
 │   └── exceptions.py
+│
+├── similarity/
+│   └── similarity.py          # Semantic similarity (sentence-transformers / difflib)
 │
 ├── orchestrator/
 │   └── orchestrator.py        # ACTIVE mode conversation loop
@@ -111,9 +114,10 @@ voice_pipeline/
 
 ## Documentation
 
-- **SCRATCHPAD.md**: Claude's working memory. Read at session start, update freely.
-- **decisions.md**: Append after each Phase. Record: key design choices and their rationale (especially when alternatives existed or it deviates from the original plan), gotchas/edge cases that affect integration or tuning, and constraints future phases should respect. Skip trivial implementation details obvious from reading the code.
-- **Module READMEs** (`turn_taking/README.md`, etc.): Created when implementing the module. Covers external repo setup, constraints, config params.
+- **docs/SETUP.md**: Raspberry Pi 5 초기 설정 가이드.
+- **docs/decisions.md**: Key design choices and their rationale, gotchas/edge cases, constraints.
+- **docs/ARCHITECTURE.md**: System architecture details.
+- **Module READMEs** (`turn_taking/README.md`, etc.): External repo setup, constraints, config params.
 
 
 ## External Model Dependencies
@@ -210,18 +214,3 @@ uv run pytest -m ''                              # everything
 Commit granularity upon completing a phase: make commits by module or by a meaningful unit of work. Don’t put an entire phase into a single commit.
 
 
-## Implementation Order
-
-```
-Phase 1 — Foundation:    core/ (types, interfaces, exceptions, config)
-Phase 2 — Independent:   history/, tts/utterance_truncator, context/
-Phase 3 — External:      asr/, llm/, tts/, bridge/, audio/wakeword, led/
-Phase 4 — Composite:     turn_taking/, generation/
-Phase 5 — Orchestration: orchestrator/
-Phase 6 — Top-level:     session/, audio/audio_input
-Phase 7 — Integration tests
-```
-
-
-
-Add interfaces/types needed by the next Phase to `core/` before starting it. Phase 1 defines only confirmed shared types (TurnDecision, ResponseData, etc.).
