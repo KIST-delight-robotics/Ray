@@ -129,11 +129,19 @@ if(MOTOR_ENABLED)
         third_party/DynamixelSDK-3.7.31/c++/include/dynamixel_sdk
         ${WIRINGPI_INCLUDE_DIR}
     )
+    # Detect architecture for DynamixelSDK variant
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm")
+        set(DXL_BUILD_DIR "linux_sbc")
+        set(DXL_LIB_NAME "dxl_sbc_cpp")
+    else()
+        set(DXL_BUILD_DIR "linux64")
+        set(DXL_LIB_NAME "dxl_x64_cpp")
+    endif()
     target_link_directories(Ray PRIVATE
-        third_party/DynamixelSDK-3.7.31/c++/build/linux64
+        third_party/DynamixelSDK-3.7.31/c++/build/${DXL_BUILD_DIR}
     )
     target_link_libraries(Ray PRIVATE
-        dxl_x64_cpp
+        ${DXL_LIB_NAME}
         ${WIRINGPI_LIBRARY}
     )
 endif()

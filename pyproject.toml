@@ -44,6 +44,9 @@ dev = [
 [project.scripts]
 ray = "voice_pipeline.__main__:main"
 
+[tool.setuptools.packages.find]
+include = ["voice_pipeline*"]
+
 [tool.pytest.ini_options]
 testpaths = ["voice_pipeline/tests"]
 addopts = "-m 'not requires_model and not requires_api'"
