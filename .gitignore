@@ -39,16 +39,8 @@ Thumbs.db
 # ruff
 .ruff_cache/
 
-# Models (large files)
-*.pt
-*.pth
-*.onnx
-*.bin
-*.safetensors
-
-# Model tokenizers are tracked (small); force-add if needed:
-#   git add -f models/turngpt/tokenizer/
-!models/turngpt/tokenizer/
+# Models (downloaded via models.zip)
+models/
 
 # TTS-generated greeting/farewell audio cache
 assets/audio/greeting_*.wav
