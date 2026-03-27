@@ -9,11 +9,13 @@
 void init_partb_config(PartBConfig& cfg)
 {
     cfg.hop_ms           = 40;
-    cfg.future_steps     = 9;     // 미래 9프레임(360ms) 내에서 peak 탐색
-    cfg.win_len          = 11;    // SG window
-    cfg.half             = 5;     // (11-1)/2
+       
     cfg.poly_order       = 3;
+
+    cfg.half             = 4;     // (9-1)/2
+    cfg.win_len          = 9;    // SG window
     cfg.future_frames    = 9;     // current chunk 뒤 미래 9프레임 확보
+    cfg.future_steps     = 9;     // 미래 9프레임(360ms) 내에서 peak 탐색
 
     cfg.peak_trigger_min = 0.24f;
     cfg.prominence_th    = 0.13f;

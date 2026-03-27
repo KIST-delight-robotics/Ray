@@ -533,7 +533,8 @@ void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream) {
 
         for (size_t i = 0; i < num_samples; ++i) {
             sf::Int16 sample = static_cast<sf::Int16>(raw_chunk[i*2] | (raw_chunk[i*2 + 1] << 8));
-            audio_for_playback[i] = sample;
+            audio_for_playback[i] 
+            = sample;
             audio_for_motion[i] = static_cast<float>(sample) / 32767.0f;
         }
 
@@ -650,7 +651,7 @@ void read_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& 
 // 로그 설정 / 로깅 파일 저장 경로: /home/limdaemin/LIM/Ray/assets/logs/
 // ============================================================
 
-constexpr float RAW_TO_MOTOR_SCALE = 450.0f; //로깅 파일에서 저장되는 음원 RAW 파일을 스케일링 할때 정할 최댓값
+constexpr float RAW_TO_MOTOR_SCALE = 400.0f; //로깅 파일에서 저장되는 음원 RAW 파일을 스케일링 할때 정할 최댓값
 constexpr float MOUTH_AUDIO_GAIN = 1.0f; // 입 모션에 음원 볼륨이 미치는 영향의 강도 조절용 상수 현재 3인 이유는 vocals.wav 기준 TTS 음원이 약 1/4라서 3정도가 적당하다고 판단했기 때문.
 
 inline void apply_mouth_audio_gain(std::vector<float>& buf, float gain) {
@@ -853,18 +854,16 @@ void generate_motion(int channels, int samplerate) {
     init_partb_config(mouth_state.cfg);
 
     // 실제 실행용 튜닝값 설정
-    mouth_state.cfg.peak_trigger_min = 0.24f;
-    mouth_state.cfg.prominence_th    = 0.13f;
-    mouth_state.cfg.min_open         = 0.52f;
-    mouth_state.cfg.future_steps     = 9;
-    mouth_state.cfg.future_frames    = 9;   // peak center 9-point SG용 (360ms)
+    // mouth_state.cfg.peak_trigger_min = 0.24f;
+    // mouth_state.cfg.prominence_th    = 0.13f;
+    // mouth_state.cfg.min_open         = 0.52f;
+
 
     //온라인 대화용 파라미터
-    // mouth_state.cfg.peak_trigger_min = 0.18f;
-    // mouth_state.cfg.prominence_th    = 0.09f;
-    // mouth_state.cfg.min_open         = 0.52f;
-    // mouth_state.cfg.future_steps     = 9;
-    // mouth_state.cfg.future_frames    = 9; 
+    mouth_state.cfg.peak_trigger_min = 0.18f;
+    mouth_state.cfg.prominence_th    = 0.09f;
+    mouth_state.cfg.min_open         = 0.52f;
+
 
     init_partb_mouth_state(mouth_state);
 
@@ -1250,9 +1249,9 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
 
             
             float motor_value = motion_data.second;
-            double roll  = 0;
-            double pitch = 0;
-            double yaw   = 0;
+            double roll  = current_motion_data[i][0];
+            double pitch = current_motion_data[i][1];
+            double yaw   = current_motion_data[i][2];
             double mouth = motor_value;
 
             target_position = RPY2DXL(roll, pitch, yaw, mouth, 0);
