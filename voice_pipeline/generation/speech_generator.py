@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from voice_pipeline.core.config import SpeechGeneratorConfig
 from voice_pipeline.core.interfaces import ILLM, ITTS, IContextBuilder, ISpeechGenerator
-from voice_pipeline.core.types import GeneratorState, ResponseData
+from voice_pipeline.core.types import GeneratorState, LLMMetrics, LLMStream, ResponseData
 
 logger = logging.getLogger("voice_pipeline.generation")
 
@@ -169,24 +169,31 @@ class SpeechGenerator(ISpeechGenerator):
             # 2. Generate LLM text
             if cancel_event.is_set():
                 return
-            llm_iter = self._llm.generate(messages)
+            llm_stream: LLMStream = self._llm.generate(messages)
             text_chunks: list[str] = []
             try:
-                for chunk in llm_iter:
+                for chunk in llm_stream:
                     if cancel_event.is_set():
-                        if hasattr(llm_iter, "close"):
-                            llm_iter.close()
+                        llm_stream.close()
                         return
                     text_chunks.append(chunk)
             except Exception:
-                if hasattr(llm_iter, "close"):
-                    with contextlib.suppress(Exception):
-                        llm_iter.close()
+                with contextlib.suppress(Exception):
+                    llm_stream.close()
                 raise
 
             full_text = "".join(text_chunks)
             t_llm = time.monotonic()
             logger.info("LLM done (%.1fs) [run=%d]: %r", t_llm - t0, run_id, full_text)
+
+            # 2a. Collect LLM metrics and build turn_items
+            metrics_list: list[LLMMetrics] = []
+            try:
+                llm_result = llm_stream.result
+                if llm_result.metrics is not None:
+                    metrics_list.append(llm_result.metrics)
+            except RuntimeError:
+                pass  # Stream was closed early, no result available
 
             # 3. Guard: empty text
             if not full_text.strip():
@@ -250,10 +257,14 @@ class SpeechGenerator(ISpeechGenerator):
             except Exception:
                 logger.debug("Timestamp retrieval failed, using empty list", exc_info=True)
                 timestamps = []
+
+            turn_items = [{"role": "assistant", "content": full_text}]
             response_data = ResponseData(
                 text=full_text,
                 audio=bytes(total_audio),
                 timestamps=timestamps,
+                turn_items=turn_items,
+                metrics_list=metrics_list,
             )
 
             with self._lock:

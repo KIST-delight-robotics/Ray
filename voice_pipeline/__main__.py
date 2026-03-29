@@ -7,8 +7,20 @@ Usage:
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
+
+# Suppress ALSA/JACK noise during PyAudio initialization.
+# Restored after AudioInput construction so runtime errors are still visible.
+_alsa_error_handler = ctypes.CFUNCTYPE(
+    None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p
+)(lambda *_: None)
+try:
+    _asound = ctypes.cdll.LoadLibrary("libasound.so.2")
+    _asound.snd_lib_error_set_handler(_alsa_error_handler)
+except Exception:
+    _asound = None
 import queue
 import signal
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +38,7 @@ from voice_pipeline.led.led_controller import LEDController
 from voice_pipeline.llm.llm import OpenAILLM
 from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
 from voice_pipeline.llm.token_counter import create_token_counter
+from voice_pipeline.llm.tools import get_tools_token_cost
 from voice_pipeline.orchestrator.orchestrator import Orchestrator
 from voice_pipeline.session.session_manager import SessionComponents, SessionManager
 from voice_pipeline.similarity.similarity import create_similarity
@@ -66,6 +79,7 @@ def main() -> None:
     similarity = create_similarity(config.similarity)
     executor = ThreadPoolExecutor(max_workers=config.speech_generator.max_workers)
     token_counter = create_token_counter(config.llm.model)
+    tools_token_cost = get_tools_token_cost(config.llm.tools)
 
     # --- Pre-generate greeting/farewell audio ---
     greeting_paths = ensure_greeting_audio(tts, config.tts, config.greeting_audio)
@@ -73,6 +87,10 @@ def main() -> None:
     # --- Audio queue + input ---
     audio_queue = queue.Queue(maxsize=config.session.audio_queue_size)
     audio_input = AudioInput(audio_queue, config.audio, config.audio_input)
+
+    # Restore default ALSA error handler
+    if _asound is not None:
+        _asound.snd_lib_error_set_handler(None)
 
     # --- Session factory: creates fresh per-session components ---
     prev_async: list[AsyncVAP | AsyncTurnGPT] = []
@@ -90,9 +108,10 @@ def main() -> None:
         async_turngpt = AsyncTurnGPT(turngpt)
         prev_async.extend([async_vap, async_turngpt])
 
-        history = ConversationHistory(storage)
+        history = ConversationHistory(storage, token_counter)
         context_builder = ContextBuilder(
-            history, config.history, DEFAULT_SYSTEM_PROMPT, token_counter
+            history, config.history, DEFAULT_SYSTEM_PROMPT, token_counter,
+            tools_token_cost=tools_token_cost,
         )
         turn_detector = TurnDetector(
             async_vap,

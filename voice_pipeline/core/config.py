@@ -53,8 +53,8 @@ class ConversationHistoryConfig:
     """Configuration for ConversationHistory and StorageBackend."""
 
     max_context_tokens: int = 4096
-    storage_backend: Literal["memory", "file"] = "file"
-    storage_path: str = "logs/sessions"
+    storage_backend: Literal["memory", "sqlite"] = "sqlite"
+    storage_path: str = "data/ray.db"
 
 
 @dataclass

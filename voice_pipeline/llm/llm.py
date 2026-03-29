@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Generator, Iterator
+import time
+from collections.abc import Generator
 from typing import Any
 
 import openai
 
 from voice_pipeline.core.config import LLMConfig
 from voice_pipeline.core.interfaces import ILLM
+from voice_pipeline.core.types import LLMMetrics, LLMResult, LLMStream, ToolCall, Usage
 from voice_pipeline.llm.exceptions import LLMError
 from voice_pipeline.llm.tools import resolve_tools
 
@@ -22,9 +24,8 @@ class OpenAILLM(ILLM):
     Reads ``OPENAI_API_KEY`` from the environment. Streams text chunks
     via ``client.responses.create(stream=True)``.
 
-    The iterator returned by :meth:`generate` must be fully consumed or
-    explicitly closed (via :meth:`~Iterator.close` or exhaustion) to
-    release the underlying HTTP connection.
+    Returns LLMStream: iterate for text deltas, access ``.result``
+    after consumption for LLMResult (text, tool_calls, metrics).
     """
 
     def __init__(self, config: LLMConfig) -> None:
@@ -35,23 +36,28 @@ class OpenAILLM(ILLM):
             timeout=config.timeout_sec,
         )
 
-    def generate(self, messages: list[dict[str, Any]]) -> Iterator[str]:
+    def generate(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> LLMStream:
         """Generate a streaming response from the given message history.
 
-        System messages (``role == "system"``) are extracted and passed
-        via the Responses API ``instructions`` parameter.  Remaining
-        messages are passed as ``input``.
-
         Args:
-            messages: List of message dicts (``role`` / ``content`` keys).
+            messages: List of message dicts.
+            tools: Tool definitions. None uses config defaults.
+                Empty list explicitly disables tools.
 
         Returns:
-            Iterator yielding text chunks as they become available.
-
-        Raises:
-            LLMError: On any API or streaming error.
+            LLMStream yielding text chunks. After full iteration,
+            .result provides LLMResult with text, tool_calls, metrics.
         """
         instructions, input_messages = _split_system_message(messages)
+
+        # Resolve tools: None → config default, [] → no tools
+        resolved_tools = self._tools if tools is None else tools
+
+        start_time = time.monotonic()
 
         try:
             kwargs: dict[str, Any] = {
@@ -65,72 +71,133 @@ class OpenAILLM(ILLM):
                 kwargs["instructions"] = instructions
             if self._config.reasoning_effort is not None:
                 kwargs["reasoning"] = {"effort": self._config.reasoning_effort}
-            if self._tools:
-                kwargs["tools"] = self._tools
+            if resolved_tools:
+                kwargs["tools"] = resolved_tools
 
             stream = self._client.responses.create(**kwargs)
         except openai.OpenAIError as exc:
             logger.warning("OpenAI API error: %s", exc)
             raise LLMError(str(exc)) from exc
 
-        return _SafeStreamIterator(stream, _iter_stream(stream))
+        # Shared mutable state between generator and result_fn
+        state = _StreamState(model=self._config.model, start_time=start_time)
+
+        gen = _iter_stream(stream, state)
+
+        def result_fn(full_text: str) -> LLMResult:
+            return state.build_result(full_text)
+
+        return LLMStream(
+            gen,
+            close_fn=lambda: _close_stream(stream),
+            result_fn=result_fn,
+        )
 
 
-class _SafeStreamIterator(Iterator[str]):
-    """Wrapper that ensures the HTTP stream is closed even if iteration never starts.
+class _StreamState:
+    """Mutable state shared between the stream generator and result builder."""
 
-    A bare generator's ``finally`` block only runs once the generator body has
-    been entered (i.e., after the first ``next()``).  If the caller calls
-    ``.close()`` before ever calling ``next()``, the underlying stream would
-    leak.  This wrapper intercepts ``close()`` and closes the stream directly.
-    """
+    __slots__ = (
+        "model",
+        "start_time",
+        "first_token_time",
+        "tool_calls",
+        "completed_response",
+    )
 
-    __slots__ = ("_stream", "_gen")
+    def __init__(self, model: str, start_time: float) -> None:
+        self.model = model
+        self.start_time = start_time
+        self.first_token_time: float | None = None
+        self.tool_calls: list[ToolCall] = []
+        self.completed_response: Any = None
 
-    def __init__(self, stream: Any, gen: Generator[str, None, None]) -> None:
-        self._stream = stream
-        self._gen = gen
+    def build_result(self, full_text: str) -> LLMResult:
+        """Build LLMResult from accumulated state."""
+        end_time = time.monotonic()
+        latency_ms = int((end_time - self.start_time) * 1000)
+        ttft_ms = (
+            int((self.first_token_time - self.start_time) * 1000)
+            if self.first_token_time is not None
+            else latency_ms
+        )
 
-    def __next__(self) -> str:
-        return next(self._gen)
+        metrics = self._extract_metrics(latency_ms, ttft_ms)
+        return LLMResult(
+            text=full_text,
+            tool_calls=tuple(self.tool_calls),
+            metrics=metrics,
+        )
 
-    def __iter__(self) -> Iterator[str]:
-        return self
+    def _extract_metrics(self, latency_ms: int, ttft_ms: int) -> LLMMetrics | None:
+        """Extract metrics from the completed response."""
+        resp = self.completed_response
+        if resp is None:
+            return None
 
-    def close(self) -> None:
-        """Close the generator and ensure the HTTP stream is released."""
         try:
-            self._gen.close()
-        finally:
-            _close_stream(self._stream)
+            usage_data = resp.usage
+            usage = Usage(
+                input_tokens=usage_data.input_tokens,
+                output_tokens=usage_data.output_tokens,
+                cached_tokens=getattr(
+                    getattr(usage_data, "input_tokens_details", None), "cached_tokens", 0
+                )
+                or 0,
+                reasoning_tokens=getattr(
+                    getattr(usage_data, "output_tokens_details", None), "reasoning_tokens", 0
+                )
+                or 0,
+            )
+        except (AttributeError, TypeError):
+            logger.debug("Failed to extract usage from response", exc_info=True)
+            return None
+
+        model = getattr(resp, "model", self.model) or self.model
+        return LLMMetrics(
+            usage=usage,
+            model=model,
+            latency_ms=latency_ms,
+            ttft_ms=ttft_ms,
+        )
 
 
 def _split_system_message(
     messages: list[dict[str, Any]],
 ) -> tuple[str | None, list[dict[str, Any]]]:
-    """Extract the system message from the front of the message list.
-
-    Returns:
-        A tuple of (instructions, remaining_messages).  ``instructions``
-        is ``None`` if the first message is not a system message.
-    """
+    """Extract the system message from the front of the message list."""
     if messages and messages[0].get("role") == "system":
         return messages[0]["content"], messages[1:]
     return None, messages
 
 
-def _iter_stream(stream: Any) -> Iterator[str]:
+def _iter_stream(stream: Any, state: _StreamState) -> Generator[str, None, None]:
     """Iterate over a Responses API stream, yielding text deltas.
 
-    Ensures ``stream.close()`` is called even when the caller
-    abandons iteration early (barge-in) or never starts iteration.
+    Captures tool_calls and completed response in the shared state.
     """
     try:
         for event in stream:
             if event.type == "response.output_text.delta":
+                if state.first_token_time is None:
+                    state.first_token_time = time.monotonic()
                 yield event.delta
+
+            elif event.type == "response.completed":
+                state.completed_response = event.response
+                # Extract tool calls from response output
+                if hasattr(event.response, "output"):
+                    for output_item in event.response.output:
+                        if getattr(output_item, "type", None) == "function_call":
+                            state.tool_calls.append(
+                                ToolCall(
+                                    call_id=output_item.call_id,
+                                    name=output_item.name,
+                                    arguments=output_item.arguments,
+                                )
+                            )
+
     except GeneratorExit:
-        # Caller closed the iterator (barge-in) — fall through to finally.
         return
     except openai.OpenAIError as exc:
         logger.warning("OpenAI streaming error: %s", exc)
@@ -143,7 +210,7 @@ def _iter_stream(stream: Any) -> Iterator[str]:
 
 
 def _close_stream(stream: Any) -> None:
-    """Close the stream, suppressing errors to avoid masking the original exception."""
+    """Close the stream, suppressing errors."""
     try:
         stream.close()
     except Exception:

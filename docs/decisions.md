@@ -220,6 +220,47 @@
 - **sentence-transformers 3.x**: Pinned to 3.x for `optimum`/`transformers` compatibility. 5.x requires `transformers>=5.0` which conflicts with `optimum`'s ONNX runtime integration. No functional difference for inference-only usage.
 - **ONNX backend deferred**: At 22M params, torch inference (~4ms) matches or beats ONNX (~6ms) on desktop CPU. ONNX `use_onnx` config option preserved for RPi 5 testing.
 
-### File storage (`history/storage_backend`)
-- **Wrapped JSON format**: Sessions saved as `{"session_id": ..., "started_at": ..., "messages": [...]}` instead of bare list. `load()` handles both formats for backward compatibility.
-- **Default backend changed to file**: `data/sessions/` directory, auto-created. Memory backend still available via config.
+### File storage (`history/storage_backend`) — REPLACED
+- ~~Wrapped JSON format~~ — Replaced by SQLite write-through storage. See "Conversation History Redesign" below.
+
+## Conversation History Redesign
+
+### Write-through SQLite storage (`history/storage_backend`)
+- **SQLite replaces FileStorageBackend**: Single `data/ray.db` file. WAL mode + `synchronous=NORMAL` for crash safety without fsync overhead. Future long-term memory tables go in the same DB (additive, no schema changes to existing tables).
+- **Write-through, not batch-at-end**: Every `add_user_message`/`add_assistant_message` does an immediate INSERT. Crash during session loses at most the in-progress turn, not the entire session. `save()` only sets `ended_at` timestamp + WAL checkpoint.
+- **Graduated DB corruption recovery**: Normal open → WAL file delete → backup corrupt file + new DB. Most RPi power-loss scenarios only corrupt the WAL (losing recent uncommitted writes), not the main DB.
+- **INSERT failure is non-fatal**: try/except around all DB writes. On failure, logs warning and continues in memory-only mode. Conversation is not interrupted by storage errors.
+
+### Individual message storage with turn_id grouping
+- **Each message = one DB row**: `messages(session_id, msg_id, turn_id, item_json, token_count, metrics_json)`. Minimum unit is a single message, not a turn. `turn_id` groups related messages (tool call + tool result + assistant text).
+- **OpenAI Responses API format stored directly**: `item_json` contains the message dict as-is. No intermediate canonical format. Vendor-specific by design (acknowledged in interface docstring). Migration script needed on vendor switch.
+- **`metrics_json` for LLM metadata**: JSON column on messages table (NULL for non-LLM messages). Flexible — new fields added without schema changes. Stores Usage (input/output/cached/reasoning tokens), model, latency_ms, ttft_ms.
+- **`token_count` pre-computed at save time**: Assistant messages use `metrics.usage.output_tokens` (exact from API). User messages and truncated text use tiktoken fallback. ContextBuilder reads stored value — no re-tokenization.
+
+### LLMStream replaces bare Iterator[str] (`llm/llm.py`)
+- **`LLMStream(Iterator[str])`**: Same streaming iteration pattern as TTSStream. Text chunks yielded during iteration. After full consumption, `.result` provides `LLMResult(text, tool_calls, metrics)`. Backward-compatible — existing `for chunk in llm.generate()` code works unchanged.
+- **Metrics captured from `response.completed` event**: Usage, model, tool_calls extracted from the Responses API stream's final event. Timing (latency_ms, ttft_ms) measured via `time.monotonic()` in the stream wrapper.
+- **`tools` parameter on `ILLM.generate()`**: `None` = use config defaults, `[]` = explicitly disable tools. Enables per-call tool control for future tool loop and memory module.
+- **`_SafeStreamIterator` removed**: LLMStream handles all lifecycle concerns (idempotent close, HTTP connection release, close-before-first-next safety).
+
+### Tool token cost management (`llm/tools.py`)
+- **`_TOOL_REGISTRY` unifies definition + cost**: Each tool entry has both the API definition and empirically measured token cost. Single point of addition when new tools are added.
+- **Measured, not estimated**: Tool definition token cost measured by comparing API `input_tokens` with/without the tool. More accurate than tiktoken estimation of the definition structure. `web_search` = 294 tokens.
+- **ContextBuilder deducts tool cost from budget**: Along with base overhead (5 tokens) and per-message overhead (3 tokens/msg), measured against actual API input_tokens.
+
+### ConversationHistory API redesign (`history/conversation_history.py`)
+- **`add_message(item, turn_id, metrics)` as core method**: Generic method for any message type. `add_user_message` and `add_assistant_message` are convenience wrappers that auto-assign turn_id.
+- **`begin_turn()` for multi-message turns**: Allocates turn_id without DB write. Used for tool call turns where function_call + function_call_output + assistant text share the same turn_id.
+- **`get_turns()` for ContextBuilder**: Groups messages by turn_id into `HistoryTurn(items, token_count)`. Atomic inclusion/exclusion in token budget — tool call groups never split.
+- **`get_messages()` for LLM input**: Flat list of message dicts, read from memory only. No DB access during conversation.
+- **`clear()` removed**: Write-through makes in-memory clearing meaningless. `new_session()` resets state.
+- **`threading.Lock` on all public methods**: Writes from Orchestrator (main thread), reads from SpeechGenerator (background thread via ContextBuilder).
+- **`token_counter` held internally**: Callers don't pass token_count. ConversationHistory computes it — from LLM metrics when available, tiktoken fallback otherwise. `_safe_count()` wraps tiktoken with exception handling.
+
+### ResponseData extension
+- **`turn_items: list[dict]`**: The complete assistant turn in Responses API format. For simple responses: single assistant message. For tool calls: full chain. Orchestrator passes these to history.
+- **`metrics_list: list[LLMMetrics]`**: One entry per LLM call in the generation pipeline. Multiple when tool loop runs. Orchestrator picks the last for history storage.
+
+### ContextBuilder overhead accounting (`context/context_builder.py`)
+- **Three overhead components**: Base (5 tokens, fixed API framing), per-message (3 tokens, role markers/separators), tool definitions (from `get_tools_token_cost()`). All empirically measured against actual API `input_tokens`.
+- **Turn-level atomic budgeting**: Uses `get_turns()` instead of `get_messages()`. Each turn's cost = stored `token_count` + `len(items) * per_message_overhead`. Never splits a turn.

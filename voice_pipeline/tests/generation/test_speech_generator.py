@@ -14,6 +14,8 @@ from voice_pipeline.core.config import SpeechGeneratorConfig
 from voice_pipeline.core.interfaces import ILLM, ITTS, IContextBuilder
 from voice_pipeline.core.types import (
     GeneratorState,
+    LLMResult,
+    LLMStream,
     ResponseData,
     TTSStream,
     WordTimestamp,
@@ -23,6 +25,22 @@ from voice_pipeline.generation.speech_generator import SpeechGenerator
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _make_llm_stream(
+    chunks: list[str],
+    result: LLMResult | None = None,
+) -> LLMStream:
+    """Create an LLMStream from a list of text chunks."""
+
+    def gen():
+        yield from chunks
+
+    text = "".join(chunks)
+    return LLMStream(
+        gen(),
+        result_fn=lambda t: result or LLMResult(text=t),
+    )
 
 
 def _make_tts_stream(
@@ -64,9 +82,9 @@ def _make_deps(
 
     llm = MagicMock(spec=ILLM)
     if llm_chunks is not None:
-        llm.generate.return_value = iter(llm_chunks)
+        llm.generate.return_value = _make_llm_stream(llm_chunks)
     else:
-        llm.generate.return_value = iter(["Hello", " there!"])
+        llm.generate.return_value = _make_llm_stream(["Hello", " there!"])
 
     tts = MagicMock(spec=ITTS)
     if tts_chunks is not None:
@@ -171,8 +189,8 @@ class TestPrepareRestart:
             if call_count == 1:
                 # First call blocks until cancelled or timeout
                 proceed_event.wait(timeout=2.0)
-                return iter(["stale"])
-            return iter(["fresh", " response"])
+                return _make_llm_stream(["stale"])
+            return _make_llm_stream(["fresh", " response"])
 
         llm = MagicMock(spec=ILLM)
         llm.generate.side_effect = slow_generate
@@ -203,7 +221,7 @@ class TestPrepareDuringStreaming:
         cb.build.return_value = [{"role": "user", "content": "hi"}]
 
         llm = MagicMock(spec=ILLM)
-        llm.generate.return_value = iter(["response"])
+        llm.generate.return_value = _make_llm_stream(["response"])
 
         call_count = 0
 
@@ -223,7 +241,7 @@ class TestPrepareDuringStreaming:
         _wait_for_state(gen, GeneratorState.STREAMING)
 
         # Restart while streaming
-        llm.generate.return_value = iter(["new response"])
+        llm.generate.return_value = _make_llm_stream(["new response"])
         gen.prepare("second")
         _wait_for_state(gen, GeneratorState.STREAMING)
         _wait_for_stream_done(gen)
@@ -248,7 +266,7 @@ class TestCancel:
 
         def slow_generate(messages):
             block_event.wait(timeout=2.0)
-            return iter(["text"])
+            return _make_llm_stream(["text"])
 
         llm = MagicMock(spec=ILLM)
         llm.generate.side_effect = slow_generate
@@ -387,7 +405,7 @@ class TestPipelineFailure:
         cb.build.return_value = [{"role": "user", "content": "hi"}]
 
         llm = MagicMock(spec=ILLM)
-        llm.generate.return_value = iter(["some text"])
+        llm.generate.return_value = _make_llm_stream(["some text"])
 
         tts = MagicMock(spec=ITTS)
         tts.synthesize.side_effect = RuntimeError("TTS error")
@@ -408,7 +426,7 @@ class TestEmptyLLMResponse:
         cb.build.return_value = [{"role": "user", "content": "hi"}]
 
         llm = MagicMock(spec=ILLM)
-        llm.generate.return_value = iter(["", "  ", ""])
+        llm.generate.return_value = _make_llm_stream(["", "  ", ""])
 
         tts = MagicMock(spec=ITTS)
 
@@ -424,7 +442,7 @@ class TestEmptyLLMResponse:
         cb.build.return_value = [{"role": "user", "content": "hi"}]
 
         llm = MagicMock(spec=ILLM)
-        llm.generate.return_value = iter(["   \n\t  "])
+        llm.generate.return_value = _make_llm_stream(["   \n\t  "])
 
         tts = MagicMock(spec=ITTS)
 
@@ -444,7 +462,7 @@ class TestZeroChunkTTS:
         cb.build.return_value = [{"role": "user", "content": "hi"}]
 
         llm = MagicMock(spec=ILLM)
-        llm.generate.return_value = iter(["some text"])
+        llm.generate.return_value = _make_llm_stream(["some text"])
 
         tts = MagicMock(spec=ITTS)
         tts.synthesize.return_value = _make_tts_stream([])
@@ -469,7 +487,7 @@ class TestShutdown:
         def cancellable_generate(messages):
             # Wait on the cancel_event that shutdown() will set
             cancel_observed.wait(timeout=2.0)
-            return iter(["text"])
+            return _make_llm_stream(["text"])
 
         llm = MagicMock(spec=ILLM)
         llm.generate.side_effect = cancellable_generate
@@ -507,8 +525,8 @@ class TestStaleRunDiscarded:
             call_count += 1
             if call_count == 1:
                 first_run_event.wait(timeout=2.0)
-                return iter(["stale text"])
-            return iter(["fresh text"])
+                return _make_llm_stream(["stale text"])
+            return _make_llm_stream(["fresh text"])
 
         llm = MagicMock(spec=ILLM)
         llm.generate.side_effect = sequenced_generate
@@ -614,7 +632,7 @@ class TestInputTextLifecycle:
 
         def slow_generate(messages):
             block_event.wait(timeout=2.0)
-            return iter(["text"])
+            return _make_llm_stream(["text"])
 
         llm = MagicMock(spec=ILLM)
         llm.generate.side_effect = slow_generate

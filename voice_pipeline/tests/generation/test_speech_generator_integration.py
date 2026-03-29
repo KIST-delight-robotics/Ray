@@ -100,10 +100,9 @@ def speech_generator(openai_api_key: str) -> SpeechGenerator:
     tts_config = TTSConfig(model="tts-1", voice="alloy")
     history_config = ConversationHistoryConfig(max_context_tokens=2048)
 
-    history = ConversationHistory(MemoryStorageBackend())
-    history.new_session("integration-test")
-
     token_counter = create_token_counter(llm_config.model)
+    history = ConversationHistory(MemoryStorageBackend(), token_counter)
+    history.new_session("integration-test")
     context_builder = ContextBuilder(
         history=history,
         config=history_config,

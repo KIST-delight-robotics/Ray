@@ -35,7 +35,9 @@ while (chunk := speech_generator.poll_audio()) is not None:
 
 if speech_generator.stream_done:
     response_data = speech_generator.get_response_data()
-    history.add_assistant_message(response_data.text)
+    # response_data.metrics_list contains LLMMetrics from each LLM call
+    metrics = response_data.metrics_list[-1] if response_data.metrics_list else None
+    history.add_assistant_message(response_data.text, metrics)
     playback_active = False
 ```
 

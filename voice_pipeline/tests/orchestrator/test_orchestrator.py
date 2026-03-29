@@ -317,7 +317,8 @@ class TestBargeIn:
         assert call_args[0] == "hello world"
         # stop_pos ≈ stop_pending_time - playback_start_time ≈ 0.35
         assert 0.2 < call_args[1] < 0.5
-        mocks["history"].add_assistant_message.assert_called_once_with("hello")
+        mocks["history"].add_assistant_message.assert_called_once()
+        assert mocks["history"].add_assistant_message.call_args[0][0] == "hello"
 
     def test_case_b_no_timestamps(self) -> None:
         """Case B: ResponseData without timestamps → DurationRatioTruncator."""
@@ -341,7 +342,8 @@ class TestBargeIn:
             MockTrunc.assert_called_once_with(1.0)
             mock_instance.truncate.assert_called_once()
 
-        mocks["history"].add_assistant_message.assert_called_once_with("hello")
+        mocks["history"].add_assistant_message.assert_called_once()
+        assert mocks["history"].add_assistant_message.call_args[0][0] == "hello"
 
     def test_case_c_no_response_data_deferred(self) -> None:
         """Case C: no ResponseData → approximate truncation + deferred."""
@@ -787,7 +789,8 @@ class TestCppEvents:
         q = _audio_queue_with()
         orch._run_frame(q)
 
-        mocks["history"].add_assistant_message.assert_called_once_with("hi there")
+        mocks["history"].add_assistant_message.assert_called_once()
+        assert mocks["history"].add_assistant_message.call_args[0][0] == "hi there"
         mocks["turn_detector"].notify_turn_complete.assert_called_once_with("robot", "hi there")
         assert orch._playback_state == PlaybackState.IDLE
 
@@ -813,7 +816,8 @@ class TestCppEvents:
             orch._run_frame(q)
 
         assert orch._playback_state == PlaybackState.IDLE
-        mocks["history"].add_assistant_message.assert_called_once_with("hello")
+        mocks["history"].add_assistant_message.assert_called_once()
+        assert mocks["history"].add_assistant_message.call_args[0][0] == "hello"
 
     def test_playback_complete_ignored_when_idle(self) -> None:
         """PLAYBACK_COMPLETE is ignored when in IDLE state."""

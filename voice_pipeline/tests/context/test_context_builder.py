@@ -4,66 +4,93 @@ from __future__ import annotations
 
 from typing import Any
 
-from voice_pipeline.context.context_builder import ContextBuilder
+from voice_pipeline.context.context_builder import (
+    ContextBuilder,
+    _BASE_OVERHEAD_TOKENS,
+    _PER_MESSAGE_OVERHEAD_TOKENS,
+)
 from voice_pipeline.core.config import ConversationHistoryConfig
-from voice_pipeline.core.interfaces import IConversationHistory, IStorageBackend
+from voice_pipeline.core.types import HistoryTurn, LLMMetrics
+
+# Per-message overhead shorthand
+_MO = _PER_MESSAGE_OVERHEAD_TOKENS
+_BO = _BASE_OVERHEAD_TOKENS
 
 
-class StubStorageBackend(IStorageBackend):
-    def load(self, session_id: str) -> list[dict[str, Any]]:
-        return []
-
-    def save(self, session_id: str, messages: list[dict[str, Any]]) -> None:
-        pass
-
-    def delete(self, session_id: str) -> None:
-        pass
-
-
-class StubHistory(IConversationHistory):
+class StubHistory:
     """Minimal history stub for testing ContextBuilder."""
 
     def __init__(self, messages: list[dict[str, Any]] | None = None) -> None:
-        self._messages = messages or []
-        self._next_id = 0
+        self._turns: list[HistoryTurn] = []
+        if messages:
+            for msg in messages:
+                text = msg.get("content", "")
+                tc = len(text.split()) if text and text.strip() else 0
+                self._turns.append(HistoryTurn(items=(msg,), token_count=tc))
 
     def new_session(self, session_id: str) -> None:
         pass
 
     def add_user_message(self, text: str) -> int:
-        msg_id = self._next_id
-        self._next_id += 1
-        self._messages.append({"role": "user", "content": text})
-        return msg_id
+        tc = len(text.split()) if text.strip() else 0
+        self._turns.append(
+            HistoryTurn(items=({"role": "user", "content": text},), token_count=tc)
+        )
+        return len(self._turns) - 1
 
-    def add_assistant_message(self, text: str) -> int:
-        msg_id = self._next_id
-        self._next_id += 1
-        self._messages.append({"role": "assistant", "content": text})
-        return msg_id
+    def add_assistant_message(
+        self, text: str, metrics: LLMMetrics | None = None
+    ) -> int:
+        tc = len(text.split()) if text.strip() else 0
+        self._turns.append(
+            HistoryTurn(
+                items=({"role": "assistant", "content": text},), token_count=tc
+            )
+        )
+        return len(self._turns) - 1
 
-    def update_message(self, message_id: int, text: str) -> None:
+    def add_message(
+        self, item: dict[str, Any], turn_id: int | None = None, metrics: LLMMetrics | None = None
+    ) -> tuple[int, int]:
+        return 0, 0
+
+    def begin_turn(self) -> int:
+        return 0
+
+    def update_message(self, msg_id: int, text: str) -> None:
         pass
 
     def get_messages(self) -> list[dict[str, Any]]:
-        return list(self._messages)
+        return [item for turn in self._turns for item in turn.items]
 
-    def clear(self) -> None:
-        self._messages.clear()
+    def get_turns(self) -> list[HistoryTurn]:
+        return list(self._turns)
 
     def save(self) -> None:
         pass
 
+    def inject_turn(self, items: list[dict[str, Any]], token_count: int) -> None:
+        self._turns.append(HistoryTurn(items=tuple(items), token_count=token_count))
+
 
 def _word_counter(text: str) -> int:
-    """Simple token counter: count words."""
     return len(text.split()) if text.strip() else 0
+
+
+def _budget(*msg_tokens: int, system: int = 0, tools: int = 0) -> int:
+    """Calculate the minimum budget needed for given messages.
+
+    Each value in msg_tokens is the content token count for one message.
+    Automatically adds base overhead, per-message overhead, and tool cost.
+    """
+    n_msgs = len(msg_tokens) + (1 if system else 0)
+    return sum(msg_tokens) + system + tools + _BO + n_msgs * _MO
 
 
 class TestContextBuilder:
     def test_basic_with_system_prompt(self) -> None:
         history = StubHistory()
-        config = ConversationHistoryConfig(max_context_tokens=100)
+        config = ConversationHistoryConfig(max_context_tokens=200)
         cb = ContextBuilder(history, config, "You are helpful.", _word_counter)
         result = cb.build("hello")
         assert result == [
@@ -73,19 +100,17 @@ class TestContextBuilder:
 
     def test_no_system_prompt(self) -> None:
         history = StubHistory()
-        config = ConversationHistoryConfig(max_context_tokens=100)
+        config = ConversationHistoryConfig(max_context_tokens=200)
         cb = ContextBuilder(history, config, "", _word_counter)
         result = cb.build("hello")
         assert result == [{"role": "user", "content": "hello"}]
 
     def test_includes_history(self) -> None:
-        history = StubHistory(
-            [
-                {"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "hello there"},
-            ]
-        )
-        config = ConversationHistoryConfig(max_context_tokens=100)
+        history = StubHistory([
+            {"role": "user", "content": "hi"},             # 1 token
+            {"role": "assistant", "content": "hello there"},  # 2 tokens
+        ])
+        config = ConversationHistoryConfig(max_context_tokens=200)
         cb = ContextBuilder(history, config, "", _word_counter)
         result = cb.build("how are you")
         assert len(result) == 3
@@ -94,19 +119,16 @@ class TestContextBuilder:
         assert result[2] == {"role": "user", "content": "how are you"}
 
     def test_token_budget_trims_oldest_first(self) -> None:
-        history = StubHistory(
-            [
-                {"role": "user", "content": "old message here"},  # 3 tokens
-                {"role": "assistant", "content": "old reply here"},  # 3 tokens
-                {"role": "user", "content": "recent"},  # 1 token
-                {"role": "assistant", "content": "recent reply"},  # 2 tokens
-            ]
-        )
-        # Budget: 4 tokens total
-        # current_text "now" = 1 token → remaining = 3
-        # reversed: "recent reply"(2) → 1, "recent"(1) → 0
-        # "old reply here"(3) exceeds → stop
-        config = ConversationHistoryConfig(max_context_tokens=4)
+        history = StubHistory([
+            {"role": "user", "content": "old message here"},       # 3 tokens
+            {"role": "assistant", "content": "old reply here"},     # 3 tokens
+            {"role": "user", "content": "recent"},                  # 1 token
+            {"role": "assistant", "content": "recent reply"},       # 2 tokens
+        ])
+        # Budget enough for current(1) + recent(1) + recent_reply(2) + overhead
+        # but not enough for old messages
+        budget = _budget(1) + (1 + _MO) + (2 + _MO)  # current + 2 history msgs
+        config = ConversationHistoryConfig(max_context_tokens=budget)
         cb = ContextBuilder(history, config, "", _word_counter)
         result = cb.build("now")
         assert len(result) == 3
@@ -115,14 +137,12 @@ class TestContextBuilder:
         assert result[2] == {"role": "user", "content": "now"}
 
     def test_system_prompt_budget(self) -> None:
-        history = StubHistory(
-            [
-                {"role": "user", "content": "hello"},  # 1 token
-            ]
-        )
-        # Budget: 5, system "be nice" = 2, current "hi" = 1 → remaining = 2
-        # history "hello" = 1 → fits
-        config = ConversationHistoryConfig(max_context_tokens=5)
+        history = StubHistory([
+            {"role": "user", "content": "hello"},  # 1 token
+        ])
+        # Budget for system(2) + current(1) + history(1) + overhead
+        budget = _budget(1, system=2) + (1 + _MO)
+        config = ConversationHistoryConfig(max_context_tokens=budget)
         cb = ContextBuilder(history, config, "be nice", _word_counter)
         result = cb.build("hi")
         assert len(result) == 3
@@ -132,7 +152,7 @@ class TestContextBuilder:
 
     def test_empty_history(self) -> None:
         history = StubHistory()
-        config = ConversationHistoryConfig(max_context_tokens=100)
+        config = ConversationHistoryConfig(max_context_tokens=200)
         cb = ContextBuilder(history, config, "sys", _word_counter)
         result = cb.build("hello")
         assert result == [
@@ -141,34 +161,26 @@ class TestContextBuilder:
         ]
 
     def test_current_text_always_included(self) -> None:
-        """Current user text must always be in the result, even with tight budget."""
-        history = StubHistory(
-            [
-                {"role": "user", "content": "very long old message"},
-            ]
-        )
-        # Budget: 2 tokens, current "hi" = 1 → remaining = 1
-        # history message = 5 tokens → won't fit
-        config = ConversationHistoryConfig(max_context_tokens=2)
+        history = StubHistory([
+            {"role": "user", "content": "very long old message"},
+        ])
+        # Tight budget: only room for current message
+        budget = _budget(1)
+        config = ConversationHistoryConfig(max_context_tokens=budget)
         cb = ContextBuilder(history, config, "", _word_counter)
         result = cb.build("hi")
         assert result == [{"role": "user", "content": "hi"}]
 
     def test_system_prompt_exceeds_budget(self) -> None:
-        """When system prompt alone exceeds budget, history is dropped but both
-        system prompt and current text are still included."""
         history = StubHistory([{"role": "user", "content": "old"}])
-        # Budget: 2, system "a very long system prompt" = 5 → budget goes negative
         config = ConversationHistoryConfig(max_context_tokens=2)
         cb = ContextBuilder(history, config, "a very long system prompt", _word_counter)
         result = cb.build("hi")
         assert result[0] == {"role": "system", "content": "a very long system prompt"}
         assert result[-1] == {"role": "user", "content": "hi"}
-        # history should be excluded (budget negative)
         assert len(result) == 2
 
     def test_zero_budget(self) -> None:
-        """Zero budget still includes system prompt and current text."""
         history = StubHistory([{"role": "user", "content": "old"}])
         config = ConversationHistoryConfig(max_context_tokens=0)
         cb = ContextBuilder(history, config, "sys", _word_counter)
@@ -178,23 +190,73 @@ class TestContextBuilder:
         assert len(result) == 2
 
     def test_empty_current_text(self) -> None:
-        """Empty current text produces a user message with empty content."""
         history = StubHistory()
-        config = ConversationHistoryConfig(max_context_tokens=100)
+        config = ConversationHistoryConfig(max_context_tokens=200)
         cb = ContextBuilder(history, config, "", _word_counter)
         result = cb.build("")
         assert result == [{"role": "user", "content": ""}]
 
     def test_single_message_exactly_fills_budget(self) -> None:
-        """A history message that exactly uses the remaining budget is included."""
-        history = StubHistory(
-            [{"role": "user", "content": "two words"}]  # 2 tokens
-        )
-        # Budget: 3, current "hi" = 1 → remaining = 2
-        # history "two words" = 2 → exactly fits
-        config = ConversationHistoryConfig(max_context_tokens=3)
+        history = StubHistory([
+            {"role": "user", "content": "two words"},  # 2 tokens
+        ])
+        # Exact budget for current(1) + history(2) + overhead
+        budget = _budget(1) + (2 + _MO)
+        config = ConversationHistoryConfig(max_context_tokens=budget)
         cb = ContextBuilder(history, config, "", _word_counter)
         result = cb.build("hi")
         assert len(result) == 2
         assert result[0] == {"role": "user", "content": "two words"}
         assert result[1] == {"role": "user", "content": "hi"}
+
+    def test_tool_call_turn_atomic(self) -> None:
+        history = StubHistory([{"role": "user", "content": "weather"}])  # 1 token
+        history.inject_turn(
+            [
+                {"type": "function_call", "call_id": "fc1", "name": "w", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "fc1", "output": "sunny"},
+                {"role": "assistant", "content": "It is sunny"},
+            ],
+            token_count=15,
+        )
+        # Budget enough for all: current + user_turn + tool_turn(3 items)
+        budget = _budget(1) + (1 + _MO) + (15 + 3 * _MO)
+        config = ConversationHistoryConfig(max_context_tokens=budget)
+        cb = ContextBuilder(history, config, "", _word_counter)
+        result = cb.build("next")
+        assert len(result) == 5  # user + 3 tool items + current
+
+    def test_tool_call_turn_excluded_when_too_large(self) -> None:
+        history = StubHistory([{"role": "user", "content": "q"}])
+        history.inject_turn(
+            [
+                {"type": "function_call", "call_id": "fc1", "name": "w", "arguments": "{}"},
+                {"role": "assistant", "content": "answer"},
+            ],
+            token_count=50,
+        )
+        # Budget only for current message
+        budget = _budget(1)
+        config = ConversationHistoryConfig(max_context_tokens=budget)
+        cb = ContextBuilder(history, config, "", _word_counter)
+        result = cb.build("hi")
+        assert len(result) == 1
+        assert result[0] == {"role": "user", "content": "hi"}
+
+    def test_tools_token_cost_deducted(self) -> None:
+        """Tool definitions reduce available budget."""
+        history = StubHistory([
+            {"role": "user", "content": "hello"},  # 1 token
+        ])
+        # Budget for current + 1 history message + overhead, NO tools
+        budget = _budget(1) + (1 + _MO)
+        # With tool cost, history message no longer fits
+        tool_cost = 100
+        config = ConversationHistoryConfig(max_context_tokens=budget)
+        cb = ContextBuilder(
+            history, config, "", _word_counter, tools_token_cost=tool_cost
+        )
+        result = cb.build("hi")
+        # Only current message fits (tool cost ate the history budget)
+        assert len(result) == 1
+        assert result[0] == {"role": "user", "content": "hi"}

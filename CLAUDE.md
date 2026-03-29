@@ -70,7 +70,7 @@ voice_pipeline/
 │
 ├── history/
 │   ├── conversation_history.py
-│   └── storage_backend.py     # Persistence (memory / file / DB)
+│   └── storage_backend.py     # Persistence (memory / sqlite)
 │
 ├── generation/
 │   ├── speech_generator.py    # ContextBuilder → LLM → TTS orchestration

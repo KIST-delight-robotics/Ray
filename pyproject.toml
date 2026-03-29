@@ -16,6 +16,8 @@ dependencies = [
     "pyaudio>=0.2.14",
     "onnxruntime>=1.24",
     "transformers>=4.0",
+    "sentence-transformers>=3.0,<4.0",
+    "optimum[onnxruntime]",
 ]
 
 [tool.uv.sources]
@@ -36,8 +38,6 @@ models-pytorch = [
     "soundfile>=0.13",
 ]
 hardware = ["rpi5-ws2812>=0.1.2"]
-similarity = ["sentence-transformers>=3.0,<4.0"]
-onnx-similarity = ["optimum[onnxruntime]"]
 
 [dependency-groups]
 dev = [

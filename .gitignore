@@ -66,3 +66,6 @@ third_party/
 
 
 /CANDOR
+
+# SQLite database
+data/

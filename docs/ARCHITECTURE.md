@@ -101,9 +101,10 @@ SLEEP ──(wakeword)──▶ GREETING ──(playback done)──▶ ACTIVE �
 | Item | Description |
 |------|-------------|
 | Role | Generate conversation responses |
-| Input | Assembled context (message list) |
-| Output | Streaming text chunks |
-| Scope | Prompt templates, model parameters, API calls. Tool definitions/execution (future). |
+| Input | Assembled context (message list), optional tool definitions |
+| Output | `LLMStream` — streaming text chunks, `.result` provides `LLMResult` (text, tool_calls, metrics) after consumption |
+| Metrics | `LLMMetrics` captured per call: Usage (input/output/cached/reasoning tokens), model, latency_ms, ttft_ms |
+| Tools | `tools` parameter: `None` = config defaults, `[]` = disabled. Tool definitions + token costs managed in `llm/tools.py` |
 | Interface | Vendor-swappable via `ILLM` abstraction |
 
 
@@ -144,12 +145,14 @@ SLEEP ──(wakeword)──▶ GREETING ──(playback done)──▶ ACTIVE �
 
 | Item | Description |
 |------|-------------|
-| Role | Store/retrieve conversation history. Pure data store. |
-| Scope | **Per-session** management. Auto-initialized on session start, saved on session end. |
-| Input | Messages (`list[dict]`). Dict schema is LLM vendor-dependent, determined at LLM implementation time. |
-| Output | Message list (all or recent N turns) |
-| Extension point | **StorageBackend**: persistence strategy (memory / file / DB) |
-| Note | Assistant message saved on: playback complete (full text) or barge-in interruption (UtteranceTruncator result) |
+| Role | Store/retrieve conversation history with write-through persistence. |
+| Scope | **Per-session** management. Auto-initialized on session start. |
+| Storage | **Write-through**: in-memory list for reads, SQLite INSERT on every mutation. `save()` only sets `ended_at`. |
+| Message format | OpenAI Responses API input format. Each message = one DB row. `turn_id` groups multi-message turns (tool calls). |
+| Token tracking | `token_count` pre-computed at save time (LLM `output_tokens` or tiktoken fallback). `metrics_json` stores full LLM call metadata. |
+| Read paths | `get_messages()` → flat list for LLM input (memory only). `get_turns()` → grouped by turn_id for ContextBuilder budgeting. |
+| Backend | `SQLiteStorageBackend` (production, WAL mode) / `MemoryStorageBackend` (tests) |
+| Threading | `threading.Lock` on all public methods. Writes from main thread, reads from background thread. |
 
 
 ### 2.12 SpeechGenerator
@@ -464,12 +467,14 @@ voice_pipeline.core         # TTSStream
 - **AudioInput thread death in SLEEP mode**: If the capture thread dies, SessionManager detects it via `audio_input.error` and crashes. In ACTIVE mode, Orchestrator's audio starvation timeout (`audio_starvation_timeout_sec`, default 5s) terminates the session. After returning to SLEEP, SessionManager detects the error and crashes. Recovery depends on external process supervision (e.g. systemd `Restart=always`).
 - **CppBridge mid-session disconnect**: If the bridge disconnects during ACTIVE mode, Orchestrator terminates the session → FAREWELL → SLEEP. On the next wakeword, `_run_greeting()` calls `bridge.connect()` to reconnect. If reconnect fails (C++ process still down), SessionManager returns to SLEEP and retries on the next wakeword.
 - **Signal handling**: No SIGINT/SIGTERM handler. `Ctrl+C` kills the process without calling `shutdown()`, so `history.save()` is skipped.
+- **Session crash safety**: With write-through storage, messages are persisted on every turn boundary. Crash during session loses at most `ended_at` timestamp. Signal handler calls `shutdown()` → `history.save()` for clean termination.
 
 
 ## 8. Open Design Questions
 
-- ConversationHistory StorageBackend selection (memory / file / DB)
-- ContextBuilder tool definition integration (deferred until LLM tools)
-- RAG / long-term memory design
+- ~~ConversationHistory StorageBackend selection~~ → SQLite write-through (resolved)
+- ~~ContextBuilder tool definition integration~~ → Tool token costs in `llm/tools.py`, deducted from budget (resolved)
+- RAG / long-term memory design (see `docs/ray-memory-design.md`)
 - LED behavior definition (which state → which color/animation)
 - LED control location (Python direct vs C++ relay)
+- Client-side tool execution loop in SpeechGenerator (structure ready, implementation deferred)

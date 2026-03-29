@@ -51,6 +51,8 @@ from voice_pipeline.core.types import (
     CppEvent,
     CppEventType,
     LEDState,
+    LLMResult,
+    LLMStream,
     TTSStream,
     VAPResult,
     WordTimestamp,
@@ -148,10 +150,19 @@ class FakeLLM(ILLM):
         self._responses = responses or [["I'm ", "doing ", "great!"]]
         self._call_count = 0
 
-    def generate(self, messages: list[dict[str, Any]]) -> Iterator[str]:
+    def generate(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> LLMStream:
         idx = min(self._call_count, len(self._responses) - 1)
         self._call_count += 1
-        yield from self._responses[idx]
+        chunks = self._responses[idx]
+
+        def gen():
+            yield from chunks
+
+        return LLMStream(gen(), result_fn=lambda t: LLMResult(text=t))
 
 
 class FakeTTS(ITTS):
@@ -339,7 +350,7 @@ def _make_orchestrator(
     _executor = executor or ThreadPoolExecutor(max_workers=GENERATOR_CONFIG.max_workers)
 
     storage = MemoryStorageBackend()
-    history = ConversationHistory(storage)
+    history = ConversationHistory(storage, _simple_token_counter)
     history.new_session("test-session")
 
     context_builder = ContextBuilder(
@@ -582,7 +593,7 @@ class TestFullSessionLifecycle:
 
             # Build fresh components using the shared bridge/led/asr
             storage = MemoryStorageBackend()
-            history = ConversationHistory(storage)
+            history = ConversationHistory(storage, _simple_token_counter)
             vap = FakeVAP()
             turngpt = FakeTurnGPT()
             context_builder = ContextBuilder(
@@ -859,12 +870,21 @@ class TestGeneratorFailure:
             def __init__(self) -> None:
                 self._call = 0
 
-            def generate(self, messages: list[dict[str, Any]]) -> Iterator[str]:
+            def generate(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+            ) -> LLMStream:
                 self._call += 1
                 if self._call == 1:
-                    yield ""  # Empty response → FAILED
+                    chunks = [""]  # Empty response → FAILED
                 else:
-                    yield "Recovery response!"
+                    chunks = ["Recovery response!"]
+
+                def gen():
+                    yield from chunks
+
+                return LLMStream(gen(), result_fn=lambda t: LLMResult(text=t))
 
         # 3 utterances: first triggers failed gen, second succeeds, third exits
         asr = ScriptedASR(["first try", "second try", "goodbye"])

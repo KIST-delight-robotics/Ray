@@ -42,8 +42,14 @@ messages = [
     {"role": "user", "content": "Hello!"},
 ]
 
-for chunk in llm.generate(messages):
+stream = llm.generate(messages)
+for chunk in stream:
     print(chunk, end="", flush=True)
+
+# After consumption: access metrics
+result = stream.result
+print(f"\nTokens: in={result.metrics.usage.input_tokens}, out={result.metrics.usage.output_tokens}")
+print(f"Latency: {result.metrics.latency_ms}ms, TTFT: {result.metrics.ttft_ms}ms")
 ```
 
 ### Barge-in (early termination)
@@ -51,9 +57,16 @@ for chunk in llm.generate(messages):
 The caller **must** either exhaust the iterator or call `.close()` to release the HTTP connection:
 
 ```python
-gen = llm.generate(messages)
-first_chunk = next(gen)
-gen.close()  # releases the stream
+stream = llm.generate(messages)
+first_chunk = next(stream)
+stream.close()  # releases the stream — .result not available after close
+```
+
+### Tool control
+
+```python
+stream = llm.generate(messages, tools=None)   # use config defaults (e.g. web_search)
+stream = llm.generate(messages, tools=[])     # explicitly disable tools
 ```
 
 ### Token counter

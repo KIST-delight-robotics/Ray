@@ -9,14 +9,16 @@ Current: Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 interfaces.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
 from typing import Any, Literal
 
 from voice_pipeline.core.types import (
     AudioFrame,
     CppEvent,
     GeneratorState,
+    HistoryTurn,
     LEDState,
+    LLMMetrics,
+    LLMStream,
     ResponseData,
     TTSStream,
     TurnDecision,
@@ -32,41 +34,84 @@ from voice_pipeline.core.types import (
 class IStorageBackend(ABC):
     """Persistence backend for conversation history.
 
-    Implementations: memory, file, database.
+    Write-through model: each mutation is persisted immediately.
+    Implementations: memory (testing), sqlite (production).
     """
 
     @abstractmethod
-    def load(self, session_id: str) -> list[dict[str, Any]]:
-        """Load messages for a session.
+    def create_session(self, session_id: str, started_at: str) -> None:
+        """Create a new session record.
 
         Args:
             session_id: Unique session identifier.
+            started_at: Session start timestamp (UTC, '%Y-%m-%d %H:%M:%S').
+        """
+
+    @abstractmethod
+    def end_session(self, session_id: str, ended_at: str) -> None:
+        """Mark a session as ended.
+
+        Args:
+            session_id: Session to end.
+            ended_at: Session end timestamp (UTC, '%Y-%m-%d %H:%M:%S').
+        """
+
+    @abstractmethod
+    def load_session(self, session_id: str) -> list[tuple[int, int, dict[str, Any], int]]:
+        """Load all messages for a session.
+
+        Args:
+            session_id: Session to load.
 
         Returns:
-            List of message dicts, or empty list if session not found.
+            List of (msg_id, turn_id, item, token_count) tuples,
+            ordered by msg_id. Empty list if session not found.
         """
 
     @abstractmethod
-    def save(
+    def append_message(
         self,
         session_id: str,
-        messages: list[dict[str, Any]],
-        metadata: dict[str, Any] | None = None,
+        msg_id: int,
+        turn_id: int,
+        item: dict[str, Any],
+        token_count: int,
+        metrics_json: str | None = None,
     ) -> None:
-        """Persist messages for a session.
+        """Append a message to the session (write-through).
 
         Args:
-            session_id: Unique session identifier.
-            messages: List of message dicts to persist.
-            metadata: Optional session metadata (e.g. started_at).
+            session_id: Target session.
+            msg_id: Sequential message identifier within session.
+            turn_id: Turn group identifier.
+            item: Message dict in Responses API input format.
+            token_count: Pre-computed token count for context budgeting.
+            metrics_json: JSON-serialized LLMMetrics, or None.
         """
 
     @abstractmethod
-    def delete(self, session_id: str) -> None:
-        """Delete stored messages for a session.
+    def update_message(
+        self,
+        session_id: str,
+        msg_id: int,
+        item: dict[str, Any],
+        token_count: int,
+    ) -> None:
+        """Update an existing message (e.g. barge-in truncation).
 
         Args:
-            session_id: Unique session identifier.
+            session_id: Target session.
+            msg_id: Message to update.
+            item: Replacement message dict.
+            token_count: Updated token count.
+        """
+
+    @abstractmethod
+    def delete_session(self, session_id: str) -> None:
+        """Delete all data for a session.
+
+        Args:
+            session_id: Session to delete.
         """
 
 
@@ -78,8 +123,13 @@ class IStorageBackend(ABC):
 class IConversationHistory(ABC):
     """Session-scoped conversation history store.
 
-    Pure data repository. Message dict schema is vendor-specific
-    and determined by LLM implementation.
+    Write-through: every mutation is persisted immediately via the
+    storage backend. In-memory list is authoritative for reads.
+
+    Thread-safe: writes from Orchestrator (main thread), reads from
+    SpeechGenerator background thread (via ContextBuilder).
+
+    Message dict schema follows the OpenAI Responses API input format.
     """
 
     @abstractmethod
@@ -92,40 +142,75 @@ class IConversationHistory(ABC):
 
     @abstractmethod
     def add_user_message(self, text: str) -> int:
-        """Append a user message to the current session.
+        """Append a user message. Auto-assigns turn_id.
+
+        token_count is computed internally via token_counter.
 
         Args:
-            text: The user's transcribed utterance (final ASR result).
+            text: The user's transcribed utterance.
 
         Returns:
-            Message ID for later reference (e.g. update_message).
+            Message ID (msg_id) for later reference.
         """
 
     @abstractmethod
-    def add_assistant_message(self, text: str) -> int:
-        """Append an assistant message to the current session.
+    def add_assistant_message(self, text: str, metrics: LLMMetrics | None = None) -> int:
+        """Append an assistant text message. Auto-assigns turn_id.
 
-        Called with full response text on normal playback completion,
-        or with truncated text on barge-in interruption.
+        token_count: uses metrics.usage.output_tokens if available,
+        falls back to token_counter.
 
         Args:
             text: The robot's spoken text (full or truncated).
+            metrics: LLM call metrics. Stored as metrics_json in DB.
 
         Returns:
-            Message ID for later reference (e.g. update_message).
+            Message ID (msg_id) for later reference.
         """
 
     @abstractmethod
-    def update_message(self, message_id: int, text: str) -> None:
-        """Update the content of an existing message by ID.
+    def add_message(
+        self,
+        item: dict[str, Any],
+        turn_id: int | None = None,
+        metrics: LLMMetrics | None = None,
+    ) -> tuple[int, int]:
+        """Append a message in Responses API input format.
 
-        Used for barge-in truncation correction: an approximate
-        truncation is saved first, then corrected when precise
-        data becomes available.
+        Low-level method for tool call items and other non-standard
+        messages. Use add_user_message / add_assistant_message for
+        simple text messages.
 
         Args:
-            message_id: ID returned by add_user_message/add_assistant_message.
-            text: New content to replace the existing message content.
+            item: Message dict in Responses API input format.
+            turn_id: Turn group ID. None to auto-assign a new turn.
+            metrics: LLM call metrics, if this message was LLM-generated.
+
+        Returns:
+            Tuple of (msg_id, turn_id).
+        """
+
+    @abstractmethod
+    def begin_turn(self) -> int:
+        """Allocate a new turn_id for grouping multiple messages.
+
+        Used for tool call turns where function_call, function_call_output,
+        and assistant text must share the same turn_id.
+
+        Returns:
+            The allocated turn_id.
+        """
+
+    @abstractmethod
+    def update_message(self, msg_id: int, text: str) -> None:
+        """Update the text content of a message.
+
+        Used for barge-in truncation correction. token_count is
+        recomputed internally via token_counter.
+
+        Args:
+            msg_id: Message ID returned by add_* methods.
+            text: New content to replace.
 
         Raises:
             HistoryError: If no message with the given ID exists.
@@ -133,19 +218,28 @@ class IConversationHistory(ABC):
 
     @abstractmethod
     def get_messages(self) -> list[dict[str, Any]]:
-        """Retrieve all conversation messages.
+        """Retrieve all messages as a flat list for LLM input.
 
         Returns:
-            List of message dicts in vendor-specific format (no internal IDs).
+            Ordered list of message dicts (no internal metadata).
         """
 
     @abstractmethod
-    def clear(self) -> None:
-        """Remove all messages from the current session in memory."""
+    def get_turns(self) -> list[HistoryTurn]:
+        """Retrieve messages grouped by turn for context budgeting.
+
+        Each HistoryTurn is atomic: included or excluded as a whole.
+
+        Returns:
+            List of HistoryTurn with pre-computed token_count.
+        """
 
     @abstractmethod
     def save(self) -> None:
-        """Persist the current session to the storage backend."""
+        """Finalize the current session (sets ended_at).
+
+        With write-through, individual messages are already persisted.
+        """
 
 
 # ---------------------------------------------------------------------------
@@ -259,19 +353,27 @@ class IASR(ABC):
 class ILLM(ABC):
     """Large language model interface for response generation.
 
-    Returns Iterator[str] (not Generator) — consumer only iterates,
-    never sends/throws. Synchronous: fits threading+queue model.
+    Returns LLMStream (Iterator[str] compatible) with post-iteration
+    access to LLMResult (text, tool_calls, metrics).
+    Synchronous: fits threading+queue model.
     """
 
     @abstractmethod
-    def generate(self, messages: list[dict[str, Any]]) -> Iterator[str]:
+    def generate(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> LLMStream:
         """Generate a streaming response from the given message history.
 
         Args:
             messages: List of message dicts in vendor-specific format.
+            tools: Tool definitions. None uses config defaults.
+                Empty list explicitly disables tools for this call.
 
         Returns:
-            Iterator yielding text chunks as they become available.
+            LLMStream yielding text chunks. After full iteration,
+            .result provides LLMResult with text, tool_calls, metrics.
         """
 
 

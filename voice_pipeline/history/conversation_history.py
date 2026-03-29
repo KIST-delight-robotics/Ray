@@ -1,86 +1,248 @@
-"""Session-scoped conversation history store."""
+"""Session-scoped conversation history store with write-through persistence."""
 
 from __future__ import annotations
 
+import json
 import logging
+import threading
+from collections import defaultdict
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from voice_pipeline.core.interfaces import IConversationHistory, IStorageBackend
+from voice_pipeline.core.types import HistoryTurn, LLMMetrics, TokenCounter
 from voice_pipeline.history.exceptions import HistoryError
+from voice_pipeline.history.storage_backend import TIMESTAMP_FORMAT
 
 logger = logging.getLogger("voice_pipeline.history")
 
 
-class ConversationHistory(IConversationHistory):
-    """Manages conversation messages for a single session.
+@dataclass
+class _Message:
+    """Internal mutable message representation."""
 
-    Pure data repository. Message dict schema follows the
-    ``{"role": ..., "content": ...}`` convention; vendor-specific
-    details are determined by the LLM implementation.
+    msg_id: int
+    turn_id: int
+    item: dict[str, Any]
+    token_count: int
+
+
+class ConversationHistory(IConversationHistory):
+    """Entry-based conversation history with write-through persistence.
+
+    In-memory list is authoritative for reads. Every mutation writes
+    to the storage backend immediately for crash safety.
+
+    Thread-safe via threading.Lock: writes from Orchestrator (main thread),
+    reads from SpeechGenerator background thread (via ContextBuilder).
     """
 
-    def __init__(self, backend: IStorageBackend) -> None:
+    def __init__(self, backend: IStorageBackend, token_counter: TokenCounter) -> None:
         self._backend = backend
+        self._token_counter = token_counter
+        self._lock = threading.Lock()
         self._session_id: str | None = None
-        self._messages: list[dict[str, Any]] = []
-        self._next_id: int = 0
-        self._started_at: str = ""
+        self._messages: list[_Message] = []
+        self._next_msg_id: int = 0
+        self._next_turn_id: int = 0
 
     def _require_session(self) -> str:
         if self._session_id is None:
             raise HistoryError("No active session. Call new_session() first.")
         return self._session_id
 
+    def _allocate_msg_id(self) -> int:
+        msg_id = self._next_msg_id
+        self._next_msg_id += 1
+        return msg_id
+
+    def _allocate_turn_id(self) -> int:
+        turn_id = self._next_turn_id
+        self._next_turn_id += 1
+        return turn_id
+
+    def _compute_token_count(self, text: str, metrics: LLMMetrics | None) -> int:
+        """Use LLM output_tokens if available, fallback to token_counter."""
+        if metrics is not None:
+            return metrics.usage.output_tokens
+        return self._safe_count(text)
+
+    def _safe_count(self, text: str) -> int:
+        """Count tokens with graceful fallback on error."""
+        try:
+            return self._token_counter(text)
+        except Exception:
+            logger.warning("Token counter failed, using 0", exc_info=True)
+            return 0
+
+    @staticmethod
+    def _serialize_metrics(metrics: LLMMetrics | None) -> str | None:
+        """Serialize LLMMetrics to JSON string for DB storage."""
+        if metrics is None:
+            return None
+        return json.dumps(
+            {
+                "usage": {
+                    "input_tokens": metrics.usage.input_tokens,
+                    "output_tokens": metrics.usage.output_tokens,
+                    "cached_tokens": metrics.usage.cached_tokens,
+                    "reasoning_tokens": metrics.usage.reasoning_tokens,
+                },
+                "model": metrics.model,
+                "latency_ms": metrics.latency_ms,
+                "ttft_ms": metrics.ttft_ms,
+            }
+        )
+
+    def _persist_message(
+        self,
+        session_id: str,
+        msg: _Message,
+        metrics: LLMMetrics | None = None,
+    ) -> None:
+        """Write-through: persist message to backend. Graceful on failure."""
+        try:
+            self._backend.append_message(
+                session_id,
+                msg.msg_id,
+                msg.turn_id,
+                msg.item,
+                msg.token_count,
+                self._serialize_metrics(metrics),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist message %d — continuing in memory only",
+                msg.msg_id,
+                exc_info=True,
+            )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def new_session(self, session_id: str) -> None:
         """Start a new session, clearing any in-memory state."""
-        self._session_id = session_id
-        self._messages = []
-        self._next_id = 0
-        self._started_at = datetime.now(UTC).isoformat()
-        logger.info("Started new session: %s", session_id)
-
-    def _allocate_id(self) -> int:
-        msg_id = self._next_id
-        self._next_id += 1
-        return msg_id
+        with self._lock:
+            self._session_id = session_id
+            self._messages = []
+            self._next_msg_id = 0
+            self._next_turn_id = 0
+            started_at = datetime.now(UTC).strftime(TIMESTAMP_FORMAT)
+            try:
+                self._backend.create_session(session_id, started_at)
+            except Exception:
+                logger.warning("Failed to create session in backend", exc_info=True)
+            logger.info("Started new session: %s", session_id)
 
     def add_user_message(self, text: str) -> int:
-        """Append a user message to the current session."""
-        self._require_session()
-        msg_id = self._allocate_id()
-        self._messages.append({"role": "user", "content": text, "_id": msg_id})
-        return msg_id
+        """Append a user message. Auto-assigns turn_id."""
+        with self._lock:
+            session_id = self._require_session()
+            msg_id = self._allocate_msg_id()
+            turn_id = self._allocate_turn_id()
+            token_count = self._safe_count(text)
+            item: dict[str, Any] = {"role": "user", "content": text}
+            msg = _Message(msg_id, turn_id, item, token_count)
+            self._messages.append(msg)
+            self._persist_message(session_id, msg)
+            return msg_id
 
-    def add_assistant_message(self, text: str) -> int:
-        """Append an assistant message to the current session."""
-        self._require_session()
-        msg_id = self._allocate_id()
-        self._messages.append({"role": "assistant", "content": text, "_id": msg_id})
-        return msg_id
+    def add_assistant_message(self, text: str, metrics: LLMMetrics | None = None) -> int:
+        """Append an assistant text message. Auto-assigns turn_id."""
+        with self._lock:
+            session_id = self._require_session()
+            msg_id = self._allocate_msg_id()
+            turn_id = self._allocate_turn_id()
+            token_count = self._compute_token_count(text, metrics)
+            item: dict[str, Any] = {"role": "assistant", "content": text}
+            msg = _Message(msg_id, turn_id, item, token_count)
+            self._messages.append(msg)
+            self._persist_message(session_id, msg, metrics)
+            return msg_id
 
-    def update_message(self, message_id: int, text: str) -> None:
-        """Update the content of an existing message by ID."""
-        self._require_session()
-        for msg in self._messages:
-            if msg.get("_id") == message_id:
-                msg["content"] = text
-                return
-        raise HistoryError(f"No message with ID {message_id}")
+    def add_message(
+        self,
+        item: dict[str, Any],
+        turn_id: int | None = None,
+        metrics: LLMMetrics | None = None,
+    ) -> tuple[int, int]:
+        """Append a message in Responses API input format."""
+        with self._lock:
+            session_id = self._require_session()
+            msg_id = self._allocate_msg_id()
+            if turn_id is None:
+                turn_id = self._allocate_turn_id()
+
+            # Compute token_count: use metrics if available, else count item text
+            if metrics is not None:
+                token_count = metrics.usage.output_tokens
+            else:
+                # Count text from content or output fields
+                text = item.get("content") or item.get("output") or item.get("arguments") or ""
+                token_count = self._safe_count(text) if text else 0
+
+            msg = _Message(msg_id, turn_id, item, token_count)
+            self._messages.append(msg)
+            self._persist_message(session_id, msg, metrics)
+            return msg_id, turn_id
+
+    def begin_turn(self) -> int:
+        """Allocate a new turn_id for grouping multiple messages."""
+        with self._lock:
+            self._require_session()
+            return self._allocate_turn_id()
+
+    def update_message(self, msg_id: int, text: str) -> None:
+        """Update message text. Recomputes token_count internally."""
+        with self._lock:
+            session_id = self._require_session()
+            for msg in self._messages:
+                if msg.msg_id == msg_id:
+                    msg.item["content"] = text
+                    msg.token_count = self._safe_count(text)
+                    try:
+                        self._backend.update_message(session_id, msg_id, msg.item, msg.token_count)
+                    except Exception:
+                        logger.warning(
+                            "Failed to update message %d in backend",
+                            msg_id,
+                            exc_info=True,
+                        )
+                    return
+            raise HistoryError(f"No message with ID {msg_id}")
 
     def get_messages(self) -> list[dict[str, Any]]:
-        """Retrieve all conversation messages (internal IDs stripped)."""
-        self._require_session()
-        return [{k: v for k, v in msg.items() if k != "_id"} for msg in self._messages]
+        """Retrieve all messages as a flat list for LLM input."""
+        with self._lock:
+            self._require_session()
+            return [dict(msg.item) for msg in self._messages]
 
-    def clear(self) -> None:
-        """Remove all messages from the current session in memory."""
-        self._require_session()
-        self._messages.clear()
+    def get_turns(self) -> list[HistoryTurn]:
+        """Retrieve messages grouped by turn for context budgeting."""
+        with self._lock:
+            self._require_session()
+            groups: dict[int, list[_Message]] = defaultdict(list)
+            for msg in self._messages:
+                groups[msg.turn_id].append(msg)
+
+            # Preserve turn order by first msg_id in each group
+            sorted_turn_ids = sorted(groups.keys(), key=lambda tid: groups[tid][0].msg_id)
+            return [
+                HistoryTurn(
+                    items=tuple(dict(m.item) for m in groups[tid]),
+                    token_count=sum(m.token_count for m in groups[tid]),
+                )
+                for tid in sorted_turn_ids
+            ]
 
     def save(self) -> None:
-        """Persist the current session to the storage backend."""
-        session_id = self._require_session()
-        clean = [{k: v for k, v in msg.items() if k != "_id"} for msg in self._messages]
-        metadata = {"started_at": self._started_at}
-        self._backend.save(session_id, clean, metadata)
+        """Finalize the current session (sets ended_at)."""
+        with self._lock:
+            session_id = self._require_session()
+            ended_at = datetime.now(UTC).strftime(TIMESTAMP_FORMAT)
+            try:
+                self._backend.end_session(session_id, ended_at)
+            except Exception:
+                logger.warning("Failed to end session in backend", exc_info=True)

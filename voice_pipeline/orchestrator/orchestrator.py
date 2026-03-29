@@ -490,7 +490,11 @@ class Orchestrator:
         logger.info("Playback complete (normal)")
         text = self._get_response_text()
         if text:
-            self._assistant_msg_id = self._history.add_assistant_message(text)
+            # Pass LLM metrics from the last LLM call (if available)
+            metrics = None
+            if self._current_response and self._current_response.metrics_list:
+                metrics = self._current_response.metrics_list[-1]
+            self._assistant_msg_id = self._history.add_assistant_message(text, metrics)
             self._turn_detector.notify_turn_complete("robot", text)
 
         self._turn_detector.reset()
