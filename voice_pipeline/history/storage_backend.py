@@ -93,6 +93,20 @@ class MemoryStorageBackend(IStorageBackend):
         """Delete all data for a session."""
         self._sessions.pop(session_id, None)
 
+    def get_recent_sessions(
+        self,
+        limit: int,
+        exclude_session_id: str | None = None,
+    ) -> list[tuple[str, str, str | None]]:
+        """Return the most recent completed sessions."""
+        completed = [
+            (sid, s["started_at"], s["ended_at"])
+            for sid, s in self._sessions.items()
+            if s["ended_at"] is not None and sid != exclude_session_id
+        ]
+        completed.sort(key=lambda x: x[1], reverse=True)
+        return completed[:limit]
+
 
 class SQLiteStorageBackend(IStorageBackend):
     """SQLite write-through storage backend.
@@ -276,6 +290,32 @@ class SQLiteStorageBackend(IStorageBackend):
             self._conn.commit()
         except sqlite3.Error:
             logger.warning("Failed to delete session %s", session_id, exc_info=True)
+
+    def get_recent_sessions(
+        self,
+        limit: int,
+        exclude_session_id: str | None = None,
+    ) -> list[tuple[str, str, str | None]]:
+        """Return the most recent completed sessions."""
+        try:
+            if exclude_session_id:
+                cursor = self._conn.execute(
+                    "SELECT session_id, started_at, ended_at FROM sessions "
+                    "WHERE ended_at IS NOT NULL AND session_id != ? "
+                    "ORDER BY started_at DESC LIMIT ?",
+                    (exclude_session_id, limit),
+                )
+            else:
+                cursor = self._conn.execute(
+                    "SELECT session_id, started_at, ended_at FROM sessions "
+                    "WHERE ended_at IS NOT NULL "
+                    "ORDER BY started_at DESC LIMIT ?",
+                    (limit,),
+                )
+            return [(row[0], row[1], row[2]) for row in cursor]
+        except sqlite3.Error:
+            logger.warning("Failed to get recent sessions", exc_info=True)
+            return []
 
     def close(self) -> None:
         """Close the database connection."""

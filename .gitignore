@@ -67,5 +67,8 @@ third_party/
 
 /CANDOR
 
+# Temporary: research materials (large, not ready for tracking)
+docs/memory-research/
+
 # SQLite database
 data/

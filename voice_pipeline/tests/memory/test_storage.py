@@ -187,6 +187,34 @@ class _StorageTests(ABC):
         assert s.search_bm25("", top_k=5) == []
         assert s.search_bm25("   ", top_k=5) == []
 
+    # --- Episodes by session IDs ---
+
+    def test_get_episodes_by_session_ids_basic(self) -> None:
+        s = self.make_storage()
+        s.add_episode(_make_episode(text="Ep A", session_id="s1", timestamp="2026-03-15 14:00:00"))
+        s.add_episode(_make_episode(text="Ep B", session_id="s1", timestamp="2026-03-15 14:05:00"))
+        s.add_episode(_make_episode(text="Ep C", session_id="s2", timestamp="2026-03-16 10:00:00"))
+
+        result = s.get_episodes_by_session_ids(["s1", "s2"])
+        assert "s1" in result
+        assert "s2" in result
+        assert len(result["s1"]) == 2
+        assert len(result["s2"]) == 1
+        # Ordered by timestamp within session
+        assert result["s1"][0].text == "Ep A"
+        assert result["s1"][1].text == "Ep B"
+
+    def test_get_episodes_by_session_ids_missing_session(self) -> None:
+        s = self.make_storage()
+        s.add_episode(_make_episode(text="Ep A", session_id="s1"))
+        result = s.get_episodes_by_session_ids(["s1", "nonexistent"])
+        assert "s1" in result
+        assert "nonexistent" not in result
+
+    def test_get_episodes_by_session_ids_empty_input(self) -> None:
+        s = self.make_storage()
+        assert s.get_episodes_by_session_ids([]) == {}
+
     # --- Episode embedding update ---
 
     def test_update_episode_embedding(self) -> None:

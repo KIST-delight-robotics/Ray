@@ -276,6 +276,9 @@ class ResponseData:
             For tool calls: tool_call + tool_output + ... + final assistant.
         metrics_list: LLMMetrics from each LLM call in the generation
             (multiple when tool loop runs).
+        cited_memory_ids: Database IDs of episodes cited by the LLM
+            (resolved from ``[MEMORIES: M1, M2]`` tag). Empty when
+            memory is not active or no citations were produced.
     """
 
     text: str
@@ -283,6 +286,7 @@ class ResponseData:
     timestamps: list[WordTimestamp] = field(default_factory=list)
     turn_items: list[dict[str, Any]] = field(default_factory=list)
     metrics_list: list[LLMMetrics] = field(default_factory=list)
+    cited_memory_ids: list[int] = field(default_factory=list)
 
     @property
     def has_timestamps(self) -> bool:

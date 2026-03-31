@@ -230,6 +230,28 @@ class SQLiteMemoryStorage(IMemoryStorage):
             logger.warning("Failed to get episodes by ids", exc_info=True)
             return []
 
+    def get_episodes_by_session_ids(self, session_ids: list[str]) -> dict[str, list[Episode]]:
+        """Retrieve episodes grouped by session ID."""
+        if not session_ids:
+            return {}
+        placeholders = ",".join("?" for _ in session_ids)
+        try:
+            rows = self._conn.execute(
+                f"SELECT id, text, timestamp, session_id, importance, "
+                f"last_cited_at, citation_count, embedding "
+                f"FROM episodes WHERE session_id IN ({placeholders}) "
+                f"ORDER BY session_id, timestamp",
+                session_ids,
+            ).fetchall()
+            result: dict[str, list[Episode]] = {}
+            for row in rows:
+                ep = self._row_to_episode(row)
+                result.setdefault(ep.session_id, []).append(ep)
+            return result
+        except sqlite3.Error:
+            logger.warning("Failed to get episodes by session ids", exc_info=True)
+            return {}
+
     def update_episode_cited(self, episode_id: int, cited_at: str) -> None:
         """Update the last_cited_at timestamp for an episode."""
         try:
@@ -437,7 +459,7 @@ class InMemoryMemoryStorage(IMemoryStorage):
         self._dimension = dimension
         self._episodes: dict[int, Episode] = {}
         self._profiles: dict[int, Profile] = {}
-        self._utterances: list[dict[str, str]] = []
+        self._utterances: list[dict[str, Any]] = []
         self._next_episode_id = 1
         self._next_profile_id = 1
 
@@ -484,6 +506,27 @@ class InMemoryMemoryStorage(IMemoryStorage):
             if ep is not None:
                 results.append(ep)
         return results
+
+    def get_episodes_by_session_ids(self, session_ids: list[str]) -> dict[str, list[Episode]]:
+        """Retrieve episodes grouped by session ID."""
+        sid_set = set(session_ids)
+        result: dict[str, list[Episode]] = {}
+        for ep in self._episodes.values():
+            if ep.session_id in sid_set:
+                copy = Episode(
+                    id=ep.id,
+                    text=ep.text,
+                    timestamp=ep.timestamp,
+                    session_id=ep.session_id,
+                    importance=ep.importance,
+                    last_cited_at=ep.last_cited_at,
+                    citation_count=ep.citation_count,
+                    embedding=ep.embedding.copy() if ep.embedding is not None else None,
+                )
+                result.setdefault(ep.session_id, []).append(copy)
+        for episodes in result.values():
+            episodes.sort(key=lambda e: e.timestamp)
+        return result
 
     def update_episode_cited(self, episode_id: int, cited_at: str) -> None:
         """Update the last_cited_at timestamp for an episode."""

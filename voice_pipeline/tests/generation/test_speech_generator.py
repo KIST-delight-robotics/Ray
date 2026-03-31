@@ -11,9 +11,16 @@ from unittest.mock import MagicMock
 import pytest
 
 from voice_pipeline.core.config import SpeechGeneratorConfig
-from voice_pipeline.core.interfaces import ILLM, ITTS, IContextBuilder
+from voice_pipeline.core.interfaces import (
+    ILLM,
+    ITTS,
+    IContextBuilder,
+    IConversationHistory,
+    IMemoryRetriever,
+)
 from voice_pipeline.core.types import (
     GeneratorState,
+    HistoryTurn,
     LLMResult,
     LLMStream,
     ResponseData,
@@ -21,6 +28,7 @@ from voice_pipeline.core.types import (
     WordTimestamp,
 )
 from voice_pipeline.generation.speech_generator import SpeechGenerator
+from voice_pipeline.memory.types import Episode, MemoryReadResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -696,4 +704,159 @@ class TestCancelDoesNotSetFailed:
         # State should still be IDLE, not FAILED
         assert gen.state == GeneratorState.IDLE
 
+        gen.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Memory integration tests (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+def _make_episode(text: str, eid: int = 1) -> Episode:
+    return Episode(
+        id=eid,
+        text=text,
+        timestamp="2026-03-15 14:00:00",
+        session_id="s1",
+        importance=1.0,
+        last_cited_at="2026-03-15 14:00:00",
+    )
+
+
+class TestMemoryIntegration:
+    """Tests for retriever integration and citation parsing in the pipeline."""
+
+    def test_retrieve_called_with_query(self) -> None:
+        cb, llm, tts = _make_deps(llm_chunks=["Response text"])
+        retriever = MagicMock(spec=IMemoryRetriever)
+        retriever.retrieve.return_value = MemoryReadResult([], [], {})
+
+        gen = SpeechGenerator(
+            cb,
+            llm,
+            tts,
+            retriever=retriever,
+            exclude_session_ids={"current-session"},
+        )
+        gen.prepare("hello")
+        _wait_for_stream_done(gen)
+        _drain_audio(gen)
+
+        retriever.retrieve.assert_called_once()
+        call_args = retriever.retrieve.call_args
+        assert "hello" in call_args[0][0]  # query contains current text
+        assert call_args[0][1] == {"current-session"}
+        gen.shutdown()
+
+    def test_citation_parsed_and_stripped(self) -> None:
+        """LLM output with citation tag → tag stripped, cited_memory_ids populated."""
+        cb = MagicMock(spec=IContextBuilder)
+        cb.build.return_value = [{"role": "user", "content": "hi"}]
+
+        llm = MagicMock(spec=ILLM)
+        llm.generate.return_value = _make_llm_stream(["Great movie!", "\n[MEMORIES: M1, M2]"])
+
+        tts = MagicMock(spec=ITTS)
+        tts.synthesize.return_value = _make_tts_stream([b"\x00" * 100])
+
+        ep1 = _make_episode("Ep one", eid=10)
+        ep2 = _make_episode("Ep two", eid=20)
+        mem_result = MemoryReadResult([ep1, ep2], [0.9, 0.8], {1: 10, 2: 20})
+
+        retriever = MagicMock(spec=IMemoryRetriever)
+        retriever.retrieve.return_value = mem_result
+
+        gen = SpeechGenerator(cb, llm, tts, retriever=retriever)
+        gen.prepare("tell me about movies")
+        _wait_for_stream_done(gen)
+        _drain_audio(gen)
+
+        data = gen.get_response_data()
+        # Tag stripped from text
+        assert "[MEMORIES" not in data.text
+        assert data.text == "Great movie!"
+        # TTS received clean text
+        tts.synthesize.assert_called_once_with("Great movie!")
+        # Cited IDs resolved
+        assert data.cited_memory_ids == [10, 20]
+        # Retriever updated
+        retriever.update_citations.assert_called_once_with([1, 2])
+        gen.shutdown()
+
+    def test_no_citation_tag_no_update(self) -> None:
+        """LLM output without citation tag → no update_citations call."""
+        cb, llm, tts = _make_deps(llm_chunks=["Just a response"])
+        retriever = MagicMock(spec=IMemoryRetriever)
+        retriever.retrieve.return_value = MemoryReadResult([], [], {})
+
+        gen = SpeechGenerator(cb, llm, tts, retriever=retriever)
+        gen.prepare("hi")
+        _wait_for_stream_done(gen)
+        _drain_audio(gen)
+
+        data = gen.get_response_data()
+        assert data.text == "Just a response"
+        assert data.cited_memory_ids == []
+        retriever.update_citations.assert_not_called()
+        gen.shutdown()
+
+    def test_retriever_error_graceful(self) -> None:
+        """Retriever failure → pipeline continues without memory."""
+        cb, llm, tts = _make_deps(llm_chunks=["Fallback response"])
+        retriever = MagicMock(spec=IMemoryRetriever)
+        retriever.retrieve.side_effect = RuntimeError("DB error")
+
+        gen = SpeechGenerator(cb, llm, tts, retriever=retriever)
+        gen.prepare("hi")
+        _wait_for_stream_done(gen)
+        _drain_audio(gen)
+
+        data = gen.get_response_data()
+        assert data.text == "Fallback response"
+        # build() called with memory_result=None
+        cb.build.assert_called_once_with("hi", memory_result=None)
+        gen.shutdown()
+
+    def test_query_includes_history_turns(self) -> None:
+        """Retriever query includes recent history turns."""
+        cb, llm, tts = _make_deps(llm_chunks=["Response"])
+        retriever = MagicMock(spec=IMemoryRetriever)
+        retriever.retrieve.return_value = MemoryReadResult([], [], {})
+
+        history = MagicMock(spec=IConversationHistory)
+        history.get_turns.return_value = [
+            HistoryTurn(items=({"role": "user", "content": "prev question"},), token_count=2),
+            HistoryTurn(items=({"role": "assistant", "content": "prev answer"},), token_count=2),
+        ]
+
+        gen = SpeechGenerator(
+            cb,
+            llm,
+            tts,
+            retriever=retriever,
+            history=history,
+        )
+        gen.prepare("current question")
+        _wait_for_stream_done(gen)
+        _drain_audio(gen)
+
+        query = retriever.retrieve.call_args[0][0]
+        assert "prev question" in query
+        assert "prev answer" in query
+        assert "current question" in query
+        gen.shutdown()
+
+    def test_no_retriever_backward_compatible(self) -> None:
+        """Without retriever, pipeline works exactly as before."""
+        cb, llm, tts = _make_deps()
+        gen = SpeechGenerator(cb, llm, tts)
+        gen.prepare("hello")
+        _wait_for_stream_done(gen)
+        _drain_audio(gen)
+
+        data = gen.get_response_data()
+        assert data.text == "Hello there!"
+        assert data.cited_memory_ids == []
+        # build() called without memory_result
+        cb.build.assert_called_once_with("hello", memory_result=None)
         gen.shutdown()

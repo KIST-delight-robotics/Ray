@@ -50,11 +50,25 @@ class AudioConfig:
 
 @dataclass
 class ConversationHistoryConfig:
-    """Configuration for ConversationHistory and StorageBackend."""
+    """Configuration for ConversationHistory and StorageBackend.
+
+    Attributes:
+        max_context_tokens: Total LLM context token budget.
+        storage_backend: Persistence backend type.
+        storage_path: Database file path.
+        max_memory_tokens: Dedicated token budget for memory block (Block 4).
+        max_profile_tokens: Dedicated token budget for profile block (Block 2).
+        max_prev_session_tokens: Token budget for previous session summaries.
+        previous_session_count: Number of recent sessions to load at session start.
+    """
 
     max_context_tokens: int = 4096
     storage_backend: Literal["memory", "sqlite"] = "sqlite"
     storage_path: str = "data/ray.db"
+    max_memory_tokens: int = 512
+    max_profile_tokens: int = 256
+    max_prev_session_tokens: int = 512
+    previous_session_count: int = 3
 
 
 @dataclass
@@ -365,13 +379,24 @@ class SpeechGeneratorConfig:
         max_workers: Thread pool size for background generation.
             Default 2 so a new prepare() run starts immediately on a
             separate worker while the cancelled run drains cooperatively.
+        pipeline_mode: TTS pipeline mode. "full" collects all LLM text
+            before TTS. "sentence" streams to TTS per sentence for
+            lower first-audio latency.
+        query_context_turns: Number of recent history turns concatenated
+            with current STT text to form the memory retriever query.
     """
 
     max_workers: int = 2
+    pipeline_mode: Literal["full", "sentence"] = "full"
+    query_context_turns: int = 3
 
     def __post_init__(self) -> None:
         if self.max_workers < 1:
             raise ConfigurationError(f"max_workers must be at least 1, got {self.max_workers}")
+        if self.pipeline_mode not in ("full", "sentence"):
+            raise ConfigurationError(
+                f"pipeline_mode must be 'full' or 'sentence', got {self.pipeline_mode!r}"
+            )
 
 
 @dataclass

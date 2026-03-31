@@ -11,6 +11,7 @@ from voice_pipeline.context.context_builder import (
 )
 from voice_pipeline.core.config import ConversationHistoryConfig
 from voice_pipeline.core.types import HistoryTurn, LLMMetrics
+from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
 
 # Per-message overhead shorthand
 _MO = _PER_MESSAGE_OVERHEAD_TOKENS
@@ -264,3 +265,183 @@ class TestContextBuilder:
         # Only current message fits (tool cost ate the history budget)
         assert len(result) == 1
         assert result[0] == {"role": "user", "content": "hi"}
+
+
+# ---------------------------------------------------------------------------
+# Memory-aware tests (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+def _make_profile(topic: str, sub: str, content: str) -> Profile:
+    return Profile(id=1, topic=topic, sub_topic=sub, content=content, updated_at="2026-03-15")
+
+
+def _make_episode(text: str, ts: str = "2026-03-15 14:00:00", eid: int = 1) -> Episode:
+    return Episode(
+        id=eid,
+        text=text,
+        timestamp=ts,
+        session_id="s1",
+        importance=1.0,
+        last_cited_at=ts,
+    )
+
+
+class TestContextBuilderWithMemory:
+    """Tests for profile, memory, and session summary injection."""
+
+    def test_profile_injected_as_developer_msg(self) -> None:
+        profiles = [_make_profile("basic_info", "name", "Alice")]
+        history = StubHistory()
+        config = ConversationHistoryConfig(max_context_tokens=500)
+        cb = ContextBuilder(history, config, "sys", _word_counter, profiles=profiles)
+        result = cb.build("hi")
+        # system, profile(developer), user
+        assert len(result) == 3
+        assert result[1]["role"] == "developer"
+        assert "basic_info::name: Alice" in result[1]["content"]
+
+    def test_memory_injected_last(self) -> None:
+        history = StubHistory()
+        history.add_user_message("prev")
+        history.add_assistant_message("reply")
+        config = ConversationHistoryConfig(max_context_tokens=500)
+        cb = ContextBuilder(history, config, "", _word_counter)
+
+        ep = _make_episode("User likes SF.")
+        mem = MemoryReadResult([ep], [0.9], {1: 1})
+        result = cb.build("now", memory_result=mem)
+        # history(2) + current user + memory(last)
+        assert result[-1]["role"] == "developer"
+        assert "[M1]" in result[-1]["content"]
+        assert result[-2] == {"role": "user", "content": "now"}
+
+    def test_session_summaries_injected(self) -> None:
+        history = StubHistory()
+        episodes = [_make_episode("User talked about Dune.")]
+        config = ConversationHistoryConfig(max_context_tokens=500)
+        cb = ContextBuilder(
+            history,
+            config,
+            "sys",
+            _word_counter,
+            session_summaries=[("2026-03-28 14:00:00", episodes)],
+        )
+        result = cb.build("hi")
+        # system, summary(developer), user
+        assert any("2026-03-28 14:00 session" in m.get("content", "") for m in result)
+
+    def test_block_ordering(self) -> None:
+        """Verify: system → profile → summary → history → user → memory."""
+        profiles = [_make_profile("basic_info", "name", "Alice")]
+        episodes = [_make_episode("Summary ep.")]
+        history = StubHistory()
+        history.add_user_message("old")
+        config = ConversationHistoryConfig(max_context_tokens=1000)
+        cb = ContextBuilder(
+            history,
+            config,
+            "sys",
+            _word_counter,
+            profiles=profiles,
+            session_summaries=[("2026-03-28 14:00:00", episodes)],
+        )
+
+        mem_ep = _make_episode("Memory ep.", eid=2)
+        mem = MemoryReadResult([mem_ep], [0.8], {1: 2})
+        result = cb.build("now", memory_result=mem)
+
+        roles = [m.get("role") for m in result]
+        # system, profile, summary, history(user), current(user), memory
+        assert roles[0] == "system"
+        assert roles[1] == "developer"  # profile
+        assert roles[2] == "developer"  # summary
+        assert roles[-1] == "developer"  # memory (last)
+        assert roles[-2] == "user"  # current text
+
+    def test_memory_budget_reserved_before_history(self) -> None:
+        """Memory gets its dedicated budget even when history is large."""
+        # Fill history with many turns
+        history = StubHistory()
+        for i in range(20):
+            history.add_user_message(f"turn {i} user message here")
+            history.add_assistant_message(f"turn {i} assistant reply here")
+
+        ep = _make_episode("Important memory episode text here.")
+        mem = MemoryReadResult([ep], [0.9], {1: 1})
+
+        # Tight budget: memory reservation eats into history space
+        config = ConversationHistoryConfig(
+            max_context_tokens=80,
+            max_memory_tokens=20,
+        )
+        cb = ContextBuilder(history, config, "", _word_counter)
+        result = cb.build("hi", memory_result=mem)
+
+        # Memory block must be present (last message)
+        assert result[-1]["role"] == "developer"
+        assert "[M1]" in result[-1]["content"]
+
+    def test_no_memory_gives_budget_to_history(self) -> None:
+        """Without memory, history gets the full remaining budget."""
+        history = StubHistory()
+        for i in range(5):
+            history.add_user_message(f"msg {i}")
+
+        config = ConversationHistoryConfig(max_context_tokens=200, max_memory_tokens=50)
+        cb = ContextBuilder(history, config, "", _word_counter)
+
+        result_no_mem = cb.build("now")
+        result_with_mem = cb.build("now", memory_result=MemoryReadResult([], [], {}))
+
+        # Both should have same result (empty memory = no reservation)
+        assert len(result_no_mem) == len(result_with_mem)
+
+    def test_backward_compatible_build_call(self) -> None:
+        """build(text) without memory_result still works."""
+        history = StubHistory()
+        config = ConversationHistoryConfig(max_context_tokens=200)
+        cb = ContextBuilder(history, config, "sys", _word_counter)
+        result = cb.build("hello")
+        assert result[0] == {"role": "system", "content": "sys"}
+        assert result[-1] == {"role": "user", "content": "hello"}
+
+    def test_profile_exceeding_cap_is_skipped(self) -> None:
+        """Profile larger than max_profile_tokens is not injected."""
+        # Create a profile with long content
+        profiles = [_make_profile("basic_info", "bio", "a " * 200)]
+        history = StubHistory()
+        config = ConversationHistoryConfig(
+            max_context_tokens=500,
+            max_profile_tokens=10,  # very tight cap
+        )
+        cb = ContextBuilder(history, config, "", _word_counter, profiles=profiles)
+        result = cb.build("hi")
+        # No developer message (profile too large)
+        assert all(m.get("role") != "developer" for m in result)
+
+    def test_summary_overflow_drops_later(self) -> None:
+        """When summaries exceed budget, later ones are dropped."""
+        summaries = [
+            ("2026-03-26 10:00:00", [_make_episode("Old session ep.")]),
+            ("2026-03-27 10:00:00", [_make_episode("Mid session ep.")]),
+            ("2026-03-28 10:00:00", [_make_episode("Recent session ep.")]),
+        ]
+        # Each summary ≈ 7 words + 3 overhead = 10 tokens. Cap at 15 → only 1 fits.
+        config = ConversationHistoryConfig(
+            max_context_tokens=500,
+            max_prev_session_tokens=15,
+        )
+        history = StubHistory()
+        cb = ContextBuilder(
+            history,
+            config,
+            "",
+            _word_counter,
+            session_summaries=summaries,
+        )
+        result = cb.build("hi")
+        dev_msgs = [m for m in result if m.get("role") == "developer"]
+        assert len(dev_msgs) == 1
+        # First summary (oldest) is included
+        assert "2026-03-26" in dev_msgs[0]["content"]

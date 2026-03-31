@@ -119,6 +119,24 @@ class IStorageBackend(ABC):
             session_id: Session to delete.
         """
 
+    @abstractmethod
+    def get_recent_sessions(
+        self,
+        limit: int,
+        exclude_session_id: str | None = None,
+    ) -> list[tuple[str, str, str | None]]:
+        """Return the most recent completed sessions.
+
+        Args:
+            limit: Maximum number of sessions to return.
+            exclude_session_id: Session ID to exclude (e.g. current session).
+
+        Returns:
+            List of ``(session_id, started_at, ended_at)`` tuples,
+            ordered by ``started_at`` descending. Only sessions with
+            ``ended_at IS NOT NULL`` are included.
+        """
+
 
 # ---------------------------------------------------------------------------
 # ConversationHistory
@@ -289,17 +307,24 @@ class IUtteranceTruncator(ABC):
 class IContextBuilder(ABC):
     """Assembles LLM context from conversation history and current input.
 
-    IConversationHistory is injected via the constructor — it does not
-    change per call. The build() method only takes the current turn's text.
+    Session-level data (profiles, previous session summaries) is injected
+    via the constructor and remains constant for the session.  Per-turn
+    data (memory search results) is passed to ``build()``.
     """
 
     @abstractmethod
-    def build(self, current_text: str) -> list[dict[str, Any]]:
+    def build(
+        self,
+        current_text: str,
+        memory_result: MemoryReadResult | None = None,
+    ) -> list[dict[str, Any]]:
         """Build the message list for an LLM call.
 
         Args:
             current_text: Current ASR transcription (the user's in-progress
                 turn, not yet committed to history).
+            memory_result: Retrieved episodes for Block 4 injection.
+                None when memory is not configured.
 
         Returns:
             List of message dicts suitable for passing to ILLM.generate().
@@ -927,6 +952,22 @@ class IMemoryStorage(ABC):
         Returns:
             Episodes found, in no guaranteed order.
             Missing IDs are silently skipped.
+        """
+
+    @abstractmethod
+    def get_episodes_by_session_ids(self, session_ids: list[str]) -> dict[str, list[Episode]]:
+        """Retrieve episodes grouped by session ID.
+
+        Used at session start to load previous sessions' episodes
+        as summaries for LLM context (Block 3).
+
+        Args:
+            session_ids: Session IDs to query.
+
+        Returns:
+            Dict mapping each session_id to its episodes, ordered
+            by timestamp within each session. Sessions with no
+            episodes are omitted from the result.
         """
 
     @abstractmethod

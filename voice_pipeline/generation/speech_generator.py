@@ -8,10 +8,22 @@ import queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
+from voice_pipeline.context.formatters import parse_citation_tag
 from voice_pipeline.core.config import SpeechGeneratorConfig
-from voice_pipeline.core.interfaces import ILLM, ITTS, IContextBuilder, ISpeechGenerator
+from voice_pipeline.core.interfaces import (
+    ILLM,
+    ITTS,
+    IContextBuilder,
+    IConversationHistory,
+    IMemoryRetriever,
+    ISpeechGenerator,
+)
 from voice_pipeline.core.types import GeneratorState, LLMMetrics, LLMStream, ResponseData
+
+if TYPE_CHECKING:
+    from voice_pipeline.memory.types import MemoryReadResult
 
 logger = logging.getLogger("voice_pipeline.generation")
 
@@ -21,6 +33,12 @@ class SpeechGenerator(ISpeechGenerator):
 
     Each prepare() submits a pipeline run. Audio chunks are streamed
     via poll_audio(). Run-ID guards prevent stale runs from writing state.
+
+    When a retriever is provided, the pipeline additionally:
+      1. Builds a retrieval query from current text + recent history.
+      2. Calls retriever.retrieve() before context assembly.
+      3. Parses ``[MEMORIES: ...]`` from LLM output and strips it before TTS.
+      4. Calls retriever.update_citations() with cited indices.
     """
 
     def __init__(
@@ -30,11 +48,20 @@ class SpeechGenerator(ISpeechGenerator):
         tts: ITTS,
         config: SpeechGeneratorConfig | None = None,
         executor: ThreadPoolExecutor | None = None,
+        *,
+        retriever: IMemoryRetriever | None = None,
+        history: IConversationHistory | None = None,
+        exclude_session_ids: set[str] | None = None,
     ) -> None:
         self._context_builder = context_builder
         self._llm = llm
         self._tts = tts
         self._config = config or SpeechGeneratorConfig()
+
+        # Memory integration (all optional)
+        self._retriever = retriever
+        self._history = history
+        self._exclude_session_ids = exclude_session_ids or set()
 
         self._lock = threading.Lock()
         self._state = GeneratorState.IDLE
@@ -151,6 +178,53 @@ class SpeechGenerator(ISpeechGenerator):
 
     # -- Background pipeline -------------------------------------------------
 
+    def _build_retriever_query(self, current_text: str) -> str:
+        """Concatenate current text with recent history turns for retrieval."""
+        if self._history is None:
+            return current_text
+        turns = self._history.get_turns()
+        recent = turns[-self._config.query_context_turns :]
+        parts: list[str] = []
+        for turn in recent:
+            for item in turn.items:
+                content = item.get("content", "")
+                if content:
+                    parts.append(content)
+        parts.append(current_text)
+        return " ".join(parts)
+
+    def _retrieve_memories(self, current_text: str) -> MemoryReadResult | None:
+        """Run memory retrieval. Returns None on error or if no retriever."""
+        if self._retriever is None:
+            return None
+        try:
+            query = self._build_retriever_query(current_text)
+            return self._retriever.retrieve(query, self._exclude_session_ids)
+        except Exception:
+            logger.warning("Memory retrieval failed, continuing without", exc_info=True)
+            return None
+
+    def _resolve_citations(
+        self,
+        cited_indices: list[int],
+        memory_result: MemoryReadResult | None,
+    ) -> list[int]:
+        """Update retriever and resolve display indices to DB IDs."""
+        if not cited_indices or not memory_result or not self._retriever:
+            return []
+
+        try:
+            self._retriever.update_citations(cited_indices)
+        except Exception:
+            logger.warning("Citation update failed", exc_info=True)
+
+        cited_ids: list[int] = []
+        for idx in cited_indices:
+            db_id = memory_result.index_to_id.get(idx)
+            if db_id is not None:
+                cited_ids.append(db_id)
+        return cited_ids
+
     def _run_pipeline(
         self,
         current_text: str,
@@ -161,12 +235,17 @@ class SpeechGenerator(ISpeechGenerator):
         try:
             t0 = time.monotonic()
 
-            # 1. Build context
+            # 1. Memory retrieval
             if cancel_event.is_set():
                 return
-            messages = self._context_builder.build(current_text)
+            memory_result = self._retrieve_memories(current_text)
 
-            # 2. Generate LLM text
+            # 2. Build context
+            if cancel_event.is_set():
+                return
+            messages = self._context_builder.build(current_text, memory_result=memory_result)
+
+            # 3. Generate LLM text
             if cancel_event.is_set():
                 return
             llm_stream: LLMStream = self._llm.generate(messages)
@@ -186,7 +265,7 @@ class SpeechGenerator(ISpeechGenerator):
             t_llm = time.monotonic()
             logger.info("LLM done (%.1fs) [run=%d]: %r", t_llm - t0, run_id, full_text)
 
-            # 2a. Collect LLM metrics and build turn_items
+            # 3a. Collect LLM metrics and build turn_items
             metrics_list: list[LLMMetrics] = []
             try:
                 llm_result = llm_stream.result
@@ -195,23 +274,29 @@ class SpeechGenerator(ISpeechGenerator):
             except RuntimeError:
                 pass  # Stream was closed early, no result available
 
-            # 3. Guard: empty text
-            if not full_text.strip():
+            # 4. Strip citation tag
+            clean_text, cited_indices = parse_citation_tag(full_text)
+
+            # 5. Guard: empty text (before updating citations)
+            if not clean_text.strip():
                 with self._lock:
                     if run_id == self._run_id:
                         self._state = GeneratorState.FAILED
                 return
 
-            # 4. Store text
+            # 5a. Update citations (only for non-empty responses)
+            cited_ids = self._resolve_citations(cited_indices, memory_result)
+
+            # 6. Store text
             with self._lock:
                 if run_id != self._run_id:
                     return
-                self._text = full_text
+                self._text = clean_text
 
-            # 5. TTS synthesis
+            # 7. TTS synthesis (using clean text without citation tag)
             if cancel_event.is_set():
                 return
-            tts_stream = self._tts.synthesize(full_text)
+            tts_stream = self._tts.synthesize(clean_text)
             first_chunk = True
             total_audio = bytearray()
             try:
@@ -251,20 +336,21 @@ class SpeechGenerator(ISpeechGenerator):
                 run_id,
             )
 
-            # 6. Build ResponseData
+            # 8. Build ResponseData
             try:
                 timestamps = list(tts_stream.timestamps)
             except Exception:
                 logger.debug("Timestamp retrieval failed, using empty list", exc_info=True)
                 timestamps = []
 
-            turn_items = [{"role": "assistant", "content": full_text}]
+            turn_items = [{"role": "assistant", "content": clean_text}]
             response_data = ResponseData(
-                text=full_text,
+                text=clean_text,
                 audio=bytes(total_audio),
                 timestamps=timestamps,
                 turn_items=turn_items,
                 metrics_list=metrics_list,
+                cited_memory_ids=cited_ids,
             )
 
             with self._lock:
