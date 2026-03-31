@@ -1,7 +1,6 @@
 """Tests for voice_pipeline.history.storage_backend."""
 
 import json
-import tempfile
 from pathlib import Path
 
 import pytest

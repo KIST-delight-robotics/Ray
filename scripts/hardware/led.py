@@ -42,6 +42,7 @@ strip.show()
 
 # 3초 후 모두 끄기
 import time
+
 time.sleep(3)
 strip.set_all_pixels(Color(0, 0, 0))
 strip.show()
