@@ -151,3 +151,11 @@ Actually, I remember you saw Dune 2 recently...
 - **프리페치 키워드**: LLM 응답 끝에 다음 턴 관련 키워드를 출력하여 다음 검색에 활용. 추가 LLM 호출 없음.
 - **별도 모델 백그라운드 생성**: 유휴 시간에 가벼운 모델로 정제된 쿼리 생성. Pi5 자원 제약 고려 필요.
 - **Foresight 저장**: Write 시 미래 연상 텍스트를 별도 메모리로 저장하여 검색 대상에 포함. 빗나간 예측이 noise가 될 수 있어 유효기간/정리 기준 필요.
+
+---
+
+## 참고 프로젝트
+
+- **Hindsight**: 벡터 + BM25 → RRF(k=60) 파이프라인 (§1), temporal 검색 채널 (§5-1), cross-encoder 리랭크 (§5-3)
+- **MemU**: salience score (similarity × recency_decay × reinforcement) — 검색 랭킹 공식 (§1-3)
+- **EverMemOS**: Foresight 저장 (§5-5)

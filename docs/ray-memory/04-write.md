@@ -103,3 +103,12 @@ interaction_style::tone, preference, ...
 
 - importance 낮고 오래된 기억을 주기적으로 정리
 - 저장 용량보다는 검색 noise 감소 목적
+
+---
+
+## 참고 프로젝트
+
+- **Hindsight**: 내러티브 단위 선별적 추출, 날짜 표현 상대→절대 변환 (§2)
+- **Mem0**: 유저 발화만 추출 가드레일 (§2), UUID→정수 인덱스 치환 (§3)
+- **Mengram**: importance 추출 시 판정 (§2)
+- **Memobase**: APPEND/UPDATE/ABORT merge, 슬롯 기반 프로필 (topic::sub_topic), 배치 처리 (§3)

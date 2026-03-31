@@ -86,11 +86,13 @@ voice_pipeline/
 │   └── exceptions.py
 │
 ├── similarity/
-│   └── similarity.py          # Semantic similarity (sentence-transformers / difflib)
+│   └── similarity.py          # Semantic similarity (embedding / difflib)
+│
+├── embedding/
+│   └── embedder.py            # IEmbedder implementations + factory
 │
 ├── memory/
 │   ├── types.py               # Episode, Profile data types
-│   ├── embedder.py            # IEmbedder interface + SentenceTransformerEmbedder
 │   ├── vector_index.py        # IVectorIndex interface + NumpyVectorIndex
 │   ├── storage.py             # SQLiteMemoryStorage + InMemoryMemoryStorage
 │   └── exceptions.py
@@ -113,6 +115,7 @@ voice_pipeline/
     ├── generation/
     ├── bridge/
     ├── led/
+    ├── embedding/
     ├── orchestrator/
     ├── memory/
     ├── session/
@@ -213,7 +216,7 @@ uv run pytest -m ''                              # everything
 
 ## Decision Log
 
-Record non-obvious design decisions and lessons learned in `docs/decisions.md` (finalized) or `docs/decisions-wip.md` (in progress).
+Record non-obvious design decisions and lessons learned in `docs/decisions.md` (finalized) or `docs/decisions-wip.md` (in progress). Entries in `decisions-wip.md` are ordered chronologically (oldest on top, newest at the bottom).
 
 Each entry should focus on **why this choice was made** — not what was built. Include:
 - Trade-offs where alternatives existed

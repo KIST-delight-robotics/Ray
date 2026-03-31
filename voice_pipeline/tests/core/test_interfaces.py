@@ -10,7 +10,10 @@ from voice_pipeline.core.interfaces import (
     IContextBuilder,
     IConversationHistory,
     ICppBridge,
+    IEmbedder,
     ILEDController,
+    IMemoryStorage,
+    ISimilarity,
     ISpeechGenerator,
     IStorageBackend,
     ITurnDetector,
@@ -78,3 +81,15 @@ class TestInterfacesAreAbstract:
     def test_speech_generator_abstract(self) -> None:
         with pytest.raises(TypeError):
             ISpeechGenerator()  # type: ignore[abstract]
+
+    def test_similarity_abstract(self) -> None:
+        with pytest.raises(TypeError):
+            ISimilarity()  # type: ignore[abstract]
+
+    def test_embedder_abstract(self) -> None:
+        with pytest.raises(TypeError):
+            IEmbedder()  # type: ignore[abstract]
+
+    def test_memory_storage_abstract(self) -> None:
+        with pytest.raises(TypeError):
+            IMemoryStorage()  # type: ignore[abstract]

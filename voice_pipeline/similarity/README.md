@@ -6,14 +6,17 @@ Semantic text similarity scoring for the voice pipeline. Used by `TurnDetector` 
 
 | Backend | Class | Model example | Latency |
 |---------|-------|---------------|---------|
-| `local` | `LocalEmbeddingSimilarity` | `all-MiniLM-L6-v2` | ~4ms (CPU) |
-| `api` | `APIEmbeddingSimilarity` | `text-embedding-3-small` | ~200ms (network) |
+| `local` | `EmbeddingSimilarity` | `all-MiniLM-L6-v2` | ~4ms (CPU) |
+| `api` | `EmbeddingSimilarity` | `text-embedding-3-small` | ~200ms (network) |
+| `difflib` | `DiffLibSimilarity` | — | <1ms |
+
+Both `local` and `api` backends use `EmbeddingSimilarity`, which wraps an `IEmbedder` instance from the `embedding/` module.
 
 ## Configuration
 
 ```python
 SimilarityConfig(
-    backend="local",              # "local" or "api"
+    backend="local",              # "local", "api", or "difflib"
     model="all-MiniLM-L6-v2",    # sentence-transformers or OpenAI model
     threshold=0.8,                # skip re-prepare if similarity >= this
     use_onnx=False,               # ONNX Runtime backend (local only)

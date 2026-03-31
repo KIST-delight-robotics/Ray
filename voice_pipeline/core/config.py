@@ -1,7 +1,7 @@
 """Dataclass-based configuration for the voice pipeline.
 
 Config sections are added as their modules are implemented.
-Current: Phase 1–3 + Phase 4 + Phase 5 + Phase 6 + Memory Phase 1.
+Current: Phase 1–3 + Phase 4 + Phase 5 + Phase 6 + Memory Phase 1 + Embedding.
 """
 
 from __future__ import annotations
@@ -314,7 +314,7 @@ class SimilarityConfig:
     """Configuration for text similarity scoring.
 
     Attributes:
-        backend: Similarity backend ("local" or "api").
+        backend: Similarity backend ("local", "api", or "difflib").
         model: Model name for the backend.
             Local: sentence-transformers model (e.g. "all-MiniLM-L6-v2").
             API: OpenAI embedding model (e.g. "text-embedding-3-small").
@@ -322,7 +322,7 @@ class SimilarityConfig:
         use_onnx: Use ONNX Runtime backend for local models (faster on CPU).
     """
 
-    backend: str = "local"
+    backend: Literal["local", "api", "difflib"] = "local"
     model: str = "all-MiniLM-L6-v2"
     threshold: float = 0.8
     use_onnx: bool = False

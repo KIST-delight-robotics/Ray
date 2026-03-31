@@ -3,7 +3,7 @@
 Only interfaces needed by the next implementation phase are defined here.
 New interfaces are added just before their consuming phase begins.
 
-Current: Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 + Memory Phase 1 interfaces.
+Current: Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 + Memory Phase 1 + Embedding interfaces.
 """
 
 from __future__ import annotations
@@ -829,6 +829,48 @@ class ISessionManager(ABC):
     @abstractmethod
     def shutdown(self) -> None:
         """Signal the session manager to shut down gracefully."""
+
+
+# ---------------------------------------------------------------------------
+# Embedder
+# ---------------------------------------------------------------------------
+
+
+class IEmbedder(ABC):
+    """Text embedding provider.
+
+    Converts text to dense vectors for semantic search.
+    Shared across modules (memory, similarity, etc.).
+
+    Implementations may use local models or external APIs.
+    """
+
+    @abstractmethod
+    def embed(self, text: str) -> np.ndarray:
+        """Embed a single text.
+
+        Args:
+            text: Input text.
+
+        Returns:
+            1-D float32 array of shape (dimension,).
+        """
+
+    @abstractmethod
+    def embed_batch(self, texts: list[str]) -> np.ndarray:
+        """Embed multiple texts in a single call.
+
+        Args:
+            texts: List of input texts.
+
+        Returns:
+            2-D float32 array of shape (len(texts), dimension).
+        """
+
+    @property
+    @abstractmethod
+    def dimension(self) -> int:
+        """Embedding vector dimension."""
 
 
 # ---------------------------------------------------------------------------
