@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     import numpy as np
 
-    from voice_pipeline.memory.types import Episode, Profile
+    from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
 
 from voice_pipeline.core.types import (
     AudioFrame,
@@ -1032,3 +1032,50 @@ class IMemoryStorage(ABC):
     @abstractmethod
     def close(self) -> None:
         """Close the database connection."""
+
+
+# ---------------------------------------------------------------------------
+# MemoryRetriever
+# ---------------------------------------------------------------------------
+
+
+class IMemoryRetriever(ABC):
+    """Retrieves and ranks episodic memories for LLM context injection.
+
+    Maintains a retained buffer across turns for citation-based memory
+    persistence. ``retrieve()`` is called once per turn before LLM
+    generation; ``update_citations()`` is called after LLM response
+    with cited indices.
+    """
+
+    @abstractmethod
+    def retrieve(self, query: str, exclude_session_ids: set[str]) -> MemoryReadResult:
+        """Search, rank, and return relevant episodes.
+
+        Runs vector + BM25 hybrid search, applies RRF fusion and
+        salience ranking, manages the retained buffer, and returns
+        the final episode list for block 4 injection.
+
+        Args:
+            query: Search query (STT + recent turns, constructed by
+                caller).
+            exclude_session_ids: Session IDs to filter out (current
+                session + sessions whose summaries are in context).
+
+        Returns:
+            MemoryReadResult with ranked episodes and index-to-ID
+            mapping.
+        """
+
+    @abstractmethod
+    def update_citations(self, cited_indices: list[int]) -> None:
+        """Update retained buffer and DB for cited memories.
+
+        Called after LLM response is parsed. Resets TTL for cited
+        memories in the retained buffer and updates ``last_cited_at``
+        in the database.
+
+        Args:
+            cited_indices: 1-based display indices (e.g., [1, 3] for
+                M1, M3).
+        """

@@ -92,9 +92,10 @@ voice_pipeline/
 │   └── embedder.py            # IEmbedder implementations + factory
 │
 ├── memory/
-│   ├── types.py               # Episode, Profile data types
+│   ├── types.py               # Episode, Profile, MemoryReadResult data types
 │   ├── vector_index.py        # IVectorIndex interface + NumpyVectorIndex
 │   ├── storage.py             # SQLiteMemoryStorage + InMemoryMemoryStorage
+│   ├── retriever.py           # MemoryRetriever — hybrid search + retained buffer
 │   └── exceptions.py
 │
 ├── orchestrator/

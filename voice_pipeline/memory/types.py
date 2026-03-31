@@ -49,3 +49,20 @@ class Profile:
     sub_topic: str
     content: str
     updated_at: str
+
+
+@dataclass
+class MemoryReadResult:
+    """Result of a memory retrieval query.
+
+    Attributes:
+        episodes: Ranked episodes for block 4 injection
+            (retained first, then new search results).
+        scores: Salience scores, 1:1 with episodes.
+        index_to_id: Mapping from 1-based display index (M1, M2, ...)
+            to episode database ID. Used for citation resolution.
+    """
+
+    episodes: list[Episode]
+    scores: list[float]
+    index_to_id: dict[int, int]

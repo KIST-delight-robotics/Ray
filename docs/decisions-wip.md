@@ -22,6 +22,13 @@
 - **실패 시 `None` 반환**: `add_episode`/`upsert_profile`이 DB 에러 시 `-1` 대신 `None`을 반환. `-1`은 다운스트림에서 유효한 ID로 오인될 위험 있음.
 
 
+## Memory Retriever (Phase 2)
+
+- **`exclude_session_ids`를 `retrieve()` 파라미터로**: 생성자가 아닌 매 턴 호출 시 전달. 세션이 길어지면 히스토리 블록 토큰 제한으로 이전 세션 요약이 빠질 수 있어, 컨텍스트 상태를 호출자가 반영해야 함. retriever가 session_id를 직접 관리할 필요 없어져서 더 단순해짐.
+- **Retained overflow eviction 기준: TTL 우선**: salience(현재 턴 쿼리 기반)가 아닌 TTL 기준으로 evict. retained buffer는 토픽 전환 시에도 인용된 기억을 보호하는 장치인데, 현재 쿼리 salience로 evict하면 토픽 전환 시 보호가 무력화됨. 동일 TTL 내에서는 저장된 salience(진입/갱신 시점 값)로 tiebreak.
+- **프로필은 retriever 범위 밖**: 프로필은 세션 내 불변이므로 매 턴 검색할 필요 없음. Phase 4 통합에서 세션 시작 시 `storage.get_all_profiles()` 1회 호출로 처리.
+
+
 ### 차후 고려
 
 - **임베딩 인스턴스 공유**: 현재 similarity와 memory가 각자 embedder를 생성. 같은 모델이면 `__main__.py`에서 하나 만들어 양쪽에 주입하여 메모리 절약 가능. Phase 4 와이어링 시 결정.

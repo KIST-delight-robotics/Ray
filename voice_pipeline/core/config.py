@@ -431,6 +431,14 @@ class MemoryConfig:
         embedding_backend: Embedding provider ('local' or 'api').
         embedding_dimension: Vector dimension of the embedding model.
         use_onnx: Use ONNX Runtime backend for local embedding model.
+        max_memories: Maximum episodes injected into block 4 per turn.
+        min_new_slots: Minimum slots reserved for new search results.
+        retained_ttl: Turns a cited memory stays in the retained buffer.
+        vector_top_k: Candidate count from vector search.
+        bm25_top_k: Candidate count from BM25 search.
+        rrf_k: RRF constant (original paper default 60).
+        recency_half_life_days: Exponential decay half-life in days.
+        salience_threshold: Minimum salience to include (0.0 = disabled).
     """
 
     db_path: str = "data/ray.db"
@@ -439,10 +447,42 @@ class MemoryConfig:
     embedding_dimension: int = 384
     use_onnx: bool = False
 
+    # Retrieval (Phase 2)
+    max_memories: int = 10
+    min_new_slots: int = 4
+    retained_ttl: int = 3
+    vector_top_k: int = 20
+    bm25_top_k: int = 20
+    rrf_k: int = 60
+    recency_half_life_days: float = 30.0
+    salience_threshold: float = 0.0
+
     def __post_init__(self) -> None:
         if self.embedding_dimension <= 0:
             raise ConfigurationError(
                 f"embedding_dimension must be positive, got {self.embedding_dimension}"
+            )
+        if self.max_memories <= 0:
+            raise ConfigurationError(f"max_memories must be positive, got {self.max_memories}")
+        if not (0 < self.min_new_slots <= self.max_memories):
+            raise ConfigurationError(
+                f"min_new_slots must be in (0, max_memories], got {self.min_new_slots}"
+            )
+        if self.retained_ttl < 1:
+            raise ConfigurationError(f"retained_ttl must be >= 1, got {self.retained_ttl}")
+        if self.vector_top_k <= 0:
+            raise ConfigurationError(f"vector_top_k must be positive, got {self.vector_top_k}")
+        if self.bm25_top_k <= 0:
+            raise ConfigurationError(f"bm25_top_k must be positive, got {self.bm25_top_k}")
+        if self.rrf_k <= 0:
+            raise ConfigurationError(f"rrf_k must be positive, got {self.rrf_k}")
+        if self.recency_half_life_days <= 0:
+            raise ConfigurationError(
+                f"recency_half_life_days must be positive, got {self.recency_half_life_days}"
+            )
+        if not (0.0 <= self.salience_threshold <= 1.0):
+            raise ConfigurationError(
+                f"salience_threshold must be in [0, 1], got {self.salience_threshold}"
             )
 
 
