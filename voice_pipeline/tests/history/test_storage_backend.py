@@ -21,12 +21,14 @@ def _assistant_item(text: str = "hi") -> dict:
 
 
 def _metrics_json() -> str:
-    return json.dumps({
-        "usage": {"input_tokens": 50, "output_tokens": 10},
-        "model": "gpt-4o",
-        "latency_ms": 300,
-        "ttft_ms": 80,
-    })
+    return json.dumps(
+        {
+            "usage": {"input_tokens": 50, "output_tokens": 10},
+            "model": "gpt-4o",
+            "latency_ms": 300,
+            "ttft_ms": 80,
+        }
+    )
 
 
 class _BackendTests:
@@ -71,9 +73,7 @@ class _BackendTests:
     def test_append_with_metrics(self) -> None:
         b = self.make_backend()
         b.create_session("s1", "2026-03-29 10:00:00")
-        b.append_message(
-            "s1", 0, 0, _assistant_item(), 2, metrics_json=_metrics_json()
-        )
+        b.append_message("s1", 0, 0, _assistant_item(), 2, metrics_json=_metrics_json())
         loaded = b.load_session("s1")
         assert len(loaded) == 1
 
@@ -126,10 +126,13 @@ class _BackendTests:
         """Store a multi-message tool call turn with shared turn_id."""
         b = self.make_backend()
         b.create_session("s1", "2026-03-29 10:00:00")
-        fc = {"type": "function_call", "call_id": "fc1", "name": "get_weather",
-              "arguments": '{"city":"Seoul"}'}
-        fco = {"type": "function_call_output", "call_id": "fc1",
-               "output": '{"temp":20}'}
+        fc = {
+            "type": "function_call",
+            "call_id": "fc1",
+            "name": "get_weather",
+            "arguments": '{"city":"Seoul"}',
+        }
+        fco = {"type": "function_call_output", "call_id": "fc1", "output": '{"temp":20}'}
         asst = {"role": "assistant", "content": "It's 20 degrees"}
         b.append_message("s1", 0, 0, _user_item("weather?"), 3)
         b.append_message("s1", 1, 1, fc, 10, metrics_json=_metrics_json())

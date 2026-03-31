@@ -18,7 +18,6 @@ import contextlib
 import queue
 import threading
 import time
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import MagicMock
@@ -458,9 +457,17 @@ class TestSingleTurnConversation:
         captured_messages: list[list[dict[str, Any]]] = []
 
         class CapturingLLM(ILLM):
-            def generate(self, messages: list[dict[str, Any]]) -> Iterator[str]:
+            def generate(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+            ) -> LLMStream:
                 captured_messages.append(list(messages))
-                yield "Sure thing!"
+
+                def gen():
+                    yield "Sure thing!"
+
+                return LLMStream(gen(), result_fn=lambda t: LLMResult(text=t))
 
         asr = ScriptedASR(["tell me something", "goodbye"])
         bridge = ScriptedBridge()
@@ -537,9 +544,17 @@ class TestMultiTurnConversation:
         captured: list[list[dict[str, Any]]] = []
 
         class CapturingLLM(ILLM):
-            def generate(self, messages: list[dict[str, Any]]) -> Iterator[str]:
+            def generate(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+            ) -> LLMStream:
                 captured.append(list(messages))
-                yield "Response."
+
+                def gen():
+                    yield "Response."
+
+                return LLMStream(gen(), result_fn=lambda t: LLMResult(text=t))
 
         asr = ScriptedASR(["first question", "second question", "goodbye"])
         bridge = ScriptedBridge()
@@ -876,10 +891,7 @@ class TestGeneratorFailure:
                 tools: list[dict[str, Any]] | None = None,
             ) -> LLMStream:
                 self._call += 1
-                if self._call == 1:
-                    chunks = [""]  # Empty response → FAILED
-                else:
-                    chunks = ["Recovery response!"]
+                chunks = [""] if self._call == 1 else ["Recovery response!"]
 
                 def gen():
                     yield from chunks

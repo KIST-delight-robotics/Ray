@@ -110,7 +110,10 @@ def main() -> None:
 
         history = ConversationHistory(storage, token_counter)
         context_builder = ContextBuilder(
-            history, config.history, DEFAULT_SYSTEM_PROMPT, token_counter,
+            history,
+            config.history,
+            DEFAULT_SYSTEM_PROMPT,
+            token_counter,
             tools_token_cost=tools_token_cost,
         )
         turn_detector = TurnDetector(

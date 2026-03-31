@@ -36,7 +36,6 @@ def _make_llm_stream(
     def gen():
         yield from chunks
 
-    text = "".join(chunks)
     return LLMStream(
         gen(),
         result_fn=lambda t: result or LLMResult(text=t),

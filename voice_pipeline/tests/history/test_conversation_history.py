@@ -122,10 +122,13 @@ class TestAddMessage:
         h, _ = _make_history()
         h.new_session("s1")
         tid = h.begin_turn()
-        fc = {"type": "function_call", "call_id": "fc1",
-              "name": "get_weather", "arguments": '{"city":"Seoul"}'}
-        fco = {"type": "function_call_output", "call_id": "fc1",
-               "output": '{"temp":20}'}
+        fc = {
+            "type": "function_call",
+            "call_id": "fc1",
+            "name": "get_weather",
+            "arguments": '{"city":"Seoul"}',
+        }
+        fco = {"type": "function_call_output", "call_id": "fc1", "output": '{"temp":20}'}
         asst = {"role": "assistant", "content": "It's 20 degrees"}
 
         m1, t1 = h.add_message(fc, turn_id=tid, metrics=_make_metrics())
