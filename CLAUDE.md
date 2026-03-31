@@ -114,8 +114,9 @@ voice_pipeline/
 
 ## Documentation
 
-- **docs/SETUP.md**: Raspberry Pi 5 초기 설정 가이드.
-- **docs/decisions.md**: Key design choices and their rationale, gotchas/edge cases, constraints.
+- **docs/SETUP.md**: Raspberry Pi 5 initial setup guide.
+- **docs/decisions.md**: Finalized decision log for completed work.
+- **docs/decisions-wip.md**: Decision log for work in progress. Merged into `decisions.md` after cleanup when the work is complete.
 - **docs/ARCHITECTURE.md**: System architecture details.
 - **Module READMEs** (`turn_taking/README.md`, etc.): External repo setup, constraints, config params.
 
@@ -201,6 +202,21 @@ uv run pytest -m ''                              # everything
 - **Error recovery**: test real failure scenarios — invalid credentials, errors during streaming, recovery via reset/restart.
 
 
+## Decision Log
+
+Record non-obvious design decisions and lessons learned in `docs/decisions.md` (finalized) or `docs/decisions-wip.md` (in progress).
+
+Each entry should focus on **why this choice was made** — not what was built. Include:
+- Trade-offs where alternatives existed
+- Gotchas and constraints discovered through trial and error
+- Context too broad for a code comment
+
+Exclude:
+- API design, schema structure, type definitions (readable from code)
+- Obvious engineering patterns (error fallback, locking, etc.)
+- Refactoring history (removed X, replaced with Y)
+
+
 ## Commit Convention
 
 ```
@@ -211,6 +227,6 @@ uv run pytest -m ''                              # everything
 - **scope**: module name (`core`, `asr`, `tts`, `orchestrator`, …) or `project` for cross-cutting changes
 - **subject**: lowercase, imperative, no period (e.g. `add ASR interface`)
 
-Commit granularity upon completing a phase: make commits by module or by a meaningful unit of work. Don’t put an entire phase into a single commit.
+Commit at natural checkpoints — when a task is complete and before starting the next one. Don’t split a single task into multiple commits.
 
 

@@ -1,266 +1,84 @@
 # Decision Log
 
-## Phase 1 — Foundation (`core/`)
+비자명한 설계 결정과 시행착오 기록. 코드에서 바로 읽을 수 있는 구현 상세는 제외.
 
-- **Incremental interfaces**: Only next-phase consumer interfaces defined at each step. Remaining interfaces added just before their consuming phase.
-- **ResponseData mutable**: Not frozen because hashing large audio bytes is expensive.
-- **CppEvent minimal**: Only `event_type` field. No `position_sec` — barge-in position estimated via time-based tracking in Orchestrator.
-- **TurnDecision**: `__post_init__` validates at most one signal True. `none()` class method eliminates nullable returns.
 
-## Phase 2 — Independent Modules (`history/`, `utterance_truncator`, `context/`)
+## ASR
 
-- **Token-based context management**: `ConversationHistory.get_messages()` returns all (pure storage). `ContextBuilder` fills context in reverse chronological order within `max_context_tokens` budget.
-- **TokenCounter as `Callable[[str], int]`**: Type alias in `core/types.py`. Simpler than a full ABC.
-- **UtteranceTruncator dual strategy**: `TimestampTruncator` (word-level timestamps) vs `DurationRatioTruncator` (no timestamps, uses `total_duration_sec`). No overlapping logic.
-- **MemoryStorageBackend**: Deep copies on load/save to prevent aliasing.
+- **Google Cloud STT V1**: V2는 batch/adaptation 등 불필요한 기능만 추가. 실시간 스트리밍 용도에는 V1으로 충분.
 
-## Phase 3 — External Modules
 
-### ASR (`asr/`)
+## LLM
 
-- **Google Cloud STT V1**: V2 adds batch/adaptation features not needed here.
-- **Threading**: Daemon reader thread + bounded `queue.Queue(maxsize=300)`. `feed_audio()` drops frames on full queue (backpressure).
-- **No auto-restart on 5-min stream limit**: Orchestrator handles via `reset()` between turns.
-- **Transcript accumulation**: Final segments concatenated; interim replaced on each update. `get_text()` returns both combined.
-- **Error pattern**: gRPC errors wrapped in `ASRError`, stored under lock, raised via `_check_error()`, cleared after first raise. Reused by CppBridge.
+- **OpenAI Responses API**: System message는 `instructions` param으로 전달, `input`에 넣지 않음. `previous_response_id`는 사용하지 않음 — ContextBuilder에서 토큰 예산 기반으로 직접 컨텍스트를 관리.
 
-### LLM (`llm/`)
 
-- **OpenAI Responses API**: System message via `instructions` param, not embedded in `input`.
-- **No `previous_response_id`**: We manage context ourselves via ContextBuilder with token budgeting.
-- **Explicit stream cleanup**: `try/finally` with `stream.close()` instead of context-manager-inside-generator antipattern.
-- **SDK-delegated retry**: `max_retries` passed to SDK constructor. No custom retry to avoid double-retry.
-- **Token counter**: `create_token_counter(model)` uses tiktoken, falls back to `o200k_base` for unknown models.
+## TTS
 
-### TTS (`tts/`)
+- **WAV header quirk**: OpenAI TTS가 `n_frames = INT_MAX`인 malformed WAV를 반환하는 경우 있음. ASR 등 헤더 검증하는 소비자에 넘길 때는 ffmpeg re-encode 필요.
 
-- **`TTSStream` (Iterator[bytes])**: Yields PCM chunks incrementally. `.audio`/`.timestamps`/`.result` only available after full iteration.
-- **Eager CM entry**: `response_cm.__enter__()` called immediately in `synthesize()`, not inside generator. Ensures safe cleanup even if generator never started.
-- **Single-exit guarantee**: Shared `exited` flag prevents double `__exit__()` between generator and `close_fn`.
-- **No word timestamps from OpenAI**: `DurationRatioTruncator` handles barge-in estimation.
-- **WAV header quirk**: OpenAI TTS may return WAV with `n_frames = INT_MAX` (malformed header). Use ffmpeg to re-encode if feeding into ASR or other consumers that validate headers.
-- **Model-specific instructions**: Explicit `_SUPPORTS_INSTRUCTIONS` set (not prefix matching).
 
-### CppBridge (`bridge/`)
+## TurnGPT
 
-- **JSON + base64 protocol**: Single parsing path, simpler debugging. ~33% bandwidth overhead acceptable on localhost.
-- **Connection retry for startup race**: Fixed 1s sleep, up to 3 attempts. No exponential backoff for localhost.
-- **WebSocket params**: `proxy=None` (avoid v15+ auto-proxy), `ping_interval=None`, `compression=None`.
-- **Fresh state on reconnect**: New queue, cleared error. No generation ID needed.
+- **KV cache 활용**: ASR이 incremental update(같은 prefix, 늘어나는 suffix)를 보내므로 매번 전체 dialog를 재처리하면 낭비. 토큰 prefix 비교 후 새 토큰만 forward. 동일 입력이면 캐시된 확률 반환.
+- **Context window eviction**: max 1024 tokens(GPT-2 한계). 초과 시 oldest turn을 `<ts>` 기준으로 삭제, 80% 이하까지. Eviction은 KV cache 전체 무효화 (full rebuild). 80% headroom은 limit 근처에서 thrashing 방지.
+- **ONNX backend**: RPi 추론 성능용. PyTorch는 여전히 필요 (토큰화에 torch tensor 사용) — 목표는 속도 개선이지 PyTorch 제거가 아님. `onnx_model_path` 설정 여부로 backend 선택. KV cache 지원은 ONNX input name에 `past_key_0` 존재 여부로 감지.
+- **ONNX threads = 2**: RPi 5 (4코어) 벤치마크 1–4스레드. 2스레드가 fp32/int8 모두 최적 (int8 42ms, fp32 111ms). 4스레드는 contention으로 오히려 느림.
+- **int8 양자화**: 4x 작고 2.6x 빠르며 TRP 차이 무시 가능 (~0.04). 배포 권장.
 
-### Wakeword Detector
 
-- **Silero VAD + Google STT `recognize()`**: VAD segments speech, non-streaming STT transcribes, `\b` regex matches keywords.
-- **VAD rechunking**: Pipeline 480 samples (30ms@16kHz) → Silero needs 512 samples (32ms). Residual buffer across calls.
-- **State machine**: IDLE → SPEECH → TRAILING → recognition. Safety cap at `max_speech_duration_sec`.
-- **Fail-closed**: VAD/STT errors return `False`. Only init failures raise `WakewordError`.
+## MaAI VAP
 
-### LED Controller (`led/`)
-
-- **Optional hardware**: `try/except ImportError` on `rpi5_ws2812`. Import absence → noop mode, no runtime flag.
-- **`LEDAnimation` Protocol**: `runtime_checkable`, pluggable per-state. `StaticAnimation` as default.
-- **Animation thread**: `Event`-based sleeping; `set_state()` wakes thread immediately.
-- **LEDConfig**: `bar_count=8`, `ring_count=16`, `brightness` 0–255 (converted to 0.0–1.0 for driver).
-
-## Phase 4 — Composite Modules
-
-### VAP Wrapper (`turn_taking/vap.py`)
-
-- **Rolling stereo buffer**: `(1, 2, n_samples)` on CPU, copied to device only at inference. Channel 0 = user, channel 1 = robot.
-- **Robot audio resampling**: `torchaudio.functional.resample` from TTS 24kHz to pipeline 16kHz.
-- **Cached result**: Inference only when `samples_since_inference >= step_samples`.
-- **Error resilience**: All errors caught, returns default result. Never propagates to orchestrator.
-
-### TurnGPT Wrapper (`turn_taking/turngpt.py`)
-
-- **Stateful (KV cache)**: Maintains `past_key_values` across `predict()` calls. Compares token-level prefix with previous input; only new tokens are forwarded. Identical input returns cached probability without model call. `reset()` clears all cache state. Rationale: ASR sends incremental updates (same prefix, growing suffix) — reprocessing the entire dialog each time is wasteful.
-- **Direct model API**: Replaced `string_list_to_trp()` with separate `tokenizer()` → `model()` → `get_trp()` calls to control KV cache passing.
-- **Context window eviction**: `max_context_tokens` (default 1024, GPT-2 limit). When exceeded, oldest turns evicted at text level (split by `<ts>`) until token count ≤ 80% of max. Eviction invalidates cache entirely (full rebuild). Headroom (0.8) prevents thrashing near the limit.
-- **Lazy import**: `from turngpt import TurnGPT` inside constructor. Package absence raises `TurnGPTError` at construction.
-- **Text formatting contract**: Wrapper passes input as-is. TurnDetector owns `<ts>` formatting.
-- **ONNX backend**: Added for inference performance on RPi. PyTorch still required (tokenization uses torch tensors) — goal is speed, not PyTorch elimination. Backend selected by config: `onnx_model_path` set → ONNX, otherwise PyTorch. KV cache support detected via `past_key_0` in ONNX input names. TRP extraction identical to PyTorch: softmax → EOS token probability (verified `get_trp` is just `x[..., eos_token_id]`).
-- **ONNX threads default = 2**: Benchmarked 1–4 threads on RPi 5 (4-core). 2 threads optimal for both fp32 and int8: fastest latency (42ms int8, 111ms fp32) while leaving 2 cores for other modules. 4 threads causes contention and is slower.
-- **int8 quantization**: 4x smaller (157MB vs 623MB), 2.6x faster, TRP difference negligible (~0.04). Recommended for deployment.
-- **Open**: Proactive cache warming (pre-forwarding robot turn tokens after turn completion) — deferred until latency measurement shows it's needed. No wrapper change required; TurnDetector adds one `predict()` call.
-
-### MaAI VAP optimization (`turn_taking/maai_vap.py`)
-
-- **`use_torch_compile` default → True**: MaAI 트랜스포머(3.6M params, dim=256)의 병목은 연산량(7.2M FLOPs)이 아니라 258개 PyTorch 모듈의 dispatch overhead. `torch.compile(mode="default")`이 P50 기준 56ms→32ms (1.8x). 10Hz 100ms budget 대비 53% 여유 확보.
-- **INT8 양자화 부적합**: CPC 인코더(Conv1D+LSTM, 2.5M params)에 `quantize_dynamic` 적용 시 1.9x 느려지고 정확도 대폭 하락. TurnGPT(MatMul 위주, 163M params)와 달리 작은 Conv 커널에서는 양자화 오버헤드가 연산 절감을 초과하고, 모델이 이미 L2 캐시에 들어가므로 메모리 대역폭 이점 없음.
+- **INT8 양자화 부적합**: CPC 인코더(Conv1D+LSTM, 2.5M params)에 `quantize_dynamic` 적용 시 1.9x 느려지고 정확도 대폭 하락. TurnGPT(MatMul 위주, 163M params)와 달리 작은 Conv 커널에서는 양자화 오버헤드가 연산 절감을 초과하고, 모델이 이미 L2 캐시에 들어가 메모리 대역폭 이점 없음.
 - **배치 처리 무의미**: No-cache 배치(N frames)는 KV cache + 1 frame보다 느림. KV cache가 이미 반복 연산을 제거하므로 텐서 크기를 키워도 추가 이점 없음.
-- **torch.compile 한계**: Inductor가 그래프를 fuse하지만, 작은 텐서([1,1,256]) 연산에서 커널 launch + 메모리 할당 오버헤드가 남아 이론치(0.4ms) 대비 32ms. PyTorch 안에서 추가 개선 어려움. 10ms 이하를 원하면 트랜스포머도 ONNX export 필요.
-- **동시 실행 안정적**: VAP(10Hz, compile=ON) + TurnGPT(3Hz, ONNX int8) 동시 실행 시 CPU 34%, 두 모델 모두 budget 내 안정적. ASR/LLM/TTS에 ~60% 여유.
-- **`use_onnx_transformer` default → True**: Transformer를 ONNX export하여 전체 파이프라인(encoder+transformer)을 ORT로 실행. PyTorch dispatch overhead 완전 제거. Mean 24ms (vs PyTorch 106ms, 3.9x speedup). Budget 초과 0% (PyTorch 35.5%). `torch.compile` warmup 100프레임 문제도 해소. ONNX 변환 시 dict KV cache → 12개 flat stacked tensor로 변환. ALiBi 마스크 pre-compute. Cross-attention source 순서 주의 필요 (원본 입력을 src로 전달, 업데이트된 값 아님). 수치 차이 max 6.8e-6 (1,200프레임 CANDOR 실제 음성).
-- **ORT 싱글스레드 최적 유지**: Transformer ONNX 추가 후에도 `ort_threads=1`이 최적. `ort_threads=4`는 스레드 동기화 비용으로 2x 느려짐 (48ms vs 24ms). PyTorch threads는 전체 ONNX 파이프라인에서 영향 없음 (ORT가 자체 스레드풀 사용).
-- **PyTorch `p_now` 리스트 반환 버그**: `VapGPT.forward()`가 `p_now`을 `[speaker1, speaker2]` 리스트로 반환. 기존 코드 `float(out["p_now"])`은 항상 실패하지만 integration test 없어 미발견. `_process_transformer_pytorch`에서 `p_now[0]` 추출로 수정.
+- **ONNX transformer export**: Transformer를 ONNX export하여 전체 파이프라인(encoder+transformer)을 ORT로 실행. PyTorch dispatch overhead 완전 제거. Mean 24ms (vs PyTorch 106ms, 3.9x). `torch.compile` warmup 100프레임 문제도 해소. 변환 시 dict KV cache → 12개 flat stacked tensor. Cross-attention source 순서 주의 (원본 입력을 src로 전달, 업데이트된 값 아님). 수치 차이 max 6.8e-6.
+- **ORT 싱글스레드 최적**: Transformer ONNX 추가 후에도 `ort_threads=1`이 최적. `ort_threads=4`는 동기화 비용으로 2x 느려짐 (48ms vs 24ms).
+- **PyTorch `p_now` 리스트 반환 버그**: `VapGPT.forward()`가 `p_now`을 `[speaker1, speaker2]` 리스트로 반환. `float(out["p_now"])`은 항상 실패하지만 integration test 없어 미발견. `p_now[0]` 추출로 수정.
+- **torch.compile 한계**: 작은 텐서([1,1,256]) 연산에서 커널 launch + 메모리 할당 오버헤드가 남아 이론치(0.4ms) 대비 32ms. 10ms 이하를 원하면 ONNX export 필요. 현재 ONNX가 기본.
 
-### TurnDetector (`turn_taking/turn_detector.py`)
 
-- **Paper-based two-path algorithm** (Skantze & Irfan, 2025): Path 1 (VAP sustained robot-favor) OR Path 2 (TurnGPT graduated silence timeout). Either path alone triggers turn_shift. This avoids single-model dependency — VAP gives fast response (~500ms) while TurnGPT ensures eventual turn-taking even if VAP fails.
-- **Internal turn state transition**: `_turn_state` switches to `ROBOT_TURN` immediately on turn_shift (not on external signal). Prevents race condition where user speech during the generation gap could produce a spurious `prepare` instead of `interrupt`. Per-frame state is reset at transition, not deferred to `reset()`.
-- **VAP favor timer reset on user speech**: `_vap_favor_robot_elapsed_sec` resets when `user_is_speaking=True`, not only when VAP probabilities flip. Prevents stale accumulation across speech gaps.
-- **Backchannel distinction via p_fut**: During ROBOT_TURN with robot_audio, `p_now > threshold` alone is insufficient for interrupt — `p_fut` must also favor user. This filters out backchannels ("yeah", "mhm") where p_now spikes but p_fut stays robot-favoring.
-- **Prepare similarity gate**: `SequenceMatcher.ratio() >= 0.8` suppresses redundant prepare signals when ASR text changes minimally. Avoids wasteful LLM+TTS restarts on minor ASR corrections.
-- **`notify_turn_complete` ignores `role`**: TurnGPT's `<ts>` format marks turn boundaries without speaker identity. The `role` parameter exists in the interface contract for potential future use but is not needed by the current TurnGPT model.
-- **VAP error default behavior**: `VAPResult(0, 0, False)` on errors looks like "robot favored," which could accumulate toward false turn_shift via Path 1. Accepted because transient errors won't sustain for 500ms, and persistent VAP failure falls back to Path 2 (TurnGPT + silence timing) which operates independently.
+## TurnDetector
 
-### Async thread separation (`turn_taking/async_vap.py`, `async_turngpt.py`)
+- **Paper-based two-path algorithm** (Skantze & Irfan, 2025): Path 1 (VAP sustained robot-favor) OR Path 2 (TurnGPT graduated silence timeout). 단일 모델 의존 회피 — VAP가 빠른 응답(~500ms), TurnGPT가 VAP 실패 시 eventual turn-taking 보장.
+- **Backchannel vs interrupt 구분**: ROBOT_TURN에서 robot_audio 있을 때 `p_now > threshold`만으로는 interrupt 판단 불충분 — `p_fut`도 user를 favor해야 함. 백채널("응", "네")은 p_now만 spike하고 p_fut는 robot-favoring 유지.
+- **`robot_audio=None` 시 unconditional interrupt 제거**: ROBOT_TURN에서 robot audio 없을 때(generation gap, PLAYBACK_STARTED 전) `user_is_speaking=True`만으로 interrupt 하던 것을 제거. 원인: 1–3s generation gap 동안 주변 소음이 false interrupt 유발 (실측: 7회 LLM 호출, 4.7s 지연). VAP는 robot 채널 없이 interrupt/backchannel 구분 불가. 수정: `TurnDecision.none()` 반환. 사용자 추가 발화는 orchestrator의 ASR text change cancel (0.5s grace) 로 처리.
+- **`user_is_speaking` 전제조건**: 논문 pseudocode (Appendix A lines 56-61) 요구. 없으면 turn-shift 직후 VAP context가 아직 user-biased일 때 transient spike로 false interrupt 발생.
+- **VAP error default `VAPResult(0, 0, False)`**: "robot favored"처럼 보이지만, transient error는 500ms 지속 안 되므로 Path 1 false trigger 없음. Persistent failure 시 Path 2(TurnGPT + silence)가 독립 작동.
 
-- **Both VAP and TurnGPT on dedicated threads**: RPi 5 worst case VAP 24ms + TurnGPT 30ms = 54ms, exceeding 30ms frame budget by 80%. ONNX Runtime releases GIL during inference, so separate threads achieve true parallelism. Frame loop now fully decoupled from inference latency.
-- **AsyncVAP implements IVAP**: Drop-in replacement. `feed_audio()` buffers audio pairs and returns latest cached result (non-blocking). Background thread runs at configurable rate (default 10Hz), drains buffer, concatenates frames, and runs inference. Works with any `IVAP` implementation (VAPWrapper, MaAIVAPWrapper).
-- **AsyncTurnGPT uses submit/poll pattern (not IVAP-like)**: TurnGPT's usage pattern (text input, infrequent calls) differs from VAP's (audio input, every frame). submit/poll is more natural than pretending it's the same interface. `SyncTurnGPTAdapter` wraps sync `ITurnGPT` for unit test compatibility.
-- **1-frame TurnGPT delay accepted**: `process_frame()` polls at the top, submits at the bottom. Result from frame N's submit arrives at frame N+1's poll. 30ms delay is negligible for turn-taking decisions that operate on 500ms+ timescales.
-- **`_pending_text = None` guards stale results**: If `clear_pending()` is called (turn transition) before inference completes, the background thread checks `_pending_text is not None` before storing the result. Stale predictions are silently discarded.
-- **Reset delegated to background thread**: `AsyncTurnGPT.reset()` sets `_pending_reset` flag. The background thread calls `turngpt.reset()` — KV cache access stays on the same thread as `predict()`, avoiding races.
-- **Session-scoped threads**: Created per session in `session_factory()`, stopped on next session start and program exit. Model objects remain process-level singletons (warmup preserved).
-- **`__main__.py` switched to MaAIVAPWrapper**: Full ONNX pipeline (encoder + transformer) as default. `PipelineConfig.maai_vap` field added. Old `VAPWrapper` (PyTorch) still available for testing.
 
-### SpeechGenerator (`generation/speech_generator.py`)
+## Async Thread Separation (VAP, TurnGPT)
 
-- **Streaming API over batch**: Replaced `get_result() -> ResponseData` with `poll_audio() -> bytes | None` + `stream_done` + `get_text()` + `get_response_data()`. Allows Orchestrator to stream TTS chunks to CppBridge as they arrive instead of waiting for full synthesis. `GeneratorState.READY` renamed to `STREAMING`.
-- **Per-run queue isolation**: Each `prepare()` creates a new `queue.Queue`. Background task captures the queue reference at submission time. Even if a stale producer puts to its old queue, Orchestrator only reads from the current queue. No cross-run contamination possible.
-- **Run-ID guard**: Monotonic `_run_id` counter. Background task captures `run_id` at submission. All state writes check `run_id == self._run_id` under lock. Stale runs silently exit without writing state. This is the primary safety mechanism — `cancel_event` is cooperative and can miss blocking I/O windows, but run_id guard is absolute.
-- **Cooperative cancellation via `threading.Event`**: Checked between pipeline steps and during LLM/TTS chunk iteration. Cannot interrupt blocking `next()` calls on LLM/TTS iterators — Python generators don't support cross-thread interruption during execution. Best-effort `.close()` on iterators/streams when cancel is detected at a check point.
-- **`max_workers=2` default**: With `max_workers=1`, a new `prepare()` run queues behind the cancelled run until it exits. If the cancelled run is blocked on a first-token API call (1–3s), the new run is delayed. With 2 workers, the new run starts immediately on the other worker while the cancelled run drains cooperatively. Pileup concern: at most 2 runs active simultaneously; stale runs exit within one blocking call duration. Voice pipeline prepare() frequency is bounded by turn detector signals, so 3+ rapid cancellations within one API timeout is unrealistic.
-- **Timestamp retrieval fallback**: `tts_stream.timestamps` access wrapped in `try/except`. If timestamps fail, empty list used instead of failing the entire run. Audio and text are already produced at that point.
-- **`get_text()` accessible in FAILED state**: After STREAMING → FAILED (mid-stream TTS error), the LLM text is still valid and useful for logging/debugging. Blocking it would discard useful information.
+- **별도 스레드 필요 이유**: RPi 5 worst case VAP 24ms + TurnGPT 30ms = 54ms, 30ms frame budget 초과. ONNX Runtime이 GIL 해제하므로 별도 스레드에서 진정한 병렬성 확보.
+- **1-frame TurnGPT delay 허용**: `process_frame()`에서 poll 후 submit. Frame N의 submit 결과는 Frame N+1에서 poll. 30ms 지연은 500ms+ 단위의 turn-taking 판단에 무시 가능.
 
-## Phase 5 — Orchestrator
 
-### ConversationHistory ID-based update
+## SpeechGenerator
 
-- **Message IDs**: `add_user_message`/`add_assistant_message` return sequential `int` IDs. Messages stored with internal `_id` field, stripped on `get_messages()` and `save()`. Enables `update_message(id, text)` for barge-in truncation correction (Case C: approximate → precise).
-- **No deep copy in `get_messages()`**: Switched from `copy.deepcopy()` to dict comprehension stripping `_id`. New dicts are created per call so external mutation doesn't affect internal state.
+- **Streaming API**: `poll_audio() → bytes | None` + `stream_done`으로 TTS 청크를 즉시 CppBridge에 전달. 전체 합성 완료 대기 불필요.
+- **`max_workers=2`**: 1이면 새 `prepare()`가 cancel된 run이 blocking API call(1–3s)에서 빠져나올 때까지 대기. 2면 즉시 시작. Turn detector 시그널 빈도상 3+ 동시 취소는 비현실적.
 
-### Orchestrator design
 
-- **Decision before drain (step 5 before step 7)**: Turn detection runs before draining audio to bridge. An interrupt is processed before sending more audio, preventing unnecessary data transmission.
-- **User message save at `_begin_streaming()` only**: Not saved at `turn_shift`. During `awaiting_response`, the user may continue speaking — saving early would create stale entries. If generation fails, user turn is not recorded (no orphan messages).
-- **History records `generator.input_text`**: `_begin_streaming()` reads `generator.input_text` (the text passed to the most recent `prepare()`) for history recording, not the current ASR text at turn_shift time. This ensures the recorded user message matches what the LLM actually saw. `input_text` is managed by SpeechGenerator's lifecycle: set on `prepare()`, cleared on `cancel()`/`reset()`/`get_response_data()`.
-- **Three-case barge-in truncation**: Case A (timestamps from ResponseData) and B (duration ratio from ResponseData) are immediate. Case C (stream not done) saves approximate truncation immediately, then defers correction via `_pending_truncation` — each frame checks if generator has finished and updates via `history.update_message()`.
-- **Pending truncation cleanup**: Cleared in 5 situations — stream_done (with correction), generator FAILED (keep approximate), new `_begin_streaming()`, new `_handle_prepare()`, and `_end_session()`. Prevents stale pending state from leaking across turns.
-- **STOP_PENDING watchdog (5s default)**: If C++ never responds to send_stop, force IDLE. Stale events arriving after watchdog timeout are naturally ignored (playback state is already IDLE, so the state guards on PLAYBACK_COMPLETE/PLAYBACK_STOPPED don't match).
-- **Interrupt during awaiting**: TurnDetector switches to ROBOT_TURN on turn_shift (preventing spurious `prepare` from user speech during generation gap). If user speaks during awaiting, TurnDetector emits `interrupt`. Orchestrator cancels generation, calls `turn_detector.reset()` to restore USER_TURN, clears awaiting state.
-- **`turn_detector.reset()` on generator FAILED**: Same as interrupt — must restore USER_TURN so TurnDetector doesn't stay stuck in ROBOT_TURN.
-- **Bridge send errors not fatal**: `send_audio()`/`send_stop()` failures are logged. The subsequent `_poll_cpp_events()` on the same or next frame will detect the broken connection and terminate the session. Avoids duplicating termination logic.
-- **DurationRatioTruncator direct import from tts module**: Orchestrator is the wiring layer per CLAUDE.md design. Creating new `DurationRatioTruncator` instances per barge-in with response-specific `total_duration_sec` is inherently a concrete operation — cannot be abstracted behind the `IUtteranceTruncator` interface without factory complexity.
-- **Exit keyword matching**: Punctuation stripped, case-insensitive, word boundary via set membership. `"goodbye"` does not match keyword `"bye"` — each keyword is an exact word.
-
-## Phase 6 — SessionManager + AudioInput
-
-### AudioInput (`audio/audio_input.py`)
-
-- **Lazy PyAudio import**: `import pyaudio` in constructor. `ImportError` → `AudioInputError` at construction time, not at runtime.
-- **Daemon thread**: If main thread dies, audio thread dies too. Clean shutdown via `stop()` in normal flow.
-- **Always drop on queue full**: `put_nowait()` with `queue.Full` caught and logged. No config flag — blocking the capture thread is never acceptable.
-- **Error attribute**: Thread captures exception to `_error` attribute for external inspection, then exits. No re-raise — thread errors are silent to the main loop.
-
-### Orchestrator stop signal
-
-- **`request_stop()` + `threading.Event`**: External stop signal checked at the top of `_run_frame()`. Lets SessionManager cancel a running Orchestrator on shutdown.
-- **Clear event at `run()` start**: `self._stop_event.clear()` prevents a stale stop from a previous session from immediately terminating the next one.
-
-### SessionManager (`session/session_manager.py`)
-
-- **Session factory pattern (replaces direct Orchestrator injection)**: Previous design reused a single Orchestrator/ConversationHistory across sessions, relying on `reset()` for state cleanup. TurnDetector's `_dialog_parts` (dialog context) was not cleared by `reset()`, causing state leakage between sessions. New design: `session_factory: Callable[[], SessionComponents]` creates fresh Orchestrator, TurnDetector, SpeechGenerator, ContextBuilder, and ConversationHistory per session. Process-level singletons (ASR, LLM, TTS, VAP, TurnGPT, CppBridge, executor) are captured by the factory closure.
-- **Three-tier lifecycle model**: (1) Process-level — model loads, API clients, hardware, shared executor (expensive init, once). (2) Session-level — stateful orchestration objects (factory-recreated per session). (3) Turn-level — lightweight `reset()` within session objects (ASR buffer, TurnDetector frame counters).
-- **Shared ThreadPoolExecutor**: SpeechGenerator accepts optional `executor` param. When externally provided, `shutdown()` only cancels in-flight work (sets cancel_event) without closing the executor. Main entry point creates the executor, injects into factory, shuts down in `finally`. Thread count stays fixed across sessions (max_workers=2).
-- **History save ownership**: Removed `_save_history()` from Orchestrator's `_end_session()`. SessionManager is the sole caller of `history.save()` — in `_run_farewell()` and `shutdown()`. Prevents double-save and clarifies lifecycle ownership.
-- **`orchestrator.run()` exception guard**: Wrapped in `try/except` in `_run_active()` to ensure FAREWELL mode is always reached. Without this, an exception from `_end_session()` (e.g., `asr.stop()` failure) would skip history save entirely since Orchestrator no longer saves.
-- **`_session_lock`**: Protects `_current_orchestrator` and `_current_history` against race between `shutdown()` (signal handler thread) and `_run_active()` (main thread).
-- **External audio_queue injection**: `audio_queue` parameter allows main entry point to create the queue and pass it to both AudioInput and SessionManager, avoiding circular dependency.
-- **Flush CppBridge events before greeting/farewell**: `_flush_bridge_events()` drains all pending events. Prevents acting on stale `PLAYBACK_COMPLETE` from a previous cycle.
-- **`history.save()` guarded**: Called in FAREWELL and `shutdown()`, but only if `_session_started` and `_current_history is not None`. Prevents crash on cold-start shutdown before any session.
-- **CppBridge connect on startup**: `run()` calls `cpp_bridge.connect()` before entering the main loop. Ensures connection is established before any greeting/farewell.
-- **`poll_event()` exception handling**: Greeting/farewell polling loops catch `poll_event()` exceptions. Bridge errors break out of the poll loop but don't crash SessionManager.
-- **Audio queue drain on ACTIVE entry**: `_drain_audio_queue()` clears stale frames before passing the queue to Orchestrator. Prevents the first ASR/TurnDetector frames from containing old audio.
-- **Greeting/farewell timeout**: Timeout expiry is treated as playback done (log warning, proceed). No error raised.
-- **`bridge.disconnect()` on exit**: `run()` finally block calls `bridge.disconnect()`, symmetric with `connect()` at startup.
-- **`SessionManager(ISessionManager)` inheritance**: Implements `ISessionManager` from `core/interfaces.py`. Follows the project's interface convention.
-- **CppBridge reconnect in GREETING**: `_run_greeting()` calls `bridge.connect()` before flush/send. `connect()` is no-op when already connected (line 78 guard). On disconnect, `_cleanup()` handles stale `_conn`/`_receiver_thread`/`_receiver_stop`. Reconnect failure → SLEEP (not FAREWELL, since no session has started). Prevents infinite GREETING→ACTIVE(fail)→FAREWELL→SLEEP cycle when C++ process restarts.
-- **Audio starvation timeout**: Orchestrator tracks `_last_frame_time`, updated on frame dequeue. `_check_audio_starvation()` runs as step 11 in the frame loop, before session timeout. Default 5s — AudioInput produces at 33Hz, so 5s without frames means the capture thread is dead. Unlike session timeout, NOT paused during PLAYING/awaiting — AudioInput must always produce frames regardless of pipeline state.
-
-### Main Entry Point (`voice_pipeline/__main__.py`)
-
-- **Process-level singletons in `main()`**: All expensive objects (models, API clients, hardware) created once. Session factory closure captures them by reference.
-- **`vap.reset()` / `turngpt.reset()` in factory**: Called at session start to clear wrapper-level caches/buffers. These are process-level singletons but carry session-scoped state (rolling audio buffer, dialog context).
-- **Windows signal handling**: `SIGINT` (Ctrl+C) + `SIGBREAK` (Ctrl+Break). No `SIGTERM` on Windows. Signal handler calls `sm.shutdown()` which is thread-safe via `_session_lock`.
-- **`finally` cleanup order**: `executor.shutdown(wait=True)` first (waits for in-flight tasks), then `wakeword.close()` and `led.close()` (hardware release).
-
-## C++ ↔ Python Protocol Alignment
+## C++ ↔ Python Protocol
 
 ### WebSocket topology
-- **C++ as server, Python as client**: C++ runs `ix::WebSocketServer` on port 8765. Python connects via `websockets`. Reversed from legacy (both were clients to separate servers). Single connection expected — `g_client_ws` stores the one connected Python client.
+- **C++ server, Python client**: C++가 `ix::WebSocketServer` port 8765. Python이 `websockets`로 접속. 단일 연결 — `g_client_ws`에 저장.
 
-### Protocol simplification
-- **No `turn_id`**: Removed from C++. WebSocket TCP ordering + Python's state machine (wait for `playback_complete` before next turn) prevent stale chunk contamination. C++ clears buffers on `stream_start`.
-- **No `playback_stopped`**: Merged into `playback_complete`. Python tracks its own `STOP_PENDING` state to distinguish normal completion from barge-in interruption. Simpler C++ — always sends `playback_complete` regardless of how playback ended.
-- **No `playback_position` stream**: Position estimated via time: `stop_pos = stop_pending_time - playback_start_time`. Acceptable ~±100ms accuracy on localhost. `playback_started` event marks the timing reference.
-- **`stream_start` replaces `responses_only` + `responses_stream_start`**: Single message to signal streaming intent. C++ clears old buffers and sets streaming flag on receipt.
-- **`audio_end` replaces `responses_stream_end`**: Sent once by Python when TTS stream is fully drained.
-- **`play_file` replaces `play_audio` + `send_greeting` + `send_farewell`**: Generic file playback. SessionManager passes config paths (`greeting_audio_path`, `farewell_audio_path`).
-- **`stop` replaces `user_interruption`**: Python sends on barge-in. C++ sets `user_interruption_flag` (internal name preserved), threads check it cooperatively.
-- **`playback_started` (new)**: Sent from `control_motor` at cycle 0 after `soundStream.play()`. Provides timing reference for barge-in position estimation and future VAP robot audio feed.
+### Protocol 단순화
+- **`turn_id` 제거**: WebSocket TCP 순서 보장 + Python 상태 머신(playback_complete 대기 후 다음 turn)으로 stale chunk 오염 방지. C++는 `stream_start` 시 버퍼 클리어.
+- **`playback_stopped` 제거 → `playback_complete`로 통합**: Python이 자체 `STOP_PENDING` 상태로 정상 완료/barge-in 구분. C++는 항상 `playback_complete`만 전송.
+- **`playback_position` 스트림 제거**: `stop_pos = stop_pending_time - playback_start_time`으로 시간 기반 추정. Localhost에서 ±100ms 정확도 허용.
+- **메시지 통합**: `stream_start` ← `responses_only` + `responses_stream_start`. `audio_end` ← `responses_stream_end`. `play_file` ← `play_audio` + `send_greeting` + `send_farewell`. `stop` ← `user_interruption`.
+- **`playback_started` (신규)**: `control_motor` cycle 0에서 `soundStream.play()` 후 전송. Barge-in 위치 추정 및 VAP robot audio 타이밍 기준점.
+- **Interrupt 시 `playback_complete` 전송**: C++가 interrupt cleanup 후에도 `playback_complete` 전송. Python의 STOP_PENDING 상태가 정상 해소됨.
 
-### C++ changes kept minimal
-- **`play_music` and `play_audio_csv` preserved**: Not used by Python pipeline but kept in C++ to avoid breaking existing functionality.
-- **Thread model unchanged**: `stream_and_split`, `generate_motion`, `control_motor` structure untouched. Only message handling and WebSocket setup modified.
-- **`send_to_python()` helper**: Thread-safe send via `g_client_ws_mutex`. All `webSocket.sendText()` calls replaced.
-- **Interruption sends `playback_complete`**: After cleanup, C++ now also sends `playback_complete` on interrupt (previously only sent on normal completion). This lets Python's STOP_PENDING state resolve cleanly.
 
-## Runtime — Interrupt, Similarity, Storage
+## Session Lifecycle
 
-### Interrupt detection (`turn_detector`)
-- **`user_is_speaking` prerequisite**: Paper pseudocode (Skantze & Irfan 2025, Appendix A lines 56-61) requires `user_is_speaking=True` before checking p_now/p_fut for interrupts. Without this guard, transient VAP probability spikes (e.g. right after turn-shift when VAP context is still user-biased) cause false interrupts even when nobody is speaking.
-- **STOP_PENDING watchdog reset**: Watchdog must call `turn_detector.reset()` alongside `_reset_playback_state()` to prevent orphaned ROBOT_TURN state when PLAYBACK_COMPLETE never arrives from bridge.
-- **`robot_audio=None` unconditional interrupt removed**: Previously, during ROBOT_TURN with no robot audio (awaiting generation or pre-PLAYBACK_STARTED), any `user_is_speaking=True` triggered an unconditional interrupt. This caused false interrupts from ambient noise during the 1–3s generation gap (observed: 7 LLM calls, 4.7s delay). Root cause: VAP without the robot channel cannot distinguish interrupt from backchannel, and the paper pseudocode guards interrupts with `is_speaking()` (robot actively playing). Fix: return `TurnDecision.none()` when `robot_audio=None`. User continuation during awaiting is now handled by the orchestrator's ASR text change cancel policy (with 0.5s grace period to filter ASR finalization).
+- **Session factory 도입**: 이전 설계는 단일 Orchestrator/ConversationHistory를 재사용하며 `reset()`으로 상태 정리. 그러나 TurnDetector의 `_dialog_parts`가 `reset()`으로 안 지워져서 세션 간 상태 누수 발생. 수정: `session_factory`가 매 세션마다 Orchestrator, TurnDetector, SpeechGenerator, ContextBuilder, ConversationHistory를 새로 생성.
+- **Three-tier lifecycle**: (1) Process-level — 모델, API 클라이언트, 하드웨어, executor (비싼 초기화, 1회). (2) Session-level — 상태 있는 orchestration 객체 (factory 재생성). (3) Turn-level — 경량 `reset()` (ASR 버퍼, TurnDetector 프레임 카운터).
 
-### Similarity scoring (`core/similarity`)
-- **Sentence embedding over SequenceMatcher**: SequenceMatcher measures character overlap — `"what is your"` vs `"what is your name"` scores 0.87 (blocked by 0.8 threshold). Sentence embedding (all-MiniLM-L6-v2) scores 0.66 (correctly passes gate). The paper uses semantic similarity (all-MiniLM-L6-v2) for this comparison.
-- **sentence-transformers 3.x**: Pinned to 3.x for `optimum`/`transformers` compatibility. 5.x requires `transformers>=5.0` which conflicts with `optimum`'s ONNX runtime integration. No functional difference for inference-only usage.
-- **ONNX backend deferred**: At 22M params, torch inference (~4ms) matches or beats ONNX (~6ms) on desktop CPU. ONNX `use_onnx` config option preserved for RPi 5 testing.
 
-### File storage (`history/storage_backend`) — REPLACED
-- ~~Wrapped JSON format~~ — Replaced by SQLite write-through storage. See "Conversation History Redesign" below.
+## Similarity
 
-## Conversation History Redesign
-
-### Write-through SQLite storage (`history/storage_backend`)
-- **SQLite replaces FileStorageBackend**: Single `data/ray.db` file. WAL mode + `synchronous=NORMAL` for crash safety without fsync overhead. Future long-term memory tables go in the same DB (additive, no schema changes to existing tables).
-- **Write-through, not batch-at-end**: Every `add_user_message`/`add_assistant_message` does an immediate INSERT. Crash during session loses at most the in-progress turn, not the entire session. `save()` only sets `ended_at` timestamp + WAL checkpoint.
-- **Graduated DB corruption recovery**: Normal open → WAL file delete → backup corrupt file + new DB. Most RPi power-loss scenarios only corrupt the WAL (losing recent uncommitted writes), not the main DB.
-- **INSERT failure is non-fatal**: try/except around all DB writes. On failure, logs warning and continues in memory-only mode. Conversation is not interrupted by storage errors.
-
-### Individual message storage with turn_id grouping
-- **Each message = one DB row**: `messages(session_id, msg_id, turn_id, item_json, token_count, metrics_json)`. Minimum unit is a single message, not a turn. `turn_id` groups related messages (tool call + tool result + assistant text).
-- **OpenAI Responses API format stored directly**: `item_json` contains the message dict as-is. No intermediate canonical format. Vendor-specific by design (acknowledged in interface docstring). Migration script needed on vendor switch.
-- **`metrics_json` for LLM metadata**: JSON column on messages table (NULL for non-LLM messages). Flexible — new fields added without schema changes. Stores Usage (input/output/cached/reasoning tokens), model, latency_ms, ttft_ms.
-- **`token_count` pre-computed at save time**: Assistant messages use `metrics.usage.output_tokens` (exact from API). User messages and truncated text use tiktoken fallback. ContextBuilder reads stored value — no re-tokenization.
-
-### LLMStream replaces bare Iterator[str] (`llm/llm.py`)
-- **`LLMStream(Iterator[str])`**: Same streaming iteration pattern as TTSStream. Text chunks yielded during iteration. After full consumption, `.result` provides `LLMResult(text, tool_calls, metrics)`. Backward-compatible — existing `for chunk in llm.generate()` code works unchanged.
-- **Metrics captured from `response.completed` event**: Usage, model, tool_calls extracted from the Responses API stream's final event. Timing (latency_ms, ttft_ms) measured via `time.monotonic()` in the stream wrapper.
-- **`tools` parameter on `ILLM.generate()`**: `None` = use config defaults, `[]` = explicitly disable tools. Enables per-call tool control for future tool loop and memory module.
-- **`_SafeStreamIterator` removed**: LLMStream handles all lifecycle concerns (idempotent close, HTTP connection release, close-before-first-next safety).
-
-### Tool token cost management (`llm/tools.py`)
-- **`_TOOL_REGISTRY` unifies definition + cost**: Each tool entry has both the API definition and empirically measured token cost. Single point of addition when new tools are added.
-- **Measured, not estimated**: Tool definition token cost measured by comparing API `input_tokens` with/without the tool. More accurate than tiktoken estimation of the definition structure. `web_search` = 294 tokens.
-- **ContextBuilder deducts tool cost from budget**: Along with base overhead (5 tokens) and per-message overhead (3 tokens/msg), measured against actual API input_tokens.
-
-### ConversationHistory API redesign (`history/conversation_history.py`)
-- **`add_message(item, turn_id, metrics)` as core method**: Generic method for any message type. `add_user_message` and `add_assistant_message` are convenience wrappers that auto-assign turn_id.
-- **`begin_turn()` for multi-message turns**: Allocates turn_id without DB write. Used for tool call turns where function_call + function_call_output + assistant text share the same turn_id.
-- **`get_turns()` for ContextBuilder**: Groups messages by turn_id into `HistoryTurn(items, token_count)`. Atomic inclusion/exclusion in token budget — tool call groups never split.
-- **`get_messages()` for LLM input**: Flat list of message dicts, read from memory only. No DB access during conversation.
-- **`clear()` removed**: Write-through makes in-memory clearing meaningless. `new_session()` resets state.
-- **`threading.Lock` on all public methods**: Writes from Orchestrator (main thread), reads from SpeechGenerator (background thread via ContextBuilder).
-- **`token_counter` held internally**: Callers don't pass token_count. ConversationHistory computes it — from LLM metrics when available, tiktoken fallback otherwise. `_safe_count()` wraps tiktoken with exception handling.
-
-### ResponseData extension
-- **`turn_items: list[dict]`**: The complete assistant turn in Responses API format. For simple responses: single assistant message. For tool calls: full chain. Orchestrator passes these to history.
-- **`metrics_list: list[LLMMetrics]`**: One entry per LLM call in the generation pipeline. Multiple when tool loop runs. Orchestrator picks the last for history storage.
-
-### ContextBuilder overhead accounting (`context/context_builder.py`)
-- **Three overhead components**: Base (5 tokens, fixed API framing), per-message (3 tokens, role markers/separators), tool definitions (from `get_tools_token_cost()`). All empirically measured against actual API `input_tokens`.
-- **Turn-level atomic budgeting**: Uses `get_turns()` instead of `get_messages()`. Each turn's cost = stored `token_count` + `len(items) * per_message_overhead`. Never splits a turn.
+- **Sentence embedding > SequenceMatcher**: SequenceMatcher는 문자 겹침 측정 — `"what is your"` vs `"what is your name"`이 0.87 (0.8 threshold에 차단됨). Sentence embedding (all-MiniLM-L6-v2)은 0.66 (정상 통과). 논문이 semantic similarity 사용.
+- **sentence-transformers 3.x 핀**: 5.x는 `transformers>=5.0` 필요, `optimum`의 ONNX runtime과 충돌. 추론 전용이므로 기능 차이 없음.
