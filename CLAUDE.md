@@ -88,6 +88,13 @@ voice_pipeline/
 ├── similarity/
 │   └── similarity.py          # Semantic similarity (sentence-transformers / difflib)
 │
+├── memory/
+│   ├── types.py               # Episode, Profile data types
+│   ├── embedder.py            # IEmbedder interface + SentenceTransformerEmbedder
+│   ├── vector_index.py        # IVectorIndex interface + NumpyVectorIndex
+│   ├── storage.py             # SQLiteMemoryStorage + InMemoryMemoryStorage
+│   └── exceptions.py
+│
 ├── orchestrator/
 │   └── orchestrator.py        # ACTIVE mode conversation loop
 │
@@ -107,6 +114,7 @@ voice_pipeline/
     ├── bridge/
     ├── led/
     ├── orchestrator/
+    ├── memory/
     ├── session/
     └── integration/
 ```
@@ -118,6 +126,7 @@ voice_pipeline/
 - **docs/decisions.md**: Finalized decision log for completed work.
 - **docs/decisions-wip.md**: Decision log for work in progress. Merged into `decisions.md` after cleanup when the work is complete.
 - **docs/ARCHITECTURE.md**: System architecture details.
+- **docs/ray-memory/**: Long-term memory system design (overview, session, read, write, storage).
 - **Module READMEs** (`turn_taking/README.md`, etc.): External repo setup, constraints, config params.
 
 

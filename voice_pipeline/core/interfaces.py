@@ -3,13 +3,18 @@
 Only interfaces needed by the next implementation phase are defined here.
 New interfaces are added just before their consuming phase begins.
 
-Current: Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 interfaces.
+Current: Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 + Memory Phase 1 interfaces.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    import numpy as np
+
+    from voice_pipeline.memory.types import Episode, Profile
 
 from voice_pipeline.core.types import (
     AudioFrame,
@@ -824,3 +829,164 @@ class ISessionManager(ABC):
     @abstractmethod
     def shutdown(self) -> None:
         """Signal the session manager to shut down gracefully."""
+
+
+# ---------------------------------------------------------------------------
+# MemoryStorage
+# ---------------------------------------------------------------------------
+
+
+class IMemoryStorage(ABC):
+    """Persistence backend for the long-term memory system.
+
+    Manages episodes, profiles, and utterances in SQLite.
+    Used by Memory Read (Phase 2), Memory Write (Phase 3),
+    and Integration (Phase 4).
+
+    Implementations: InMemoryMemoryStorage (testing),
+    SQLiteMemoryStorage (production).
+    """
+
+    # --- Episode ---
+
+    @abstractmethod
+    def add_episode(self, episode: Episode) -> int | None:
+        """Persist a new episode.
+
+        Args:
+            episode: Episode to store. ``id`` is ignored (auto-assigned).
+
+        Returns:
+            Assigned database ID, or None on failure.
+        """
+
+    @abstractmethod
+    def get_episode(self, episode_id: int) -> Episode | None:
+        """Retrieve a single episode by ID.
+
+        Args:
+            episode_id: Database ID.
+
+        Returns:
+            Episode if found, None otherwise.
+        """
+
+    @abstractmethod
+    def get_episodes_by_ids(self, ids: list[int]) -> list[Episode]:
+        """Retrieve multiple episodes by ID.
+
+        Args:
+            ids: List of database IDs.
+
+        Returns:
+            Episodes found, in no guaranteed order.
+            Missing IDs are silently skipped.
+        """
+
+    @abstractmethod
+    def update_episode_cited(self, episode_id: int, cited_at: str) -> None:
+        """Update the last_cited_at timestamp for an episode.
+
+        Args:
+            episode_id: Database ID.
+            cited_at: New citation timestamp (UTC, '%Y-%m-%d %H:%M:%S').
+        """
+
+    @abstractmethod
+    def update_episode_embedding(self, episode_id: int, embedding: np.ndarray) -> None:
+        """Update the embedding vector for an episode.
+
+        Used when episodes are stored before embeddings are computed
+        (e.g., batch embedding after extraction in Phase 3).
+
+        Args:
+            episode_id: Database ID.
+            embedding: 1-D float32 vector.
+        """
+
+    @abstractmethod
+    def search_bm25(self, query: str, top_k: int) -> list[tuple[int, float]]:
+        """Keyword search over episode texts using BM25 (FTS5).
+
+        Args:
+            query: Search query string.
+            top_k: Maximum number of results.
+
+        Returns:
+            List of (episode_id, bm25_score) tuples, best matches first.
+            Score is negated FTS5 rank (higher = better match).
+        """
+
+    # --- Profile ---
+
+    @abstractmethod
+    def get_all_profiles(self) -> list[Profile]:
+        """Load all user profile slots.
+
+        Returns:
+            All profiles, in no guaranteed order.
+        """
+
+    @abstractmethod
+    def upsert_profile(self, profile: Profile) -> int | None:
+        """Insert or update a profile slot.
+
+        If ``profile.id`` is not None and exists, updates it.
+        Otherwise inserts a new row.
+
+        Args:
+            profile: Profile to upsert.
+
+        Returns:
+            Database ID of the upserted profile, or None on failure.
+        """
+
+    @abstractmethod
+    def delete_profile(self, profile_id: int) -> None:
+        """Delete a profile slot.
+
+        Args:
+            profile_id: Database ID.
+        """
+
+    # --- Utterance ---
+
+    @abstractmethod
+    def add_utterance(self, session_id: str, role: str, text: str, timestamp: str) -> None:
+        """Store a conversation utterance for later memory extraction.
+
+        Args:
+            session_id: Session this utterance belongs to.
+            role: Speaker role ('user' or 'assistant').
+            text: Utterance text.
+            timestamp: When spoken (UTC, '%Y-%m-%d %H:%M:%S').
+        """
+
+    @abstractmethod
+    def get_utterances(self, session_id: str) -> list[tuple[str, str, str]]:
+        """Retrieve all utterances for a session.
+
+        Args:
+            session_id: Session to query.
+
+        Returns:
+            List of (role, text, timestamp) tuples, ordered by timestamp.
+        """
+
+    # --- Lifecycle ---
+
+    @abstractmethod
+    def load_all_embeddings(self) -> tuple[list[int], np.ndarray]:
+        """Load all episode embeddings for vector index initialization.
+
+        Called at service startup to populate the in-memory vector index.
+
+        Returns:
+            Tuple of (ids, vectors) where ids is a list of episode IDs
+            and vectors is a float32 array of shape (N, dim).
+            Returns ([], empty array) if no embeddings exist.
+        """
+
+    @abstractmethod
+    def close(self) -> None:
+        """Close the database connection."""

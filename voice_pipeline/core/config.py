@@ -1,7 +1,7 @@
 """Dataclass-based configuration for the voice pipeline.
 
 Config sections are added as their modules are implemented.
-Current: Phase 1–3 + Phase 4 + Phase 5 + Phase 6.
+Current: Phase 1–3 + Phase 4 + Phase 5 + Phase 6 + Memory Phase 1.
 """
 
 from __future__ import annotations
@@ -422,6 +422,31 @@ class SessionConfig:
 
 
 @dataclass
+class MemoryConfig:
+    """Configuration for the long-term memory system.
+
+    Attributes:
+        db_path: SQLite database path (shared with conversation history).
+        embedding_model: Sentence-transformers model name for embeddings.
+        embedding_backend: Embedding provider ('local' or 'api').
+        embedding_dimension: Vector dimension of the embedding model.
+        use_onnx: Use ONNX Runtime backend for local embedding model.
+    """
+
+    db_path: str = "data/ray.db"
+    embedding_model: str = "all-MiniLM-L6-v2"
+    embedding_backend: Literal["local", "api"] = "local"
+    embedding_dimension: int = 384
+    use_onnx: bool = False
+
+    def __post_init__(self) -> None:
+        if self.embedding_dimension <= 0:
+            raise ConfigurationError(
+                f"embedding_dimension must be positive, got {self.embedding_dimension}"
+            )
+
+
+@dataclass
 class PipelineConfig:
     """Top-level configuration for the voice pipeline.
 
@@ -447,3 +472,4 @@ class PipelineConfig:
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     audio_input: AudioInputConfig = field(default_factory=AudioInputConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
