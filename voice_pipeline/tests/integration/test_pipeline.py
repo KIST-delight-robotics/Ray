@@ -153,6 +153,7 @@ class FakeLLM(ILLM):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMStream:
         idx = min(self._call_count, len(self._responses) - 1)
         self._call_count += 1
@@ -461,6 +462,7 @@ class TestSingleTurnConversation:
                 self,
                 messages: list[dict[str, Any]],
                 tools: list[dict[str, Any]] | None = None,
+                response_format: dict[str, Any] | None = None,
             ) -> LLMStream:
                 captured_messages.append(list(messages))
 
@@ -548,6 +550,7 @@ class TestMultiTurnConversation:
                 self,
                 messages: list[dict[str, Any]],
                 tools: list[dict[str, Any]] | None = None,
+                response_format: dict[str, Any] | None = None,
             ) -> LLMStream:
                 captured.append(list(messages))
 
@@ -889,6 +892,7 @@ class TestGeneratorFailure:
                 self,
                 messages: list[dict[str, Any]],
                 tools: list[dict[str, Any]] | None = None,
+                response_format: dict[str, Any] | None = None,
             ) -> LLMStream:
                 self._call += 1
                 chunks = [""] if self._call == 1 else ["Recovery response!"]

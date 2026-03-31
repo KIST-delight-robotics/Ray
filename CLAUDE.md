@@ -96,6 +96,8 @@ voice_pipeline/
 │   ├── vector_index.py        # IVectorIndex interface + NumpyVectorIndex
 │   ├── storage.py             # SQLiteMemoryStorage + InMemoryMemoryStorage
 │   ├── retriever.py           # MemoryRetriever — hybrid search + retained buffer
+│   ├── writer.py              # MemoryWriter — episode/profile extraction pipeline
+│   ├── prompts.py             # Write prompts, JSON schemas, profile schema
 │   └── exceptions.py
 │
 ├── orchestrator/

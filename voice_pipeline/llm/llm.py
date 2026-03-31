@@ -40,6 +40,7 @@ class OpenAILLM(ILLM):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMStream:
         """Generate a streaming response from the given message history.
 
@@ -47,6 +48,9 @@ class OpenAILLM(ILLM):
             messages: List of message dicts.
             tools: Tool definitions. None uses config defaults.
                 Empty list explicitly disables tools.
+            response_format: Structured output format specification.
+                None = free-form text. Passed to the API as
+                ``text={"format": response_format}`` when set.
 
         Returns:
             LLMStream yielding text chunks. After full iteration,
@@ -73,6 +77,8 @@ class OpenAILLM(ILLM):
                 kwargs["reasoning"] = {"effort": self._config.reasoning_effort}
             if resolved_tools:
                 kwargs["tools"] = resolved_tools
+            if response_format is not None:
+                kwargs["text"] = {"format": response_format}
 
             stream = self._client.responses.create(**kwargs)
         except openai.OpenAIError as exc:

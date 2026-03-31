@@ -19,6 +19,8 @@ class Episode:
         importance: Qualitative importance judged by LLM, in [0, 1].
         last_cited_at: Last time this memory was cited in conversation
             (UTC, '%Y-%m-%d %H:%M:%S'). Initial value equals timestamp.
+        citation_count: Number of times this memory has been cited.
+            Reserved for future use (reinforcement signal).
         embedding: Dense vector for semantic search. None if not yet computed.
     """
 
@@ -28,6 +30,7 @@ class Episode:
     session_id: str
     importance: float
     last_cited_at: str
+    citation_count: int = 0
     embedding: np.ndarray | None = None
 
 

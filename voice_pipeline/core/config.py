@@ -1,7 +1,7 @@
 """Dataclass-based configuration for the voice pipeline.
 
 Config sections are added as their modules are implemented.
-Current: Phase 1–3 + Phase 4 + Phase 5 + Phase 6 + Memory Phase 1 + Embedding.
+Current: Phase 1–3 + Phase 4 + Phase 5 + Phase 6 + Memory Phase 1–3 + Embedding.
 """
 
 from __future__ import annotations
@@ -439,6 +439,13 @@ class MemoryConfig:
         rrf_k: RRF constant (original paper default 60).
         recency_half_life_days: Exponential decay half-life in days.
         salience_threshold: Minimum salience to include (0.0 = disabled).
+        write_llm: LLM configuration for memory write (episode/profile extraction).
+        write_max_input_tokens: Max tokens per episode extraction window.
+            Session is processed in a single call when under this limit.
+        write_window_overlap_turns: Overlap turns between windows to
+            maintain context continuity across splits.
+        profile_max_content_tokens: Max tokens per profile slot content.
+        profile_max_subtopics: Max subtopics per topic before reorganization.
     """
 
     db_path: str = "data/ray.db"
@@ -456,6 +463,20 @@ class MemoryConfig:
     rrf_k: int = 60
     recency_half_life_days: float = 30.0
     salience_threshold: float = 0.0
+
+    # Write (Phase 3)
+    write_llm: LLMConfig = field(
+        default_factory=lambda: LLMConfig(
+            model="gpt-4o-mini",
+            temperature=0.0,
+            max_tokens=4096,
+            tools=[],
+        )
+    )
+    write_max_input_tokens: int = 8000
+    write_window_overlap_turns: int = 2
+    profile_max_content_tokens: int = 128
+    profile_max_subtopics: int = 20
 
     def __post_init__(self) -> None:
         if self.embedding_dimension <= 0:
@@ -483,6 +504,23 @@ class MemoryConfig:
         if not (0.0 <= self.salience_threshold <= 1.0):
             raise ConfigurationError(
                 f"salience_threshold must be in [0, 1], got {self.salience_threshold}"
+            )
+        if self.write_max_input_tokens <= 0:
+            raise ConfigurationError(
+                f"write_max_input_tokens must be positive, got {self.write_max_input_tokens}"
+            )
+        if self.write_window_overlap_turns < 0:
+            raise ConfigurationError(
+                f"write_window_overlap_turns must be >= 0, got {self.write_window_overlap_turns}"
+            )
+        if self.profile_max_content_tokens <= 0:
+            raise ConfigurationError(
+                f"profile_max_content_tokens must be positive,"
+                f" got {self.profile_max_content_tokens}"
+            )
+        if self.profile_max_subtopics <= 0:
+            raise ConfigurationError(
+                f"profile_max_subtopics must be positive, got {self.profile_max_subtopics}"
             )
 
 

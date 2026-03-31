@@ -3,7 +3,7 @@
 Only interfaces needed by the next implementation phase are defined here.
 New interfaces are added just before their consuming phase begins.
 
-Current: Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 + Memory Phase 1 + Embedding interfaces.
+Current: Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 + Memory Phase 1–3 + Embedding interfaces.
 """
 
 from __future__ import annotations
@@ -368,6 +368,7 @@ class ILLM(ABC):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMStream:
         """Generate a streaming response from the given message history.
 
@@ -375,6 +376,9 @@ class ILLM(ABC):
             messages: List of message dicts in vendor-specific format.
             tools: Tool definitions. None uses config defaults.
                 Empty list explicitly disables tools for this call.
+            response_format: Structured output format specification.
+                None = free-form text (default). When provided, passed
+                through to the API (e.g. ``{"type": "json_schema", ...}``).
 
         Returns:
             LLMStream yielding text chunks. After full iteration,
@@ -994,7 +998,9 @@ class IMemoryStorage(ABC):
     # --- Utterance ---
 
     @abstractmethod
-    def add_utterance(self, session_id: str, role: str, text: str, timestamp: str) -> None:
+    def add_utterance(
+        self, session_id: str, role: str, text: str, timestamp: str, token_count: int = 0
+    ) -> None:
         """Store a conversation utterance for later memory extraction.
 
         Args:
@@ -1002,17 +1008,19 @@ class IMemoryStorage(ABC):
             role: Speaker role ('user' or 'assistant').
             text: Utterance text.
             timestamp: When spoken (UTC, '%Y-%m-%d %H:%M:%S').
+            token_count: Pre-computed token count for the text.
         """
 
     @abstractmethod
-    def get_utterances(self, session_id: str) -> list[tuple[str, str, str]]:
+    def get_utterances(self, session_id: str) -> list[tuple[str, str, str, int]]:
         """Retrieve all utterances for a session.
 
         Args:
             session_id: Session to query.
 
         Returns:
-            List of (role, text, timestamp) tuples, ordered by timestamp.
+            List of (role, text, timestamp, token_count) tuples,
+            ordered by timestamp.
         """
 
     # --- Lifecycle ---

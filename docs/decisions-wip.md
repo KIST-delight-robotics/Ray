@@ -29,6 +29,19 @@
 - **프로필은 retriever 범위 밖**: 프로필은 세션 내 불변이므로 매 턴 검색할 필요 없음. Phase 4 통합에서 세션 시작 시 `storage.get_all_profiles()` 1회 호출로 처리.
 
 
+## Memory Writer (Phase 3)
+
+- **세션 종료 시 즉시 추출**: 기존 설계(히스토리에서 밀려날 때 처리)에서 변경. 에피소드를 세션 종료 시 바로 추출하고, 추출된 에피소드가 세션 요약 역할도 겸함. 별도 요약 LLM 호출 절약.
+- **3단계 순차 LLM 호출**: 에피소드 추출 → 프로필 fact 추출 → 프로필 Merge. 에피소드 추출과 프로필 추출은 작업 성격이 다르고(서사 생성 vs fact 식별), 프로필 추출과 merge도 다름(fact 식별 vs 기존 슬롯 대비 판정). 합치면 프롬프트 복잡도가 올라가고 실패 시 영향 범위가 커짐.
+- **별도 LLMConfig(`write_llm`)**: 대화용 LLM과 모델·설정을 독립. 추출은 더 저렴한 모델(gpt-4o-mini), 낮은 temperature(0.0), 높은 max_tokens(4096), 도구 없음. 모델별 파라미터(reasoning_effort 등)가 다를 수 있어 필드 몇 개 추가보다 LLMConfig 통째 분리가 유연.
+- **`ILLM.generate()`에 `response_format` 추가**: structured output(JSON schema)을 호출 시점에 지정. config가 아닌 파라미터인 이유: 에피소드/프로필/merge 각각 스키마가 다름. 기존 대화 호출은 None(기본값)으로 영향 없음.
+- **프로필 Merge — `(topic, sub_topic)` 키 매칭**: 기존 슬롯에 P1/P2 인덱스를 매기는 대신, fact별로 기존 내용을 인라인 표시. LLM이 APPEND/UPDATE/ABORT만 판정하고, 코드에서 `(topic, sub_topic)` 키로 기존 슬롯을 매칭. 슬롯 순서 무관, `get_all_profiles()` 반환 순서에 비의존.
+- **토큰 제한 — 조건부 경고**: 프로필 슬롯의 토큰 수를 `token_counter`로 측정, `profile_max_content_tokens`의 70% 초과 시 해당 fact에만 제한 지시 추가. 모든 슬롯에 무조건 제한을 명시하면 불필요한 압축을 유발.
+- **importance 고정값(1.0)**: LLM이 0~1 연속값을 일관되게 매기기 어렵고, 기준 확정에 실사용 데이터가 필요. 데이터 쌓인 후 범주형(high/medium/low) 또는 reinforcement(인용 횟수) 기반으로 전환 검토. `citation_count` 필드는 미래용으로 추가해둠.
+- **윈도우 처리 — 에피소드 추출만 분할**: 프로필 추출은 에피소드(이미 압축된 입력)를 받으므로 원문보다 훨씬 짧아 윈도우 불필요. 에피소드 추출도 기본은 세션 전체 1회 처리, `write_max_input_tokens` 초과 시에만 턴 단위 분할 + 겹침.
+- **utterance에 `token_count` 저장**: 윈도우 분할 시 재토큰화 없이 저장된 값을 합산. Phase 4에서 orchestrator가 utterance 저장 시 이미 계산된 값을 전달.
+
+
 ### 차후 고려
 
 - **임베딩 인스턴스 공유**: 현재 similarity와 memory가 각자 embedder를 생성. 같은 모델이면 `__main__.py`에서 하나 만들어 양쪽에 주입하여 메모리 절약 가능. Phase 4 와이어링 시 결정.

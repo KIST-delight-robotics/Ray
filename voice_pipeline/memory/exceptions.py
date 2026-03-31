@@ -5,3 +5,7 @@ from voice_pipeline.core.exceptions import PipelineError
 
 class MemoryStorageError(PipelineError):
     """Base exception for memory module errors."""
+
+
+class MemoryWriteError(PipelineError):
+    """Raised when memory write processing fails."""

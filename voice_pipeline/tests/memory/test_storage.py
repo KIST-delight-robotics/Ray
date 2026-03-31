@@ -21,6 +21,7 @@ def _make_episode(
     session_id: str = "s1",
     importance: float = 0.7,
     last_cited_at: str | None = None,
+    citation_count: int = 0,
     embedding: np.ndarray | None = None,
 ) -> Episode:
     return Episode(
@@ -30,6 +31,7 @@ def _make_episode(
         session_id=session_id,
         importance=importance,
         last_cited_at=last_cited_at or timestamp,
+        citation_count=citation_count,
         embedding=embedding,
     )
 
@@ -72,6 +74,15 @@ class _StorageTests(ABC):
         assert loaded.session_id == ep.session_id
         assert loaded.importance == pytest.approx(ep.importance)
         assert loaded.last_cited_at == ep.last_cited_at
+        assert loaded.citation_count == 0
+
+    def test_episode_citation_count_roundtrip(self) -> None:
+        s = self.make_storage()
+        ep = _make_episode(citation_count=5)
+        eid = s.add_episode(ep)
+        loaded = s.get_episode(eid)
+        assert loaded is not None
+        assert loaded.citation_count == 5
 
     def test_get_episode_not_found(self) -> None:
         s = self.make_storage()
@@ -238,14 +249,14 @@ class _StorageTests(ABC):
 
     def test_add_and_get_utterances(self) -> None:
         s = self.make_storage()
-        s.add_utterance("s1", "user", "Hello", "2026-03-15 14:00:00")
-        s.add_utterance("s1", "assistant", "Hi there!", "2026-03-15 14:00:01")
+        s.add_utterance("s1", "user", "Hello", "2026-03-15 14:00:00", token_count=3)
+        s.add_utterance("s1", "assistant", "Hi there!", "2026-03-15 14:00:01", token_count=5)
         s.add_utterance("s2", "user", "Other session", "2026-03-15 15:00:00")
 
         utts = s.get_utterances("s1")
         assert len(utts) == 2
-        assert utts[0] == ("user", "Hello", "2026-03-15 14:00:00")
-        assert utts[1] == ("assistant", "Hi there!", "2026-03-15 14:00:01")
+        assert utts[0] == ("user", "Hello", "2026-03-15 14:00:00", 3)
+        assert utts[1] == ("assistant", "Hi there!", "2026-03-15 14:00:01", 5)
 
     def test_get_utterances_empty(self) -> None:
         s = self.make_storage()
@@ -334,13 +345,14 @@ class TestSQLiteMemoryStoragePersistence:
 
     def test_utterance_persists(self) -> None:
         s1 = self._make_storage()
-        s1.add_utterance("s1", "user", "Persistent utterance", "2026-03-15 14:00:00")
+        s1.add_utterance("s1", "user", "Persistent utterance", "2026-03-15 14:00:00", 10)
         s1.close()
 
         s2 = self._make_storage()
         utts = s2.get_utterances("s1")
         assert len(utts) == 1
         assert utts[0][1] == "Persistent utterance"
+        assert utts[0][3] == 10
         s2.close()
 
     def test_embedding_persists(self) -> None:

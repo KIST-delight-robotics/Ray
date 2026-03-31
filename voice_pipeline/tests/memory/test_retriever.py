@@ -27,6 +27,7 @@ def _make_episode(
     session_id: str = "s-old",
     importance: float = 0.7,
     last_cited_at: str | None = None,
+    citation_count: int = 0,
     embedding: np.ndarray | None = None,
 ) -> Episode:
     return Episode(
@@ -36,6 +37,7 @@ def _make_episode(
         session_id=session_id,
         importance=importance,
         last_cited_at=last_cited_at or timestamp,
+        citation_count=citation_count,
         embedding=embedding,
     )
 

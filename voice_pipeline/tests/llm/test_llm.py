@@ -333,3 +333,24 @@ class TestClientConfig:
 
         call_kwargs = client.responses.create.call_args[1]
         assert call_kwargs["tools"] == [{"type": "web_search"}]
+
+    def test_response_format_passed_to_api(self, llm_config: LLMConfig) -> None:
+        """response_format should be forwarded as text.format."""
+        client = create_mock_client(make_stream_events(["ok"]))
+        llm = _build_llm(client, llm_config)
+        fmt = {"type": "json_schema", "name": "test", "schema": {"type": "object"}}
+
+        list(llm.generate([_user_msg("hi")], response_format=fmt))
+
+        call_kwargs = client.responses.create.call_args[1]
+        assert call_kwargs["text"] == {"format": fmt}
+
+    def test_response_format_omitted_by_default(self, llm_config: LLMConfig) -> None:
+        """No response_format means no text key in kwargs."""
+        client = create_mock_client(make_stream_events(["ok"]))
+        llm = _build_llm(client, llm_config)
+
+        list(llm.generate([_user_msg("hi")]))
+
+        call_kwargs = client.responses.create.call_args[1]
+        assert "text" not in call_kwargs

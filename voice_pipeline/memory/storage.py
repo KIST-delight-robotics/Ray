@@ -34,6 +34,7 @@ class SQLiteMemoryStorage(IMemoryStorage):
         self._dimension = config.embedding_dimension
         self._conn = self._open_db(config.db_path)
         self._create_tables()
+        self._migrate()
 
     def _open_db(self, db_path: str) -> sqlite3.Connection:
         """Open DB with graduated corruption recovery.
@@ -85,13 +86,14 @@ class SQLiteMemoryStorage(IMemoryStorage):
     def _create_tables(self) -> None:
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS episodes (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                text          TEXT    NOT NULL,
-                timestamp     TEXT    NOT NULL,
-                session_id    TEXT    NOT NULL,
-                importance    REAL    NOT NULL DEFAULT 0.5,
-                last_cited_at TEXT    NOT NULL,
-                embedding     BLOB
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                text            TEXT    NOT NULL,
+                timestamp       TEXT    NOT NULL,
+                session_id      TEXT    NOT NULL,
+                importance      REAL    NOT NULL DEFAULT 0.5,
+                last_cited_at   TEXT    NOT NULL,
+                citation_count  INTEGER NOT NULL DEFAULT 0,
+                embedding       BLOB
             );
 
             CREATE INDEX IF NOT EXISTS idx_episodes_session
@@ -106,11 +108,12 @@ class SQLiteMemoryStorage(IMemoryStorage):
             );
 
             CREATE TABLE IF NOT EXISTS utterances (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role       TEXT NOT NULL,
-                text       TEXT NOT NULL,
-                timestamp  TEXT NOT NULL
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id  TEXT    NOT NULL,
+                role        TEXT    NOT NULL,
+                text        TEXT    NOT NULL,
+                timestamp   TEXT    NOT NULL,
+                token_count INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE INDEX IF NOT EXISTS idx_utterances_session
@@ -149,6 +152,20 @@ class SQLiteMemoryStorage(IMemoryStorage):
                 self._conn.execute(trigger_sql)
         self._conn.commit()
 
+    def _migrate(self) -> None:
+        """Apply schema migrations for columns added after initial release."""
+        migrations = [
+            "ALTER TABLE episodes ADD COLUMN citation_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE utterances ADD COLUMN token_count INTEGER NOT NULL DEFAULT 0",
+        ]
+        for sql in migrations:
+            try:
+                self._conn.execute(sql)
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                # Column already exists — expected after first migration.
+                pass
+
     # --- Episode ---
 
     def add_episode(self, episode: Episode) -> int | None:
@@ -161,14 +178,16 @@ class SQLiteMemoryStorage(IMemoryStorage):
         try:
             cursor = self._conn.execute(
                 "INSERT INTO episodes "
-                "(text, timestamp, session_id, importance, last_cited_at, embedding) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(text, timestamp, session_id, importance, last_cited_at, "
+                "citation_count, embedding) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     episode.text,
                     episode.timestamp,
                     episode.session_id,
                     episode.importance,
                     episode.last_cited_at,
+                    episode.citation_count,
                     embedding_blob,
                 ),
             )
@@ -183,7 +202,8 @@ class SQLiteMemoryStorage(IMemoryStorage):
         try:
             row = self._conn.execute(
                 "SELECT id, text, timestamp, session_id, importance, "
-                "last_cited_at, embedding FROM episodes WHERE id = ?",
+                "last_cited_at, citation_count, embedding "
+                "FROM episodes WHERE id = ?",
                 (episode_id,),
             ).fetchone()
             if row is None:
@@ -201,7 +221,8 @@ class SQLiteMemoryStorage(IMemoryStorage):
         try:
             rows = self._conn.execute(
                 f"SELECT id, text, timestamp, session_id, importance, "
-                f"last_cited_at, embedding FROM episodes WHERE id IN ({placeholders})",
+                f"last_cited_at, citation_count, embedding "
+                f"FROM episodes WHERE id IN ({placeholders})",
                 ids,
             ).fetchall()
             return [self._row_to_episode(row) for row in rows]
@@ -310,26 +331,29 @@ class SQLiteMemoryStorage(IMemoryStorage):
 
     # --- Utterance ---
 
-    def add_utterance(self, session_id: str, role: str, text: str, timestamp: str) -> None:
+    def add_utterance(
+        self, session_id: str, role: str, text: str, timestamp: str, token_count: int = 0
+    ) -> None:
         """Store a conversation utterance."""
         try:
             self._conn.execute(
-                "INSERT INTO utterances (session_id, role, text, timestamp) VALUES (?, ?, ?, ?)",
-                (session_id, role, text, timestamp),
+                "INSERT INTO utterances (session_id, role, text, timestamp, token_count) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, role, text, timestamp, token_count),
             )
             self._conn.commit()
         except sqlite3.Error:
             logger.warning("Failed to add utterance", exc_info=True)
 
-    def get_utterances(self, session_id: str) -> list[tuple[str, str, str]]:
+    def get_utterances(self, session_id: str) -> list[tuple[str, str, str, int]]:
         """Retrieve all utterances for a session."""
         try:
             rows = self._conn.execute(
-                "SELECT role, text, timestamp FROM utterances "
+                "SELECT role, text, timestamp, token_count FROM utterances "
                 "WHERE session_id = ? ORDER BY timestamp, id",
                 (session_id,),
             ).fetchall()
-            return [(row[0], row[1], row[2]) for row in rows]
+            return [(row[0], row[1], row[2], row[3]) for row in rows]
         except sqlite3.Error:
             logger.warning("Failed to get utterances for session %s", session_id, exc_info=True)
             return []
@@ -389,7 +413,7 @@ class SQLiteMemoryStorage(IMemoryStorage):
         return " ".join(safe_tokens)
 
     def _row_to_episode(self, row: Any) -> Episode:
-        embedding = np.frombuffer(row[6], dtype=np.float32).copy() if row[6] is not None else None
+        embedding = np.frombuffer(row[7], dtype=np.float32).copy() if row[7] is not None else None
         return Episode(
             id=row[0],
             text=row[1],
@@ -397,6 +421,7 @@ class SQLiteMemoryStorage(IMemoryStorage):
             session_id=row[3],
             importance=row[4],
             last_cited_at=row[5],
+            citation_count=row[6],
             embedding=embedding,
         )
 
@@ -429,6 +454,7 @@ class InMemoryMemoryStorage(IMemoryStorage):
             session_id=episode.session_id,
             importance=episode.importance,
             last_cited_at=episode.last_cited_at,
+            citation_count=episode.citation_count,
             embedding=episode.embedding.copy() if episode.embedding is not None else None,
         )
         self._episodes[eid] = stored
@@ -446,6 +472,7 @@ class InMemoryMemoryStorage(IMemoryStorage):
             session_id=ep.session_id,
             importance=ep.importance,
             last_cited_at=ep.last_cited_at,
+            citation_count=ep.citation_count,
             embedding=ep.embedding.copy() if ep.embedding is not None else None,
         )
 
@@ -527,7 +554,9 @@ class InMemoryMemoryStorage(IMemoryStorage):
 
     # --- Utterance ---
 
-    def add_utterance(self, session_id: str, role: str, text: str, timestamp: str) -> None:
+    def add_utterance(
+        self, session_id: str, role: str, text: str, timestamp: str, token_count: int = 0
+    ) -> None:
         """Store a conversation utterance."""
         self._utterances.append(
             {
@@ -535,13 +564,14 @@ class InMemoryMemoryStorage(IMemoryStorage):
                 "role": role,
                 "text": text,
                 "timestamp": timestamp,
+                "token_count": token_count,
             }
         )
 
-    def get_utterances(self, session_id: str) -> list[tuple[str, str, str]]:
+    def get_utterances(self, session_id: str) -> list[tuple[str, str, str, int]]:
         """Retrieve all utterances for a session."""
         return [
-            (u["role"], u["text"], u["timestamp"])
+            (u["role"], u["text"], u["timestamp"], u["token_count"])
             for u in self._utterances
             if u["session_id"] == session_id
         ]
