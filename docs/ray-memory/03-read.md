@@ -36,7 +36,7 @@ salience = similarity × recency_decay × importance
 | `recency_decay` | 시간 경과에 따른 감쇠. 마지막 갱신 또는 기억 인용 일자 기준 |
 | `importance` | 질적 중요도 — Write 시 LLM이 판정 (감정적 강도, 개인적 의미 등) |
 
-- recency_decay는 "최근에 들은 얘기를 더 잘 기억한다"는 인지적 자연스러움 반영
+- recency_decay는 "최근에 들은 얘기를 더 잘 기억한다"는 인지적 자연스러움 반영. 지수 감쇠 사용: `exp(-ln(2) × days / half_life)`, 기본 half_life = 30일
 - 기억 인용 시 감쇠 기준 일시를 현재로 리프레시. 기본 1회 인용 시 적용, 1회성 참조가 많을 경우 기준 상향 조정
 
 ### 1-4. 필터링
@@ -107,7 +107,9 @@ Actually, I remember you saw Dune 2 recently...
 ```
 
 - 토픽 전환 시 명시적 flush 없음 — 검색에 안 걸리기 시작하면 TTL 감쇠로 자연 퇴출
-- retained vs 신규 슬롯 배분, 초기 TTL 값(N)은 구현 시 결정
+- retained overflow 시 TTL 기준으로 eviction (현재 쿼리 salience가 아닌 TTL 우선 — 토픽 전환 시 보호 유지)
+- **슬롯 배분**: 블록 4 전체 슬롯 중 신규 검색 결과의 최소 보장 슬롯을 확보하고, 나머지를 retained에 할당 (초기값: 전체 10, 신규 최소 4)
+- **초기 TTL 값(N)**: 인용된 기억이 보호되는 턴 수 (초기값: 3)
 
 ---
 

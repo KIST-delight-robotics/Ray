@@ -16,6 +16,7 @@ episodes:
   session_id: 세션 참조
   importance: 질적 중요도 (LLM 판정)
   last_cited_at: 마지막 기억 인용 일시 (recency_decay 기준, 초기값 = timestamp)
+  citation_count: 인용 횟수 (향후 reinforcement 신호용, 초기값 = 0)
   embedding: 벡터 (BLOB)
 ```
 
@@ -30,22 +31,29 @@ profiles:
   updated_at: 마지막 갱신 일시
 ```
 
-### 세션/원문 테이블
+### 원문 테이블
 
 ```
-sessions:
-  id: 정수 PK
-  started_at: 세션 시작 일시
-  ended_at: 세션 종료 일시
-  summary: 세션 요약 (NULL 가능)
-
 utterances:
   id: 정수 PK
   session_id: 세션 참조
   role: speaker (user/assistant)
   text: 발화 텍스트
   timestamp: 일시
+  token_count: 토큰 수 (윈도우 분할 시 재토큰화 없이 사용)
 ```
+
+세션 메타데이터(시작/종료 일시 등)는 conversation history 모듈에서 관리한다.
+
+### 처리 상태 테이블
+
+```
+processed_sessions:
+  session_id: 텍스트 PK
+  processed_at: 처리 완료 일시
+```
+
+메모리 추출(process_session)이 시도된 세션을 기록한다. 에피소드가 0건이어도 마킹. 세션 시작 시 이전 세션 표현 방식을 결정하는 데 사용 (02-session.md §3: 에피소드 없음 + 처리 완료 → 생략, 미처리 → 원문 포함).
 
 ### FTS5 인덱스
 

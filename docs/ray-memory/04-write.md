@@ -5,21 +5,19 @@
 ## 1. 기본 원칙
 
 - 원문은 턴 전환 경계에서 DB에 즉시 저장
-- 메모리 추출/갱신은 대화 중 수행하지 않고 세션 종료 후 비동기 배치 처리
+- 메모리 추출/갱신은 대화 중 수행하지 않고 세션 종료 후 비동기 처리
   - Turn Shift 구조에서 대화 중 DB write가 섞이면 취소된 생성의 중복 처리 등 복잡성 발생
-- 최근 몇 세션은 히스토리(블록 3)로 직접 전달되므로, 히스토리에서 밀려나는 시점에 write 처리
+- 추출된 에피소드가 이전 세션 표현(블록 3)의 역할도 겸함 — 별도 세션 요약 불필요 (02-session.md §3)
 
 ### 처리 흐름
 
 ```
-세션이 히스토리에서 밀려남
-  → 세션 원문을 LLM에 전달하여 추출:
-      에피소드 리스트 (3인칭 내러티브 + importance)
-      프로필 업데이트 (topic::sub_topic)
-  → 에피소드 저장 (ADD)
-  → 프로필 Merge (APPEND/UPDATE/ABORT)
-  → 임베딩 생성 + 벡터 인덱스 갱신
-  → 기억 인용 반영 (recency_decay 기준 일시 리프레시)
+세션 종료
+  → 에피소드 추출 (LLM: 원문 → 3인칭 내러티브)
+  → 윈도우 간 중복 해소 (임베딩 유사도 필터 → LLM 판정)
+  → 에피소드 저장 + 임베딩 생성 + 벡터 인덱스 갱신
+  → 프로필 fact 추출 (LLM: 에피소드 → topic::sub_topic)
+  → 프로필 Merge (LLM: APPEND/UPDATE/ABORT)
 ```
 
 ---
@@ -40,8 +38,9 @@
 
 세션 길이가 가변적이므로 윈도우 단위로 처리한다.
 
-- 한번에 처리 가능한 양을 제한하고, 윈도우 간 겹침 구간을 두어 맥락 절단 방지
-- 각 윈도우에서 개별 추출 후, 윈도우 간 중복 에피소드를 확인하여 병합
+- 한번에 처리 가능한 양을 제한하고, 윈도우 간 토큰 비율 기반 겹침 구간을 두어 맥락 절단 방지
+- 각 윈도우에서 개별 추출 후, 임베딩 코사인 유사도로 중복 후보를 필터링하고 LLM이 판정 (MERGE/KEEP_BOTH/DISCARD)
+- 후보를 순차 처리하여 각 판정 결과를 즉시 반영 — 이전 병합 결과가 다음 비교에 영향
 
 ### Importance 판정
 
@@ -49,6 +48,8 @@
 
 - 감정적/개인적 의미가 있는 기억은 한 번만 언급되어도 높은 importance 부여
 - Salience 공식에서 에피소드의 비맥락적 가치를 결정하는 유일한 요소
+
+LLM의 0~1 연속값 판정이 불안정하여, 현재는 고정값(1.0)으로 운용한다. 판정 방식은 실사용 데이터 축적 후 확정하며, 범주형(high/medium/low) 판정 또는 `citation_count` 기반 reinforcement를 검토한다.
 
 ### 저장
 
@@ -59,13 +60,24 @@
 
 ## 3. 프로필 Write
 
+에피소드 추출과 별도의 2단계 LLM 호출로 처리한다. 에피소드에서 fact를 추출한 후, 기존 슬롯과 대조하여 merge한다.
+
+### 추출
+
+추출된 에피소드에서 프로필에 해당하는 fact를 식별한다.
+
+- 프로필 스키마를 제공하여 topic::sub_topic 매핑을 유도
+- 스키마에 정의되지 않은 하위 분류(sub_topic)도 생성 가능
+- 명확한 근거가 있는 fact만 추출 (추측 배제)
+
 ### Merge
 
-Memobase의 APPEND/UPDATE/ABORT 패턴을 사용한다.
+Memobase의 APPEND/UPDATE/ABORT 패턴으로 기존 프로필에 반영한다.
 
-- 기존 슬롯 목록을 추출 프롬프트에 제공하여 같은 슬롯에 매핑 유도
-- 배치 모드: 전체 슬롯을 한 번의 LLM 호출로 판정
-- UUID를 정수 인덱스로 치환하여 LLM에 전달 (환각 방지)
+- 각 fact에 기존 슬롯 내용을 인라인 표시하여 LLM이 판정
+- 배치 모드: 전체 fact를 한 번의 LLM 호출로 처리
+- fact는 정수 인덱스(F1, F2, ...)로 참조
+- 슬롯 토큰 수가 제한의 70% 초과 시 해당 fact에만 압축 지시 추가
 
 ### 프로필 스키마
 
@@ -73,12 +85,12 @@ Memobase의 APPEND/UPDATE/ABORT 패턴을 사용한다.
 
 ```
 # 시맨틱 프로필
-basic_info::name, age, ...
-interest::movie, music, book, ...
-personality::성격 특성, 가치관, ...
+basic_info::name, age, location, occupation, language
+interest::movie, music, book, game, food, sport, hobby
+personality::traits, values, communication_style
 
 # 관계 메모 (절차 기억)
-interaction_style::tone, preference, ...
+interaction_style::tone_preference, topic_preference, humor_style
 ```
 
 - 관계 메모는 시맨틱 프로필과 메커니즘 동일, 추출 지침만 별도 — 명시적 요청이나 확실한 선호 신호가 있을 때만 추출
