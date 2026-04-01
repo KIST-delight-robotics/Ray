@@ -58,3 +58,14 @@
 - **SimilarityConfig/MemoryConfig 임베딩 필드 중복**: 양쪽 config에 model, use_onnx 등이 중복 존재. 공유 EmbeddingConfig 추출 여부는 실제 사용 패턴 보고 판단.
 - **similarity.compare() 임베딩 캐싱**: TurnDetector 호출 패턴에서 `a`(이전 텍스트)가 반복됨. 한쪽 임베딩을 캐싱하면 추론 비용 절반 가능. 기존 코드도 동일 패턴이라 regression은 아님.
 - **similarity 유닛 테스트 부재**: EmbeddingSimilarity, DiffLibSimilarity, create_similarity 팩토리에 대한 유닛 테스트가 없음. 현재는 TurnDetector 테스트에서 ISimilarity를 mock하여 간접 검증.
+
+
+## Sentence Streaming (Phase 4-5)
+
+- **영어 기준 문장 경계 감지**: `.` `!` `?` + 뒤따르는 공백으로 판단. 약어(`Mr.`, `Dr.`, `etc.`)와 단일 대문자 이니셜(`U.S.`)은 frozenset 기반 휴리스틱으로 제외. NLP 토크나이저 대비 의존성 없고 지연 없음. 한국어 등 다른 언어 지원 시 별도 전략 필요.
+- **`min_flush_words = 4`**: 문장 경계가 감지되어도 누적 단어 수가 임계값 미만이면 다음 문장과 합쳐서 TTS. `"Sure!"` 같은 짧은 감탄사가 단독 TTS 호출되면 HTTP 오버헤드가 실제 합성 시간을 초과. 대부분의 LLM 첫 문장은 5~15단어이므로 즉시 발송됨.
+- **TTS 파이프라이닝 (producer-consumer)**: LLM 스트리밍 + 문장 감지(producer)와 TTS 결과 drain(consumer)을 별도 스레드로 분리. 문장 N의 TTS 진행 중 문장 N+1의 TTS를 동시 시작하여 문장 간 gap 최소화. 로컬 `ThreadPoolExecutor(max_workers=2)`를 파이프라인 실행마다 생성/소멸하여 기존 `self._executor`(prepare 재시작용)와 독립.
+- **인용 태그 처리**: `[MEMORIES: M1, M3]`는 문장 종결 부호가 없으므로 SentenceDetector 버퍼에 자연스럽게 잔류. LLM 스트림 종료 시 `flush()` → `parse_citation_tag()` 순으로 처리. 중간 문장에 태그가 섞일 가능성 없음.
+- **`_text` 누적 갱신**: consumer가 각 문장의 TTS 오디오를 큐에 적재 완료한 후 `self._text`를 갱신. `get_text()`가 반환하는 텍스트는 항상 오디오가 생산된 범위와 일치하여 barge-in truncation 정확도가 full 모드 대비 개선됨.
+- **Orchestrator/CppBridge 변경 없음**: 기존 `send_stream_start → send_audio(chunk)* → send_audio_end` 프로토콜이 chunk 출처와 무관하게 동작. C++ 측은 버퍼에 쌓이는 PCM을 360ms 단위로 drain하므로 TTS 호출 횟수를 알 필요 없음.
+- **Barge-in 호환성**: PLAYING 중 interrupt 시 generator를 cancel하지 않는 기존 동작 그대로 유지. consumer가 계속 실행되어 `stream_done = True` 설정 → deferred truncation 패턴이 동일하게 적용. 다음 `prepare()` 호출 시 `cancel_event`가 문장 간 체크에서 잡혀 불필요한 TTS는 최대 진행 중 1회로 제한.

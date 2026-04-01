@@ -384,11 +384,16 @@ class SpeechGeneratorConfig:
             lower first-audio latency.
         query_context_turns: Number of recent history turns concatenated
             with current STT text to form the memory retriever query.
+        min_flush_words: Minimum word count before a detected sentence
+            boundary triggers a TTS flush in sentence mode.  Short
+            fragments (e.g. "Sure!") are accumulated with the next
+            sentence to avoid tiny TTS calls.
     """
 
     max_workers: int = 2
     pipeline_mode: Literal["full", "sentence"] = "full"
     query_context_turns: int = 3
+    min_flush_words: int = 4
 
     def __post_init__(self) -> None:
         if self.max_workers < 1:
@@ -396,6 +401,10 @@ class SpeechGeneratorConfig:
         if self.pipeline_mode not in ("full", "sentence"):
             raise ConfigurationError(
                 f"pipeline_mode must be 'full' or 'sentence', got {self.pipeline_mode!r}"
+            )
+        if self.min_flush_words < 1:
+            raise ConfigurationError(
+                f"min_flush_words must be at least 1, got {self.min_flush_words}"
             )
 
 

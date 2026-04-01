@@ -7,7 +7,7 @@ import logging
 import queue
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from voice_pipeline.context.formatters import parse_citation_tag
@@ -20,7 +20,14 @@ from voice_pipeline.core.interfaces import (
     IMemoryRetriever,
     ISpeechGenerator,
 )
-from voice_pipeline.core.types import GeneratorState, LLMMetrics, LLMStream, ResponseData
+from voice_pipeline.core.types import (
+    GeneratorState,
+    LLMMetrics,
+    LLMStream,
+    ResponseData,
+    TTSStream,
+    WordTimestamp,
+)
 
 if TYPE_CHECKING:
     from voice_pipeline.memory.types import MemoryReadResult
@@ -232,6 +239,18 @@ class SpeechGenerator(ISpeechGenerator):
         cancel_event: threading.Event,
         audio_queue: queue.Queue[bytes],
     ) -> None:
+        if self._config.pipeline_mode == "sentence":
+            self._run_pipeline_sentence(current_text, run_id, cancel_event, audio_queue)
+        else:
+            self._run_pipeline_full(current_text, run_id, cancel_event, audio_queue)
+
+    def _run_pipeline_full(
+        self,
+        current_text: str,
+        run_id: int,
+        cancel_event: threading.Event,
+        audio_queue: queue.Queue[bytes],
+    ) -> None:
         try:
             t0 = time.monotonic()
 
@@ -364,3 +383,266 @@ class SpeechGenerator(ISpeechGenerator):
             with self._lock:
                 if run_id == self._run_id:
                     self._state = GeneratorState.FAILED
+
+    # -- Sentence-streaming pipeline -----------------------------------------
+
+    # Queue item: (sentence_text, future) or None (sentinel).
+    _SentenceItem = tuple[str, "Future[TTSStream]"]
+
+    def _run_pipeline_sentence(
+        self,
+        current_text: str,
+        run_id: int,
+        cancel_event: threading.Event,
+        audio_queue: queue.Queue[bytes],
+    ) -> None:
+        from voice_pipeline.generation.sentence_detector import SentenceDetector
+
+        tts_executor: ThreadPoolExecutor | None = None
+        consumer_thread: threading.Thread | None = None
+        future_queue: queue.Queue[SpeechGenerator._SentenceItem | None] = queue.Queue()
+
+        try:
+            t0 = time.monotonic()
+
+            # 1. Memory retrieval
+            if cancel_event.is_set():
+                return
+            memory_result = self._retrieve_memories(current_text)
+
+            # 2. Build context
+            if cancel_event.is_set():
+                return
+            messages = self._context_builder.build(current_text, memory_result=memory_result)
+
+            # 3. LLM stream → sentence detection → TTS submission
+            if cancel_event.is_set():
+                return
+            llm_stream: LLMStream = self._llm.generate(messages)
+
+            detector = SentenceDetector(min_flush_words=self._config.min_flush_words)
+            tts_executor = ThreadPoolExecutor(max_workers=2)
+
+            # Shared state between producer (this thread) and consumer.
+            # Consumer writes; producer reads only after consumer_thread.join().
+            accumulated_text: list[str] = []
+            total_audio = bytearray()
+            all_timestamps: list[WordTimestamp] = []
+            consumer_error: list[Exception] = []
+
+            consumer_thread = threading.Thread(
+                target=self._sentence_tts_consumer,
+                args=(
+                    future_queue,
+                    audio_queue,
+                    cancel_event,
+                    run_id,
+                    accumulated_text,
+                    total_audio,
+                    all_timestamps,
+                    consumer_error,
+                ),
+                daemon=True,
+            )
+            consumer_thread.start()
+
+            # --- Producer: iterate LLM stream, detect sentences, submit TTS ---
+            text_chunks: list[str] = []
+            try:
+                for chunk in llm_stream:
+                    if cancel_event.is_set():
+                        llm_stream.close()
+                        break
+                    text_chunks.append(chunk)
+                    for sentence in detector.feed(chunk):
+                        if cancel_event.is_set():
+                            break
+                        future = tts_executor.submit(self._tts.synthesize, sentence)
+                        future_queue.put((sentence, future))
+            except Exception:
+                with contextlib.suppress(Exception):
+                    llm_stream.close()
+                raise
+
+            full_text = "".join(text_chunks)
+            t_llm = time.monotonic()
+            logger.info("LLM done (%.1fs) [run=%d]: %r", t_llm - t0, run_id, full_text)
+
+            # Collect LLM metrics
+            metrics_list: list[LLMMetrics] = []
+            try:
+                llm_result = llm_stream.result
+                if llm_result.metrics is not None:
+                    metrics_list.append(llm_result.metrics)
+            except RuntimeError:
+                pass
+
+            # 4. Flush remaining buffer + parse citation tag
+            cited_indices: list[int] = []
+            if not cancel_event.is_set():
+                remainder = detector.flush()
+                if remainder:
+                    clean_remainder, cited_indices = parse_citation_tag(remainder)
+                    if clean_remainder.strip():
+                        future = tts_executor.submit(
+                            self._tts.synthesize, clean_remainder.strip()
+                        )
+                        future_queue.put((clean_remainder.strip(), future))
+                else:
+                    _, cited_indices = parse_citation_tag(full_text)
+
+            # 5. Signal consumer to finish, then wait
+            future_queue.put(None)
+            consumer_thread.join(timeout=120.0)
+            consumer_thread = None  # prevent finally from joining again
+
+            if consumer_error:
+                raise consumer_error[0]
+
+            # 6. Build final clean text
+            clean_text = " ".join(accumulated_text)
+
+            # 7. Guard: empty text
+            if not clean_text.strip():
+                with self._lock:
+                    if run_id == self._run_id:
+                        self._state = GeneratorState.FAILED
+                return
+
+            # 7a. Update citations
+            cited_ids = self._resolve_citations(cited_indices, memory_result)
+
+            # 8. Guard: no audio produced
+            if not total_audio:
+                with self._lock:
+                    if run_id == self._run_id:
+                        self._state = GeneratorState.FAILED
+                return
+
+            t_done = time.monotonic()
+            audio_sec = len(total_audio) / (24000 * 2)
+            logger.info(
+                "Sentence pipeline done (%.1fs): %.1fs audio [run=%d]",
+                t_done - t0,
+                audio_sec,
+                run_id,
+            )
+
+            # 9. Build ResponseData
+            turn_items = [{"role": "assistant", "content": clean_text}]
+            response_data = ResponseData(
+                text=clean_text,
+                audio=bytes(total_audio),
+                timestamps=all_timestamps,
+                turn_items=turn_items,
+                metrics_list=metrics_list,
+                cited_memory_ids=cited_ids,
+            )
+
+            with self._lock:
+                if run_id != self._run_id:
+                    return
+                self._response_data = response_data
+                self._stream_done = True
+
+        except Exception:
+            logger.warning("Sentence pipeline run failed", exc_info=True)
+            with self._lock:
+                if run_id == self._run_id:
+                    self._state = GeneratorState.FAILED
+        finally:
+            # Ensure consumer is stopped even on producer error.
+            if consumer_thread is not None and consumer_thread.is_alive():
+                future_queue.put(None)
+                consumer_thread.join(timeout=10.0)
+            if tts_executor is not None:
+                tts_executor.shutdown(wait=False)
+
+    def _sentence_tts_consumer(
+        self,
+        future_queue: queue.Queue[_SentenceItem | None],
+        audio_queue: queue.Queue[bytes],
+        cancel_event: threading.Event,
+        run_id: int,
+        accumulated_text: list[str],
+        total_audio: bytearray,
+        all_timestamps: list[WordTimestamp],
+        consumer_error: list[Exception],
+    ) -> None:
+        """Consumer thread: drain TTS futures in order, feed *audio_queue*."""
+        first_chunk_overall = True
+        audio_offset_bytes = 0
+
+        try:
+            while True:
+                if cancel_event.is_set():
+                    return
+
+                # Block with timeout so we can re-check cancel_event.
+                try:
+                    item = future_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                if item is None:
+                    return  # sentinel — producer is done
+
+                sentence_text, future = item
+
+                try:
+                    tts_stream: TTSStream = future.result(timeout=120.0)
+                except Exception as exc:
+                    consumer_error.append(exc)
+                    return
+
+                # Drain this sentence's TTS stream.
+                sentence_audio = bytearray()
+                try:
+                    for chunk in tts_stream:
+                        if cancel_event.is_set():
+                            tts_stream.close()
+                            return
+
+                        if first_chunk_overall:
+                            with self._lock:
+                                if run_id != self._run_id:
+                                    tts_stream.close()
+                                    return
+                                self._state = GeneratorState.STREAMING
+                            first_chunk_overall = False
+
+                        audio_queue.put(chunk)
+                        sentence_audio.extend(chunk)
+                        total_audio.extend(chunk)
+                except Exception as exc:
+                    with contextlib.suppress(Exception):
+                        tts_stream.close()
+                    consumer_error.append(exc)
+                    return
+
+                # Update accumulated text + self._text after this sentence.
+                accumulated_text.append(sentence_text)
+                with self._lock:
+                    if run_id != self._run_id:
+                        return
+                    self._text = " ".join(accumulated_text)
+
+                # Collect timestamps with offset correction.
+                try:
+                    for wt in tts_stream.timestamps:
+                        offset_sec = audio_offset_bytes / (24000 * 2)
+                        all_timestamps.append(
+                            WordTimestamp(
+                                word=wt.word,
+                                start_sec=wt.start_sec + offset_sec,
+                                end_sec=wt.end_sec + offset_sec,
+                            )
+                        )
+                except Exception:
+                    pass  # timestamps not available
+
+                audio_offset_bytes += len(sentence_audio)
+
+        except Exception as exc:
+            consumer_error.append(exc)
+            return
