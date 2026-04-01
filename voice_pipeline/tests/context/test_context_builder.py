@@ -318,14 +318,14 @@ class TestContextBuilderWithMemory:
 
     def test_session_summaries_injected(self) -> None:
         history = StubHistory()
-        episodes = [_make_episode("User talked about Dune.")]
+        summary = "[2026-03-28 14:00 session]\n- User talked about Dune."
         config = ConversationHistoryConfig(max_context_tokens=500)
         cb = ContextBuilder(
             history,
             config,
             "sys",
             _word_counter,
-            session_summaries=[("2026-03-28 14:00:00", episodes)],
+            session_summaries=[summary],
         )
         result = cb.build("hi")
         # system, summary(developer), user
@@ -334,7 +334,7 @@ class TestContextBuilderWithMemory:
     def test_block_ordering(self) -> None:
         """Verify: system → profile → summary → history → user → memory."""
         profiles = [_make_profile("basic_info", "name", "Alice")]
-        episodes = [_make_episode("Summary ep.")]
+        summary = "[2026-03-28 14:00 session]\n- Summary ep."
         history = StubHistory()
         history.add_user_message("old")
         config = ConversationHistoryConfig(max_context_tokens=1000)
@@ -344,7 +344,7 @@ class TestContextBuilderWithMemory:
             "sys",
             _word_counter,
             profiles=profiles,
-            session_summaries=[("2026-03-28 14:00:00", episodes)],
+            session_summaries=[summary],
         )
 
         mem_ep = _make_episode("Memory ep.", eid=2)
@@ -423,9 +423,9 @@ class TestContextBuilderWithMemory:
     def test_summary_overflow_drops_later(self) -> None:
         """When summaries exceed budget, later ones are dropped."""
         summaries = [
-            ("2026-03-26 10:00:00", [_make_episode("Old session ep.")]),
-            ("2026-03-27 10:00:00", [_make_episode("Mid session ep.")]),
-            ("2026-03-28 10:00:00", [_make_episode("Recent session ep.")]),
+            "[2026-03-26 10:00 session]\n- Old session ep.",
+            "[2026-03-27 10:00 session]\n- Mid session ep.",
+            "[2026-03-28 10:00 session]\n- Recent session ep.",
         ]
         # Each summary ≈ 7 words + 3 overhead = 10 tokens. Cap at 15 → only 1 fits.
         config = ConversationHistoryConfig(

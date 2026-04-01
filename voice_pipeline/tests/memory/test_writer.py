@@ -15,7 +15,7 @@ from voice_pipeline.core.types import LLMResult, LLMStream
 from voice_pipeline.memory.storage import InMemoryMemoryStorage
 from voice_pipeline.memory.types import Profile
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
-from voice_pipeline.memory.writer import MemoryWriter, _text_similarity
+from voice_pipeline.memory.writer import MemoryWriter
 
 # ---------------------------------------------------------------------------
 # Test infrastructure
@@ -66,6 +66,20 @@ class FakeEmbedder(IEmbedder):
         return _DIM
 
 
+class ConstantEmbedder(IEmbedder):
+    """Embedder returning identical vectors — cosine similarity always 1.0."""
+
+    def embed(self, text: str) -> np.ndarray:
+        return np.ones(_DIM, dtype=np.float32)
+
+    def embed_batch(self, texts: list[str]) -> np.ndarray:
+        return np.ones((len(texts), _DIM), dtype=np.float32)
+
+    @property
+    def dimension(self) -> int:
+        return _DIM
+
+
 def _make_config(**overrides: Any) -> MemoryConfig:
     defaults = {"embedding_dimension": _DIM}
     defaults.update(overrides)
@@ -76,11 +90,12 @@ def _make_writer(
     llm_responses: list[str],
     config: MemoryConfig | None = None,
     storage: InMemoryMemoryStorage | None = None,
+    embedder: IEmbedder | None = None,
 ) -> tuple[MemoryWriter, InMemoryMemoryStorage, NumpyVectorIndex, FakeLLM]:
     cfg = config or _make_config()
     st = storage or InMemoryMemoryStorage(dimension=_DIM)
     vi = NumpyVectorIndex()
-    emb = FakeEmbedder()
+    emb = embedder or FakeEmbedder()
     llm = FakeLLM(llm_responses)
     counter = lambda text: len(text.split())  # noqa: E731
     writer = MemoryWriter(st, vi, emb, llm, cfg, counter)
@@ -130,6 +145,11 @@ def _merge_response(*actions: tuple[str, int, str | None]) -> str:
     )
 
 
+def _dedup_response(action: str, merged: str | None = None) -> str:
+    """Build a JSON response for episode deduplication (single pair)."""
+    return json.dumps({"action": action, "merged": merged})
+
+
 # ---------------------------------------------------------------------------
 # Episode extraction tests
 # ---------------------------------------------------------------------------
@@ -174,6 +194,35 @@ class TestEpisodeExtraction:
 
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
         assert episodes == []
+
+    def test_session_marked_processed_after_extraction(self) -> None:
+        ep_json = _episode_response("An episode.")
+        facts_json = _profile_facts_response()
+        writer, storage, _, _ = _make_writer([ep_json, facts_json])
+        _add_utterances(storage)
+
+        writer.process_session(_SESSION_ID, _TIMESTAMP)
+
+        assert _SESSION_ID in storage.get_processed_session_ids([_SESSION_ID])
+
+    def test_session_marked_processed_on_empty_extraction(self) -> None:
+        """Even if 0 episodes extracted, session is marked as processed."""
+        ep_json = _episode_response()  # empty
+        writer, storage, _, _ = _make_writer([ep_json])
+        _add_utterances(storage)
+
+        writer.process_session(_SESSION_ID, _TIMESTAMP)
+
+        assert _SESSION_ID in storage.get_processed_session_ids([_SESSION_ID])
+
+    def test_session_not_marked_when_too_short(self) -> None:
+        """Sessions below MIN_UTTERANCES are not marked as processed."""
+        writer, storage, _, _ = _make_writer(["should not be called"])
+        _add_utterances(storage, count=1)
+
+        writer.process_session(_SESSION_ID, _TIMESTAMP)
+
+        assert _SESSION_ID not in storage.get_processed_session_ids([_SESSION_ID])
 
     def test_episodes_have_embeddings(self) -> None:
         ep_json = _episode_response("The user loves sci-fi movies.")
@@ -355,39 +404,177 @@ class TestWindowing:
         """Session exceeding token limit should be split into windows."""
         ep_json_1 = _episode_response("Episode from window 1.")
         ep_json_2 = _episode_response("Episode from window 2.")
+        dedup_json = _dedup_response("KEEP_BOTH")
         facts_json = _profile_facts_response()
-        # max=25, overlap=0 → 4 utterances (10+10+10+6=36) split into 2 windows
-        config = _make_config(write_max_input_tokens=25, write_window_overlap_turns=0)
-        writer, storage, _, llm = _make_writer([ep_json_1, ep_json_2, facts_json], config=config)
+        config = _make_config(
+            write_max_input_tokens=25,
+            write_window_overlap_ratio=0.0,
+            write_dedup_threshold=0.8,
+        )
+        writer, storage, _, llm = _make_writer(
+            [ep_json_1, ep_json_2, dedup_json, facts_json],
+            config=config,
+            embedder=ConstantEmbedder(),
+        )
         _add_utterances(storage)
 
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
 
-        # Should have episodes from both windows
         assert len(episodes) == 2
-        # 2 episode extraction calls + 1 profile call = 3
-        assert llm._call_count == 3
+        # 2 extraction + 1 dedup + 1 profile = 4
+        assert llm._call_count == 4
 
-    def test_deduplication(self) -> None:
-        """Near-duplicate episodes across windows should be deduplicated."""
-        ep_json_1 = _episode_response(
-            "The user watched Interstellar and loved it.",
-        )
+    def test_dedup_merge(self) -> None:
+        """LLM MERGE action combines two episodes into one."""
+        ep_json_1 = _episode_response("The user watched Interstellar.")
         ep_json_2 = _episode_response(
-            "The user watched Interstellar and really loved it.",  # near-duplicate
-            "The user cried at the ending.",  # unique
+            "The user watched Interstellar and cried.",
+            "The user cried at the ending.",
         )
+        # Sequential: candidate 1 → MERGE, candidate 2 → KEEP_BOTH
+        merge_json = _dedup_response(
+            "MERGE", "The user watched Interstellar and was deeply moved to tears."
+        )
+        keep_json = _dedup_response("KEEP_BOTH")
         facts_json = _profile_facts_response()
-        config = _make_config(write_max_input_tokens=25, write_window_overlap_turns=0)
-        writer, storage, _, _ = _make_writer([ep_json_1, ep_json_2, facts_json], config=config)
+        config = _make_config(
+            write_max_input_tokens=25,
+            write_window_overlap_ratio=0.0,
+            write_dedup_threshold=0.8,
+        )
+        writer, storage, _, _ = _make_writer(
+            [ep_json_1, ep_json_2, merge_json, keep_json, facts_json],
+            config=config,
+            embedder=ConstantEmbedder(),
+        )
         _add_utterances(storage)
 
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
 
         texts = [ep.text for ep in episodes]
-        # Near-duplicate dropped, unique one kept
         assert len(texts) == 2
+        assert "The user watched Interstellar and was deeply moved to tears." in texts
         assert "The user cried at the ending." in texts
+
+    def test_dedup_discard_first(self) -> None:
+        """LLM DISCARD_FIRST replaces the first episode with the second."""
+        ep_json_1 = _episode_response("The user likes sci-fi.")
+        ep_json_2 = _episode_response("The user loves sci-fi movies, especially Nolan films.")
+        dedup_json = _dedup_response("DISCARD_FIRST")
+        facts_json = _profile_facts_response()
+        config = _make_config(
+            write_max_input_tokens=25,
+            write_window_overlap_ratio=0.0,
+            write_dedup_threshold=0.8,
+        )
+        writer, storage, _, _ = _make_writer(
+            [ep_json_1, ep_json_2, dedup_json, facts_json],
+            config=config,
+            embedder=ConstantEmbedder(),
+        )
+        _add_utterances(storage)
+
+        episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
+
+        assert len(episodes) == 1
+        assert episodes[0].text == "The user loves sci-fi movies, especially Nolan films."
+
+    def test_dedup_discard_second(self) -> None:
+        """LLM DISCARD_SECOND keeps only the first episode."""
+        ep_json_1 = _episode_response("The user loves sci-fi movies, especially Nolan films.")
+        ep_json_2 = _episode_response("The user likes sci-fi.")
+        dedup_json = _dedup_response("DISCARD_SECOND")
+        facts_json = _profile_facts_response()
+        config = _make_config(
+            write_max_input_tokens=25,
+            write_window_overlap_ratio=0.0,
+            write_dedup_threshold=0.8,
+        )
+        writer, storage, _, _ = _make_writer(
+            [ep_json_1, ep_json_2, dedup_json, facts_json],
+            config=config,
+            embedder=ConstantEmbedder(),
+        )
+        _add_utterances(storage)
+
+        episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
+
+        assert len(episodes) == 1
+        assert episodes[0].text == "The user loves sci-fi movies, especially Nolan films."
+
+    def test_dedup_fallback_on_llm_failure(self) -> None:
+        """When dedup LLM fails, keep the longer episode."""
+        ep_json_1 = _episode_response("Short.")
+        ep_json_2 = _episode_response("This is a longer and more detailed episode.")
+        facts_json = _profile_facts_response()
+        config = _make_config(
+            write_max_input_tokens=25,
+            write_window_overlap_ratio=0.0,
+            write_dedup_threshold=0.8,
+        )
+        # 2 extraction calls succeed, dedup call returns bad JSON, profile call
+        writer, storage, _, _ = _make_writer(
+            [ep_json_1, ep_json_2, "bad json", facts_json],
+            config=config,
+            embedder=ConstantEmbedder(),
+        )
+        _add_utterances(storage)
+
+        episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
+
+        assert len(episodes) == 1
+        assert episodes[0].text == "This is a longer and more detailed episode."
+
+    def test_high_threshold_skips_dedup(self) -> None:
+        """When no embeddings exceed threshold, no dedup LLM call is made."""
+        ep_json_1 = _episode_response("Episode about movies.")
+        ep_json_2 = _episode_response("Episode about cooking.")
+        facts_json = _profile_facts_response()
+        # Random embeddings have near-zero cosine similarity, threshold=0.99 skips all
+        config = _make_config(
+            write_max_input_tokens=25,
+            write_window_overlap_ratio=0.0,
+            write_dedup_threshold=0.99,
+        )
+        writer, storage, _, llm = _make_writer(
+            [ep_json_1, ep_json_2, facts_json], config=config
+        )
+        _add_utterances(storage)
+
+        episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
+
+        assert len(episodes) == 2
+        # 2 extraction + 1 profile = 3 (no dedup call)
+        assert llm._call_count == 3
+
+    def test_overlap_ratio_based(self) -> None:
+        """Window overlap uses token ratio, not turn count."""
+        # Verify windowing mechanics — dedup skipped via high threshold.
+        # max=25, overlap_ratio=0.4 → overlap of 10 tokens
+        # Utterances: 10+10+10+6=36.
+        #   Window 1: [10,10]=20. Overlap: last 10 tokens → [10].
+        #   Window 2: overlap[10]+[10]=20. Overlap: last 10 → [10].
+        #   Window 3: overlap[10]+[6]=16.
+        # → 3 windows, 3 extraction calls + 1 profile call.
+        ep_json_1 = _episode_response("Window 1 episode.")
+        ep_json_2 = _episode_response("Window 2 episode.")
+        ep_json_3 = _episode_response("Window 3 episode.")
+        facts_json = _profile_facts_response()
+        config = _make_config(
+            write_max_input_tokens=25,
+            write_window_overlap_ratio=0.4,
+            write_dedup_threshold=0.99,
+        )
+        writer, storage, _, llm = _make_writer(
+            [ep_json_1, ep_json_2, ep_json_3, facts_json], config=config
+        )
+        _add_utterances(storage)
+
+        episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
+
+        # 3 extraction + 0 dedup (random embeddings < 0.99) + 1 profile = 4
+        assert llm._call_count == 4
+        assert len(episodes) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -433,24 +620,3 @@ class TestErrorHandling:
 
         assert len(episodes) == 1
         assert storage.get_episode(episodes[0].id) is not None
-
-
-# ---------------------------------------------------------------------------
-# Utility tests
-# ---------------------------------------------------------------------------
-
-
-class TestTextSimilarity:
-    def test_identical_texts(self) -> None:
-        assert _text_similarity("hello world", "hello world") == pytest.approx(1.0)
-
-    def test_different_texts(self) -> None:
-        assert _text_similarity("hello world", "foo bar") == pytest.approx(0.0)
-
-    def test_partial_overlap(self) -> None:
-        sim = _text_similarity("the user loves movies", "the user enjoys movies")
-        assert 0.4 < sim < 0.9
-
-    def test_empty_text(self) -> None:
-        assert _text_similarity("", "hello") == pytest.approx(0.0)
-        assert _text_similarity("", "") == pytest.approx(0.0)

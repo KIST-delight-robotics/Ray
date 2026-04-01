@@ -5,6 +5,7 @@ from __future__ import annotations
 from voice_pipeline.context.formatters import (
     format_memory_block,
     format_profile_block,
+    format_raw_transcript_block,
     format_session_summary_block,
     parse_citation_tag,
 )
@@ -82,6 +83,35 @@ class TestFormatSessionSummaryBlock:
     def test_no_episodes(self) -> None:
         result = format_session_summary_block("2026-03-28 14:00:00", [])
         assert "(no summary available)" in result
+
+
+# ---------------------------------------------------------------------------
+# format_raw_transcript_block
+# ---------------------------------------------------------------------------
+
+
+class TestFormatRawTranscriptBlock:
+    def test_basic(self) -> None:
+        utterances = [
+            ("user", "What time is it?", "2026-03-28 21:30:00", 5),
+            ("assistant", "It's 9:30.", "2026-03-28 21:30:05", 3),
+        ]
+        result = format_raw_transcript_block("2026-03-28 21:30:00", utterances)
+        assert "[2026-03-28 21:30 session]" in result
+        assert "User: What time is it?" in result
+        assert "Ray: It's 9:30." in result
+
+    def test_user_only(self) -> None:
+        utterances = [("user", "Hello!", "2026-03-28 10:00:00", 1)]
+        result = format_raw_transcript_block("2026-03-28 10:00:00", utterances)
+        assert "User: Hello!" in result
+        assert "Ray" not in result
+
+    def test_empty_utterances(self) -> None:
+        result = format_raw_transcript_block("2026-03-28 10:00:00", [])
+        assert "[2026-03-28 10:00 session]" in result
+        # Only header, no content
+        assert result.count("\n") == 0
 
 
 # ---------------------------------------------------------------------------

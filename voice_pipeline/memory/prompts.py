@@ -303,6 +303,82 @@ def build_profile_merge_messages(
 
 
 # ---------------------------------------------------------------------------
+# Episode deduplication across windows
+# ---------------------------------------------------------------------------
+
+EPISODE_DEDUP_SCHEMA: dict[str, Any] = {
+    "type": "json_schema",
+    "name": "episode_dedup",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": [
+                    "MERGE",
+                    "KEEP_BOTH",
+                    "DISCARD_FIRST",
+                    "DISCARD_SECOND",
+                ],
+            },
+            "merged": {
+                "type": ["string", "null"],
+                "description": (
+                    "Merged narrative for MERGE action. "
+                    "Null for KEEP_BOTH / DISCARD_*."
+                ),
+            },
+        },
+        "required": ["action", "merged"],
+        "additionalProperties": False,
+    },
+}
+
+_EPISODE_DEDUP_SYSTEM = """\
+You are an episode deduplication system. You are given two episode \
+descriptions extracted from overlapping windows of the same conversation. \
+Determine whether they describe the same event and choose an action:
+
+- MERGE: Same event described from different angles or with different \
+details. Combine into a single third-person narrative (1-3 sentences) \
+preserving all unique details from both. Return the merged text.
+- KEEP_BOTH: Different events. Keep both episodes unchanged. Return null.
+- DISCARD_FIRST: First episode is a strict subset of the second. \
+Keep the second. Return null.
+- DISCARD_SECOND: Second episode is a strict subset of the first. \
+Keep the first. Return null."""
+
+_EPISODE_DEDUP_USER_TEMPLATE = """\
+A: {episode_a}
+B: {episode_b}"""
+
+
+def build_episode_dedup_messages(
+    episode_a: str,
+    episode_b: str,
+) -> list[dict[str, Any]]:
+    """Build messages for episode deduplication LLM call.
+
+    Args:
+        episode_a: Existing episode text.
+        episode_b: Candidate episode text to compare.
+
+    Returns:
+        Messages list with system + user message.
+    """
+    return [
+        {"role": "system", "content": _EPISODE_DEDUP_SYSTEM},
+        {
+            "role": "user",
+            "content": _EPISODE_DEDUP_USER_TEMPLATE.format(
+                episode_a=episode_a, episode_b=episode_b
+            ),
+        },
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

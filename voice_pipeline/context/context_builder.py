@@ -18,14 +18,13 @@ from typing import TYPE_CHECKING, Any
 from voice_pipeline.context.formatters import (
     format_memory_block,
     format_profile_block,
-    format_session_summary_block,
 )
 from voice_pipeline.core.config import ConversationHistoryConfig
 from voice_pipeline.core.interfaces import IContextBuilder, IConversationHistory
 from voice_pipeline.core.types import TokenCounter
 
 if TYPE_CHECKING:
-    from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
+    from voice_pipeline.memory.types import MemoryReadResult, Profile
 
 logger = logging.getLogger("voice_pipeline.context")
 
@@ -61,7 +60,7 @@ class ContextBuilder(IContextBuilder):
         token_counter: TokenCounter,
         tools_token_cost: int = 0,
         profiles: list[Profile] | None = None,
-        session_summaries: list[tuple[str, list[Episode]]] | None = None,
+        session_summaries: list[str] | None = None,
     ) -> None:
         self._history = history
         self._config = config
@@ -79,8 +78,7 @@ class ContextBuilder(IContextBuilder):
 
         self._summary_msgs: list[tuple[str, int]] = []  # (text, token_cost)
         if session_summaries:
-            for started_at, episodes in session_summaries:
-                text = format_session_summary_block(started_at, episodes)
+            for text in session_summaries:
                 cost = self._token_counter(text) + _PER_MESSAGE_OVERHEAD_TOKENS
                 self._summary_msgs.append((text, cost))
 

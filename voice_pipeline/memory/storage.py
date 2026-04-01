@@ -124,6 +124,11 @@ class SQLiteMemoryStorage(IMemoryStorage):
 
             CREATE INDEX IF NOT EXISTS idx_utterances_session
                 ON utterances(session_id);
+
+            CREATE TABLE IF NOT EXISTS processed_sessions (
+                session_id  TEXT PRIMARY KEY,
+                processed_at TEXT NOT NULL
+            );
         """)
         # FTS5 virtual table — must be created outside executescript
         # because CREATE VIRTUAL TABLE cannot be in a multi-statement script
@@ -400,6 +405,43 @@ class SQLiteMemoryStorage(IMemoryStorage):
                 )
                 return []
 
+    # --- Session processing status ---
+
+    def mark_session_processed(self, session_id: str) -> None:
+        """Record that memory extraction has been attempted for a session."""
+        with self._lock:
+            try:
+                from datetime import datetime, timezone
+
+                now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO processed_sessions (session_id, processed_at) "
+                    "VALUES (?, ?)",
+                    (session_id, now),
+                )
+                self._conn.commit()
+            except sqlite3.Error:
+                logger.warning(
+                    "Failed to mark session %s as processed", session_id, exc_info=True
+                )
+
+    def get_processed_session_ids(self, session_ids: list[str]) -> set[str]:
+        """Check which sessions have been processed."""
+        if not session_ids:
+            return set()
+        with self._lock:
+            try:
+                placeholders = ",".join("?" for _ in session_ids)
+                rows = self._conn.execute(
+                    f"SELECT session_id FROM processed_sessions "
+                    f"WHERE session_id IN ({placeholders})",
+                    session_ids,
+                ).fetchall()
+                return {row[0] for row in rows}
+            except sqlite3.Error:
+                logger.warning("Failed to get processed session IDs", exc_info=True)
+                return set()
+
     # --- Lifecycle ---
 
     def load_all_embeddings(self) -> tuple[list[int], np.ndarray]:
@@ -482,6 +524,7 @@ class InMemoryMemoryStorage(IMemoryStorage):
         self._episodes: dict[int, Episode] = {}
         self._profiles: dict[int, Profile] = {}
         self._utterances: list[dict[str, Any]] = []
+        self._processed: set[str] = set()
         self._next_episode_id = 1
         self._next_profile_id = 1
 
@@ -640,6 +683,16 @@ class InMemoryMemoryStorage(IMemoryStorage):
             for u in self._utterances
             if u["session_id"] == session_id
         ]
+
+    # --- Session processing status ---
+
+    def mark_session_processed(self, session_id: str) -> None:
+        """Record that memory extraction has been attempted."""
+        self._processed.add(session_id)
+
+    def get_processed_session_ids(self, session_ids: list[str]) -> set[str]:
+        """Check which sessions have been processed."""
+        return self._processed & set(session_ids)
 
     # --- Lifecycle ---
 

@@ -290,6 +290,32 @@ class _StorageTests(ABC):
         s = self.make_storage()
         assert s.get_utterances("nonexistent") == []
 
+    # --- Session processing status ---
+
+    def test_mark_and_get_processed(self) -> None:
+        s = self.make_storage()
+        s.mark_session_processed("session-1")
+        s.mark_session_processed("session-2")
+        result = s.get_processed_session_ids(["session-1", "session-2", "session-3"])
+        assert result == {"session-1", "session-2"}
+
+    def test_get_processed_empty(self) -> None:
+        s = self.make_storage()
+        result = s.get_processed_session_ids(["session-1"])
+        assert result == set()
+
+    def test_get_processed_no_ids(self) -> None:
+        s = self.make_storage()
+        result = s.get_processed_session_ids([])
+        assert result == set()
+
+    def test_mark_session_processed_idempotent(self) -> None:
+        s = self.make_storage()
+        s.mark_session_processed("session-1")
+        s.mark_session_processed("session-1")  # should not raise
+        result = s.get_processed_session_ids(["session-1"])
+        assert result == {"session-1"}
+
     # --- Embeddings load ---
 
     def test_load_all_embeddings(self) -> None:

@@ -31,6 +31,7 @@ from voice_pipeline.audio.audio_input import AudioInput
 from voice_pipeline.audio.wakeword import WakewordDetector
 from voice_pipeline.bridge.cpp_bridge import CppBridge
 from voice_pipeline.context.context_builder import ContextBuilder
+from voice_pipeline.context.formatters import format_raw_transcript_block, format_session_summary_block
 from voice_pipeline.core.config import PipelineConfig
 from voice_pipeline.embedding.embedder import create_embedder
 from voice_pipeline.generation.speech_generator import SpeechGenerator
@@ -130,14 +131,27 @@ def main() -> None:
 
         session_id = str(uuid.uuid4())
 
-        # Memory: load profiles + previous session summaries
+        # Memory: load profiles + previous session summaries (3-way logic)
         profiles = memory_storage.get_all_profiles()
         recent = storage.get_recent_sessions(
             config.history.previous_session_count, exclude_session_id=session_id
         )
         recent_session_ids = [s[0] for s in recent]
         session_episodes = memory_storage.get_episodes_by_session_ids(recent_session_ids)
-        session_summaries = [(s[1], session_episodes.get(s[0], [])) for s in recent]
+        processed_ids = memory_storage.get_processed_session_ids(recent_session_ids)
+        session_summaries: list[str] = []
+        for sid, started_at, _ended_at in recent:
+            episodes = session_episodes.get(sid, [])
+            if episodes:
+                session_summaries.append(format_session_summary_block(started_at, episodes))
+            elif sid in processed_ids:
+                continue  # extracted but 0 episodes — skip
+            else:
+                utterances = memory_storage.get_utterances(sid)
+                if utterances:
+                    session_summaries.append(
+                        format_raw_transcript_block(started_at, utterances)
+                    )
         exclude_session_ids = {session_id} | set(recent_session_ids)
 
         async_vap = AsyncVAP(vap)

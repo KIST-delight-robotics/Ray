@@ -57,7 +57,6 @@ def format_session_summary_block(
         - User talked about watching Dune 2 over the weekend.
         - User said the Interstellar OST is their favorite.
     """
-    # Display date + hour:minute only
     display_time = started_at[:16] if len(started_at) >= 16 else started_at
     header = f"[{display_time} session]"
     if not episodes:
@@ -65,6 +64,33 @@ def format_session_summary_block(
     lines = [header]
     for ep in episodes:
         lines.append(f"- {ep.text}")
+    return "\n".join(lines)
+
+
+def format_raw_transcript_block(
+    started_at: str,
+    utterances: list[tuple[str, str, str, int]],
+) -> str:
+    """Format raw utterances as a session block (fallback when no episodes).
+
+    Used for sessions not yet processed by MemoryWriter.
+
+    Args:
+        started_at: Session start timestamp (UTC, '%Y-%m-%d %H:%M:%S').
+        utterances: List of (role, text, timestamp, token_count) tuples.
+
+    Output example::
+
+        [2026-03-28 21:30 session]
+        User: What time is it?
+        Ray: It's 9:30.
+    """
+    display_time = started_at[:16] if len(started_at) >= 16 else started_at
+    header = f"[{display_time} session]"
+    lines = [header]
+    for role, text, _ts, _tc in utterances:
+        label = "User" if role == "user" else "Ray"
+        lines.append(f"{label}: {text}")
     return "\n".join(lines)
 
 

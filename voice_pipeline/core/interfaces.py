@@ -1064,6 +1064,31 @@ class IMemoryStorage(ABC):
             ordered by timestamp.
         """
 
+    # --- Session processing status ---
+
+    @abstractmethod
+    def mark_session_processed(self, session_id: str) -> None:
+        """Record that memory extraction has been attempted for a session.
+
+        Called after process_session completes (even if 0 episodes
+        extracted). Allows distinguishing "not yet processed" from
+        "processed with no results".
+
+        Args:
+            session_id: Session that was processed.
+        """
+
+    @abstractmethod
+    def get_processed_session_ids(self, session_ids: list[str]) -> set[str]:
+        """Check which sessions have been processed.
+
+        Args:
+            session_ids: Session IDs to check.
+
+        Returns:
+            Subset of input IDs that have been marked as processed.
+        """
+
     # --- Lifecycle ---
 
     @abstractmethod

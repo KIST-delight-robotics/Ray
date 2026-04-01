@@ -10,14 +10,19 @@ import json
 import logging
 from typing import Any
 
+import numpy as np
+
 from voice_pipeline.core.config import MemoryConfig
 from voice_pipeline.core.interfaces import ILLM, IEmbedder, IMemoryStorage
 from voice_pipeline.core.types import TokenCounter
+
 from voice_pipeline.memory.prompts import (
+    EPISODE_DEDUP_SCHEMA,
     EPISODE_EXTRACTION_SCHEMA,
     PROFILE_EXTRACTION_SCHEMA,
     PROFILE_MERGE_SCHEMA,
     PROFILE_SCHEMA,
+    build_episode_dedup_messages,
     build_episode_extraction_messages,
     build_profile_extraction_messages,
     build_profile_merge_messages,
@@ -87,11 +92,13 @@ class MemoryWriter:
         episodes = self._extract_episodes(utterances, session_id, session_timestamp)
         if not episodes:
             logger.info("No episodes extracted from session %s", session_id)
+            self._storage.mark_session_processed(session_id)
             return []
 
         # 2. Store episodes + embeddings
         stored = self._store_episodes(episodes)
         if not stored:
+            self._storage.mark_session_processed(session_id)
             return []
 
         # 3. Profile extraction from episodes
@@ -101,6 +108,7 @@ class MemoryWriter:
         if facts:
             self._merge_profiles(facts, session_timestamp)
 
+        self._storage.mark_session_processed(session_id)
         return stored
 
     # ------------------------------------------------------------------
@@ -357,7 +365,7 @@ class MemoryWriter:
         max_tokens: int,
     ) -> list[list[tuple[str, str, str, int]]]:
         """Split utterances into overlapping windows based on token count."""
-        overlap = self._config.write_window_overlap_turns
+        overlap_tokens = int(max_tokens * self._config.write_window_overlap_ratio)
         windows: list[list[tuple[str, str, str, int]]] = []
         current: list[tuple[str, str, str, int]] = []
         current_tokens = 0
@@ -367,13 +375,17 @@ class MemoryWriter:
             # If adding this utterance exceeds limit and we have content, split
             if current_tokens + utt_tokens > max_tokens and current:
                 windows.append(current)
-                # Start new window with overlap from end of previous
-                if overlap > 0 and len(current) >= overlap:
-                    current = list(current[-overlap:])
-                    current_tokens = sum(u[3] for u in current)
-                else:
-                    current = []
-                    current_tokens = 0
+                # Keep utterances from the end that fit within overlap_tokens
+                overlap_utts: list[tuple[str, str, str, int]] = []
+                overlap_sum = 0
+                for u in reversed(current):
+                    if overlap_sum + u[3] > overlap_tokens:
+                        break
+                    overlap_utts.append(u)
+                    overlap_sum += u[3]
+                overlap_utts.reverse()
+                current = overlap_utts
+                current_tokens = overlap_sum
 
             current.append(utt)
             current_tokens += utt_tokens
@@ -384,20 +396,99 @@ class MemoryWriter:
         return windows
 
     def _deduplicate_episodes(self, episodes_per_window: list[list[Episode]]) -> list[Episode]:
-        """Deduplicate episodes across windows using text similarity."""
+        """Deduplicate episodes across windows using embedding similarity + LLM.
+
+        Processes candidates sequentially: after each merge/discard, the
+        affected result embedding is updated so subsequent candidates
+        compare against the current state.
+        """
         if not episodes_per_window:
             return []
 
         result = list(episodes_per_window[0])
+        if not result:
+            for window_episodes in episodes_per_window[1:]:
+                result.extend(window_episodes)
+            return result
+
+        result_embeddings = list(self._embedder.embed_batch([ep.text for ep in result]))
+        threshold = self._config.write_dedup_threshold
 
         for window_episodes in episodes_per_window[1:]:
+            if not window_episodes:
+                continue
+
             for candidate in window_episodes:
-                if not any(
-                    _text_similarity(candidate.text, existing.text) > 0.85 for existing in result
-                ):
+                cand_emb = self._embedder.embed(candidate.text)
+
+                # Find best match in current result
+                best_sim = 0.0
+                best_ri = -1
+                for ri, exist_emb in enumerate(result_embeddings):
+                    sim = float(np.dot(cand_emb, exist_emb) / (
+                        np.linalg.norm(cand_emb) * np.linalg.norm(exist_emb) + 1e-9
+                    ))
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_ri = ri
+
+                if best_sim < threshold:
                     result.append(candidate)
+                    result_embeddings.append(cand_emb)
+                    continue
+
+                # LLM decides how to resolve
+                action = self._resolve_dedup_pair(result[best_ri].text, candidate.text)
+                act = action.get("action", "KEEP_BOTH")
+
+                if act == "MERGE" and action.get("merged"):
+                    result[best_ri] = Episode(
+                        id=result[best_ri].id,
+                        text=action["merged"],
+                        timestamp=result[best_ri].timestamp,
+                        session_id=result[best_ri].session_id,
+                        importance=result[best_ri].importance,
+                        last_cited_at=result[best_ri].last_cited_at,
+                        citation_count=result[best_ri].citation_count,
+                        embedding=None,
+                    )
+                    result_embeddings[best_ri] = self._embedder.embed(action["merged"])
+                elif act == "DISCARD_FIRST":
+                    result[best_ri] = candidate
+                    result_embeddings[best_ri] = cand_emb
+                elif act == "KEEP_BOTH":
+                    result.append(candidate)
+                    result_embeddings.append(cand_emb)
+                # DISCARD_SECOND: keep result[best_ri] as-is
 
         return result
+
+    def _resolve_dedup_pair(self, existing: str, candidate: str) -> dict[str, Any]:
+        """Call LLM to resolve a single duplicate episode pair.
+
+        On failure, falls back to keeping the longer episode.
+        """
+        messages = build_episode_dedup_messages(existing, candidate)
+        text = self._call_llm(messages, EPISODE_DEDUP_SCHEMA)
+        if text is None:
+            return self._dedup_fallback(existing, candidate)
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse episode dedup JSON")
+            return self._dedup_fallback(existing, candidate)
+
+        action = data.get("action")
+        if action not in ("MERGE", "KEEP_BOTH", "DISCARD_FIRST", "DISCARD_SECOND"):
+            return self._dedup_fallback(existing, candidate)
+
+        return data
+
+    @staticmethod
+    def _dedup_fallback(existing: str, candidate: str) -> dict[str, Any]:
+        """Fallback when LLM dedup fails: keep the longer episode."""
+        return {"action": "DISCARD_FIRST" if len(candidate) > len(existing) else "DISCARD_SECOND"}
 
     # ------------------------------------------------------------------
     # LLM helper
@@ -418,15 +509,3 @@ class MemoryWriter:
             return None
 
 
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
-
-
-def _text_similarity(a: str, b: str) -> float:
-    """Token-level Jaccard similarity for deduplication."""
-    tokens_a = set(a.lower().split())
-    tokens_b = set(b.lower().split())
-    if not tokens_a or not tokens_b:
-        return 0.0
-    return len(tokens_a & tokens_b) / len(tokens_a | tokens_b)

@@ -476,8 +476,10 @@ class MemoryConfig:
         write_llm: LLM configuration for memory write (episode/profile extraction).
         write_max_input_tokens: Max tokens per episode extraction window.
             Session is processed in a single call when under this limit.
-        write_window_overlap_turns: Overlap turns between windows to
-            maintain context continuity across splits.
+        write_window_overlap_ratio: Fraction of window tokens to overlap
+            between adjacent windows (0.0–1.0).
+        write_dedup_threshold: Cosine similarity threshold for candidate
+            duplicate episode detection across windows.
         profile_max_content_tokens: Max tokens per profile slot content.
         profile_max_subtopics: Max subtopics per topic before reorganization.
     """
@@ -508,7 +510,8 @@ class MemoryConfig:
         )
     )
     write_max_input_tokens: int = 8000
-    write_window_overlap_turns: int = 2
+    write_window_overlap_ratio: float = 0.25
+    write_dedup_threshold: float = 0.8
     profile_max_content_tokens: int = 128
     profile_max_subtopics: int = 20
 
@@ -543,9 +546,13 @@ class MemoryConfig:
             raise ConfigurationError(
                 f"write_max_input_tokens must be positive, got {self.write_max_input_tokens}"
             )
-        if self.write_window_overlap_turns < 0:
+        if not (0.0 <= self.write_window_overlap_ratio < 1.0):
             raise ConfigurationError(
-                f"write_window_overlap_turns must be >= 0, got {self.write_window_overlap_turns}"
+                f"write_window_overlap_ratio must be in [0, 1), got {self.write_window_overlap_ratio}"
+            )
+        if not (0.0 < self.write_dedup_threshold <= 1.0):
+            raise ConfigurationError(
+                f"write_dedup_threshold must be in (0, 1], got {self.write_dedup_threshold}"
             )
         if self.profile_max_content_tokens <= 0:
             raise ConfigurationError(
