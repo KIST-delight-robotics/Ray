@@ -42,9 +42,19 @@
 - **utterance에 `token_count` 저장**: 윈도우 분할 시 재토큰화 없이 저장된 값을 합산. Phase 4에서 orchestrator가 utterance 저장 시 이미 계산된 값을 전달.
 
 
+## Memory Integration (Phase 4)
+
+- **`on_session_end` 콜백 패턴**: SessionManager가 MemoryWriter를 직접 의존하지 않도록 `Callable[[str, str], None]` 콜백으로 분리. `__main__.py`에서 `write_executor.submit(memory_writer.process_session, ...)` 클로저를 주입. SessionManager는 메모리 시스템 존재 여부를 모름.
+- **session_id를 factory에서 생성**: 기존 SessionManager에서 uuid를 생성했으나, factory에서 생성하도록 변경. factory가 profiles/previous sessions 로딩 시 현재 session_id를 exclude 조건에 사용해야 하므로, factory가 생성하고 `SessionComponents.session_id`로 반환.
+- **Utterance 저장 위치: Orchestrator**: history 저장과 동일 시점에 `memory_storage.add_utterance()` 호출. SpeechGenerator나 ContextBuilder가 아닌 Orchestrator에서 수행하는 이유: 최종 확정 텍스트만 저장을 보장 (barge-in truncation 반영).
+- **NumpyVectorIndex / SQLiteMemoryStorage에 threading.Lock 추가**: process-level 싱글턴이 3개 쓰레드(메인, SpeechGenerator 백그라운드, write_executor)에서 접근. NumpyVectorIndex는 `_ids`/`_matrix` 동시 읽기/쓰기 보호, SQLiteMemoryStorage는 단일 커넥션 직렬화.
+- **임베딩 인스턴스 공유 결정**: similarity와 memory가 같은 모델을 사용하지만, 현재는 별도 인스턴스로 유지. similarity는 `SimilarityConfig`로 생성, memory embedder는 `MemoryConfig`로 생성. 모델이 동일해도 config 경로가 달라 강제 공유 시 config 의존성이 복잡해짐. 메모리 사용량이 문제되면 추후 통합.
+- **이전 세션 요약 = 에피소드 그대로 사용**: `get_episodes_by_session_ids()`로 이전 세션 에피소드를 로드하여 `format_session_summary_block()`으로 포맷. 별도 요약 LLM 호출 없음 (Phase 3 결정 확정).
+- **MemoryRetriever 매 세션 새로 생성**: retained buffer를 세션 간 격리하기 위해 factory에서 매번 생성. process-level 싱글턴인 memory_storage/vector_index/embedder를 주입받으므로 생성 비용 낮음.
+
+
 ### 차후 고려
 
-- **임베딩 인스턴스 공유**: 현재 similarity와 memory가 각자 embedder를 생성. 같은 모델이면 `__main__.py`에서 하나 만들어 양쪽에 주입하여 메모리 절약 가능. Phase 4 와이어링 시 결정.
-- **SimilarityConfig/MemoryConfig 임베딩 필드 중복**: 양쪽 config에 model, use_onnx 등이 중복 존재. 공유 EmbeddingConfig 추출 여부는 와이어링 시 실제 사용 패턴 보고 판단.
+- **SimilarityConfig/MemoryConfig 임베딩 필드 중복**: 양쪽 config에 model, use_onnx 등이 중복 존재. 공유 EmbeddingConfig 추출 여부는 실제 사용 패턴 보고 판단.
 - **similarity.compare() 임베딩 캐싱**: TurnDetector 호출 패턴에서 `a`(이전 텍스트)가 반복됨. 한쪽 임베딩을 캐싱하면 추론 비용 절반 가능. 기존 코드도 동일 패턴이라 regression은 아님.
 - **similarity 유닛 테스트 부재**: EmbeddingSimilarity, DiffLibSimilarity, create_similarity 팩토리에 대한 유닛 테스트가 없음. 현재는 TurnDetector 테스트에서 ISimilarity를 mock하여 간접 검증.

@@ -6,9 +6,9 @@ import logging
 import queue
 import threading
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from voice_pipeline.core.config import SessionConfig
 from voice_pipeline.core.interfaces import (
@@ -24,6 +24,8 @@ from voice_pipeline.orchestrator.orchestrator import Orchestrator
 
 logger = logging.getLogger("voice_pipeline.session")
 
+_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
 
 @dataclass
 class SessionComponents:
@@ -31,6 +33,7 @@ class SessionComponents:
 
     orchestrator: Orchestrator
     history: IConversationHistory
+    session_id: str
 
 
 class SessionManager(ISessionManager):
@@ -51,6 +54,7 @@ class SessionManager(ISessionManager):
         greeting_audio_path: str,
         farewell_audio_path: str,
         audio_queue: queue.Queue[AudioFrame] | None = None,
+        on_session_end: Callable[[str, str], None] | None = None,
     ) -> None:
         self._audio_input = audio_input
         self._wakeword = wakeword
@@ -60,6 +64,7 @@ class SessionManager(ISessionManager):
         self._config = config
         self._greeting_audio_path = greeting_audio_path
         self._farewell_audio_path = farewell_audio_path
+        self._on_session_end = on_session_end
 
         self._audio_queue: queue.Queue[AudioFrame] = audio_queue or queue.Queue(
             maxsize=config.audio_queue_size
@@ -71,6 +76,8 @@ class SessionManager(ISessionManager):
         self._session_lock = threading.Lock()
         self._current_orchestrator: Orchestrator | None = None
         self._current_history: IConversationHistory | None = None
+        self._current_session_id: str | None = None
+        self._session_started_at: str | None = None
 
     @property
     def audio_queue(self) -> queue.Queue[AudioFrame]:
@@ -109,6 +116,8 @@ class SessionManager(ISessionManager):
                     self._current_history.save()
                 except Exception:
                     logger.warning("History save error on shutdown", exc_info=True)
+                self._trigger_session_end()
+                self._session_started = False
 
     # ------------------------------------------------------------------
     # Mode implementations
@@ -183,11 +192,12 @@ class SessionManager(ISessionManager):
         with self._session_lock:
             self._current_orchestrator = components.orchestrator
             self._current_history = components.history
+            self._current_session_id = components.session_id
+            self._session_started_at = datetime.now(UTC).strftime(_TIMESTAMP_FORMAT)
+            self._session_started = True
 
-        session_id = str(uuid.uuid4())
-        self._current_history.new_session(session_id)
-        self._session_started = True
-        logger.info("Session started: %s", session_id)
+        self._current_history.new_session(components.session_id)
+        logger.info("Session started: %s", components.session_id)
 
         try:
             self._current_orchestrator.run(self._audio_queue)
@@ -228,6 +238,7 @@ class SessionManager(ISessionManager):
                 self._current_history.save()
             except Exception:
                 logger.warning("History save error in farewell", exc_info=True)
+            self._trigger_session_end()
 
         self._session_started = False
         self._drain_audio_queue()
@@ -236,9 +247,28 @@ class SessionManager(ISessionManager):
         with self._session_lock:
             self._current_orchestrator = None
             self._current_history = None
+            self._current_session_id = None
+            self._session_started_at = None
 
         self._mode = SystemMode.SLEEP
         logger.info("Session ended — returning to SLEEP")
+
+    # ------------------------------------------------------------------
+    # Memory write trigger
+    # ------------------------------------------------------------------
+
+    def _trigger_session_end(self) -> None:
+        """Invoke the on_session_end callback if configured."""
+        if self._on_session_end is None:
+            return
+        session_id = self._current_session_id
+        started_at = self._session_started_at
+        if session_id is None or started_at is None:
+            return
+        try:
+            self._on_session_end(session_id, started_at)
+        except Exception:
+            logger.warning("on_session_end callback failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Helpers

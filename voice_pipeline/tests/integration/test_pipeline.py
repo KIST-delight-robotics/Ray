@@ -645,7 +645,11 @@ class TestFullSessionLifecycle:
                 tts_config=TTS_CONFIG,
                 audio_config=AUDIO_CONFIG,
             )
-            return SessionComponents(orchestrator=orchestrator, history=history)
+            import uuid
+
+            return SessionComponents(
+                orchestrator=orchestrator, history=history, session_id=str(uuid.uuid4())
+            )
 
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=SESSION_CONFIG.audio_queue_size)
 

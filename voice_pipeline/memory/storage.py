@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +28,16 @@ class SQLiteMemoryStorage(IMemoryStorage):
     Opens its own connection to the shared DB file (WAL mode allows
     concurrent connections). Manages episodes, profiles, utterances,
     and FTS5 index tables.
+
+    Thread-safe: a lock serializes all connection access so that
+    concurrent callers (orchestrator main thread, retriever background
+    thread, write-executor thread) do not corrupt the connection state.
     """
 
     def __init__(self, config: MemoryConfig) -> None:
         self._db_path = config.db_path
         self._dimension = config.embedding_dimension
+        self._lock = threading.Lock()
         self._conn = self._open_db(config.db_path)
         self._create_tables()
         self._migrate()
@@ -175,181 +181,191 @@ class SQLiteMemoryStorage(IMemoryStorage):
             if episode.embedding is not None
             else None
         )
-        try:
-            cursor = self._conn.execute(
-                "INSERT INTO episodes "
-                "(text, timestamp, session_id, importance, last_cited_at, "
-                "citation_count, embedding) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    episode.text,
-                    episode.timestamp,
-                    episode.session_id,
-                    episode.importance,
-                    episode.last_cited_at,
-                    episode.citation_count,
-                    embedding_blob,
-                ),
-            )
-            self._conn.commit()
-            return cursor.lastrowid
-        except sqlite3.Error:
-            logger.warning("Failed to add episode", exc_info=True)
-            return None
+        with self._lock:
+            try:
+                cursor = self._conn.execute(
+                    "INSERT INTO episodes "
+                    "(text, timestamp, session_id, importance, last_cited_at, "
+                    "citation_count, embedding) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        episode.text,
+                        episode.timestamp,
+                        episode.session_id,
+                        episode.importance,
+                        episode.last_cited_at,
+                        episode.citation_count,
+                        embedding_blob,
+                    ),
+                )
+                self._conn.commit()
+                return cursor.lastrowid
+            except sqlite3.Error:
+                logger.warning("Failed to add episode", exc_info=True)
+                return None
 
     def get_episode(self, episode_id: int) -> Episode | None:
         """Retrieve a single episode by ID."""
-        try:
-            row = self._conn.execute(
-                "SELECT id, text, timestamp, session_id, importance, "
-                "last_cited_at, citation_count, embedding "
-                "FROM episodes WHERE id = ?",
-                (episode_id,),
-            ).fetchone()
-            if row is None:
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT id, text, timestamp, session_id, importance, "
+                    "last_cited_at, citation_count, embedding "
+                    "FROM episodes WHERE id = ?",
+                    (episode_id,),
+                ).fetchone()
+                if row is None:
+                    return None
+                return self._row_to_episode(row)
+            except sqlite3.Error:
+                logger.warning("Failed to get episode %d", episode_id, exc_info=True)
                 return None
-            return self._row_to_episode(row)
-        except sqlite3.Error:
-            logger.warning("Failed to get episode %d", episode_id, exc_info=True)
-            return None
 
     def get_episodes_by_ids(self, ids: list[int]) -> list[Episode]:
         """Retrieve multiple episodes by ID."""
         if not ids:
             return []
         placeholders = ",".join("?" for _ in ids)
-        try:
-            rows = self._conn.execute(
-                f"SELECT id, text, timestamp, session_id, importance, "
-                f"last_cited_at, citation_count, embedding "
-                f"FROM episodes WHERE id IN ({placeholders})",
-                ids,
-            ).fetchall()
-            return [self._row_to_episode(row) for row in rows]
-        except sqlite3.Error:
-            logger.warning("Failed to get episodes by ids", exc_info=True)
-            return []
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    f"SELECT id, text, timestamp, session_id, importance, "
+                    f"last_cited_at, citation_count, embedding "
+                    f"FROM episodes WHERE id IN ({placeholders})",
+                    ids,
+                ).fetchall()
+                return [self._row_to_episode(row) for row in rows]
+            except sqlite3.Error:
+                logger.warning("Failed to get episodes by ids", exc_info=True)
+                return []
 
     def get_episodes_by_session_ids(self, session_ids: list[str]) -> dict[str, list[Episode]]:
         """Retrieve episodes grouped by session ID."""
         if not session_ids:
             return {}
         placeholders = ",".join("?" for _ in session_ids)
-        try:
-            rows = self._conn.execute(
-                f"SELECT id, text, timestamp, session_id, importance, "
-                f"last_cited_at, citation_count, embedding "
-                f"FROM episodes WHERE session_id IN ({placeholders}) "
-                f"ORDER BY session_id, timestamp",
-                session_ids,
-            ).fetchall()
-            result: dict[str, list[Episode]] = {}
-            for row in rows:
-                ep = self._row_to_episode(row)
-                result.setdefault(ep.session_id, []).append(ep)
-            return result
-        except sqlite3.Error:
-            logger.warning("Failed to get episodes by session ids", exc_info=True)
-            return {}
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    f"SELECT id, text, timestamp, session_id, importance, "
+                    f"last_cited_at, citation_count, embedding "
+                    f"FROM episodes WHERE session_id IN ({placeholders}) "
+                    f"ORDER BY session_id, timestamp",
+                    session_ids,
+                ).fetchall()
+                result: dict[str, list[Episode]] = {}
+                for row in rows:
+                    ep = self._row_to_episode(row)
+                    result.setdefault(ep.session_id, []).append(ep)
+                return result
+            except sqlite3.Error:
+                logger.warning("Failed to get episodes by session ids", exc_info=True)
+                return {}
 
     def update_episode_cited(self, episode_id: int, cited_at: str) -> None:
         """Update the last_cited_at timestamp for an episode."""
-        try:
-            self._conn.execute(
-                "UPDATE episodes SET last_cited_at = ? WHERE id = ?",
-                (cited_at, episode_id),
-            )
-            self._conn.commit()
-        except sqlite3.Error:
-            logger.warning("Failed to update episode %d cited_at", episode_id, exc_info=True)
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "UPDATE episodes SET last_cited_at = ? WHERE id = ?",
+                    (cited_at, episode_id),
+                )
+                self._conn.commit()
+            except sqlite3.Error:
+                logger.warning("Failed to update episode %d cited_at", episode_id, exc_info=True)
 
     def update_episode_embedding(self, episode_id: int, embedding: np.ndarray) -> None:
         """Update the embedding vector for an episode."""
-        try:
-            self._conn.execute(
-                "UPDATE episodes SET embedding = ? WHERE id = ?",
-                (embedding.astype(np.float32).tobytes(), episode_id),
-            )
-            self._conn.commit()
-        except sqlite3.Error:
-            logger.warning("Failed to update episode %d embedding", episode_id, exc_info=True)
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "UPDATE episodes SET embedding = ? WHERE id = ?",
+                    (embedding.astype(np.float32).tobytes(), episode_id),
+                )
+                self._conn.commit()
+            except sqlite3.Error:
+                logger.warning("Failed to update episode %d embedding", episode_id, exc_info=True)
 
     def search_bm25(self, query: str, top_k: int) -> list[tuple[int, float]]:
         """BM25 search over episodes using FTS5."""
         safe_query = self._sanitize_fts_query(query)
         if not safe_query:
             return []
-        try:
-            rows = self._conn.execute(
-                "SELECT rowid, rank FROM episodes_fts "
-                "WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?",
-                (safe_query, top_k),
-            ).fetchall()
-            # FTS5 rank is negative (more negative = better). Negate for
-            # a positive score where higher = better.
-            return [(row[0], -row[1]) for row in rows]
-        except sqlite3.Error:
-            logger.warning("BM25 search failed", exc_info=True)
-            return []
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT rowid, rank FROM episodes_fts "
+                    "WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?",
+                    (safe_query, top_k),
+                ).fetchall()
+                # FTS5 rank is negative (more negative = better). Negate for
+                # a positive score where higher = better.
+                return [(row[0], -row[1]) for row in rows]
+            except sqlite3.Error:
+                logger.warning("BM25 search failed", exc_info=True)
+                return []
 
     # --- Profile ---
 
     def get_all_profiles(self) -> list[Profile]:
         """Load all user profile slots."""
-        try:
-            rows = self._conn.execute(
-                "SELECT id, topic, sub_topic, content, updated_at FROM profiles"
-            ).fetchall()
-            return [
-                Profile(
-                    id=row[0],
-                    topic=row[1],
-                    sub_topic=row[2],
-                    content=row[3],
-                    updated_at=row[4],
-                )
-                for row in rows
-            ]
-        except sqlite3.Error:
-            logger.warning("Failed to load profiles", exc_info=True)
-            return []
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT id, topic, sub_topic, content, updated_at FROM profiles"
+                ).fetchall()
+                return [
+                    Profile(
+                        id=row[0],
+                        topic=row[1],
+                        sub_topic=row[2],
+                        content=row[3],
+                        updated_at=row[4],
+                    )
+                    for row in rows
+                ]
+            except sqlite3.Error:
+                logger.warning("Failed to load profiles", exc_info=True)
+                return []
 
     def upsert_profile(self, profile: Profile) -> int | None:
         """Insert or update a profile slot."""
-        try:
-            if profile.id is not None:
-                self._conn.execute(
-                    "UPDATE profiles SET topic = ?, sub_topic = ?, "
-                    "content = ?, updated_at = ? WHERE id = ?",
-                    (
-                        profile.topic,
-                        profile.sub_topic,
-                        profile.content,
-                        profile.updated_at,
-                        profile.id,
-                    ),
-                )
-                self._conn.commit()
-                return profile.id
-            else:
-                cursor = self._conn.execute(
-                    "INSERT INTO profiles (topic, sub_topic, content, updated_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (profile.topic, profile.sub_topic, profile.content, profile.updated_at),
-                )
-                self._conn.commit()
-                return cursor.lastrowid
-        except sqlite3.Error:
-            logger.warning("Failed to upsert profile", exc_info=True)
-            return None
+        with self._lock:
+            try:
+                if profile.id is not None:
+                    self._conn.execute(
+                        "UPDATE profiles SET topic = ?, sub_topic = ?, "
+                        "content = ?, updated_at = ? WHERE id = ?",
+                        (
+                            profile.topic,
+                            profile.sub_topic,
+                            profile.content,
+                            profile.updated_at,
+                            profile.id,
+                        ),
+                    )
+                    self._conn.commit()
+                    return profile.id
+                else:
+                    cursor = self._conn.execute(
+                        "INSERT INTO profiles (topic, sub_topic, content, updated_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (profile.topic, profile.sub_topic, profile.content, profile.updated_at),
+                    )
+                    self._conn.commit()
+                    return cursor.lastrowid
+            except sqlite3.Error:
+                logger.warning("Failed to upsert profile", exc_info=True)
+                return None
 
     def delete_profile(self, profile_id: int) -> None:
         """Delete a profile slot."""
-        try:
-            self._conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
-            self._conn.commit()
-        except sqlite3.Error:
-            logger.warning("Failed to delete profile %d", profile_id, exc_info=True)
+        with self._lock:
+            try:
+                self._conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+                self._conn.commit()
+            except sqlite3.Error:
+                logger.warning("Failed to delete profile %d", profile_id, exc_info=True)
 
     # --- Utterance ---
 
@@ -357,66 +373,72 @@ class SQLiteMemoryStorage(IMemoryStorage):
         self, session_id: str, role: str, text: str, timestamp: str, token_count: int = 0
     ) -> None:
         """Store a conversation utterance."""
-        try:
-            self._conn.execute(
-                "INSERT INTO utterances (session_id, role, text, timestamp, token_count) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (session_id, role, text, timestamp, token_count),
-            )
-            self._conn.commit()
-        except sqlite3.Error:
-            logger.warning("Failed to add utterance", exc_info=True)
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "INSERT INTO utterances (session_id, role, text, timestamp, token_count) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (session_id, role, text, timestamp, token_count),
+                )
+                self._conn.commit()
+            except sqlite3.Error:
+                logger.warning("Failed to add utterance", exc_info=True)
 
     def get_utterances(self, session_id: str) -> list[tuple[str, str, str, int]]:
         """Retrieve all utterances for a session."""
-        try:
-            rows = self._conn.execute(
-                "SELECT role, text, timestamp, token_count FROM utterances "
-                "WHERE session_id = ? ORDER BY timestamp, id",
-                (session_id,),
-            ).fetchall()
-            return [(row[0], row[1], row[2], row[3]) for row in rows]
-        except sqlite3.Error:
-            logger.warning("Failed to get utterances for session %s", session_id, exc_info=True)
-            return []
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT role, text, timestamp, token_count FROM utterances "
+                    "WHERE session_id = ? ORDER BY timestamp, id",
+                    (session_id,),
+                ).fetchall()
+                return [(row[0], row[1], row[2], row[3]) for row in rows]
+            except sqlite3.Error:
+                logger.warning(
+                    "Failed to get utterances for session %s", session_id, exc_info=True
+                )
+                return []
 
     # --- Lifecycle ---
 
     def load_all_embeddings(self) -> tuple[list[int], np.ndarray]:
         """Load all episode embeddings for vector index initialization."""
-        try:
-            rows = self._conn.execute(
-                "SELECT id, embedding FROM episodes WHERE embedding IS NOT NULL"
-            ).fetchall()
-            if not rows:
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT id, embedding FROM episodes WHERE embedding IS NOT NULL"
+                ).fetchall()
+                if not rows:
+                    return [], np.empty((0, self._dimension), dtype=np.float32)
+                expected_bytes = self._dimension * 4  # float32
+                ids = []
+                vecs = []
+                for row in rows:
+                    if len(row[1]) != expected_bytes:
+                        logger.warning(
+                            "Skipping episode %d: embedding size %d != expected %d",
+                            row[0],
+                            len(row[1]),
+                            expected_bytes,
+                        )
+                        continue
+                    ids.append(row[0])
+                    vecs.append(np.frombuffer(row[1], dtype=np.float32).copy())
+                if not ids:
+                    return [], np.empty((0, self._dimension), dtype=np.float32)
+                return ids, np.stack(vecs)
+            except (sqlite3.Error, ValueError):
+                logger.warning("Failed to load embeddings", exc_info=True)
                 return [], np.empty((0, self._dimension), dtype=np.float32)
-            expected_bytes = self._dimension * 4  # float32
-            ids = []
-            vecs = []
-            for row in rows:
-                if len(row[1]) != expected_bytes:
-                    logger.warning(
-                        "Skipping episode %d: embedding size %d != expected %d",
-                        row[0],
-                        len(row[1]),
-                        expected_bytes,
-                    )
-                    continue
-                ids.append(row[0])
-                vecs.append(np.frombuffer(row[1], dtype=np.float32).copy())
-            if not ids:
-                return [], np.empty((0, self._dimension), dtype=np.float32)
-            return ids, np.stack(vecs)
-        except (sqlite3.Error, ValueError):
-            logger.warning("Failed to load embeddings", exc_info=True)
-            return [], np.empty((0, self._dimension), dtype=np.float32)
 
     def close(self) -> None:
         """Close the database connection."""
-        try:
-            self._conn.close()
-        except sqlite3.Error:
-            logger.debug("Error closing memory DB connection", exc_info=True)
+        with self._lock:
+            try:
+                self._conn.close()
+            except sqlite3.Error:
+                logger.debug("Error closing memory DB connection", exc_info=True)
 
     # --- Internal ---
 

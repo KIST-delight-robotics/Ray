@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from voice_pipeline.core.config import AudioConfig, OrchestratorConfig, TTSConfig
 from voice_pipeline.core.interfaces import (
@@ -15,6 +16,7 @@ from voice_pipeline.core.interfaces import (
     IConversationHistory,
     ICppBridge,
     ILEDController,
+    IMemoryStorage,
     ISpeechGenerator,
     ITurnDetector,
     IUtteranceTruncator,
@@ -26,6 +28,7 @@ from voice_pipeline.core.types import (
     LEDState,
     PlaybackState,
     ResponseData,
+    TokenCounter,
     TurnDecision,
 )
 from voice_pipeline.tts.utterance_truncator import DurationRatioTruncator
@@ -61,6 +64,9 @@ class Orchestrator:
         config: OrchestratorConfig,
         tts_config: TTSConfig,
         audio_config: AudioConfig,
+        memory_storage: IMemoryStorage | None = None,
+        session_id: str | None = None,
+        token_counter: TokenCounter | None = None,
     ) -> None:
         self._asr = asr
         self._turn_detector = turn_detector
@@ -72,6 +78,9 @@ class Orchestrator:
         self._config = config
         self._tts_config = tts_config
         self._audio_config = audio_config
+        self._memory_storage = memory_storage
+        self._session_id = session_id
+        self._token_counter = token_counter
 
         # External stop signal
         self._stop_event = threading.Event()
@@ -414,6 +423,7 @@ class Orchestrator:
             return
 
         self._user_msg_id = self._history.add_user_message(user_text)
+        self._save_utterance("user", user_text)
         self._turn_detector.notify_turn_complete("user", user_text)
 
         self._asr.reset()
@@ -495,6 +505,7 @@ class Orchestrator:
             if self._current_response and self._current_response.metrics_list:
                 metrics = self._current_response.metrics_list[-1]
             self._assistant_msg_id = self._history.add_assistant_message(text, metrics)
+            self._save_utterance("assistant", text)
             self._turn_detector.notify_turn_complete("robot", text)
 
         self._turn_detector.reset()
@@ -538,6 +549,7 @@ class Orchestrator:
             if truncated:
                 logger.info("Truncated (%s): %r", trunc_method, truncated)
                 self._assistant_msg_id = self._history.add_assistant_message(truncated)
+                self._save_utterance("assistant", truncated)
                 self._turn_detector.notify_turn_complete("robot", truncated)
         else:
             # Case C: stream not done — approximate now, correct later
@@ -550,6 +562,7 @@ class Orchestrator:
                 logger.info("Truncated (%s): %r", trunc_method, truncated)
                 msg_id = self._history.add_assistant_message(truncated)
                 self._assistant_msg_id = msg_id
+                self._save_utterance("assistant", truncated)
                 self._turn_detector.notify_turn_complete("robot", truncated)
                 self._pending_truncation = _PendingTruncation(
                     msg_id=msg_id,
@@ -672,6 +685,25 @@ class Orchestrator:
         cleaned = re.sub(r"[^\w\s]", "", text.lower())
         words = set(cleaned.split())
         return any(kw.lower() in words for kw in self._config.exit_keywords)
+
+    # ------------------------------------------------------------------
+    # Utterance storage (memory system)
+    # ------------------------------------------------------------------
+
+    def _save_utterance(self, role: str, text: str) -> None:
+        """Store an utterance for later memory extraction."""
+        if self._memory_storage is None or self._session_id is None:
+            return
+        if not text:
+            return
+        try:
+            timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+            token_count = self._token_counter(text) if self._token_counter else 0
+            self._memory_storage.add_utterance(
+                self._session_id, role, text, timestamp, token_count
+            )
+        except Exception:
+            logger.warning("Failed to save %s utterance", role, exc_info=True)
 
     # ------------------------------------------------------------------
     # Helpers

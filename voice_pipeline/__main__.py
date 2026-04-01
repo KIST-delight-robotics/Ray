@@ -23,6 +23,7 @@ except Exception:
     _asound = None
 import queue
 import signal
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from voice_pipeline.asr.asr import GoogleCloudASR
@@ -31,6 +32,7 @@ from voice_pipeline.audio.wakeword import WakewordDetector
 from voice_pipeline.bridge.cpp_bridge import CppBridge
 from voice_pipeline.context.context_builder import ContextBuilder
 from voice_pipeline.core.config import PipelineConfig
+from voice_pipeline.embedding.embedder import create_embedder
 from voice_pipeline.generation.speech_generator import SpeechGenerator
 from voice_pipeline.history.conversation_history import ConversationHistory
 from voice_pipeline.history.storage_backend import create_storage_backend
@@ -39,6 +41,10 @@ from voice_pipeline.llm.llm import OpenAILLM
 from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
 from voice_pipeline.llm.token_counter import create_token_counter
 from voice_pipeline.llm.tools import get_tools_token_cost
+from voice_pipeline.memory.retriever import MemoryRetriever
+from voice_pipeline.memory.storage import SQLiteMemoryStorage
+from voice_pipeline.memory.vector_index import NumpyVectorIndex
+from voice_pipeline.memory.writer import MemoryWriter
 from voice_pipeline.orchestrator.orchestrator import Orchestrator
 from voice_pipeline.session.session_manager import SessionComponents, SessionManager
 from voice_pipeline.similarity.similarity import create_similarity
@@ -81,6 +87,24 @@ def main() -> None:
     token_counter = create_token_counter(config.llm.model)
     tools_token_cost = get_tools_token_cost(config.llm.tools)
 
+    # --- Memory system (process-level) ---
+    embedder = create_embedder(
+        config.memory.embedding_model,
+        config.memory.embedding_backend,
+        use_onnx=config.memory.use_onnx,
+        expected_dimension=config.memory.embedding_dimension,
+    )
+    memory_storage = SQLiteMemoryStorage(config.memory)
+    vector_index = NumpyVectorIndex()
+    ids, vectors = memory_storage.load_all_embeddings()
+    if ids:
+        vector_index.load(ids, vectors)
+    write_llm = OpenAILLM(config.memory.write_llm)
+    memory_writer = MemoryWriter(
+        memory_storage, vector_index, embedder, write_llm, config.memory, token_counter
+    )
+    write_executor = ThreadPoolExecutor(max_workers=1)
+
     # --- Pre-generate greeting/farewell audio ---
     greeting_paths = ensure_greeting_audio(tts, config.tts, config.greeting_audio)
 
@@ -104,17 +128,32 @@ def main() -> None:
         vap.reset()
         turngpt.reset()
 
+        session_id = str(uuid.uuid4())
+
+        # Memory: load profiles + previous session summaries
+        profiles = memory_storage.get_all_profiles()
+        recent = storage.get_recent_sessions(
+            config.history.previous_session_count, exclude_session_id=session_id
+        )
+        recent_session_ids = [s[0] for s in recent]
+        session_episodes = memory_storage.get_episodes_by_session_ids(recent_session_ids)
+        session_summaries = [(s[1], session_episodes.get(s[0], [])) for s in recent]
+        exclude_session_ids = {session_id} | set(recent_session_ids)
+
         async_vap = AsyncVAP(vap)
         async_turngpt = AsyncTurnGPT(turngpt)
         prev_async.extend([async_vap, async_turngpt])
 
         history = ConversationHistory(storage, token_counter)
+        retriever = MemoryRetriever(memory_storage, vector_index, embedder, config.memory)
         context_builder = ContextBuilder(
             history,
             config.history,
             DEFAULT_SYSTEM_PROMPT,
             token_counter,
             tools_token_cost=tools_token_cost,
+            profiles=profiles,
+            session_summaries=session_summaries,
         )
         turn_detector = TurnDetector(
             async_vap,
@@ -124,7 +163,16 @@ def main() -> None:
             config.similarity,
             config.audio,
         )
-        generator = SpeechGenerator(context_builder, llm, tts, config.speech_generator, executor)
+        generator = SpeechGenerator(
+            context_builder,
+            llm,
+            tts,
+            config.speech_generator,
+            executor,
+            retriever=retriever,
+            history=history,
+            exclude_session_ids=exclude_session_ids,
+        )
         truncator = TimestampTruncator()
         orchestrator = Orchestrator(
             asr=asr,
@@ -137,8 +185,15 @@ def main() -> None:
             config=config.orchestrator,
             tts_config=config.tts,
             audio_config=config.audio,
+            memory_storage=memory_storage,
+            session_id=session_id,
+            token_counter=token_counter,
         )
-        return SessionComponents(orchestrator=orchestrator, history=history)
+        return SessionComponents(orchestrator=orchestrator, history=history, session_id=session_id)
+
+    # --- Memory write callback ---
+    def on_session_end(session_id: str, started_at: str) -> None:
+        write_executor.submit(memory_writer.process_session, session_id, started_at)
 
     # --- SessionManager ---
     sm = SessionManager(
@@ -151,6 +206,7 @@ def main() -> None:
         greeting_audio_path=greeting_paths.greeting,
         farewell_audio_path=greeting_paths.farewell,
         audio_queue=audio_queue,
+        on_session_end=on_session_end,
     )
 
     # --- Signal handling ---
@@ -168,11 +224,13 @@ def main() -> None:
         for wrapper in prev_async:
             wrapper.stop()
         prev_async.clear()
+        write_executor.shutdown(wait=True)
         executor.shutdown(wait=True)
         asr.stop()
         bridge.disconnect()
         wakeword.close()
         led.close()
+        memory_storage.close()
 
 
 if __name__ == "__main__":

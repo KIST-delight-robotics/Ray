@@ -1012,3 +1012,133 @@ class TestAwaitingCancel:
         orch._run_frame(q)
 
         mocks["generator"].cancel.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Utterance storage (memory integration)
+# ---------------------------------------------------------------------------
+
+
+def _make_orchestrator_with_memory(
+    **kwargs: object,
+) -> tuple[Orchestrator, dict[str, MagicMock]]:
+    """Create an Orchestrator with memory_storage, session_id, and token_counter."""
+    mocks = {
+        "asr": MagicMock(),
+        "turn_detector": MagicMock(),
+        "generator": MagicMock(),
+        "bridge": MagicMock(),
+        "history": MagicMock(),
+        "truncator": MagicMock(),
+        "led": MagicMock(),
+        "memory_storage": MagicMock(),
+        "token_counter": MagicMock(return_value=5),
+    }
+
+    mocks["asr"].get_text.return_value = ""
+    mocks["turn_detector"].process_frame.return_value = TurnDecision.none()
+    mocks["generator"].state = GeneratorState.IDLE
+    mocks["generator"].stream_done = False
+    mocks["generator"].poll_audio.return_value = None
+    mocks["bridge"].poll_event.return_value = None
+    mocks["history"].add_user_message.return_value = 0
+    mocks["history"].add_assistant_message.return_value = 1
+
+    orch_kwargs = {k: v for k, v in kwargs.items() if k in OrchestratorConfig.__dataclass_fields__}
+    config = OrchestratorConfig(**orch_kwargs)
+    tts_config = TTSConfig(output_sample_rate=int(kwargs.get("output_sample_rate", 24000)))
+    audio_config = AudioConfig()
+
+    orch = Orchestrator(
+        asr=mocks["asr"],
+        turn_detector=mocks["turn_detector"],
+        speech_generator=mocks["generator"],
+        cpp_bridge=mocks["bridge"],
+        history=mocks["history"],
+        truncator=mocks["truncator"],
+        led=mocks["led"],
+        config=config,
+        tts_config=tts_config,
+        audio_config=audio_config,
+        memory_storage=mocks["memory_storage"],
+        session_id="test-session-id",
+        token_counter=mocks["token_counter"],
+    )
+    return orch, mocks
+
+
+class TestUtteranceStorage:
+    def test_user_utterance_saved_on_begin_streaming(self) -> None:
+        """User utterance is saved when streaming begins."""
+        orch, mocks = _make_orchestrator_with_memory()
+        orch._start_session()
+        mocks["generator"].state = GeneratorState.STREAMING
+        mocks["generator"].input_text = "hello there"
+        mocks["generator"].poll_audio.return_value = None
+        mocks["generator"].stream_done = False
+
+        orch._begin_streaming()
+
+        mocks["memory_storage"].add_utterance.assert_called_once()
+        call_args = mocks["memory_storage"].add_utterance.call_args
+        assert call_args[0][0] == "test-session-id"
+        assert call_args[0][1] == "user"
+        assert call_args[0][2] == "hello there"
+
+    def test_assistant_utterance_saved_on_playback_complete(self) -> None:
+        """Assistant utterance is saved on normal playback completion."""
+        orch, mocks = _make_orchestrator_with_memory()
+        orch._start_session()
+        orch._playback_state = PlaybackState.PLAYING
+        orch._current_response = ResponseData(text="I'm fine", audio=b"\x00" * 100)
+
+        orch._on_playback_complete()
+
+        calls = mocks["memory_storage"].add_utterance.call_args_list
+        assert len(calls) == 1
+        assert calls[0][0][1] == "assistant"
+        assert calls[0][0][2] == "I'm fine"
+
+    def test_assistant_utterance_saved_on_interrupt(self) -> None:
+        """Truncated assistant utterance is saved on barge-in."""
+        orch, mocks = _make_orchestrator_with_memory()
+        orch._start_session()
+        orch._playback_state = PlaybackState.STOP_PENDING
+        orch._playback_start_time = time.monotonic() - 1.0
+        orch._stop_pending_time = time.monotonic() - 0.5
+        orch._current_response = ResponseData(
+            text="I am doing well today",
+            audio=b"\x00" * 48000,  # 1 second at 24kHz 16-bit
+        )
+        mocks["truncator"].truncate.return_value = "I am doing"
+
+        orch._on_playback_interrupted()
+
+        calls = mocks["memory_storage"].add_utterance.call_args_list
+        assert len(calls) == 1
+        assert calls[0][0][1] == "assistant"
+        assert calls[0][0][2] == "I am doing"
+
+    def test_no_utterance_without_memory_storage(self) -> None:
+        """Without memory_storage, no utterance saving occurs."""
+        orch, mocks = _make_orchestrator()
+        orch._start_session()
+        orch._playback_state = PlaybackState.PLAYING
+        orch._current_response = ResponseData(text="hello", audio=b"\x00" * 100)
+
+        orch._on_playback_complete()
+
+        # No memory_storage → no add_utterance call (and no error)
+        mocks["history"].add_assistant_message.assert_called_once()
+
+    def test_utterance_save_error_doesnt_crash(self) -> None:
+        """add_utterance error is logged but doesn't crash the orchestrator."""
+        orch, mocks = _make_orchestrator_with_memory()
+        orch._start_session()
+        mocks["memory_storage"].add_utterance.side_effect = RuntimeError("DB error")
+        orch._playback_state = PlaybackState.PLAYING
+        orch._current_response = ResponseData(text="hello", audio=b"\x00" * 100)
+
+        orch._on_playback_complete()  # Should not raise
+
+        mocks["history"].add_assistant_message.assert_called_once()

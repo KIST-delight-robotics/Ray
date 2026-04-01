@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from unittest.mock import MagicMock
 
 import pytest
@@ -29,6 +30,7 @@ def _make_session_manager(
     farewell_timeout_sec: float = 0.1,
     frame_timeout_sec: float = 0.01,
     audio_queue_size: int = 300,
+    on_session_end: MagicMock | None = None,
 ) -> tuple[SessionManager, dict[str, MagicMock]]:
     """Create a SessionManager with all dependencies mocked."""
     mocks = {
@@ -58,6 +60,7 @@ def _make_session_manager(
         return SessionComponents(
             orchestrator=mocks["orchestrator"],
             history=mocks["history"],
+            session_id=str(uuid.uuid4()),
         )
 
     sm = SessionManager(
@@ -69,6 +72,7 @@ def _make_session_manager(
         config=config,
         greeting_audio_path="assets/audio/greeting.wav",
         farewell_audio_path="assets/audio/farewell.wav",
+        on_session_end=on_session_end,
     )
 
     return sm, mocks
@@ -276,8 +280,8 @@ class TestActive:
         assert sm._audio_queue.empty()
         mocks["orchestrator"].run.assert_called_once()
 
-    def test_new_session_called_with_uuid(self) -> None:
-        """history.new_session is called with a UUID string."""
+    def test_session_id_from_factory_used(self) -> None:
+        """Factory-provided session_id is passed to history.new_session."""
         sm, mocks = _make_session_manager()
 
         sm._run_active()
@@ -285,9 +289,9 @@ class TestActive:
         mocks["history"].new_session.assert_called_once()
         session_id = mocks["history"].new_session.call_args[0][0]
         # Should be a valid UUID string
-        import uuid
-
         uuid.UUID(session_id)  # Raises if invalid
+        # SessionManager should store the same session_id
+        assert sm._current_session_id == session_id
 
     def test_factory_failure_returns_to_sleep(self) -> None:
         """Session factory exception → SLEEP, no crash."""
@@ -424,7 +428,7 @@ class TestMultiSessionIsolation:
             hist = MagicMock()
             histories.append(hist)
             orchestrators.append(orch)
-            return SessionComponents(orchestrator=orch, history=hist)
+            return SessionComponents(orchestrator=orch, history=hist, session_id=str(uuid.uuid4()))
 
         config = SessionConfig(
             audio_queue_size=300,
@@ -493,3 +497,61 @@ class TestGreetingReconnect:
 
         assert sm._mode == SystemMode.SLEEP
         mocks["bridge"].send_play_file.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# on_session_end callback
+# ---------------------------------------------------------------------------
+
+
+class TestOnSessionEnd:
+    def test_callback_called_in_farewell(self) -> None:
+        """on_session_end is called during farewell with session_id and started_at."""
+        callback = MagicMock()
+        sm, mocks = _make_session_manager(farewell_timeout_sec=0.01, on_session_end=callback)
+        mocks["bridge"].poll_event.return_value = None
+
+        # Simulate a session that went through _run_active
+        sm._run_active()
+        session_id = sm._current_session_id
+        started_at = sm._session_started_at
+
+        sm._run_farewell()
+
+        callback.assert_called_once_with(session_id, started_at)
+
+    def test_callback_error_doesnt_crash_farewell(self) -> None:
+        """If on_session_end raises, farewell still completes."""
+        callback = MagicMock(side_effect=RuntimeError("write failed"))
+        sm, mocks = _make_session_manager(farewell_timeout_sec=0.01, on_session_end=callback)
+        mocks["bridge"].poll_event.return_value = None
+
+        sm._run_active()
+        sm._run_farewell()
+
+        assert sm._mode == SystemMode.SLEEP
+        callback.assert_called_once()
+
+    def test_no_callback_backward_compat(self) -> None:
+        """Without on_session_end, farewell works as before."""
+        sm, mocks = _make_session_manager(farewell_timeout_sec=0.01)
+        mocks["bridge"].poll_event.return_value = None
+
+        sm._run_active()
+        sm._run_farewell()
+
+        assert sm._mode == SystemMode.SLEEP
+        mocks["history"].save.assert_called_once()
+
+    def test_callback_called_on_shutdown(self) -> None:
+        """shutdown() triggers on_session_end if a session is active."""
+        callback = MagicMock()
+        sm, mocks = _make_session_manager(on_session_end=callback)
+
+        # Simulate an active session
+        sm._run_active()
+
+        sm.shutdown()
+
+        callback.assert_called_once()
+        assert sm._shutdown_event.is_set()
