@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
 from voice_pipeline.generation.sentence_detector import SentenceDetector
-
 
 # ---------------------------------------------------------------------------
 # Basic sentence detection
@@ -161,9 +158,7 @@ class TestMinFlushWords:
     def test_default_threshold_is_four(self) -> None:
         d = SentenceDetector()
         assert d.feed("Hi. ") == []
-        assert d.feed("This is a complete sentence. ") == [
-            "Hi. This is a complete sentence."
-        ]
+        assert d.feed("This is a complete sentence. ") == ["Hi. This is a complete sentence."]
 
 
 # ---------------------------------------------------------------------------

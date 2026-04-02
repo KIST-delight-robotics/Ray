@@ -144,7 +144,7 @@ class SentenceDetector:
             if ch in self._SENTENCE_ENDERS:
                 # Skip consecutive sentence-enders / closing quotes.
                 j = i + 1
-                while j < length and buf[j] in '.!?"\')\u201d\u2019':
+                while j < length and buf[j] in ".!?\"')\u201d\u2019":
                     j += 1
 
                 # Boundary requires trailing whitespace.

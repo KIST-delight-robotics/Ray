@@ -7,7 +7,6 @@ from collections.abc import Generator
 from typing import Any
 
 import numpy as np
-import pytest
 
 from voice_pipeline.core.config import MemoryConfig
 from voice_pipeline.core.interfaces import ILLM, IEmbedder
@@ -536,9 +535,7 @@ class TestWindowing:
             write_window_overlap_ratio=0.0,
             write_dedup_threshold=0.99,
         )
-        writer, storage, _, llm = _make_writer(
-            [ep_json_1, ep_json_2, facts_json], config=config
-        )
+        writer, storage, _, llm = _make_writer([ep_json_1, ep_json_2, facts_json], config=config)
         _add_utterances(storage)
 
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)

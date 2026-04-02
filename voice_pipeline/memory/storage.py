@@ -10,6 +10,7 @@ import contextlib
 import logging
 import sqlite3
 import threading
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -411,9 +412,9 @@ class SQLiteMemoryStorage(IMemoryStorage):
         """Record that memory extraction has been attempted for a session."""
         with self._lock:
             try:
-                from datetime import datetime, timezone
+                from datetime import datetime
 
-                now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
                 self._conn.execute(
                     "INSERT OR IGNORE INTO processed_sessions (session_id, processed_at) "
                     "VALUES (?, ?)",
@@ -421,9 +422,7 @@ class SQLiteMemoryStorage(IMemoryStorage):
                 )
                 self._conn.commit()
             except sqlite3.Error:
-                logger.warning(
-                    "Failed to mark session %s as processed", session_id, exc_info=True
-                )
+                logger.warning("Failed to mark session %s as processed", session_id, exc_info=True)
 
     def get_processed_session_ids(self, session_ids: list[str]) -> set[str]:
         """Check which sessions have been processed."""

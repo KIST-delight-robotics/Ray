@@ -307,6 +307,9 @@ class TurnDetectorConfig:
     prepare_turngpt_threshold: float = 0.2
     prepare_timeout_sec: float = 0.2
 
+    # --- Similarity gate ---
+    similarity_threshold: float = 0.8
+
     def __post_init__(self) -> None:
         if not (0.0 <= self.vap_user_threshold <= 1.0):
             raise ConfigurationError(
@@ -321,29 +324,10 @@ class TurnDetectorConfig:
                 f"prepare_turngpt_threshold must be in [0, 1], got "
                 f"{self.prepare_turngpt_threshold}"
             )
-
-
-@dataclass
-class SimilarityConfig:
-    """Configuration for text similarity scoring.
-
-    Attributes:
-        backend: Similarity backend ("local", "api", or "difflib").
-        model: Model name for the backend.
-            Local: sentence-transformers model (e.g. "all-MiniLM-L6-v2").
-            API: OpenAI embedding model (e.g. "text-embedding-3-small").
-        threshold: Skip re-prepare if similarity >= this value.
-        use_onnx: Use ONNX Runtime backend for local models (faster on CPU).
-    """
-
-    backend: Literal["local", "api", "difflib"] = "local"
-    model: str = "all-MiniLM-L6-v2"
-    threshold: float = 0.8
-    use_onnx: bool = False
-
-    def __post_init__(self) -> None:
-        if not (0.0 <= self.threshold <= 1.0):
-            raise ConfigurationError(f"threshold must be in [0, 1], got {self.threshold}")
+        if not (0.0 <= self.similarity_threshold <= 1.0):
+            raise ConfigurationError(
+                f"similarity_threshold must be in [0, 1], got {self.similarity_threshold}"
+            )
 
 
 @dataclass
@@ -548,7 +532,8 @@ class MemoryConfig:
             )
         if not (0.0 <= self.write_window_overlap_ratio < 1.0):
             raise ConfigurationError(
-                f"write_window_overlap_ratio must be in [0, 1), got {self.write_window_overlap_ratio}"
+                f"write_window_overlap_ratio must be in [0, 1),"
+                f" got {self.write_window_overlap_ratio}"
             )
         if not (0.0 < self.write_dedup_threshold <= 1.0):
             raise ConfigurationError(
@@ -586,7 +571,6 @@ class PipelineConfig:
     turngpt: TurnGPTConfig = field(default_factory=TurnGPTConfig)
     turn_detector: TurnDetectorConfig = field(default_factory=TurnDetectorConfig)
     greeting_audio: GreetingAudioConfig = field(default_factory=GreetingAudioConfig)
-    similarity: SimilarityConfig = field(default_factory=SimilarityConfig)
     speech_generator: SpeechGeneratorConfig = field(default_factory=SpeechGeneratorConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
     audio_input: AudioInputConfig = field(default_factory=AudioInputConfig)

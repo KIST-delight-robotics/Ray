@@ -15,7 +15,6 @@ import numpy as np
 from voice_pipeline.core.config import MemoryConfig
 from voice_pipeline.core.interfaces import ILLM, IEmbedder, IMemoryStorage
 from voice_pipeline.core.types import TokenCounter
-
 from voice_pipeline.memory.prompts import (
     EPISODE_DEDUP_SCHEMA,
     EPISODE_EXTRACTION_SCHEMA,
@@ -425,9 +424,10 @@ class MemoryWriter:
                 best_sim = 0.0
                 best_ri = -1
                 for ri, exist_emb in enumerate(result_embeddings):
-                    sim = float(np.dot(cand_emb, exist_emb) / (
-                        np.linalg.norm(cand_emb) * np.linalg.norm(exist_emb) + 1e-9
-                    ))
+                    sim = float(
+                        np.dot(cand_emb, exist_emb)
+                        / (np.linalg.norm(cand_emb) * np.linalg.norm(exist_emb) + 1e-9)
+                    )
                     if sim > best_sim:
                         best_sim = sim
                         best_ri = ri
@@ -507,5 +507,3 @@ class MemoryWriter:
         except Exception:
             logger.warning("LLM call failed during memory write", exc_info=True)
             return None
-
-

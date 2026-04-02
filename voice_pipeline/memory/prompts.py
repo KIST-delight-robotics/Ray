@@ -325,8 +325,7 @@ EPISODE_DEDUP_SCHEMA: dict[str, Any] = {
             "merged": {
                 "type": ["string", "null"],
                 "description": (
-                    "Merged narrative for MERGE action. "
-                    "Null for KEEP_BOTH / DISCARD_*."
+                    "Merged narrative for MERGE action. Null for KEEP_BOTH / DISCARD_*."
                 ),
             },
         },

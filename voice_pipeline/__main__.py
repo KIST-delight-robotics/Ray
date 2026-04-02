@@ -31,7 +31,10 @@ from voice_pipeline.audio.audio_input import AudioInput
 from voice_pipeline.audio.wakeword import WakewordDetector
 from voice_pipeline.bridge.cpp_bridge import CppBridge
 from voice_pipeline.context.context_builder import ContextBuilder
-from voice_pipeline.context.formatters import format_raw_transcript_block, format_session_summary_block
+from voice_pipeline.context.formatters import (
+    format_raw_transcript_block,
+    format_session_summary_block,
+)
 from voice_pipeline.core.config import PipelineConfig
 from voice_pipeline.embedding.embedder import create_embedder
 from voice_pipeline.generation.speech_generator import SpeechGenerator
@@ -48,7 +51,6 @@ from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.writer import MemoryWriter
 from voice_pipeline.orchestrator.orchestrator import Orchestrator
 from voice_pipeline.session.session_manager import SessionComponents, SessionManager
-from voice_pipeline.similarity.similarity import create_similarity
 from voice_pipeline.tts.greeting_audio import ensure_greeting_audio
 from voice_pipeline.tts.tts import OpenAITTS
 from voice_pipeline.tts.utterance_truncator import TimestampTruncator
@@ -83,7 +85,6 @@ def main() -> None:
     wakeword = WakewordDetector(config.wakeword, config.audio)
     led = LEDController(config.led)
     storage = create_storage_backend(config.history)
-    similarity = create_similarity(config.similarity)
     executor = ThreadPoolExecutor(max_workers=config.speech_generator.max_workers)
     token_counter = create_token_counter(config.llm.model)
     tools_token_cost = get_tools_token_cost(config.llm.tools)
@@ -149,9 +150,7 @@ def main() -> None:
             else:
                 utterances = memory_storage.get_utterances(sid)
                 if utterances:
-                    session_summaries.append(
-                        format_raw_transcript_block(started_at, utterances)
-                    )
+                    session_summaries.append(format_raw_transcript_block(started_at, utterances))
         exclude_session_ids = {session_id} | set(recent_session_ids)
 
         async_vap = AsyncVAP(vap)
@@ -172,9 +171,8 @@ def main() -> None:
         turn_detector = TurnDetector(
             async_vap,
             async_turngpt,
-            similarity,
+            embedder,
             config.turn_detector,
-            config.similarity,
             config.audio,
         )
         generator = SpeechGenerator(

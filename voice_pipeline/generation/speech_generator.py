@@ -484,9 +484,7 @@ class SpeechGenerator(ISpeechGenerator):
                 if remainder:
                     clean_remainder, cited_indices = parse_citation_tag(remainder)
                     if clean_remainder.strip():
-                        future = tts_executor.submit(
-                            self._tts.synthesize, clean_remainder.strip()
-                        )
+                        future = tts_executor.submit(self._tts.synthesize, clean_remainder.strip())
                         future_queue.put((clean_remainder.strip(), future))
                 else:
                     _, cited_indices = parse_citation_tag(full_text)

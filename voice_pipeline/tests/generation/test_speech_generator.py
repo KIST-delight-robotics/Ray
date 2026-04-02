@@ -953,9 +953,7 @@ class TestSentenceModeMultipleSentences:
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
-        llm.generate.return_value = _make_llm_stream(
-            ["Hello ", "there. ", "How are ", "you? "]
-        )
+        llm.generate.return_value = _make_llm_stream(["Hello ", "there. ", "How are ", "you? "])
         tts = _make_sequential_tts([[b"\x01" * 50], [b"\x02" * 50]])
 
         gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG)
@@ -973,19 +971,15 @@ class TestSentenceModeMultipleSentences:
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
-        llm.generate.return_value = _make_llm_stream(
-            ["First. Second! Third? "]
-        )
-        tts = _make_sequential_tts(
-            [[b"\x01" * 50], [b"\x02" * 50], [b"\x03" * 50]]
-        )
+        llm.generate.return_value = _make_llm_stream(["First. Second! Third? "])
+        tts = _make_sequential_tts([[b"\x01" * 50], [b"\x02" * 50], [b"\x03" * 50]])
 
         gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG)
         gen.prepare("hi")
         _wait_for_stream_done(gen)
         _drain_audio(gen)
 
-        data = gen.get_response_data()
+        gen.get_response_data()
         assert tts.synthesize.call_count == 3
         gen.shutdown()
 
@@ -999,9 +993,7 @@ class TestSentenceModeMinFlushWords:
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
         # "Sure!" (1 word) + "That sounds really great." (4 words) = 5 total
-        llm.generate.return_value = _make_llm_stream(
-            ["Sure! That sounds really great."]
-        )
+        llm.generate.return_value = _make_llm_stream(["Sure! That sounds really great."])
         tts = _make_sequential_tts([[b"\x00" * 100]])
 
         gen = SpeechGenerator(cb, llm, tts, config)
@@ -1024,9 +1016,7 @@ class TestSentenceModeCitation:
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
-        llm.generate.return_value = _make_llm_stream(
-            ["Great movie! [MEMORIES: M1, M2]"]
-        )
+        llm.generate.return_value = _make_llm_stream(["Great movie! [MEMORIES: M1, M2]"])
         tts = _make_sequential_tts([[b"\x00" * 100]])
 
         ep1 = _make_episode("Ep one", eid=10)

@@ -13,8 +13,10 @@ import enum
 import logging
 from typing import Literal
 
-from voice_pipeline.core.config import AudioConfig, SimilarityConfig, TurnDetectorConfig
-from voice_pipeline.core.interfaces import IVAP, ISimilarity, ITurnDetector
+import numpy as np
+
+from voice_pipeline.core.config import AudioConfig, TurnDetectorConfig
+from voice_pipeline.core.interfaces import IVAP, IEmbedder, ITurnDetector
 from voice_pipeline.core.types import AudioFrame, TurnDecision, VAPResult
 from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT, SyncTurnGPTAdapter
 
@@ -41,16 +43,14 @@ class TurnDetector(ITurnDetector):
         self,
         vap: IVAP,
         turngpt: AsyncTurnGPT | SyncTurnGPTAdapter,
-        similarity: ISimilarity,
+        embedder: IEmbedder,
         config: TurnDetectorConfig,
-        similarity_config: SimilarityConfig,
         audio_config: AudioConfig,
     ) -> None:
         self._vap = vap
         self._turngpt = turngpt
-        self._similarity = similarity
+        self._embedder = embedder
         self._config = config
-        self._similarity_threshold = similarity_config.threshold
 
         self._frame_duration_sec = audio_config.frame_duration_ms / 1000.0
 
@@ -243,8 +243,12 @@ class TurnDetector(ITurnDetector):
 
         # Similarity gate: skip if text is too similar to last prepare
         if self._last_prepare_text:
-            similarity = self._similarity.compare(self._last_prepare_text, asr_text)
-            if similarity >= self._similarity_threshold:
+            vecs = self._embedder.embed_batch([self._last_prepare_text, asr_text])
+            similarity = float(
+                np.dot(vecs[0], vecs[1])
+                / (np.linalg.norm(vecs[0]) * np.linalg.norm(vecs[1]) + 1e-9)
+            )
+            if similarity >= self._config.similarity_threshold:
                 logger.info(
                     "PREPARE skipped (similarity=%.2f): %r → %r",
                     similarity,

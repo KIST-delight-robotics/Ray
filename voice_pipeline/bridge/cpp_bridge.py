@@ -76,7 +76,7 @@ class CppBridge(ICppBridge):
     def connect(self) -> None:
         """Establish connection to the C++ process."""
         if self._running.is_set():
-            logger.warning("connect() called while already connected — ignoring")
+            logger.debug("connect() called while already connected — skipping")
             return
 
         # Clean up residual state from a previous failed connection

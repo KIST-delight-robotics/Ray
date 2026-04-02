@@ -28,7 +28,6 @@ from voice_pipeline.core.config import (
     ConversationHistoryConfig,
     OrchestratorConfig,
     SessionConfig,
-    SimilarityConfig,
     SpeechGeneratorConfig,
     TTSConfig,
     TurnDetectorConfig,
@@ -40,8 +39,8 @@ from voice_pipeline.core.interfaces import (
     IVAP,
     IAudioInput,
     ICppBridge,
+    IEmbedder,
     ILEDController,
-    ISimilarity,
     ITurnGPT,
     IWakewordDetector,
 )
@@ -357,14 +356,12 @@ def _make_orchestrator(
         history, HISTORY_CONFIG, DEFAULT_SYSTEM_PROMPT, _simple_token_counter
     )
     _turngpt_adapter = SyncTurnGPTAdapter(_turngpt)
-    _similarity = MagicMock(spec=ISimilarity)
-    _similarity.compare.return_value = 0.0
+    _embedder = MagicMock(spec=IEmbedder)
     turn_detector = TurnDetector(
         _vap,
         _turngpt_adapter,
-        _similarity,
+        _embedder,
         turn_detector_config or TURN_DETECTOR_CONFIG,
-        SimilarityConfig(),
         AUDIO_CONFIG,
     )
     generator = SpeechGenerator(context_builder, _llm, _tts, GENERATOR_CONFIG, _executor)
@@ -618,14 +615,12 @@ class TestFullSessionLifecycle:
                 history, HISTORY_CONFIG, DEFAULT_SYSTEM_PROMPT, _simple_token_counter
             )
             turngpt_adapter = SyncTurnGPTAdapter(turngpt)
-            sim = MagicMock(spec=ISimilarity)
-            sim.compare.return_value = 0.0
+            _emb = MagicMock(spec=IEmbedder)
             turn_detector = TurnDetector(
                 vap,
                 turngpt_adapter,
-                sim,
+                _emb,
                 TURN_DETECTOR_CONFIG,
-                SimilarityConfig(),
                 AUDIO_CONFIG,
             )
             generator = SpeechGenerator(

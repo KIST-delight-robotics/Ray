@@ -620,23 +620,6 @@ class ITurnGPT(ABC):
 
 
 # ---------------------------------------------------------------------------
-# Similarity
-# ---------------------------------------------------------------------------
-
-
-class ISimilarity(ABC):
-    """Text similarity scorer.
-
-    Used by TurnDetector to decide whether a new prepare() is needed
-    when ASR text changes.
-    """
-
-    @abstractmethod
-    def compare(self, a: str, b: str) -> float:
-        """Return similarity score between *a* and *b* in [0.0, 1.0]."""
-
-
-# ---------------------------------------------------------------------------
 # TurnDetector
 # ---------------------------------------------------------------------------
 

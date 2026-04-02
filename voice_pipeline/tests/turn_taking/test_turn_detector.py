@@ -7,8 +7,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from voice_pipeline.core.config import AudioConfig, SimilarityConfig, TurnDetectorConfig
-from voice_pipeline.core.interfaces import IVAP, ISimilarity, ITurnGPT
+import numpy as np
+
+from voice_pipeline.core.config import AudioConfig, TurnDetectorConfig
+from voice_pipeline.core.interfaces import IVAP, IEmbedder, ITurnGPT
 from voice_pipeline.core.types import TurnDecision, VAPResult
 from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector, _TurnState
@@ -23,11 +25,30 @@ FRAME = b"\x00" * (16000 * 30 // 1000 * 2)  # 30ms of silence at 16kHz, 16-bit
 ROBOT_FRAME = b"\x00" * 100  # dummy robot audio
 
 
+def _make_embedder_mock(similarity: float = 0.0) -> MagicMock:
+    """Create a mock IEmbedder that returns vectors with the given cosine similarity."""
+    mock = MagicMock(spec=IEmbedder)
+    if similarity >= 1.0:
+        # Identical vectors
+        vec = np.array([1.0, 0.0], dtype=np.float32)
+        mock.embed_batch.return_value = np.array([vec, vec])
+    elif similarity <= 0.0:
+        # Orthogonal vectors
+        mock.embed_batch.return_value = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+    else:
+        # Vectors at desired angle: cos(theta) = similarity
+        theta = np.arccos(similarity)
+        vec_a = np.array([1.0, 0.0], dtype=np.float32)
+        vec_b = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)
+        mock.embed_batch.return_value = np.array([vec_a, vec_b])
+    return mock
+
+
 def _make_detector(
     config: TurnDetectorConfig | None = None,
     vap_results: list[VAPResult] | None = None,
     turngpt_prob: float = 0.0,
-    similarity: ISimilarity | None = None,
+    embedder: MagicMock | None = None,
 ) -> tuple[TurnDetector, MagicMock, MagicMock]:
     """Create a TurnDetector with mocked VAP and TurnGPT.
 
@@ -45,13 +66,10 @@ def _make_detector(
     mock_turngpt.predict.return_value = turngpt_prob
 
     cfg = config or TurnDetectorConfig()
-    sim_cfg = SimilarityConfig()
-    if similarity is None:
-        # Default mock: always return 0.0 (everything is different)
-        similarity = MagicMock(spec=ISimilarity)
-        similarity.compare.return_value = 0.0
+    if embedder is None:
+        embedder = _make_embedder_mock(similarity=0.0)
     adapter = SyncTurnGPTAdapter(mock_turngpt)
-    detector = TurnDetector(mock_vap, adapter, similarity, cfg, sim_cfg, AUDIO_CFG)
+    detector = TurnDetector(mock_vap, adapter, embedder, cfg, AUDIO_CFG)
     return detector, mock_vap, mock_turngpt
 
 
@@ -334,12 +352,11 @@ class TestPrepareSimilarityGate:
         """Similar text to last prepare -> skipped."""
         n_frames = 5
         vap_results = [VAPResult(0.5, 0.5, True)] * n_frames
-        mock_sim = MagicMock(spec=ISimilarity)
-        mock_sim.compare.return_value = 0.9  # very similar
+        mock_emb = _make_embedder_mock(similarity=0.9)
         detector, _, _ = _make_detector(
             vap_results=vap_results,
             turngpt_prob=0.5,
-            similarity=mock_sim,
+            embedder=mock_emb,
         )
 
         # Frame 1: text changes, submit fires
@@ -358,12 +375,11 @@ class TestPrepareSimilarityGate:
         """Sufficiently different text -> prepare fires again."""
         n_frames = 4
         vap_results = [VAPResult(0.5, 0.5, True)] * n_frames
-        mock_sim = MagicMock(spec=ISimilarity)
-        mock_sim.compare.return_value = 0.3  # very different
+        mock_emb = _make_embedder_mock(similarity=0.3)
         detector, _, _ = _make_detector(
             vap_results=vap_results,
             turngpt_prob=0.5,
-            similarity=mock_sim,
+            embedder=mock_emb,
         )
 
         # Frame 1-2: first prepare fires
