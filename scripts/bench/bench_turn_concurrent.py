@@ -5,8 +5,8 @@ TurnGPT runs at ~3Hz when ASR text changes. This script measures
 inference latency when both models share CPU resources simultaneously.
 
 Usage:
-    uv run python scripts/bench/benchmark_concurrent.py --duration 60
-    uv run python scripts/bench/benchmark_concurrent.py --duration 120 --vap-threads 2 --tgpt-threads 2
+    uv run python scripts/bench/bench_turn_concurrent.py --duration 60
+    uv run python scripts/bench/bench_turn_concurrent.py --duration 120 --vap-threads 2 --tgpt-threads 2
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from benchmark_compare import (  # noqa: E402
+from bench_turn_model import (  # noqa: E402
     CONVERSATIONS,
     BenchmarkResult,
     build_incremental_inputs,
@@ -327,7 +327,7 @@ def main() -> None:
         "tgpt_threads": args.tgpt_threads,
     }
 
-    # Load solo results (must run benchmark_compare.py first)
+    # Load solo results (must run bench_turn_model.py first)
     vap_solo_file = f"bench_vap_t{args.vap_threads}.json"
     tgpt_solo_file = f"bench_tgpt_t{args.tgpt_threads}.json"
 

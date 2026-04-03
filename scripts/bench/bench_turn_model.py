@@ -16,15 +16,15 @@ TurnGPT variants:
 
 Usage:
     # Compare all MaAI VAP variants with real audio
-    uv run python scripts/bench/benchmark_compare.py \\
+    uv run python scripts/bench/bench_turn_model.py \\
         --model vap --variants all --audio /path/to/candor.mp3 --duration 60
 
     # Compare TurnGPT ONNX fp32 vs int8
-    uv run python scripts/bench/benchmark_compare.py \\
+    uv run python scripts/bench/bench_turn_model.py \\
         --model turngpt --variants turngpt-onnx-fp32 turngpt-onnx-int8
 
     # Quick synthetic test
-    uv run python scripts/bench/benchmark_compare.py \\
+    uv run python scripts/bench/bench_turn_model.py \\
         --model vap --variants maai-full-onnx --duration 30
 """
 

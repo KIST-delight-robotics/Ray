@@ -164,7 +164,8 @@ scripts/
 ├── export_maai_onnx.py     # MaAI ONNX export (wrappers + CLI)
 ├── generate_test_wav.py    # Test audio file generator
 ├── bench/
-│   ├── benchmark_compare.py
-│   └── benchmark_concurrent.py
+│   ├── bench_turn_model.py
+│   ├── bench_turn_concurrent.py
+│   └── bench_memory_retrieve.py
 └── hardware/               # Live hardware test scripts
 ```
