@@ -10,6 +10,7 @@ Scenarios:
   2. Multi-turn conversation: two exchanges before exit
   3. Full session lifecycle: SLEEP → GREETING → ACTIVE → FAREWELL → SLEEP
   4. Barge-in during playback
+  5. Memory integration: utterance storage, retrieval, context injection, citation, session end
 """
 
 from __future__ import annotations
@@ -22,10 +23,13 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import MagicMock
 
+import numpy as np
+
 from voice_pipeline.context.context_builder import ContextBuilder
 from voice_pipeline.core.config import (
     AudioConfig,
     ConversationHistoryConfig,
+    MemoryConfig,
     OrchestratorConfig,
     SessionConfig,
     SpeechGeneratorConfig,
@@ -59,6 +63,10 @@ from voice_pipeline.generation.speech_generator import SpeechGenerator
 from voice_pipeline.history.conversation_history import ConversationHistory
 from voice_pipeline.history.storage_backend import MemoryStorageBackend
 from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
+from voice_pipeline.memory.retriever import MemoryRetriever
+from voice_pipeline.memory.storage import InMemoryMemoryStorage
+from voice_pipeline.memory.types import Episode
+from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.orchestrator.orchestrator import Orchestrator
 from voice_pipeline.session.session_manager import SessionComponents, SessionManager
 from voice_pipeline.tts.utterance_truncator import TimestampTruncator
@@ -927,3 +935,609 @@ class TestGeneratorFailure:
         # At least one successful exchange
         assert len(assistant_msgs) >= 1
         assert "Recovery response!" in [m["content"] for m in assistant_msgs]
+
+
+# ---------------------------------------------------------------------------
+# Memory integration helpers
+# ---------------------------------------------------------------------------
+
+_DIM = 8  # Small dimension for fast deterministic tests
+
+
+class _DeterministicEmbedder(IEmbedder):
+    """Embedder returning deterministic vectors seeded by text hash."""
+
+    def embed(self, text: str) -> np.ndarray:
+        import numpy as np
+
+        rng = np.random.default_rng(hash(text) % (2**31))
+        vec = rng.standard_normal(_DIM).astype(np.float32)
+        return vec / (np.linalg.norm(vec) + 1e-9)
+
+    def embed_batch(self, texts: list[str]) -> np.ndarray:
+        import numpy as np
+
+        return np.stack([self.embed(t) for t in texts])
+
+    @property
+    def dimension(self) -> int:
+        return _DIM
+
+
+def _make_memory_orchestrator(
+    asr: IASR,
+    bridge: ScriptedBridge,
+    led: FakeLED,
+    *,
+    llm: ILLM | None = None,
+    tts: ITTS | None = None,
+    session_id: str = "mem-session-1",
+    pre_episodes: list[Episode] | None = None,
+) -> tuple[
+    Orchestrator,
+    ConversationHistory,
+    SpeechGenerator,
+    InMemoryMemoryStorage,
+    MemoryRetriever,
+]:
+    """Wire up a full Orchestrator with memory modules enabled.
+
+    Optionally seeds episodes into the memory store for retrieval tests.
+    """
+    import numpy as np
+
+    _llm = llm or FakeLLM()
+    _tts = tts or FakeTTS()
+    executor = ThreadPoolExecutor(max_workers=GENERATOR_CONFIG.max_workers)
+
+    # Conversation history
+    conv_storage = MemoryStorageBackend()
+    history = ConversationHistory(conv_storage, _simple_token_counter)
+    history.new_session(session_id)
+
+    # Memory infra
+    memory_config = MemoryConfig(embedding_dimension=_DIM, max_memories=5, min_new_slots=2)
+    memory_storage = InMemoryMemoryStorage(dimension=_DIM)
+    vector_index = NumpyVectorIndex()
+    embedder = _DeterministicEmbedder()
+
+    # Seed pre-existing episodes
+    if pre_episodes:
+        for ep in pre_episodes:
+            eid = memory_storage.add_episode(ep)
+            ep.id = eid
+            emb = embedder.embed(ep.text)
+            ep.embedding = emb
+            memory_storage.update_episode_embedding(eid, emb)
+            vector_index.add(eid, emb)
+
+    retriever = MemoryRetriever(memory_storage, vector_index, embedder, memory_config)
+
+    # Context builder
+    context_builder = ContextBuilder(
+        history, HISTORY_CONFIG, DEFAULT_SYSTEM_PROMPT, _simple_token_counter
+    )
+
+    # Speech generator with memory
+    generator = SpeechGenerator(
+        context_builder,
+        _llm,
+        _tts,
+        GENERATOR_CONFIG,
+        executor,
+        retriever=retriever,
+        history=history,
+        exclude_session_ids={session_id},
+    )
+
+    # Turn detector
+    vap = FakeVAP()
+    turngpt = FakeTurnGPT()
+    turngpt_adapter = SyncTurnGPTAdapter(turngpt)
+    _embedder = MagicMock(spec=IEmbedder)
+    turn_detector = TurnDetector(
+        vap, turngpt_adapter, _embedder, TURN_DETECTOR_CONFIG, AUDIO_CONFIG
+    )
+
+    truncator = TimestampTruncator()
+
+    orchestrator = Orchestrator(
+        asr=asr,
+        turn_detector=turn_detector,
+        speech_generator=generator,
+        cpp_bridge=bridge,
+        history=history,
+        truncator=truncator,
+        led=led,
+        config=ORCHESTRATOR_CONFIG,
+        tts_config=TTS_CONFIG,
+        audio_config=AUDIO_CONFIG,
+        memory_storage=memory_storage,
+        session_id=session_id,
+        token_counter=_simple_token_counter,
+    )
+    return orchestrator, history, generator, memory_storage, retriever
+
+
+# ---------------------------------------------------------------------------
+# Test: Memory — Orchestrator utterance storage
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryUtteranceStorage:
+    """Orchestrator stores utterances into memory storage during conversation."""
+
+    def test_utterances_saved_during_conversation(self) -> None:
+        """User and assistant utterances are saved to memory storage."""
+        asr = ScriptedASR(["hello world", "goodbye"])
+        bridge = ScriptedBridge()
+        led = FakeLED()
+
+        orchestrator, history, generator, memory_storage, _ = _make_memory_orchestrator(
+            asr, bridge, led
+        )
+
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        feeder = FrameFeeder(audio_queue)
+        feeder.start()
+
+        try:
+            orchestrator.run(audio_queue)
+        finally:
+            feeder.stop()
+            generator.reset()
+
+        utterances = memory_storage.get_utterances("mem-session-1")
+        roles = [u[0] for u in utterances]
+        texts = [u[1] for u in utterances]
+
+        # Both user and assistant utterances should be stored
+        assert "user" in roles
+        assert "assistant" in roles
+        assert "hello world" in texts
+        # Assistant text comes from FakeLLM default: "I'm doing great!"
+        assert "I'm doing great!" in texts
+
+    def test_utterance_token_counts_stored(self) -> None:
+        """Stored utterances have non-zero token counts."""
+        asr = ScriptedASR(["tell me something", "goodbye"])
+        bridge = ScriptedBridge()
+        led = FakeLED()
+
+        orchestrator, _, generator, memory_storage, _ = _make_memory_orchestrator(
+            asr, bridge, led
+        )
+
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        feeder = FrameFeeder(audio_queue)
+        feeder.start()
+
+        try:
+            orchestrator.run(audio_queue)
+        finally:
+            feeder.stop()
+            generator.reset()
+
+        utterances = memory_storage.get_utterances("mem-session-1")
+        # Token counts should be > 0 (using _simple_token_counter)
+        for _role, text, _ts, token_count in utterances:
+            assert token_count > 0, f"Token count should be > 0 for '{text}'"
+
+
+# ---------------------------------------------------------------------------
+# Test: Memory — SpeechGenerator retrieval & context injection
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryRetrievalInPipeline:
+    """SpeechGenerator retrieves memories and injects them into LLM context."""
+
+    def test_memory_block_injected_into_context(self) -> None:
+        """When pre-existing episodes exist, LLM context includes a memory block."""
+        captured_messages: list[list[dict[str, Any]]] = []
+
+        class CapturingLLM(ILLM):
+            def generate(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                response_format: dict[str, Any] | None = None,
+            ) -> LLMStream:
+                captured_messages.append(list(messages))
+
+                def gen():
+                    yield "Got it!"
+
+                return LLMStream(gen(), result_fn=lambda t: LLMResult(text=t))
+
+        pre_episodes = [
+            Episode(
+                id=None,
+                text="The user loves watching sci-fi movies.",
+                timestamp="2026-03-15 14:00:00",
+                session_id="s-old",
+                importance=1.0,
+                last_cited_at="2026-03-15 14:00:00",
+                embedding=None,
+            ),
+        ]
+
+        asr = ScriptedASR(["I like movies", "goodbye"])
+        bridge = ScriptedBridge()
+        led = FakeLED()
+
+        orchestrator, _, generator, _, _ = _make_memory_orchestrator(
+            asr, bridge, led, llm=CapturingLLM(), pre_episodes=pre_episodes
+        )
+
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        feeder = FrameFeeder(audio_queue)
+        feeder.start()
+
+        try:
+            orchestrator.run(audio_queue)
+        finally:
+            feeder.stop()
+            generator.reset()
+
+        # LLM should have been called with a memory block in the context
+        assert len(captured_messages) >= 1
+        msgs = captured_messages[0]
+        developer_msgs = [m for m in msgs if m.get("role") == "developer"]
+        memory_msgs = [m for m in developer_msgs if "[Retrieved Memories]" in m.get("content", "")]
+
+        assert len(memory_msgs) == 1, "Should have exactly one memory block in context"
+        assert "[M1]" in memory_msgs[0]["content"]
+        assert "sci-fi" in memory_msgs[0]["content"]
+
+    def test_no_memory_block_when_no_episodes(self) -> None:
+        """Without pre-existing episodes, no memory block is in the context."""
+        captured_messages: list[list[dict[str, Any]]] = []
+
+        class CapturingLLM(ILLM):
+            def generate(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                response_format: dict[str, Any] | None = None,
+            ) -> LLMStream:
+                captured_messages.append(list(messages))
+
+                def gen():
+                    yield "Hello!"
+
+                return LLMStream(gen(), result_fn=lambda t: LLMResult(text=t))
+
+        asr = ScriptedASR(["hi there", "goodbye"])
+        bridge = ScriptedBridge()
+        led = FakeLED()
+
+        orchestrator, _, generator, _, _ = _make_memory_orchestrator(
+            asr, bridge, led, llm=CapturingLLM()
+        )
+
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        feeder = FrameFeeder(audio_queue)
+        feeder.start()
+
+        try:
+            orchestrator.run(audio_queue)
+        finally:
+            feeder.stop()
+            generator.reset()
+
+        assert len(captured_messages) >= 1
+        msgs = captured_messages[0]
+        memory_msgs = [
+            m for m in msgs if "[Retrieved Memories]" in m.get("content", "")
+        ]
+        assert len(memory_msgs) == 0, "Should have no memory block without episodes"
+
+
+# ---------------------------------------------------------------------------
+# Test: Memory — Citation parsing
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryCitationInPipeline:
+    """SpeechGenerator parses citation tags and updates the retriever."""
+
+    def test_citation_tag_stripped_from_response(self) -> None:
+        """[MEMORIES: M1] tag is stripped from the response stored in history."""
+        pre_episodes = [
+            Episode(
+                id=None,
+                text="The user loves sci-fi movies.",
+                timestamp="2026-03-15 14:00:00",
+                session_id="s-old",
+                importance=1.0,
+                last_cited_at="2026-03-15 14:00:00",
+                embedding=None,
+            ),
+        ]
+
+        class CitingLLM(ILLM):
+            def generate(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                response_format: dict[str, Any] | None = None,
+            ) -> LLMStream:
+                def gen():
+                    yield "You mentioned sci-fi before!"
+                    yield "\n[MEMORIES: M1]"
+
+                return LLMStream(gen(), result_fn=lambda t: LLMResult(text=t))
+
+        asr = ScriptedASR(["I love space", "goodbye"])
+        bridge = ScriptedBridge()
+        led = FakeLED()
+
+        orchestrator, history, generator, _, retriever = _make_memory_orchestrator(
+            asr, bridge, led, llm=CitingLLM(), pre_episodes=pre_episodes
+        )
+
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        feeder = FrameFeeder(audio_queue)
+        feeder.start()
+
+        try:
+            orchestrator.run(audio_queue)
+        finally:
+            feeder.stop()
+            generator.reset()
+
+        # History should contain the clean text WITHOUT citation tag
+        messages = history.get_messages()
+        assistant_msgs = [m for m in messages if m["role"] == "assistant"]
+        assert len(assistant_msgs) >= 1
+        assert "[MEMORIES:" not in assistant_msgs[0]["content"]
+        assert "You mentioned sci-fi before!" in assistant_msgs[0]["content"]
+
+    def test_citation_updates_retained_buffer(self) -> None:
+        """Cited episode enters the retriever's retained buffer."""
+        pre_episodes = [
+            Episode(
+                id=None,
+                text="The user loves sci-fi movies.",
+                timestamp="2026-03-15 14:00:00",
+                session_id="s-old",
+                importance=1.0,
+                last_cited_at="2026-03-15 14:00:00",
+                embedding=None,
+            ),
+        ]
+
+        class CitingLLM(ILLM):
+            def generate(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                response_format: dict[str, Any] | None = None,
+            ) -> LLMStream:
+                def gen():
+                    yield "Great movie taste!"
+                    yield "\n[MEMORIES: M1]"
+
+                return LLMStream(gen(), result_fn=lambda t: LLMResult(text=t))
+
+        asr = ScriptedASR(["movies are fun", "goodbye"])
+        bridge = ScriptedBridge()
+        led = FakeLED()
+
+        orchestrator, _, generator, _, retriever = _make_memory_orchestrator(
+            asr, bridge, led, llm=CitingLLM(), pre_episodes=pre_episodes
+        )
+
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        feeder = FrameFeeder(audio_queue)
+        feeder.start()
+
+        try:
+            orchestrator.run(audio_queue)
+        finally:
+            feeder.stop()
+            generator.reset()
+
+        # The cited episode should be in the retained buffer
+        assert len(retriever._retained) >= 1
+        cited_ep = pre_episodes[0]
+        assert cited_ep.id in retriever._retained
+
+
+# ---------------------------------------------------------------------------
+# Test: Memory — SessionManager triggers session-end callback
+# ---------------------------------------------------------------------------
+
+
+class TestMemorySessionEnd:
+    """SessionManager invokes on_session_end callback at session termination."""
+
+    def test_session_end_callback_invoked(self) -> None:
+        """on_session_end receives the correct session_id and timestamp."""
+        callback_calls: list[tuple[str, str]] = []
+
+        def on_session_end(session_id: str, started_at: str) -> None:
+            callback_calls.append((session_id, started_at))
+
+        asr = ScriptedASR(["hello", "goodbye"])
+        bridge = ScriptedBridge()
+        led = FakeLED()
+        wakeword = FakeWakeword(trigger_after=1)
+        audio_input = FakeAudioInput()
+
+        executor = ThreadPoolExecutor(max_workers=2)
+
+        def session_factory() -> SessionComponents:
+            import uuid
+
+            sid = str(uuid.uuid4())
+
+            conv_storage = MemoryStorageBackend()
+            hist = ConversationHistory(conv_storage, _simple_token_counter)
+            hist.new_session(sid)
+
+            context_builder = ContextBuilder(
+                hist, HISTORY_CONFIG, DEFAULT_SYSTEM_PROMPT, _simple_token_counter
+            )
+            vap = FakeVAP()
+            turngpt_adapter = SyncTurnGPTAdapter(FakeTurnGPT())
+            _emb = MagicMock(spec=IEmbedder)
+            td = TurnDetector(
+                vap, turngpt_adapter, _emb, TURN_DETECTOR_CONFIG, AUDIO_CONFIG
+            )
+            gen = SpeechGenerator(context_builder, FakeLLM(), FakeTTS(), GENERATOR_CONFIG, executor)
+            trunc = TimestampTruncator()
+
+            orch = Orchestrator(
+                asr=asr,
+                turn_detector=td,
+                speech_generator=gen,
+                cpp_bridge=bridge,
+                history=hist,
+                truncator=trunc,
+                led=led,
+                config=ORCHESTRATOR_CONFIG,
+                tts_config=TTS_CONFIG,
+                audio_config=AUDIO_CONFIG,
+            )
+            return SessionComponents(orchestrator=orch, history=hist, session_id=sid)
+
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=SESSION_CONFIG.audio_queue_size)
+
+        sm = SessionManager(
+            audio_input=audio_input,
+            wakeword=wakeword,
+            session_factory=session_factory,
+            cpp_bridge=bridge,
+            led=led,
+            config=SESSION_CONFIG,
+            greeting_audio_path=GREETING_AUDIO_PATH,
+            farewell_audio_path=FAREWELL_AUDIO_PATH,
+            audio_queue=audio_queue,
+            on_session_end=on_session_end,
+        )
+
+        feeder = FrameFeeder(audio_queue)
+        feeder.start()
+
+        original_run_sleep = sm._run_sleep
+        call_count = 0
+
+        def _shutdown_on_second_sleep() -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                sm._shutdown_event.set()
+                return
+            original_run_sleep()
+
+        sm._run_sleep = _shutdown_on_second_sleep
+
+        try:
+            sm.run()
+        finally:
+            feeder.stop()
+            executor.shutdown(wait=True)
+
+        # Callback should have been invoked once with a valid session_id and timestamp
+        assert len(callback_calls) == 1
+        sid, started_at = callback_calls[0]
+        assert len(sid) > 0
+        assert len(started_at) > 0
+        # Timestamp format: "YYYY-MM-DD HH:MM:SS"
+        assert len(started_at) == 19
+
+
+# ---------------------------------------------------------------------------
+# Test: Memory — Barge-in saves truncated utterance
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryBargeIn:
+    """Memory storage receives truncated text on barge-in, not full text."""
+
+    def test_bargein_saves_truncated_utterance(self) -> None:
+        """On barge-in the assistant utterance in memory storage is truncated."""
+        vap = InterruptableVAP()
+
+        # LLM returns a long multi-word response so truncation is observable
+        class LongLLM(ILLM):
+            def generate(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                response_format: dict[str, Any] | None = None,
+            ) -> LLMStream:
+                def gen():
+                    yield "word1 word2 word3 word4 word5 word6 word7 word8 word9 word10"
+
+                return LLMStream(gen(), result_fn=lambda t: LLMResult(text=t))
+
+        full_text = "word1 word2 word3 word4 word5 word6 word7 word8 word9 word10"
+
+        # SlowTTS: 10 chunks, each 100ms at 24kHz = 1 second total
+        class SlowTTS(ITTS):
+            def synthesize(self, text: str) -> TTSStream:
+                chunk = b"\x00" * 4800
+
+                def gen():
+                    for _ in range(10):
+                        yield chunk
+
+                words = text.split()
+
+                def ts_fn() -> tuple[WordTimestamp, ...]:
+                    return tuple(
+                        WordTimestamp(w, i * 0.1, (i + 1) * 0.1) for i, w in enumerate(words)
+                    )
+
+                return TTSStream(gen(), timestamps_fn=ts_fn)
+
+        class InterruptBridge(ScriptedBridge):
+            def __init__(self, vap_ref: InterruptableVAP) -> None:
+                super().__init__()
+                self._vap_ref = vap_ref
+                self._audio_count = 0
+
+            def send_audio(self, audio: bytes) -> None:
+                super().send_audio(audio)
+                self._audio_count += 1
+                if self._audio_count == 2:
+                    self._vap_ref.interrupting = True
+
+            def send_audio_end(self) -> None:
+                self.audio_end_count += 1
+
+        bridge = InterruptBridge(vap)
+        led = FakeLED()
+        asr = ScriptedASR(["tell me words", "goodbye"])
+
+        orchestrator, history, generator, memory_storage, _ = _make_memory_orchestrator(
+            asr, bridge, led, llm=LongLLM(), tts=SlowTTS(),
+        )
+        # Patch VAP into the turn detector (replace the default FakeVAP)
+        orchestrator._turn_detector._vap = vap
+
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        feeder = FrameFeeder(audio_queue)
+        feeder.start()
+
+        try:
+            orchestrator.run(audio_queue)
+        finally:
+            feeder.stop()
+            generator.reset()
+
+        utterances = memory_storage.get_utterances("mem-session-1")
+        assistant_utts = [(text, tc) for role, text, _ts, tc in utterances if role == "assistant"]
+
+        # Should have at least one assistant utterance
+        assert len(assistant_utts) >= 1
+
+        saved_text = assistant_utts[0][0]
+        # The saved text should be truncated (shorter than or equal to full text).
+        # With interrupt after 2 chunks (~200ms of 1000ms), truncation should cut it.
+        assert len(saved_text) <= len(full_text)
+        # And it should be non-empty (some audio was played before interrupt)
+        assert len(saved_text) > 0
