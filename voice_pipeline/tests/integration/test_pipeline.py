@@ -984,7 +984,6 @@ def _make_memory_orchestrator(
 
     Optionally seeds episodes into the memory store for retrieval tests.
     """
-    import numpy as np
 
     _llm = llm or FakeLLM()
     _tts = tts or FakeTTS()
@@ -1104,9 +1103,7 @@ class TestMemoryUtteranceStorage:
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        orchestrator, _, generator, memory_storage, _ = _make_memory_orchestrator(
-            asr, bridge, led
-        )
+        orchestrator, _, generator, memory_storage, _ = _make_memory_orchestrator(asr, bridge, led)
 
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         feeder = FrameFeeder(audio_queue)
@@ -1228,9 +1225,7 @@ class TestMemoryRetrievalInPipeline:
 
         assert len(captured_messages) >= 1
         msgs = captured_messages[0]
-        memory_msgs = [
-            m for m in msgs if "[Retrieved Memories]" in m.get("content", "")
-        ]
+        memory_msgs = [m for m in msgs if "[Retrieved Memories]" in m.get("content", "")]
         assert len(memory_msgs) == 0, "Should have no memory block without episodes"
 
 
@@ -1383,10 +1378,10 @@ class TestMemorySessionEnd:
             vap = FakeVAP()
             turngpt_adapter = SyncTurnGPTAdapter(FakeTurnGPT())
             _emb = MagicMock(spec=IEmbedder)
-            td = TurnDetector(
-                vap, turngpt_adapter, _emb, TURN_DETECTOR_CONFIG, AUDIO_CONFIG
+            td = TurnDetector(vap, turngpt_adapter, _emb, TURN_DETECTOR_CONFIG, AUDIO_CONFIG)
+            gen = SpeechGenerator(
+                context_builder, FakeLLM(), FakeTTS(), GENERATOR_CONFIG, executor
             )
-            gen = SpeechGenerator(context_builder, FakeLLM(), FakeTTS(), GENERATOR_CONFIG, executor)
             trunc = TimestampTruncator()
 
             orch = Orchestrator(
@@ -1514,7 +1509,11 @@ class TestMemoryBargeIn:
         asr = ScriptedASR(["tell me words", "goodbye"])
 
         orchestrator, history, generator, memory_storage, _ = _make_memory_orchestrator(
-            asr, bridge, led, llm=LongLLM(), tts=SlowTTS(),
+            asr,
+            bridge,
+            led,
+            llm=LongLLM(),
+            tts=SlowTTS(),
         )
         # Patch VAP into the turn detector (replace the default FakeVAP)
         orchestrator._turn_detector._vap = vap

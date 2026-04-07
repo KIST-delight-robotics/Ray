@@ -5,8 +5,6 @@ Requires OPENAI_API_KEY and a local embedding model.
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
 from voice_pipeline.core.config import MemoryConfig
@@ -19,9 +17,7 @@ from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Profile
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.writer import MemoryWriter
-
 from voice_pipeline.tests.memory.conftest import (
-    CONVERSATION_COOKING,
     CONVERSATION_MOVIE,
     CONVERSATION_PERSONAL,
     CONVERSATION_TRIVIAL,
@@ -68,7 +64,9 @@ class TestEpisodeExtraction:
     ) -> None:
         """A meaningful Korean conversation yields at least one episode."""
         populate_utterances(memory_db, "s1", CONVERSATION_MOVIE)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter)
+        writer = _make_writer(
+            memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter
+        )
 
         episodes = writer.process_session("s1", "2026-04-01 10:00:00")
 
@@ -91,7 +89,9 @@ class TestEpisodeExtraction:
     ) -> None:
         """Episode text should not contain raw timestamps or role labels."""
         populate_utterances(memory_db, "s1", CONVERSATION_PERSONAL)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter)
+        writer = _make_writer(
+            memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter
+        )
 
         episodes = writer.process_session("s1", "2026-04-01 11:00:00")
         assert len(episodes) >= 1
@@ -114,7 +114,9 @@ class TestEpisodeExtraction:
     ) -> None:
         """A trivial greeting exchange yields zero episodes."""
         populate_utterances(memory_db, "s1", CONVERSATION_TRIVIAL)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter)
+        writer = _make_writer(
+            memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter
+        )
 
         episodes = writer.process_session("s1", "2026-04-01 13:00:00")
         # Trivial conversation: too few utterances (_MIN_UTTERANCES = 2) or
@@ -132,7 +134,9 @@ class TestEpisodeExtraction:
     ) -> None:
         """Extracted episodes have embeddings stored."""
         populate_utterances(memory_db, "s1", CONVERSATION_MOVIE)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter)
+        writer = _make_writer(
+            memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter
+        )
 
         episodes = writer.process_session("s1", "2026-04-01 10:00:00")
         assert len(episodes) >= 1
@@ -162,9 +166,11 @@ class TestProfileExtraction:
         token_counter: TokenCounter,
     ) -> None:
         """Extracted profiles have valid topics from PROFILE_SCHEMA."""
-        # CONVERSATION_PERSONAL mentions: jazz (interest), Seoul (basic_info), programmer (basic_info)
+        # CONVERSATION_PERSONAL: jazz (interest), Seoul/programmer (basic_info)
         populate_utterances(memory_db, "s1", CONVERSATION_PERSONAL)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter)
+        writer = _make_writer(
+            memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter
+        )
 
         writer.process_session("s1", "2026-04-01 11:00:00")
 
@@ -200,7 +206,9 @@ class TestProfileExtraction:
 
         # Process a conversation that mentions music (new topic)
         populate_utterances(memory_db, "s1", CONVERSATION_PERSONAL)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter)
+        writer = _make_writer(
+            memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter
+        )
         writer.process_session("s1", "2026-04-01 11:00:00")
 
         profiles_after = memory_db.get_all_profiles()
@@ -230,7 +238,9 @@ class TestSessionProcessing:
     ) -> None:
         """Session is marked as processed after write completes."""
         populate_utterances(memory_db, "s1", CONVERSATION_MOVIE)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter)
+        writer = _make_writer(
+            memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter
+        )
 
         writer.process_session("s1", "2026-04-01 10:00:00")
 
@@ -252,7 +262,9 @@ class TestSessionProcessing:
         check get_processed_session_ids() before calling process_session().
         """
         populate_utterances(memory_db, "s1", CONVERSATION_MOVIE)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter)
+        writer = _make_writer(
+            memory_db, vector_index, shared_embedder, write_llm, memory_config, token_counter
+        )
 
         # Not processed yet
         assert "s1" not in memory_db.get_processed_session_ids(["s1"])

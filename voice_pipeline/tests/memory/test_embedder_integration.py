@@ -21,14 +21,18 @@ def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
 class TestSentenceTransformerKorean:
     """Verify embedding model handles Korean text correctly."""
 
-    def test_embed_returns_correct_shape(self, shared_embedder: SentenceTransformerEmbedder) -> None:
+    def test_embed_returns_correct_shape(
+        self, shared_embedder: SentenceTransformerEmbedder
+    ) -> None:
         """Korean text produces a 384-dim float32 vector."""
         vec = shared_embedder.embed("어제 인터스텔라를 봤는데 정말 감동적이었어")
         assert vec.shape == (384,)
         assert vec.dtype == np.float32
         assert not np.any(np.isnan(vec))
 
-    def test_semantic_similarity_ordering(self, shared_embedder: SentenceTransformerEmbedder) -> None:
+    def test_semantic_similarity_ordering(
+        self, shared_embedder: SentenceTransformerEmbedder
+    ) -> None:
         """Semantically similar Korean texts have higher cosine similarity."""
         v_movie1 = shared_embedder.embed("인터스텔라 영화가 정말 감동적이었어")
         v_movie2 = shared_embedder.embed("놀란 감독의 SF 영화를 좋아해")

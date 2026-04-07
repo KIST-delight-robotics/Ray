@@ -12,7 +12,6 @@ from voice_pipeline.embedding.embedder import SentenceTransformerEmbedder
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
-
 from voice_pipeline.tests.memory.conftest import make_episode, store_episode_with_embedding
 
 pytestmark = pytest.mark.requires_model
@@ -64,7 +63,8 @@ class TestVectorSearchReal:
             vector_index,
             shared_embedder,
             make_episode(
-                "The user made cream mushroom pasta from scratch and wants to learn Italian cooking.",
+                "The user made cream mushroom pasta from scratch"
+                " and wants to learn Italian cooking.",
                 session_id="s-old",
             ),
         )
@@ -197,7 +197,11 @@ class TestRetainedBufferReal:
         )
 
         retriever = _build_retriever(
-            memory_db, vector_index, shared_embedder, retained_ttl=2, max_memories=5,
+            memory_db,
+            vector_index,
+            shared_embedder,
+            retained_ttl=2,
+            max_memories=5,
         )
 
         # Turn 1: movie query → movie_ep enters retained with ttl=1

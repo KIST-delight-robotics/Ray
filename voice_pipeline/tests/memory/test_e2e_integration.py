@@ -17,7 +17,6 @@ from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.writer import MemoryWriter
-
 from voice_pipeline.tests.memory.conftest import (
     CONVERSATION_COOKING,
     CONVERSATION_MOVIE,
@@ -67,9 +66,15 @@ class TestWriteThenRetrieve:
     ) -> None:
         """Written episodes are retrievable by a relevant query."""
         episodes = _write_session(
-            memory_db, vector_index, shared_embedder, write_llm,
-            memory_config, token_counter,
-            "s-movie", "2026-04-01 10:00:00", CONVERSATION_MOVIE,
+            memory_db,
+            vector_index,
+            shared_embedder,
+            write_llm,
+            memory_config,
+            token_counter,
+            "s-movie",
+            "2026-04-01 10:00:00",
+            CONVERSATION_MOVIE,
         )
         assert len(episodes) >= 1
 
@@ -95,14 +100,26 @@ class TestWriteThenRetrieve:
     ) -> None:
         """Movie query ranks movie-session episodes above cooking-session episodes."""
         movie_eps = _write_session(
-            memory_db, vector_index, shared_embedder, write_llm,
-            memory_config, token_counter,
-            "s-movie", "2026-04-01 10:00:00", CONVERSATION_MOVIE,
+            memory_db,
+            vector_index,
+            shared_embedder,
+            write_llm,
+            memory_config,
+            token_counter,
+            "s-movie",
+            "2026-04-01 10:00:00",
+            CONVERSATION_MOVIE,
         )
         cook_eps = _write_session(
-            memory_db, vector_index, shared_embedder, write_llm,
-            memory_config, token_counter,
-            "s-cook", "2026-04-01 12:00:00", CONVERSATION_COOKING,
+            memory_db,
+            vector_index,
+            shared_embedder,
+            write_llm,
+            memory_config,
+            token_counter,
+            "s-cook",
+            "2026-04-01 12:00:00",
+            CONVERSATION_COOKING,
         )
         assert len(movie_eps) >= 1 and len(cook_eps) >= 1
 
@@ -145,9 +162,15 @@ class TestContextIntegration:
     ) -> None:
         """format_memory_block produces [M1] tags from real retrieval results."""
         _write_session(
-            memory_db, vector_index, shared_embedder, write_llm,
-            memory_config, token_counter,
-            "s1", "2026-04-01 10:00:00", CONVERSATION_MOVIE,
+            memory_db,
+            vector_index,
+            shared_embedder,
+            write_llm,
+            memory_config,
+            token_counter,
+            "s1",
+            "2026-04-01 10:00:00",
+            CONVERSATION_MOVIE,
         )
 
         retriever = MemoryRetriever(memory_db, vector_index, shared_embedder, memory_config)
@@ -170,9 +193,15 @@ class TestContextIntegration:
     ) -> None:
         """Full citation roundtrip: format → simulated LLM response → parse → update."""
         _write_session(
-            memory_db, vector_index, shared_embedder, write_llm,
-            memory_config, token_counter,
-            "s1", "2026-04-01 10:00:00", CONVERSATION_MOVIE,
+            memory_db,
+            vector_index,
+            shared_embedder,
+            write_llm,
+            memory_config,
+            token_counter,
+            "s1",
+            "2026-04-01 10:00:00",
+            CONVERSATION_MOVIE,
         )
 
         retriever = MemoryRetriever(memory_db, vector_index, shared_embedder, memory_config)
