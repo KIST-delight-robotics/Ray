@@ -24,6 +24,7 @@ from voice_pipeline.core.types import (
     LEDState,
     LLMMetrics,
     LLMStream,
+    PipelineTrace,
     ResponseData,
     TTSStream,
     TurnDecision,
@@ -779,6 +780,15 @@ class ISpeechGenerator(ABC):
 
         Does not shut down the executor — the generator can be reused.
         """
+
+    @property
+    def trace(self) -> PipelineTrace | None:
+        """Current pipeline trace, if tracing is active.
+
+        Returns None by default.  Concrete implementations override
+        to expose the trace populated during the current pipeline run.
+        """
+        return None
 
     @abstractmethod
     def shutdown(self) -> None:

@@ -51,6 +51,7 @@ from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.writer import MemoryWriter
 from voice_pipeline.orchestrator.orchestrator import Orchestrator
 from voice_pipeline.session.session_manager import SessionComponents, SessionManager
+from voice_pipeline.trace.trace_store import SQLiteTraceStore
 from voice_pipeline.tts.greeting_audio import ensure_greeting_audio
 from voice_pipeline.tts.tts import OpenAITTS
 from voice_pipeline.tts.utterance_truncator import TimestampTruncator
@@ -97,6 +98,7 @@ def main() -> None:
         expected_dimension=config.memory.embedding_dimension,
     )
     memory_storage = SQLiteMemoryStorage(config.memory)
+    trace_store = SQLiteTraceStore(config.memory.db_path)
     vector_index = NumpyVectorIndex()
     ids, vectors = memory_storage.load_all_embeddings()
     if ids:
@@ -200,6 +202,7 @@ def main() -> None:
             memory_storage=memory_storage,
             session_id=session_id,
             token_counter=token_counter,
+            trace_store=trace_store,
         )
         return SessionComponents(orchestrator=orchestrator, history=history, session_id=session_id)
 
@@ -243,6 +246,7 @@ def main() -> None:
         wakeword.close()
         led.close()
         memory_storage.close()
+        trace_store.close()
 
 
 if __name__ == "__main__":

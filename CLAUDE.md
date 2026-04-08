@@ -29,7 +29,7 @@ SessionManager (top-level state machine)
 ```
 voice_pipeline/
 ├── core/
-│   ├── types.py               # Shared data types (TurnDecision, ResponseData, etc.)
+│   ├── types.py               # Shared data types (TurnDecision, ResponseData, PipelineTrace, etc.)
 │   ├── interfaces.py          # All module interfaces (IASR, ITTS, ILLM, etc.)
 │   ├── exceptions.py          # PipelineError base only
 │   └── config.py              # Dataclass-based configuration
@@ -100,6 +100,9 @@ voice_pipeline/
 │   ├── prompts.py             # Write prompts, JSON schemas, profile schema
 │   └── exceptions.py
 │
+├── trace/
+│   └── trace_store.py         # Pipeline latency trace storage (SQLite / in-memory)
+│
 ├── orchestrator/
 │   └── orchestrator.py        # ACTIVE mode conversation loop
 │
@@ -121,6 +124,7 @@ voice_pipeline/
     ├── embedding/
     ├── orchestrator/
     ├── memory/
+    ├── trace/
     ├── session/
     └── integration/
 ```

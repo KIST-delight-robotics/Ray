@@ -67,6 +67,7 @@ class Orchestrator:
         memory_storage: IMemoryStorage | None = None,
         session_id: str | None = None,
         token_counter: TokenCounter | None = None,
+        trace_store: object | None = None,
     ) -> None:
         self._asr = asr
         self._turn_detector = turn_detector
@@ -81,6 +82,7 @@ class Orchestrator:
         self._memory_storage = memory_storage
         self._session_id = session_id
         self._token_counter = token_counter
+        self._trace_store = trace_store
 
         # External stop signal
         self._stop_event = threading.Event()
@@ -100,6 +102,8 @@ class Orchestrator:
         self._assistant_msg_id: int | None = None
         self._last_frame_time = 0.0
         self._turn_shift_time = 0.0
+        self._begin_streaming_time = 0.0
+        self._speculative_attempts = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -200,6 +204,8 @@ class Orchestrator:
         self._user_msg_id = None
         self._assistant_msg_id = None
         self._turn_shift_time = 0.0
+        self._begin_streaming_time = 0.0
+        self._speculative_attempts = 0
 
         self._asr.start()
         self._set_led(LEDState.IDLE)
@@ -255,6 +261,7 @@ class Orchestrator:
             and time.monotonic() - self._turn_shift_time > self._config.awaiting_cancel_grace_sec
         ):
             logger.info("User continued speaking during awaiting — cancelling generation")
+            self._save_trace("cancelled")
             self._generator.cancel()
             self._turn_detector.reset()
             self._awaiting_response = False
@@ -371,14 +378,15 @@ class Orchestrator:
         if self._check_exit_keyword(text):
             return True
 
+        self._turn_shift_time = time.monotonic()
         if self._generator.state == GeneratorState.STREAMING:
             self._begin_streaming()
         else:
             # Not ready yet — set awaiting
-            self._turn_shift_time = time.monotonic()
             self._awaiting_response = True
             # Start generation if not already preparing
             if self._generator.state == GeneratorState.IDLE:
+                self._speculative_attempts += 1
                 self._generator.prepare(text)
         return False
 
@@ -386,6 +394,7 @@ class Orchestrator:
         """Start speculative generation with current text."""
         if self._awaiting_response:
             return
+        self._speculative_attempts += 1
         self._pending_truncation = None
         self._generator.prepare(text)
 
@@ -402,6 +411,7 @@ class Orchestrator:
             self._stop_pending_time = time.monotonic()
         elif self._awaiting_response:
             logger.info("Interrupt → cancel generator (awaiting_response)")
+            self._save_trace("cancelled")
             self._generator.cancel()
             self._turn_detector.reset()
             self._awaiting_response = False
@@ -436,11 +446,18 @@ class Orchestrator:
         self._audio_end_sent = False
         self._pending_truncation = None
 
+        self._begin_streaming_time = time.monotonic()
         self._bridge.send_stream_start()
         self._drain_audio_to_bridge()
         self._playback_state = PlaybackState.PLAYING
         buf_sec = len(self._sent_audio_buffer) / (self._tts_config.output_sample_rate * 2)
         logger.info("begin_streaming: %.1fs audio buffered → PLAYING", buf_sec)
+
+        trace = self._generator.trace
+        if trace is not None:
+            trace.session_id = self._session_id or ""
+            trace.turn_shift_ts = self._turn_shift_time
+            trace.begin_streaming_ts = self._begin_streaming_time
 
     def _drain_audio_to_bridge(self) -> None:
         """Poll audio chunks from generator and send to bridge."""
@@ -483,6 +500,9 @@ class Orchestrator:
                 if event.event_type == CppEventType.PLAYBACK_STARTED:
                     if self._playback_state == PlaybackState.PLAYING:
                         self._playback_start_time = time.monotonic()
+                        trace = self._generator.trace
+                        if trace is not None:
+                            trace.playback_started_ts = self._playback_start_time
 
                 elif event.event_type == CppEventType.PLAYBACK_COMPLETE:
                     if self._playback_state == PlaybackState.PLAYING:
@@ -508,6 +528,7 @@ class Orchestrator:
             self._save_utterance("assistant", text)
             self._turn_detector.notify_turn_complete("robot", text)
 
+        self._save_trace("completed")
         self._turn_detector.reset()
         self._reset_playback_state()
 
@@ -569,6 +590,7 @@ class Orchestrator:
                     stop_position_sec=stop_pos,
                 )
 
+        self._save_trace("truncated")
         self._turn_detector.reset()
         self._reset_playback_state()
 
@@ -627,6 +649,7 @@ class Orchestrator:
             self._begin_streaming()
         elif state == GeneratorState.FAILED:
             logger.warning("Generator failed while awaiting — skipping turn")
+            self._save_trace("cancelled")
             self._generator.reset()
             self._awaiting_response = False
             self._turn_detector.reset()
@@ -709,6 +732,27 @@ class Orchestrator:
     # Helpers
     # ------------------------------------------------------------------
 
+    def _save_trace(self, outcome: str) -> None:
+        """Persist the current pipeline trace with the given outcome."""
+        if self._trace_store is None:
+            return
+        trace = self._generator.trace
+        if trace is None:
+            return
+        trace.outcome = outcome
+        trace.speculative_attempts = self._speculative_attempts
+        if self._user_msg_id is not None:
+            trace.user_msg_id = self._user_msg_id
+        if not trace.session_id:
+            trace.session_id = self._session_id or ""
+        try:
+            self._trace_store.save(trace)
+            if outcome != "cancelled":
+                logger.info("Pipeline trace: %s", trace.summary())
+        except Exception:
+            logger.warning("Failed to save pipeline trace", exc_info=True)
+        self._speculative_attempts = 0
+
     def _get_response_text(self) -> str:
         """Get the current response text from generator or current_response."""
         if self._current_response is not None:
@@ -724,6 +768,7 @@ class Orchestrator:
         self._current_response = None
         self._sent_audio_buffer = bytearray()
         self._playback_start_time = 0.0
+        self._begin_streaming_time = 0.0
         self._audio_end_sent = False
 
     def _set_led(self, state: LEDState) -> None:

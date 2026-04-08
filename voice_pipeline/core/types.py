@@ -503,3 +503,121 @@ class CppEvent:
     """
 
     event_type: CppEventType
+
+
+# ---------------------------------------------------------------------------
+# Pipeline latency tracing
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PipelineTrace:
+    """Timing trace for one turn's response generation pipeline.
+
+    Accumulates monotonic timestamps from SpeechGenerator (background
+    thread) and Orchestrator (main thread).  Stored once per turn —
+    speculative prepare() replacements within a turn are not stored
+    individually; only the final pipeline run's timing is recorded.
+
+    ``to_record()`` converts raw timestamps to millisecond durations
+    for SQLite storage (monotonic values are meaningless across
+    process restarts).
+
+    Thread safety: the SpeechGenerator background thread writes
+    pipeline-stage fields while the Orchestrator main thread writes
+    orchestrator-level fields.  Individual float assignments are
+    atomic under CPython's GIL, and the fields written by each thread
+    do not overlap.
+    """
+
+    # -- Identity / metadata --
+    session_id: str = ""
+    run_id: int = 0
+    pipeline_mode: str = "full"
+    created_at: str = ""
+    outcome: str = ""
+    speculative_attempts: int = 1
+
+    # -- Link to conversation history --
+    user_msg_id: int = 0
+
+    # -- Orchestrator-level monotonic timestamps --
+    prepare_ts: float = 0.0
+    turn_shift_ts: float = 0.0
+    begin_streaming_ts: float = 0.0
+    playback_started_ts: float = 0.0
+
+    # -- SpeechGenerator pipeline-stage monotonic timestamps --
+    pipeline_start_ts: float = 0.0
+    memory_done_ts: float = 0.0
+    context_done_ts: float = 0.0
+    llm_start_ts: float = 0.0
+    llm_first_token_ts: float = 0.0
+    llm_done_ts: float = 0.0
+    tts_start_ts: float = 0.0
+    tts_first_chunk_ts: float = 0.0
+    tts_done_ts: float = 0.0
+
+    # -- From LLMMetrics (already in ms) --
+    llm_ttft_ms: float = 0.0
+
+    @staticmethod
+    def _delta_ms(start: float, end: float) -> float:
+        """Compute millisecond delta, returning 0.0 if either timestamp is missing."""
+        if start <= 0 or end <= 0 or end < start:
+            return 0.0
+        return (end - start) * 1000
+
+    def to_record(self) -> dict[str, object]:
+        """Convert to a flat dict of computed durations for DB storage."""
+        speculative_ms = (
+            max(0.0, (self.turn_shift_ts - self.prepare_ts) * 1000)
+            if self.turn_shift_ts > 0 and self.prepare_ts > 0
+            else 0.0
+        )
+        return {
+            "session_id": self.session_id,
+            "run_id": self.run_id,
+            "pipeline_mode": self.pipeline_mode,
+            "created_at": self.created_at,
+            "outcome": self.outcome,
+            "speculative_attempts": self.speculative_attempts,
+            "user_msg_id": self.user_msg_id,
+            "memory_ms": self._delta_ms(self.pipeline_start_ts, self.memory_done_ts),
+            "context_ms": self._delta_ms(self.memory_done_ts, self.context_done_ts),
+            "llm_ms": self._delta_ms(self.llm_start_ts, self.llm_done_ts),
+            "llm_ttft_ms": self.llm_ttft_ms,
+            "tts_ms": self._delta_ms(self.tts_start_ts, self.tts_done_ts),
+            "tts_ttfc_ms": self._delta_ms(self.tts_start_ts, self.tts_first_chunk_ts),
+            "prepare_to_streaming_ms": self._delta_ms(self.prepare_ts, self.tts_first_chunk_ts),
+            "turn_shift_to_playback_ms": self._delta_ms(
+                self.turn_shift_ts, self.playback_started_ts
+            ),
+            "speculative_ms": speculative_ms,
+            "bridge_ms": self._delta_ms(self.begin_streaming_ts, self.playback_started_ts),
+        }
+
+    def summary(self) -> str:
+        """One-line latency summary for logging."""
+        r = self.to_record()
+        parts = [f"outcome={self.outcome}"]
+        ts_to_pb = r["turn_shift_to_playback_ms"]
+        if ts_to_pb:
+            parts.append(f"ts→pb={ts_to_pb:.0f}ms")
+        spec = r["speculative_ms"]
+        if spec:
+            parts.append(f"spec={spec:.0f}ms")
+        for key in ("memory_ms", "context_ms", "llm_ms", "tts_ms", "bridge_ms"):
+            v = r[key]
+            if v:
+                label = key.removesuffix("_ms")
+                parts.append(f"{label}={v:.0f}ms")
+        ttft = r["llm_ttft_ms"]
+        if ttft:
+            parts.append(f"llm_ttft={ttft:.0f}ms")
+        ttfc = r["tts_ttfc_ms"]
+        if ttfc:
+            parts.append(f"tts_ttfc={ttfc:.0f}ms")
+        if self.speculative_attempts > 1:
+            parts.append(f"attempts={self.speculative_attempts}")
+        return " | ".join(parts)

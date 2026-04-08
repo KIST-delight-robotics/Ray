@@ -13,12 +13,14 @@ from voice_pipeline.core.types import (
     CppEventType,
     GeneratorState,
     LEDState,
+    PipelineTrace,
     PlaybackState,
     ResponseData,
     TurnDecision,
     WordTimestamp,
 )
 from voice_pipeline.orchestrator.orchestrator import Orchestrator, _PendingTruncation
+from voice_pipeline.trace.trace_store import InMemoryTraceStore
 
 # ---------------------------------------------------------------------------
 # Fixture helper
@@ -1142,3 +1144,185 @@ class TestUtteranceStorage:
         orch._on_playback_complete()  # Should not raise
 
         mocks["history"].add_assistant_message.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Pipeline trace tests
+# ---------------------------------------------------------------------------
+
+
+def _make_orchestrator_with_trace() -> (
+    tuple[Orchestrator, dict[str, MagicMock], InMemoryTraceStore]
+):
+    """Create an Orchestrator with InMemoryTraceStore."""
+    orch, mocks = _make_orchestrator()
+    store = InMemoryTraceStore()
+    orch._trace_store = store
+    orch._session_id = "test-session"
+    mocks["generator"].trace = PipelineTrace(
+        run_id=1, pipeline_mode="full", prepare_ts=time.monotonic()
+    )
+    return orch, mocks, store
+
+
+class TestPipelineTraceCompleted:
+    def test_completed_on_playback_complete(self) -> None:
+        orch, mocks, store = _make_orchestrator_with_trace()
+        orch._start_session()
+        orch._playback_state = PlaybackState.PLAYING
+        orch._current_response = ResponseData(text="hello", audio=b"\x00" * 100)
+
+        orch._on_playback_complete()
+
+        assert len(store.traces) == 1
+        assert store.traces[0].outcome == "completed"
+
+    def test_completed_resets_attempts_counter(self) -> None:
+        orch, mocks, store = _make_orchestrator_with_trace()
+        orch._start_session()
+        orch._speculative_attempts = 3
+        orch._playback_state = PlaybackState.PLAYING
+        orch._current_response = ResponseData(text="hi", audio=b"\x00" * 100)
+
+        orch._on_playback_complete()
+
+        assert store.traces[0].speculative_attempts == 3
+        assert orch._speculative_attempts == 0
+
+
+class TestPipelineTraceTruncated:
+    def test_truncated_on_barge_in(self) -> None:
+        orch, mocks, store = _make_orchestrator_with_trace()
+        orch._start_session()
+        orch._playback_state = PlaybackState.STOP_PENDING
+        orch._playback_start_time = time.monotonic() - 1.0
+        orch._stop_pending_time = time.monotonic() - 0.5
+        orch._current_response = ResponseData(text="hello world", audio=b"\x00" * 4800)
+        mocks["truncator"].truncate.return_value = "hello"
+
+        orch._on_playback_interrupted()
+
+        assert len(store.traces) == 1
+        assert store.traces[0].outcome == "truncated"
+
+
+class TestPipelineTraceCancelled:
+    def test_cancelled_on_interrupt_during_awaiting(self) -> None:
+        orch, mocks, store = _make_orchestrator_with_trace()
+        orch._start_session()
+        orch._awaiting_response = True
+
+        orch._handle_interrupt()
+
+        assert len(store.traces) == 1
+        assert store.traces[0].outcome == "cancelled"
+
+    def test_cancelled_on_user_continued_speaking(self) -> None:
+        orch, mocks, store = _make_orchestrator_with_trace()
+        orch._start_session()
+        orch._awaiting_response = True
+        orch._turn_shift_time = time.monotonic() - 10.0  # well past grace period
+
+        mocks["asr"].get_text.return_value = "new text"
+        mocks["turn_detector"].process_frame.return_value = TurnDecision.none()
+
+        q = _audio_queue_with(_frame())
+        orch._run_frame(q)
+
+        assert len(store.traces) == 1
+        assert store.traces[0].outcome == "cancelled"
+
+    def test_cancelled_on_generator_failed(self) -> None:
+        orch, mocks, store = _make_orchestrator_with_trace()
+        orch._start_session()
+        orch._awaiting_response = True
+        mocks["generator"].state = GeneratorState.FAILED
+
+        orch._check_generator_completion()
+
+        assert len(store.traces) == 1
+        assert store.traces[0].outcome == "cancelled"
+
+
+class TestPipelineTraceSpeculative:
+    def test_speculative_attempts_counted(self) -> None:
+        orch, mocks, store = _make_orchestrator_with_trace()
+        orch._start_session()
+
+        # Two speculative prepares
+        orch._handle_prepare("text A")
+        orch._handle_prepare("text B")
+
+        # Then turn_shift → streaming → playback
+        mocks["generator"].state = GeneratorState.STREAMING
+        mocks["generator"].input_text = "text B"
+        orch._handle_turn_shift("text B")
+        orch._playback_state = PlaybackState.PLAYING
+        orch._current_response = ResponseData(text="response", audio=b"\x00" * 100)
+
+        orch._on_playback_complete()
+
+        assert len(store.traces) == 1
+        assert store.traces[0].speculative_attempts == 2
+
+    def test_speculative_replace_does_not_save(self) -> None:
+        """Replacing a speculative prepare should NOT save the old trace."""
+        orch, mocks, store = _make_orchestrator_with_trace()
+        orch._start_session()
+
+        orch._handle_prepare("text A")
+        orch._handle_prepare("text B")
+
+        # Only speculative replacements — no turn completion yet
+        assert len(store.traces) == 0
+
+
+class TestPipelineTraceDisabled:
+    def test_no_error_when_store_is_none(self) -> None:
+        orch, mocks = _make_orchestrator()
+        orch._start_session()
+        mocks["generator"].trace = PipelineTrace(run_id=1)
+        orch._playback_state = PlaybackState.PLAYING
+        orch._current_response = ResponseData(text="hello", audio=b"\x00" * 100)
+
+        orch._on_playback_complete()  # should not raise
+
+    def test_no_error_when_trace_is_none(self) -> None:
+        orch, mocks, store = _make_orchestrator_with_trace()
+        orch._start_session()
+        mocks["generator"].trace = None
+        orch._playback_state = PlaybackState.PLAYING
+        orch._current_response = ResponseData(text="hello", audio=b"\x00" * 100)
+
+        orch._on_playback_complete()  # should not raise
+        assert len(store.traces) == 0
+
+
+class TestPipelineTraceTimestamps:
+    def test_begin_streaming_sets_trace_timestamps(self) -> None:
+        orch, mocks, store = _make_orchestrator_with_trace()
+        orch._start_session()
+        orch._turn_shift_time = time.monotonic()
+        mocks["generator"].state = GeneratorState.STREAMING
+        mocks["generator"].input_text = "hello"
+
+        orch._begin_streaming()
+
+        trace = mocks["generator"].trace
+        assert trace.turn_shift_ts > 0
+        assert trace.begin_streaming_ts > 0
+        assert trace.session_id != ""
+
+    def test_playback_started_sets_trace_timestamp(self) -> None:
+        orch, mocks, store = _make_orchestrator_with_trace()
+        orch._start_session()
+        orch._playback_state = PlaybackState.PLAYING
+        mocks["bridge"].poll_event.side_effect = [
+            CppEvent(CppEventType.PLAYBACK_STARTED),
+            None,
+        ]
+
+        orch._poll_cpp_events()
+
+        trace = mocks["generator"].trace
+        assert trace.playback_started_ts > 0

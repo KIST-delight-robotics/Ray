@@ -8,6 +8,7 @@ import queue
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from voice_pipeline.context.formatters import parse_citation_tag
@@ -24,6 +25,7 @@ from voice_pipeline.core.types import (
     GeneratorState,
     LLMMetrics,
     LLMStream,
+    PipelineTrace,
     ResponseData,
     TTSStream,
     WordTimestamp,
@@ -81,6 +83,7 @@ class SpeechGenerator(ISpeechGenerator):
         self._audio_queue: queue.Queue[bytes] = queue.Queue()
         self._response_data: ResponseData | None = None
         self._stream_done = False
+        self._trace: PipelineTrace | None = None
 
     # -- Properties ----------------------------------------------------------
 
@@ -98,6 +101,11 @@ class SpeechGenerator(ISpeechGenerator):
     def input_text(self) -> str:
         with self._lock:
             return self._input_text
+
+    @property
+    def trace(self) -> PipelineTrace | None:
+        with self._lock:
+            return self._trace
 
     # -- Public methods ------------------------------------------------------
 
@@ -119,6 +127,12 @@ class SpeechGenerator(ISpeechGenerator):
             self._text = ""
             self._response_data = None
             self._stream_done = False
+            self._trace = PipelineTrace(
+                run_id=run_id,
+                pipeline_mode=self._config.pipeline_mode,
+                created_at=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+                prepare_ts=time.monotonic(),
+            )
 
         logger.info("prepare(%r) → PREPARING [run=%d]", current_text[:60], run_id)
         self._executor.submit(self._run_pipeline, current_text, run_id, cancel_event, audio_queue)
@@ -134,6 +148,7 @@ class SpeechGenerator(ISpeechGenerator):
             self._text = ""
             self._response_data = None
             self._stream_done = False
+            self._trace = None
 
     def poll_audio(self) -> bytes | None:
         with self._lock:
@@ -171,6 +186,7 @@ class SpeechGenerator(ISpeechGenerator):
             self._text = ""
             self._response_data = None
             self._stream_done = False
+            self._trace = None
 
     def shutdown(self) -> None:
         """Permanently shut down the executor. Call only at program exit.
@@ -253,27 +269,45 @@ class SpeechGenerator(ISpeechGenerator):
     ) -> None:
         try:
             t0 = time.monotonic()
+            trace = self._trace  # snapshot ref — safe under GIL
+
+            if trace is not None:
+                trace.pipeline_start_ts = t0
 
             # 1. Memory retrieval
             if cancel_event.is_set():
                 return
             memory_result = self._retrieve_memories(current_text)
 
+            if trace is not None:
+                trace.memory_done_ts = time.monotonic()
+
             # 2. Build context
             if cancel_event.is_set():
                 return
             messages = self._context_builder.build(current_text, memory_result=memory_result)
 
+            if trace is not None:
+                trace.context_done_ts = time.monotonic()
+
             # 3. Generate LLM text
             if cancel_event.is_set():
                 return
+
+            if trace is not None:
+                trace.llm_start_ts = time.monotonic()
+
             llm_stream: LLMStream = self._llm.generate(messages)
             text_chunks: list[str] = []
+            llm_first = True
             try:
                 for chunk in llm_stream:
                     if cancel_event.is_set():
                         llm_stream.close()
                         return
+                    if llm_first and trace is not None:
+                        trace.llm_first_token_ts = time.monotonic()
+                        llm_first = False
                     text_chunks.append(chunk)
             except Exception:
                 with contextlib.suppress(Exception):
@@ -282,6 +316,10 @@ class SpeechGenerator(ISpeechGenerator):
 
             full_text = "".join(text_chunks)
             t_llm = time.monotonic()
+
+            if trace is not None:
+                trace.llm_done_ts = t_llm
+
             logger.info("LLM done (%.1fs) [run=%d]: %r", t_llm - t0, run_id, full_text)
 
             # 3a. Collect LLM metrics and build turn_items
@@ -290,6 +328,8 @@ class SpeechGenerator(ISpeechGenerator):
                 llm_result = llm_stream.result
                 if llm_result.metrics is not None:
                     metrics_list.append(llm_result.metrics)
+                    if trace is not None:
+                        trace.llm_ttft_ms = float(llm_result.metrics.ttft_ms)
             except RuntimeError:
                 pass  # Stream was closed early, no result available
 
@@ -315,6 +355,10 @@ class SpeechGenerator(ISpeechGenerator):
             # 7. TTS synthesis (using clean text without citation tag)
             if cancel_event.is_set():
                 return
+
+            if trace is not None:
+                trace.tts_start_ts = time.monotonic()
+
             tts_stream = self._tts.synthesize(clean_text)
             first_chunk = True
             total_audio = bytearray()
@@ -330,6 +374,8 @@ class SpeechGenerator(ISpeechGenerator):
                                 tts_stream.close()
                                 return
                             self._state = GeneratorState.STREAMING
+                        if trace is not None:
+                            trace.tts_first_chunk_ts = time.monotonic()
                         first_chunk = False
 
                     audio_queue.put(chunk)
@@ -347,6 +393,10 @@ class SpeechGenerator(ISpeechGenerator):
                 return
 
             t_tts = time.monotonic()
+
+            if trace is not None:
+                trace.tts_done_ts = t_tts
+
             audio_sec = len(total_audio) / (24000 * 2)
             logger.info(
                 "TTS done (%.1fs): %.1fs audio → STREAMING [run=%d]",
@@ -404,20 +454,34 @@ class SpeechGenerator(ISpeechGenerator):
 
         try:
             t0 = time.monotonic()
+            trace = self._trace
+
+            if trace is not None:
+                trace.pipeline_start_ts = t0
 
             # 1. Memory retrieval
             if cancel_event.is_set():
                 return
             memory_result = self._retrieve_memories(current_text)
 
+            if trace is not None:
+                trace.memory_done_ts = time.monotonic()
+
             # 2. Build context
             if cancel_event.is_set():
                 return
             messages = self._context_builder.build(current_text, memory_result=memory_result)
 
+            if trace is not None:
+                trace.context_done_ts = time.monotonic()
+
             # 3. LLM stream → sentence detection → TTS submission
             if cancel_event.is_set():
                 return
+
+            if trace is not None:
+                trace.llm_start_ts = time.monotonic()
+
             llm_stream: LLMStream = self._llm.generate(messages)
 
             detector = SentenceDetector(min_flush_words=self._config.min_flush_words)
@@ -448,11 +512,15 @@ class SpeechGenerator(ISpeechGenerator):
 
             # --- Producer: iterate LLM stream, detect sentences, submit TTS ---
             text_chunks: list[str] = []
+            llm_first = True
             try:
                 for chunk in llm_stream:
                     if cancel_event.is_set():
                         llm_stream.close()
                         break
+                    if llm_first and trace is not None:
+                        trace.llm_first_token_ts = time.monotonic()
+                        llm_first = False
                     text_chunks.append(chunk)
                     for sentence in detector.feed(chunk):
                         if cancel_event.is_set():
@@ -466,6 +534,10 @@ class SpeechGenerator(ISpeechGenerator):
 
             full_text = "".join(text_chunks)
             t_llm = time.monotonic()
+
+            if trace is not None:
+                trace.llm_done_ts = t_llm
+
             logger.info("LLM done (%.1fs) [run=%d]: %r", t_llm - t0, run_id, full_text)
 
             # Collect LLM metrics
@@ -474,6 +546,8 @@ class SpeechGenerator(ISpeechGenerator):
                 llm_result = llm_stream.result
                 if llm_result.metrics is not None:
                     metrics_list.append(llm_result.metrics)
+                    if trace is not None:
+                        trace.llm_ttft_ms = float(llm_result.metrics.ttft_ms)
             except RuntimeError:
                 pass
 
@@ -518,6 +592,10 @@ class SpeechGenerator(ISpeechGenerator):
                 return
 
             t_done = time.monotonic()
+
+            if trace is not None:
+                trace.tts_done_ts = t_done
+
             audio_sec = len(total_audio) / (24000 * 2)
             logger.info(
                 "Sentence pipeline done (%.1fs): %.1fs audio [run=%d]",
@@ -569,7 +647,9 @@ class SpeechGenerator(ISpeechGenerator):
     ) -> None:
         """Consumer thread: drain TTS futures in order, feed *audio_queue*."""
         first_chunk_overall = True
+        first_sentence = True
         audio_offset_bytes = 0
+        trace = self._trace
 
         try:
             while True:
@@ -586,6 +666,10 @@ class SpeechGenerator(ISpeechGenerator):
                     return  # sentinel — producer is done
 
                 sentence_text, future = item
+
+                if first_sentence and trace is not None:
+                    trace.tts_start_ts = time.monotonic()
+                    first_sentence = False
 
                 try:
                     tts_stream: TTSStream = future.result(timeout=120.0)
@@ -607,6 +691,8 @@ class SpeechGenerator(ISpeechGenerator):
                                     tts_stream.close()
                                     return
                                 self._state = GeneratorState.STREAMING
+                            if trace is not None:
+                                trace.tts_first_chunk_ts = time.monotonic()
                             first_chunk_overall = False
 
                         audio_queue.put(chunk)
