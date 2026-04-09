@@ -93,6 +93,22 @@ class TestSQLiteTraceStore:
         assert count == 5
         conn.close()
 
+    def test_interrupt_latency_stored(self) -> None:
+        store = self._make_store()
+        trace = _make_trace(
+            outcome="truncated",
+            interrupt_ts=100.8,
+            interrupt_ack_ts=100.85,
+        )
+        store.save(trace)
+        store.close()
+
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM pipeline_traces").fetchone()
+        assert row["interrupt_latency_ms"] == pytest.approx(50.0, abs=1)
+        conn.close()
+
     def test_cancelled_trace_zero_durations(self) -> None:
         store = self._make_store()
         trace = PipelineTrace(

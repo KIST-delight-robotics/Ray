@@ -1205,6 +1205,26 @@ class TestPipelineTraceTruncated:
         assert len(store.traces) == 1
         assert store.traces[0].outcome == "truncated"
 
+    def test_interrupt_latency_recorded(self) -> None:
+        orch, mocks, store = _make_orchestrator_with_trace()
+        orch._start_session()
+        orch._playback_state = PlaybackState.PLAYING
+        orch._playback_start_time = time.monotonic() - 1.0
+        orch._current_response = ResponseData(text="hello world", audio=b"\x00" * 4800)
+        mocks["truncator"].truncate.return_value = "hello"
+
+        orch._handle_interrupt()
+        assert orch._playback_state == PlaybackState.STOP_PENDING
+
+        trace = mocks["generator"].trace
+        assert trace.interrupt_ts > 0
+
+        orch._on_playback_interrupted()
+
+        assert trace.interrupt_ack_ts >= trace.interrupt_ts
+        record = trace.to_record()
+        assert record["interrupt_latency_ms"] > 0
+
 
 class TestPipelineTraceCancelled:
     def test_cancelled_on_interrupt_during_awaiting(self) -> None:

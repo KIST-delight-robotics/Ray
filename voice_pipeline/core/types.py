@@ -547,6 +547,10 @@ class PipelineTrace:
     begin_streaming_ts: float = 0.0
     playback_started_ts: float = 0.0
 
+    # -- Interrupt monotonic timestamps --
+    interrupt_ts: float = 0.0
+    interrupt_ack_ts: float = 0.0
+
     # -- SpeechGenerator pipeline-stage monotonic timestamps --
     pipeline_start_ts: float = 0.0
     memory_done_ts: float = 0.0
@@ -595,6 +599,7 @@ class PipelineTrace:
             ),
             "speculative_ms": speculative_ms,
             "bridge_ms": self._delta_ms(self.begin_streaming_ts, self.playback_started_ts),
+            "interrupt_latency_ms": self._delta_ms(self.interrupt_ts, self.interrupt_ack_ts),
         }
 
     def summary(self) -> str:
@@ -618,6 +623,9 @@ class PipelineTrace:
         ttfc = r["tts_ttfc_ms"]
         if ttfc:
             parts.append(f"tts_ttfc={ttfc:.0f}ms")
+        interrupt_ms = r["interrupt_latency_ms"]
+        if interrupt_ms:
+            parts.append(f"interrupt={interrupt_ms:.0f}ms")
         if self.speculative_attempts > 1:
             parts.append(f"attempts={self.speculative_attempts}")
         return " | ".join(parts)

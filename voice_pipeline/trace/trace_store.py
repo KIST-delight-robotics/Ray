@@ -29,6 +29,7 @@ _COLUMNS = (
     "turn_shift_to_playback_ms",
     "speculative_ms",
     "bridge_ms",
+    "interrupt_latency_ms",
 )
 
 
@@ -68,7 +69,8 @@ class SQLiteTraceStore:
                 prepare_to_streaming_ms REAL    NOT NULL DEFAULT 0,
                 turn_shift_to_playback_ms REAL  NOT NULL DEFAULT 0,
                 speculative_ms          REAL    NOT NULL DEFAULT 0,
-                bridge_ms               REAL    NOT NULL DEFAULT 0
+                bridge_ms               REAL    NOT NULL DEFAULT 0,
+                interrupt_latency_ms    REAL    NOT NULL DEFAULT 0
             )
         """)
         self._conn.execute(

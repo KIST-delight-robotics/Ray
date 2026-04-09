@@ -408,7 +408,11 @@ class Orchestrator:
                 logger.warning("Bridge send_stop error", exc_info=True)
                 # Treat as bridge failure — will be caught by poll
             self._playback_state = PlaybackState.STOP_PENDING
-            self._stop_pending_time = time.monotonic()
+            now = time.monotonic()
+            self._stop_pending_time = now
+            trace = self._generator.trace
+            if trace is not None:
+                trace.interrupt_ts = now
         elif self._awaiting_response:
             logger.info("Interrupt → cancel generator (awaiting_response)")
             self._save_trace("cancelled")
@@ -538,6 +542,10 @@ class Orchestrator:
         Stop position is estimated from the time between playback_started
         and stop being sent (time-based estimation).
         """
+        now = time.monotonic()
+        trace = self._generator.trace
+        if trace is not None:
+            trace.interrupt_ack_ts = now
         if self._playback_start_time > 0.0:
             stop_pos = max(0.0, self._stop_pending_time - self._playback_start_time)
         else:
