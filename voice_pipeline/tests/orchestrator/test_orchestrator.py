@@ -1151,9 +1151,9 @@ class TestUtteranceStorage:
 # ---------------------------------------------------------------------------
 
 
-def _make_orchestrator_with_trace() -> (
-    tuple[Orchestrator, dict[str, MagicMock], InMemoryTraceStore]
-):
+def _make_orchestrator_with_trace() -> tuple[
+    Orchestrator, dict[str, MagicMock], InMemoryTraceStore
+]:
     """Create an Orchestrator with InMemoryTraceStore."""
     orch, mocks = _make_orchestrator()
     store = InMemoryTraceStore()

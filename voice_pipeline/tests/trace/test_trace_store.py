@@ -47,9 +47,7 @@ class TestSQLiteTraceStore:
     def test_table_creation(self) -> None:
         store = self._make_store()
         conn = sqlite3.connect(self._db_path)
-        tables = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()
+        tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         table_names = {row[0] for row in tables}
         assert "pipeline_traces" in table_names
         conn.close()

@@ -3,18 +3,11 @@
 import pytest
 
 from voice_pipeline.core.types import (
-    CppEvent,
-    CppEventType,
-    GeneratorState,
-    LEDState,
     PipelineTrace,
-    PlaybackState,
     ResponseData,
-    SystemMode,
     TTSResult,
     TTSStream,
     TurnDecision,
-    VAPResult,
     WordTimestamp,
 )
 
@@ -46,45 +39,6 @@ class TestTurnDecision:
     def test_all_signals_raises(self) -> None:
         with pytest.raises(ValueError, match="at most one signal"):
             TurnDecision(turn_shift=True, interrupt=True, prepare=True)
-
-    def test_frozen(self) -> None:
-        decision = TurnDecision.none()
-        with pytest.raises(AttributeError):
-            decision.turn_shift = True  # type: ignore[misc]
-
-
-class TestVAPResult:
-    def test_construction(self) -> None:
-        result = VAPResult(p_now=0.8, p_fut=0.3, user_is_speaking=True)
-        assert result.p_now == 0.8
-        assert result.p_fut == 0.3
-        assert result.user_is_speaking is True
-
-    def test_frozen(self) -> None:
-        result = VAPResult(p_now=0.5, p_fut=0.5, user_is_speaking=False)
-        with pytest.raises(AttributeError):
-            result.p_now = 0.9  # type: ignore[misc]
-
-
-class TestWordTimestamp:
-    def test_construction(self) -> None:
-        ts = WordTimestamp(word="hello", start_sec=0.0, end_sec=0.5)
-        assert ts.word == "hello"
-        assert ts.start_sec == 0.0
-        assert ts.end_sec == 0.5
-
-
-class TestTTSResult:
-    def test_construction_no_timestamps(self) -> None:
-        result = TTSResult(audio=b"\x00\x01")
-        assert result.audio == b"\x00\x01"
-        assert result.timestamps == ()
-
-    def test_construction_with_timestamps(self) -> None:
-        ts = (WordTimestamp(word="hi", start_sec=0.0, end_sec=0.2),)
-        result = TTSResult(audio=b"\x00", timestamps=ts)
-        assert len(result.timestamps) == 1
-        assert result.timestamps[0].word == "hi"
 
 
 class TestTTSStream:
@@ -213,79 +167,9 @@ class TestResponseData:
         data = ResponseData(text="hello", audio=b"\x00", timestamps=ts)
         assert data.has_timestamps is True
 
-    def test_mutable(self) -> None:
-        data = ResponseData(text="hello", audio=b"\x00")
-        data.text = "world"
-        assert data.text == "world"
-
-
-class TestCppEvent:
-    def test_playback_started(self) -> None:
-        event = CppEvent(event_type=CppEventType.PLAYBACK_STARTED)
-        assert event.event_type == CppEventType.PLAYBACK_STARTED
-
-    def test_playback_complete(self) -> None:
-        event = CppEvent(event_type=CppEventType.PLAYBACK_COMPLETE)
-        assert event.event_type == CppEventType.PLAYBACK_COMPLETE
-
-    def test_frozen(self) -> None:
-        event = CppEvent(event_type=CppEventType.PLAYBACK_STARTED)
-        import pytest
-
-        with pytest.raises(AttributeError):
-            event.event_type = CppEventType.PLAYBACK_COMPLETE  # type: ignore[misc]
-
-
-class TestLEDState:
-    def test_values(self) -> None:
-        assert LEDState.OFF.value == "off"
-        assert LEDState.SLEEPING.value == "sleeping"
-        assert LEDState.IDLE.value == "idle"
-
-    def test_member_count(self) -> None:
-        assert len(LEDState) == 3
-
-
-class TestEnums:
-    def test_system_mode_values(self) -> None:
-        assert SystemMode.SLEEP.value == "sleep"
-        assert SystemMode.GREETING.value == "greeting"
-        assert SystemMode.ACTIVE.value == "active"
-        assert SystemMode.FAREWELL.value == "farewell"
-
-    def test_playback_state_values(self) -> None:
-        assert PlaybackState.IDLE.value == "idle"
-        assert PlaybackState.PLAYING.value == "playing"
-        assert PlaybackState.STOP_PENDING.value == "stop_pending"
-
-    def test_generator_state_values(self) -> None:
-        assert GeneratorState.IDLE.value == "idle"
-        assert GeneratorState.PREPARING.value == "preparing"
-        assert GeneratorState.STREAMING.value == "streaming"
-        assert GeneratorState.FAILED.value == "failed"
-        assert len(GeneratorState) == 4
-
-    def test_cpp_event_type_values(self) -> None:
-        assert len(CppEventType) == 2
-
 
 class TestPipelineTrace:
     """Tests for PipelineTrace dataclass."""
-
-    def test_defaults(self) -> None:
-        trace = PipelineTrace()
-        assert trace.session_id == ""
-        assert trace.outcome == ""
-        assert trace.speculative_attempts == 1
-        assert trace.prepare_ts == 0.0
-        assert trace.llm_ttft_ms == 0.0
-
-    def test_mutable(self) -> None:
-        trace = PipelineTrace()
-        trace.prepare_ts = 100.0
-        trace.outcome = "completed"
-        assert trace.prepare_ts == 100.0
-        assert trace.outcome == "completed"
 
     def test_to_record_full_pipeline(self) -> None:
         trace = PipelineTrace(

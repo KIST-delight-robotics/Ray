@@ -74,8 +74,7 @@ class SQLiteTraceStore:
             )
         """)
         self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_traces_session "
-            "ON pipeline_traces(session_id)"
+            "CREATE INDEX IF NOT EXISTS idx_traces_session ON pipeline_traces(session_id)"
         )
         self._conn.commit()
 

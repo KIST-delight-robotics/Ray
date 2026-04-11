@@ -66,7 +66,8 @@ voice_pipeline/
 │   └── exceptions.py
 │
 ├── context/
-│   └── context_builder.py     # LLM context assembly
+│   ├── context_builder.py     # LLM context assembly
+│   └── formatters.py          # Memory/profile block formatting, citation parsing
 │
 ├── history/
 │   ├── conversation_history.py
@@ -74,6 +75,7 @@ voice_pipeline/
 │
 ├── generation/
 │   ├── speech_generator.py    # ContextBuilder → LLM → TTS orchestration
+│   ├── sentence_detector.py   # LLM stream → sentence boundary detection (sentence mode)
 │   └── exceptions.py
 │
 ├── bridge/
@@ -127,6 +129,14 @@ voice_pipeline/
     ├── trace/
     ├── session/
     └── integration/
+
+scripts/
+├── sandbox.py             # Pipeline execution sandbox for bug reproduction
+├── mock_cpp_server.py     # Mock C++ WebSocket server
+├── tts_to_file.py         # TTS → WAV file utility
+├── export_maai_onnx.py    # MaAI VAP ONNX export
+├── bench/                 # Performance benchmarks
+└── hardware/              # Hardware integration checks (mic, LED, bridge)
 ```
 
 
@@ -189,8 +199,6 @@ threading + `queue.Queue` based.
 
 ## Testing
 
-Tests must pass after each Phase before proceeding to the next.
-
 ### Test tiers
 
 | Tier | File pattern | Marker | Default run | Purpose |
@@ -219,6 +227,10 @@ uv run pytest -m ''                              # everything
 - **Environment variables** for test inputs (file paths, language codes, etc.) — never hardcoded.
 - **Mirror orchestrator usage**: test the same call patterns the orchestrator will use (e.g., frame-by-frame feed+get, reset between turns, mid-stream stop).
 - **Error recovery**: test real failure scenarios — invalid credentials, errors during streaming, recovery via reset/restart.
+
+### Bug reproduction
+
+Do **not** add pytest test files to reproduce or verify bugs. Use `scripts/sandbox.py` instead — it runs the actual production code path (SpeechGenerator, Orchestrator) with controlled inputs. See `scripts/sandbox.py` module docstring for usage.
 
 
 ## Decision Log
