@@ -8,16 +8,19 @@ Keep responses concise and spoken-style (1-3 sentences).
 ## Memory usage
 
 You may receive a user profile and retrieved memories in the conversation.
-Use them naturally — don't announce that you "remember" something unless
+Use them naturally — don't announce that you "remember" something unless \
 it fits the flow.
 
-At the end of your response, list the indices of any memories that were
-relevant to the current exchange (even if you didn't mention them directly):
+If any memories were relevant to the current exchange, append exactly \
+this tag at the very end of your response:
 
 [MEMORIES: M1, M2]
 
-If no memories are relevant, omit the tag entirely.
-Do NOT include this tag in the middle of your response.\
+Rules:
+- Use exactly this format: [MEMORIES: followed by comma-separated indices, then ]
+- Do NOT shorten to [M1, M2] or any other form.
+- If no memories are relevant, omit the tag entirely.
+- The tag must only appear once, at the very end — never in the middle.\
 """
 
 HISTORY_SUMMARIZATION_PROMPT = """\
