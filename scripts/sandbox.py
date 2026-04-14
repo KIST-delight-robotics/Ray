@@ -1,9 +1,16 @@
-"""Pipeline execution sandbox for bug reproduction.
+"""Pipeline execution sandbox.
 
-Provides building blocks to run the actual production pipeline with
-controlled inputs.  Hardware-dependent components (mic, C++ bridge,
-LED) are replaced with minimal stubs; everything else uses real
-production code.
+Provides building blocks to run production pipeline modules with
+controlled inputs and enhanced monitoring.  Hardware-dependent
+components can be replaced with stubs or used as-is with real
+hardware (e.g. microphone).
+
+Usage (Turn detection monitor)::
+
+    from scripts.sandbox import setup_turn_monitor, run_turn_monitor
+
+    setup = setup_turn_monitor()           # real mic + ASR + VAP + TurnGPT
+    run_turn_monitor(setup)                # Ctrl+C to stop
 
 Usage (SpeechGenerator level)::
 
@@ -29,17 +36,26 @@ Usage (SpeechGenerator level)::
     print(result.tts_inputs, result.raw_llm_output)
     gen.shutdown()
 
-Usage (Orchestrator level)::
+Usage (ad-hoc module composition)::
 
-    from scripts.sandbox import setup_orchestrator, run_orchestrator
+    from scripts.sandbox import create_audio_input, create_asr
 
-    setup = setup_orchestrator(["hello how are you", "goodbye"])
-    run_orchestrator(setup)
-    print(setup.history.get_messages())
-    print(setup.tts.calls)
-    setup.cleanup()
+    audio_queue = queue.Queue(300)
+    ai = create_audio_input(audio_queue)
+    asr = create_asr()
+    ai.start(); asr.start()
+    try:
+        while True:
+            frame = audio_queue.get()
+            asr.feed_audio(frame)
+            print(asr.get_text(), end="\\r", flush=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        asr.stop(); ai.stop()
 
-Requires: OPENAI_API_KEY environment variable for real LLM calls.
+Requires: OPENAI_API_KEY for LLM calls, GOOGLE_APPLICATION_CREDENTIALS
+for real ASR, ONNX model files for VAP/TurnGPT.
 """
 
 from __future__ import annotations
@@ -49,6 +65,7 @@ import queue
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,20 +73,25 @@ import numpy as np
 
 from voice_pipeline.context.context_builder import ContextBuilder
 from voice_pipeline.core.config import (
+    ASRConfig,
     AudioConfig,
+    AudioInputConfig,
     ConversationHistoryConfig,
     LLMConfig,
+    MaAIVAPConfig,
     MemoryConfig,
     OrchestratorConfig,
     SpeechGeneratorConfig,
     TTSConfig,
     TurnDetectorConfig,
+    TurnGPTConfig,
 )
 from voice_pipeline.core.interfaces import (
     IASR,
     ILLM,
     ITTS,
     IVAP,
+    IAudioInput,
     ICppBridge,
     IEmbedder,
     ILEDController,
@@ -146,6 +168,19 @@ class PipelineResult:
     response_data: ResponseData | None = None
     trace: PipelineTrace | None = None
     error: str | None = None
+
+
+@dataclass
+class TurnMonitorFrame:
+    """Per-frame monitoring data from the turn detection monitor."""
+
+    elapsed_sec: float
+    asr_text: str
+    vap_result: VAPResult
+    turngpt_prob: float
+    silence_sec: float
+    vap_favor_sec: float
+    decision: TurnDecision
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +410,27 @@ class ObservableLLM(ILLM):
         return LLMStream(_tee(), close_fn=inner.close, result_fn=_result_fn)
 
 
+class ObservableVAP(IVAP):
+    """Wraps a real VAP and captures the latest result.
+
+    ``last_result`` is updated on every ``feed_audio()`` call.
+    """
+
+    def __init__(self, real_vap: IVAP) -> None:
+        self._real = real_vap
+        self.last_result: VAPResult = VAPResult(p_now=0.5, p_fut=0.5, user_is_speaking=False)
+
+    def feed_audio(
+        self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None
+    ) -> VAPResult:
+        result = self._real.feed_audio(user_audio, robot_audio)
+        self.last_result = result
+        return result
+
+    def reset(self) -> None:
+        self._real.reset()
+
+
 # ---------------------------------------------------------------------------
 # 4. Setup helpers
 # ---------------------------------------------------------------------------
@@ -457,7 +513,68 @@ def setup_history(
 
 
 # ---------------------------------------------------------------------------
-# 5. Pipeline runner (SpeechGenerator level)
+# 5. Module factories
+# ---------------------------------------------------------------------------
+
+
+def create_audio_input(
+    audio_queue: queue.Queue[AudioFrame],
+    *,
+    audio_config: AudioConfig | None = None,
+    config: AudioInputConfig | None = None,
+) -> IAudioInput:
+    """Create a real AudioInput with microphone capture.
+
+    Requires PyAudio.
+    """
+    from voice_pipeline.audio.audio_input import AudioInput
+
+    return AudioInput(audio_queue, audio_config or _AUDIO_CONFIG, config or AudioInputConfig())
+
+
+def create_asr(
+    *,
+    config: ASRConfig | None = None,
+    audio_config: AudioConfig | None = None,
+) -> IASR:
+    """Create a real Google Cloud ASR.
+
+    Requires ``GOOGLE_APPLICATION_CREDENTIALS`` environment variable.
+    """
+    from voice_pipeline.asr.asr import GoogleCloudASR
+
+    return GoogleCloudASR(config or ASRConfig(), audio_config or _AUDIO_CONFIG)
+
+
+def create_vap(
+    *,
+    config: MaAIVAPConfig | None = None,
+    audio_config: AudioConfig | None = None,
+    tts_config: TTSConfig | None = None,
+) -> IVAP:
+    """Create a real MaAI VAP (ONNX).
+
+    Requires ONNX model files at configured paths.
+    """
+    from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
+
+    return MaAIVAPWrapper(
+        config or MaAIVAPConfig(), audio_config or _AUDIO_CONFIG, tts_config or TTSConfig()
+    )
+
+
+def create_turngpt(*, config: TurnGPTConfig | None = None) -> ITurnGPT:
+    """Create a real TurnGPT (ONNX).
+
+    Requires ONNX model and tokenizer files at configured paths.
+    """
+    from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
+
+    return TurnGPTWrapper(config or TurnGPTConfig())
+
+
+# ---------------------------------------------------------------------------
+# 6. Pipeline runner (SpeechGenerator level)
 # ---------------------------------------------------------------------------
 
 
@@ -519,7 +636,137 @@ def run_pipeline(
 
 
 # ---------------------------------------------------------------------------
-# 6. Orchestrator level setup + runner
+# 7. Turn detection monitor
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TurnMonitorSetup:
+    """Holds wired components for a turn detection monitor run."""
+
+    audio_input: IAudioInput
+    asr: IASR
+    turn_detector: TurnDetector
+    vap: ObservableVAP
+    audio_queue: queue.Queue[AudioFrame]
+
+
+def setup_turn_monitor(
+    *,
+    asr: IASR | None = None,
+    vap: IVAP | None = None,
+    turngpt: ITurnGPT | None = None,
+    embedder: IEmbedder | None = None,
+    turn_config: TurnDetectorConfig | None = None,
+    audio_config: AudioConfig | None = None,
+    audio_input_config: AudioInputConfig | None = None,
+) -> TurnMonitorSetup:
+    """Wire modules for turn detection monitoring with real mic input.
+
+    All parameters are optional.  Unspecified modules are created with
+    default production configs via ``create_*`` factories.
+
+    Args:
+        asr: ASR module. Default: real GoogleCloudASR.
+        vap: VAP module. Default: real MaAIVAPWrapper (ONNX).
+        turngpt: TurnGPT model. Default: real TurnGPTWrapper (ONNX).
+            Wrapped with ``SyncTurnGPTAdapter`` internally so that
+            probabilities are always up-to-date each frame.
+        embedder: Embedder for prepare similarity gate.
+            Default: StubEmbedder (gate disabled).
+        turn_config: TurnDetector thresholds and timeouts.
+        audio_config: Audio frame configuration (sample rate, etc.).
+        audio_input_config: Microphone device configuration.
+    """
+    _audio_config = audio_config or _AUDIO_CONFIG
+    _asr = asr or create_asr(audio_config=_audio_config)
+    _raw_vap = vap or create_vap(audio_config=_audio_config)
+    _observable_vap = ObservableVAP(_raw_vap)
+    _turngpt = turngpt or create_turngpt()
+    _adapter = SyncTurnGPTAdapter(_turngpt)
+    _embedder = embedder or StubEmbedder()
+
+    _turn_detector = TurnDetector(
+        _observable_vap,
+        _adapter,
+        _embedder,
+        turn_config or TurnDetectorConfig(),
+        _audio_config,
+    )
+
+    _audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+    _audio_input = create_audio_input(
+        _audio_queue, audio_config=_audio_config, config=audio_input_config,
+    )
+
+    return TurnMonitorSetup(
+        audio_input=_audio_input,
+        asr=_asr,
+        turn_detector=_turn_detector,
+        vap=_observable_vap,
+        audio_queue=_audio_queue,
+    )
+
+
+def run_turn_monitor(
+    setup: TurnMonitorSetup,
+    *,
+    callback: Callable[[TurnMonitorFrame], None] | None = None,
+) -> None:
+    """Run the turn detection monitor until Ctrl+C.
+
+    Feeds real microphone audio through ASR and TurnDetector,
+    reporting per-frame monitoring data via *callback*.
+
+    After each ``turn_shift``, resets ASR and TurnDetector and
+    continues monitoring the next turn.
+
+    Args:
+        setup: Wired components from :func:`setup_turn_monitor`.
+        callback: Per-frame handler.  Receives a :class:`TurnMonitorFrame`
+            every audio frame (~30 ms).  Default: formatted console output.
+    """
+    cb = callback or _default_turn_callback
+    setup.audio_input.start()
+    setup.asr.start()
+    start = time.monotonic()
+    try:
+        while True:
+            try:
+                frame = setup.audio_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            setup.asr.feed_audio(frame)
+            text = setup.asr.get_text()
+            decision = setup.turn_detector.process_frame(frame, text)
+
+            # Access TurnDetector internals for monitoring.
+            td = setup.turn_detector
+            frame_data = TurnMonitorFrame(
+                elapsed_sec=time.monotonic() - start,
+                asr_text=text,
+                vap_result=setup.vap.last_result,
+                turngpt_prob=td._turngpt_prob,  # noqa: SLF001
+                silence_sec=td._silence_elapsed_sec,  # noqa: SLF001
+                vap_favor_sec=td._vap_favor_robot_elapsed_sec,  # noqa: SLF001
+                decision=decision,
+            )
+            cb(frame_data)
+
+            if decision.turn_shift:
+                setup.turn_detector.notify_turn_complete("user", text)
+                setup.asr.reset()
+                setup.turn_detector.reset()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        setup.asr.stop()
+        setup.audio_input.stop()
+
+
+# ---------------------------------------------------------------------------
+# 8. Orchestrator level setup + runner
 # ---------------------------------------------------------------------------
 
 
@@ -697,6 +944,37 @@ def run_orchestrator(setup: OrchestratorSetup) -> None:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _default_turn_callback(frame: TurnMonitorFrame) -> None:
+    """Default console output for turn monitor frames.
+
+    Regular frames overwrite the same line (``\\r``).  Events
+    (turn_shift, prepare) print on a new line.
+    """
+    vap = frame.vap_result
+    speak = "speak" if vap.user_is_speaking else "     "
+    decision_str = ""
+    if frame.decision.turn_shift:
+        decision_str = " -> TURN_SHIFT"
+    elif frame.decision.prepare:
+        decision_str = " -> PREPARE"
+
+    line = (
+        f"[{frame.elapsed_sec:6.1f}s] "
+        f"VAP:{vap.p_now:.2f}/{vap.p_fut:.2f} {speak} "
+        f"sil:{frame.silence_sec:.1f}s "
+        f"tgpt:{frame.turngpt_prob:.2f}"
+    )
+    if frame.asr_text:
+        line += f" | {frame.asr_text[:40]}"
+
+    if decision_str:
+        print(f"\r{line}{decision_str}")
+        if frame.decision.turn_shift:
+            print(f"--- turn shift: {frame.asr_text!r} ---")
+    else:
+        print(f"\r{line}", end="", flush=True)
 
 
 def _lazy_load_embedder() -> IEmbedder:
