@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import array
 import logging
 import queue
 import threading
@@ -75,17 +76,34 @@ class AudioInput(IAudioInput):
             pa = self._pyaudio_module.PyAudio()
             frame_size = self._audio_config.frame_size_samples
 
+            capture_ch = self._config.capture_channels or self._audio_config.channels
+            need_extract = capture_ch != self._audio_config.channels
+
             stream = pa.open(
                 format=pa.get_format_from_width(self._audio_config.sample_width),
-                channels=self._audio_config.channels,
+                channels=capture_ch,
                 rate=self._audio_config.sample_rate,
                 input=True,
                 input_device_index=self._config.device_index,
                 frames_per_buffer=frame_size,
             )
 
+            if need_extract:
+                ch_idx = self._config.extract_channel
+                if ch_idx >= capture_ch:
+                    raise AudioInputError(
+                        f"extract_channel ({ch_idx}) >= capture_channels ({capture_ch})"
+                    )
+                logger.info(
+                    "Capturing %dch, extracting CH%d as mono", capture_ch, ch_idx,
+                )
+
             while not self._stop_event.is_set():
                 data = stream.read(frame_size, exception_on_overflow=False)
+                if need_extract:
+                    samples = array.array("h", data)
+                    mono = samples[ch_idx::capture_ch]
+                    data = mono.tobytes()
                 try:
                     self._queue.put_nowait(data)
                 except queue.Full:

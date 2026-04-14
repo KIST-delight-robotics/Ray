@@ -398,9 +398,16 @@ class AudioInputConfig:
 
     Attributes:
         device_index: PyAudio device index. None = system default.
+        capture_channels: Number of channels to capture from device.
+            None = use AudioConfig.channels (default mono).
+            Set to 6 for ReSpeaker 6ch firmware.
+        extract_channel: Which channel to extract when capture_channels
+            differs from AudioConfig.channels. Default 0 (first channel).
     """
 
     device_index: int | None = None
+    capture_channels: int | None = None
+    extract_channel: int = 0
 
 
 @dataclass

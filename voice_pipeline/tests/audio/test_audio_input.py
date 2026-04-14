@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import array
 import queue
+import struct
 import sys
 import threading
 import time
@@ -25,11 +27,17 @@ def _make_audio_input(
     *,
     queue_size: int = 10,
     device_index: int | None = None,
+    capture_channels: int | None = None,
+    extract_channel: int = 0,
 ):
     """Create AudioInput with mocked PyAudio."""
     audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=queue_size)
     audio_config = AudioConfig()
-    config = AudioInputConfig(device_index=device_index)
+    config = AudioInputConfig(
+        device_index=device_index,
+        capture_channels=capture_channels,
+        extract_channel=extract_channel,
+    )
 
     # Provide a mock pyaudio module
     mock_pyaudio = MagicMock()
@@ -175,6 +183,93 @@ class TestCapture:
 
         assert ai._error is not None
         assert "No such device" in str(ai._error)
+
+
+class TestMultiChannelExtract:
+    """Tests for multi-channel capture → mono extraction."""
+
+    def test_extracts_first_channel_from_6ch(self) -> None:
+        """6ch frames should be reduced to mono using channel 0."""
+        ai, audio_queue = _make_audio_input(capture_channels=6, extract_channel=0)
+
+        mock_pa_instance = MagicMock()
+        mock_stream = MagicMock()
+
+        # Build a 6ch frame: ch0=100, ch1=200, ..., ch5=600 (repeated per sample)
+        samples_per_ch = ai._audio_config.frame_size_samples
+        raw = b""
+        for _ in range(samples_per_ch):
+            for ch in range(6):
+                raw += struct.pack("<h", (ch + 1) * 100)
+
+        mock_stream.read.side_effect = _frames_then_stop(ai, [raw])
+        mock_pa_instance.open.return_value = mock_stream
+        ai._pyaudio_module.PyAudio.return_value = mock_pa_instance
+
+        ai.start()
+        ai._thread.join(timeout=2.0)
+
+        frame = audio_queue.get_nowait()
+        mono = array.array("h", frame)
+        assert len(mono) == samples_per_ch
+        assert all(s == 100 for s in mono)
+
+    def test_extracts_nonzero_channel(self) -> None:
+        """extract_channel=3 should pick the 4th channel."""
+        ai, audio_queue = _make_audio_input(capture_channels=6, extract_channel=3)
+
+        mock_pa_instance = MagicMock()
+        mock_stream = MagicMock()
+
+        samples_per_ch = ai._audio_config.frame_size_samples
+        raw = b""
+        for _ in range(samples_per_ch):
+            for ch in range(6):
+                raw += struct.pack("<h", (ch + 1) * 100)
+
+        mock_stream.read.side_effect = _frames_then_stop(ai, [raw])
+        mock_pa_instance.open.return_value = mock_stream
+        ai._pyaudio_module.PyAudio.return_value = mock_pa_instance
+
+        ai.start()
+        ai._thread.join(timeout=2.0)
+
+        frame = audio_queue.get_nowait()
+        mono = array.array("h", frame)
+        assert len(mono) == samples_per_ch
+        assert all(s == 400 for s in mono)
+
+    def test_mono_passthrough_no_extraction(self) -> None:
+        """capture_channels=None should pass frames through unchanged."""
+        ai, audio_queue = _make_audio_input(capture_channels=None)
+
+        mock_pa_instance = MagicMock()
+        mock_stream = MagicMock()
+        mono_frame = b"\x01" * (ai._audio_config.frame_size_samples * 2)
+        mock_stream.read.side_effect = _frames_then_stop(ai, [mono_frame])
+        mock_pa_instance.open.return_value = mock_stream
+        ai._pyaudio_module.PyAudio.return_value = mock_pa_instance
+
+        ai.start()
+        ai._thread.join(timeout=2.0)
+
+        frame = audio_queue.get_nowait()
+        assert frame == mono_frame
+
+    def test_extract_channel_out_of_range_raises(self) -> None:
+        """extract_channel >= capture_channels should raise AudioInputError."""
+        ai, _ = _make_audio_input(capture_channels=6, extract_channel=6)
+
+        mock_pa_instance = MagicMock()
+        mock_stream = MagicMock()
+        mock_pa_instance.open.return_value = mock_stream
+        ai._pyaudio_module.PyAudio.return_value = mock_pa_instance
+
+        ai.start()
+        ai._thread.join(timeout=2.0)
+
+        assert isinstance(ai._error, AudioInputError)
+        assert "extract_channel" in str(ai._error)
 
 
 # ---------------------------------------------------------------------------
