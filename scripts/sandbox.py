@@ -1,61 +1,54 @@
 """Pipeline execution sandbox.
 
-Provides building blocks to run production pipeline modules with
-controlled inputs and enhanced monitoring.  Hardware-dependent
-components can be replaced with stubs or used as-is with real
-hardware (e.g. microphone).
+Provides a unified setup for running production pipeline modules with
+real or stubbed components.  One ``setup_sandbox()`` assembles all
+modules; separate runner functions execute different pipeline segments.
 
-Usage (Turn detection monitor)::
+Usage (turn detection monitor — all real)::
 
-    from scripts.sandbox import setup_turn_monitor, run_turn_monitor
+    from scripts.sandbox import setup_sandbox, run_turn_monitor
+    from voice_pipeline.core.config import AudioInputConfig
 
-    setup = setup_turn_monitor()           # real mic + ASR + VAP + TurnGPT
-    run_turn_monitor(setup)                # Ctrl+C to stop
+    setup = setup_sandbox(audio_input_config=AudioInputConfig(
+        device_index=3, capture_channels=6, extract_channel=0,
+    ))
+    run_turn_monitor(setup)   # Ctrl+C to stop
+    setup.cleanup()
 
-Usage (SpeechGenerator level)::
+Usage (generation pipeline — stub turn-taking to skip model loading)::
 
     from scripts.sandbox import (
-        CaptureTTS, ObservableLLM, run_pipeline,
-        setup_history, setup_memory,
+        setup_sandbox, run_pipeline,
+        ScriptedASR, FakeVAP, FakeTurnGPT, SandboxBridge,
     )
-    from voice_pipeline.core.config import LLMConfig, SpeechGeneratorConfig
-    from voice_pipeline.llm.llm import OpenAILLM
-    from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
-    from voice_pipeline.llm.token_counter import create_token_counter
-    from voice_pipeline.context.context_builder import ContextBuilder
-    from voice_pipeline.generation.speech_generator import SpeechGenerator
 
-    tc = create_token_counter("gpt-4o")
-    history = setup_history(tc)
-    tts = CaptureTTS()
-    llm = ObservableLLM(OpenAILLM(LLMConfig(tools=[])))
-    cb = ContextBuilder(history, ..., DEFAULT_SYSTEM_PROMPT, tc)
-    gen = SpeechGenerator(cb, llm, tts, SpeechGeneratorConfig())
+    setup = setup_sandbox(
+        asr=ScriptedASR([]), vap=FakeVAP(), turngpt=FakeTurnGPT(),
+        bridge=SandboxBridge(),
+    )
+    result = run_pipeline(setup, "안녕하세요")
+    print(result.clean_text, result.trace.summary())
+    setup.cleanup()
 
-    result = run_pipeline(gen, "안녕하세요", tts=tts, llm=llm)
-    print(result.tts_inputs, result.raw_llm_output)
-    gen.shutdown()
+Usage (orchestrator with sound — mock server or C++ process required)::
 
-Usage (ad-hoc module composition)::
+    from scripts.sandbox import (
+        setup_sandbox, run_orchestrator,
+        ScriptedASR, FakeVAP, FakeTurnGPT,
+        _FAST_TURN_DETECTOR_CONFIG,
+    )
 
-    from scripts.sandbox import create_audio_input, create_asr
+    setup = setup_sandbox(
+        asr=ScriptedASR(["hello", "goodbye"]),
+        vap=FakeVAP(), turngpt=FakeTurnGPT(),
+        turn_config=_FAST_TURN_DETECTOR_CONFIG,
+    )
+    run_orchestrator(setup)
+    setup.cleanup()
 
-    audio_queue = queue.Queue(300)
-    ai = create_audio_input(audio_queue)
-    asr = create_asr()
-    ai.start(); asr.start()
-    try:
-        while True:
-            frame = audio_queue.get()
-            asr.feed_audio(frame)
-            print(asr.get_text(), end="\\r", flush=True)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        asr.stop(); ai.stop()
-
-Requires: OPENAI_API_KEY for LLM calls, GOOGLE_APPLICATION_CREDENTIALS
-for real ASR, ONNX model files for VAP/TurnGPT.
+Requires: OPENAI_API_KEY for LLM/TTS, GOOGLE_APPLICATION_CREDENTIALS
+for real ASR, ONNX model files for VAP/TurnGPT, WebSocket server for
+real CppBridge.
 """
 
 from __future__ import annotations
@@ -77,6 +70,7 @@ from voice_pipeline.core.config import (
     AudioConfig,
     AudioInputConfig,
     ConversationHistoryConfig,
+    CppBridgeConfig,
     LLMConfig,
     MaAIVAPConfig,
     MemoryConfig,
@@ -121,7 +115,7 @@ from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
 from voice_pipeline.llm.token_counter import create_token_counter
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
-from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
+from voice_pipeline.memory.types import Episode, Profile
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.orchestrator.orchestrator import Orchestrator
 from voice_pipeline.tts.utterance_truncator import TimestampTruncator
@@ -133,10 +127,15 @@ from voice_pipeline.turn_taking.turn_detector import TurnDetector
 # ---------------------------------------------------------------------------
 
 _AUDIO_CONFIG = AudioConfig(sample_rate=16000, channels=1, frame_duration_ms=30, sample_width=2)
-_FRAME_BYTES = _AUDIO_CONFIG.sample_rate * _AUDIO_CONFIG.frame_duration_ms * _AUDIO_CONFIG.sample_width // 1000
+_FRAME_BYTES = (
+    _AUDIO_CONFIG.sample_rate
+    * _AUDIO_CONFIG.frame_duration_ms
+    * _AUDIO_CONFIG.sample_width
+    // 1000
+)
 _SILENCE_FRAME: AudioFrame = b"\x00" * _FRAME_BYTES
 
-# Fast turn-detection config for sandbox (instant turn shift).
+# Fast turn-detection config for scripted ASR scenarios (instant turn shift).
 _FAST_TURN_DETECTOR_CONFIG = TurnDetectorConfig(
     vap_user_threshold=0.5,
     min_gap_time_sec=0.03,
@@ -144,13 +143,6 @@ _FAST_TURN_DETECTOR_CONFIG = TurnDetectorConfig(
     interrupt_user_threshold=0.5,
     prepare_turngpt_threshold=0.2,
     prepare_timeout_sec=0.06,
-)
-
-_DEFAULT_ORCH_CONFIG = OrchestratorConfig(
-    exit_keywords=("goodbye",),
-    session_timeout_sec=30.0,
-    frame_timeout_sec=0.05,
-    stop_pending_timeout_sec=2.0,
 )
 
 # ---------------------------------------------------------------------------
@@ -573,30 +565,229 @@ def create_turngpt(*, config: TurnGPTConfig | None = None) -> ITurnGPT:
     return TurnGPTWrapper(config or TurnGPTConfig())
 
 
+def create_tts(*, config: TTSConfig | None = None) -> ITTS:
+    """Create a real OpenAI TTS.
+
+    Requires ``OPENAI_API_KEY`` environment variable.
+    """
+    from voice_pipeline.tts.tts import OpenAITTS
+
+    return OpenAITTS(config or TTSConfig())
+
+
+def create_bridge(*, config: CppBridgeConfig | None = None) -> ICppBridge:
+    """Create a real CppBridge (WebSocket).
+
+    Connects to ``localhost:9200`` by default.  Start either the real
+    C++ process or ``scripts/mock_cpp_server.py`` before calling
+    ``bridge.connect()``.
+    """
+    from voice_pipeline.bridge.cpp_bridge import CppBridge
+
+    return CppBridge(config or CppBridgeConfig())
+
+
 # ---------------------------------------------------------------------------
-# 6. Pipeline runner (SpeechGenerator level)
+# 6. Sandbox setup
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SandboxSetup:
+    """Holds all wired components for sandbox execution."""
+
+    audio_input: IAudioInput
+    audio_queue: queue.Queue[AudioFrame]
+    asr: IASR
+    turn_detector: TurnDetector
+    vap: ObservableVAP
+    generator: SpeechGenerator
+    llm: ILLM
+    tts: ITTS
+    bridge: ICppBridge
+    history: ConversationHistory
+    orchestrator: Orchestrator
+    memory_storage: IMemoryStorage | None = None
+    retriever: MemoryRetriever | None = None
+    _tmpdir: tempfile.TemporaryDirectory[str] | None = field(default=None, repr=False)
+
+    def cleanup(self) -> None:
+        """Shut down executor and clean up temp files."""
+        self.generator.shutdown()
+        if self._tmpdir is not None:
+            self._tmpdir.cleanup()
+
+
+def setup_sandbox(
+    *,
+    # Module overrides — pass an instance to replace the default.
+    asr: IASR | None = None,
+    vap: IVAP | None = None,
+    turngpt: ITurnGPT | None = None,
+    embedder: IEmbedder | None = None,
+    llm: ILLM | None = None,
+    tts: ITTS | None = None,
+    bridge: ICppBridge | None = None,
+    # Config overrides
+    audio_input_config: AudioInputConfig | None = None,
+    audio_config: AudioConfig | None = None,
+    turn_config: TurnDetectorConfig | None = None,
+    llm_config: LLMConfig | None = None,
+    gen_config: SpeechGeneratorConfig | None = None,
+    orch_config: OrchestratorConfig | None = None,
+    memory_config: MemoryConfig | None = None,
+    # Data
+    episodes: list[Episode] | None = None,
+    profiles: list[Profile] | None = None,
+    history_turns: list[tuple[str, str]] | None = None,
+    session_summaries: list[str] | None = None,
+    system_prompt: str | None = None,
+) -> SandboxSetup:
+    """Wire all pipeline modules into a single sandbox setup.
+
+    All parameters are optional.  Unspecified modules are created with
+    real production defaults via ``create_*`` factories.  Pass stubs
+    (e.g. ``ScriptedASR``, ``FakeVAP``) to skip hardware or model
+    dependencies you don't need.
+
+    The returned :class:`SandboxSetup` can be passed to any runner:
+
+    - :func:`run_turn_monitor` — mic → ASR → TurnDetector loop
+    - :func:`run_pipeline` — text → LLM → TTS
+    - :func:`run_orchestrator` — full Orchestrator frame loop
+    """
+    _audio_config = audio_config or _AUDIO_CONFIG
+
+    # -- Audio input --
+    _audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+    _audio_input = create_audio_input(
+        _audio_queue, audio_config=_audio_config, config=audio_input_config,
+    )
+
+    # -- ASR --
+    _asr = asr or create_asr(audio_config=_audio_config)
+
+    # -- VAP + TurnGPT → TurnDetector --
+    _raw_vap = vap or create_vap(audio_config=_audio_config)
+    _observable_vap = ObservableVAP(_raw_vap)
+    _turngpt = turngpt or create_turngpt()
+    _adapter = SyncTurnGPTAdapter(_turngpt)
+
+    # -- Token counter --
+    token_counter = create_token_counter("gpt-4o")
+
+    # -- Memory (optional) --
+    tmpdir: tempfile.TemporaryDirectory[str] | None = None
+    retriever: MemoryRetriever | None = None
+    memory_storage: IMemoryStorage | None = None
+    _embedder: IEmbedder
+
+    if episodes:
+        _embedder = embedder or _lazy_load_embedder()
+        memory_storage, retriever, tmpdir = setup_memory(episodes, _embedder, memory_config)
+    else:
+        _embedder = embedder or StubEmbedder()
+
+    _turn_detector = TurnDetector(
+        _observable_vap,
+        _adapter,
+        _embedder,
+        turn_config or TurnDetectorConfig(),
+        _audio_config,
+    )
+
+    # -- History --
+    history = setup_history(token_counter, history_turns)
+
+    # -- Context builder --
+    _profiles = profiles or []
+    if memory_storage and _profiles == []:
+        _profiles = list(memory_storage.get_all_profiles())
+
+    history_config = ConversationHistoryConfig(max_context_tokens=4096, storage_backend="memory")
+    cb = ContextBuilder(
+        history,
+        history_config,
+        system_prompt or DEFAULT_SYSTEM_PROMPT,
+        token_counter,
+        profiles=_profiles or None,
+        session_summaries=session_summaries,
+    )
+
+    # -- LLM + TTS + Bridge --
+    _llm = llm or ObservableLLM(OpenAILLM(llm_config or LLMConfig(tools=[])))
+    _tts = tts or create_tts()
+    _bridge = bridge or create_bridge()
+
+    # -- SpeechGenerator --
+    generator = SpeechGenerator(
+        cb,
+        _llm,
+        _tts,
+        gen_config or SpeechGeneratorConfig(),
+        retriever=retriever,
+        history=history,
+        exclude_session_ids={"sandbox"},
+    )
+
+    # -- Orchestrator --
+    orchestrator = Orchestrator(
+        asr=_asr,
+        turn_detector=_turn_detector,
+        speech_generator=generator,
+        cpp_bridge=_bridge,
+        history=history,
+        truncator=TimestampTruncator(),
+        led=NoOpLED(),
+        config=orch_config or OrchestratorConfig(),
+        tts_config=TTSConfig(output_sample_rate=24000),
+        audio_config=_audio_config,
+        memory_storage=memory_storage,
+        session_id="sandbox",
+        token_counter=token_counter,
+    )
+
+    return SandboxSetup(
+        audio_input=_audio_input,
+        audio_queue=_audio_queue,
+        asr=_asr,
+        turn_detector=_turn_detector,
+        vap=_observable_vap,
+        generator=generator,
+        llm=_llm,
+        tts=_tts,
+        bridge=_bridge,
+        history=history,
+        orchestrator=orchestrator,
+        memory_storage=memory_storage,
+        retriever=retriever,
+        _tmpdir=tmpdir,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 7. Runners
 # ---------------------------------------------------------------------------
 
 
 def run_pipeline(
-    gen: SpeechGenerator,
+    setup: SandboxSetup,
     input_text: str,
     *,
-    tts: CaptureTTS | None = None,
-    llm: ObservableLLM | None = None,
     timeout: float = 60.0,
 ) -> PipelineResult:
     """Run a single SpeechGenerator pipeline execution and collect results.
 
-    Calls ``gen.prepare(input_text)``, polls until completion or failure,
-    and returns a :class:`PipelineResult`.
-
-    The generator's lifecycle (``shutdown()``) is the caller's
-    responsibility.
+    Calls ``setup.generator.prepare(input_text)``, polls until completion
+    or failure, and returns a :class:`PipelineResult`.
     """
-    # Snapshot capture indices for slicing after run.
-    tts_start = len(tts.calls) if tts else 0
-    llm_start = len(llm.calls) if llm else 0
+    gen = setup.generator
+    tts = setup.tts
+    llm = setup.llm
+
+    # Snapshot capture indices (works if tts/llm have a ``calls`` attribute).
+    tts_start = len(tts.calls) if hasattr(tts, "calls") else 0
+    llm_start = len(llm.calls) if hasattr(llm, "calls") else 0
 
     gen.prepare(input_text)
 
@@ -614,8 +805,8 @@ def run_pipeline(
     else:
         return PipelineResult(error=f"Timeout after {timeout}s", trace=gen.trace)
 
-    # Collect results.  get_text() before get_response_data() because
-    # get_response_data() transitions state to IDLE.
+    # get_text() before get_response_data() because the latter transitions
+    # state to IDLE.
     clean_text = gen.get_text()
     trace = gen.trace
     try:
@@ -623,8 +814,14 @@ def run_pipeline(
     except RuntimeError:
         response_data = None
 
-    tts_inputs = list(tts.calls[tts_start:]) if tts else []
-    raw_llm_output = llm.calls[llm_start] if llm and len(llm.calls) > llm_start else ""
+    tts_inputs = (
+        list(tts.calls[tts_start:]) if hasattr(tts, "calls") else []
+    )
+    raw_llm_output = (
+        llm.calls[llm_start]
+        if hasattr(llm, "calls") and len(llm.calls) > llm_start
+        else ""
+    )
 
     return PipelineResult(
         clean_text=clean_text,
@@ -635,96 +832,18 @@ def run_pipeline(
     )
 
 
-# ---------------------------------------------------------------------------
-# 7. Turn detection monitor
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class TurnMonitorSetup:
-    """Holds wired components for a turn detection monitor run."""
-
-    audio_input: IAudioInput
-    asr: IASR
-    turn_detector: TurnDetector
-    vap: ObservableVAP
-    audio_queue: queue.Queue[AudioFrame]
-
-
-def setup_turn_monitor(
-    *,
-    asr: IASR | None = None,
-    vap: IVAP | None = None,
-    turngpt: ITurnGPT | None = None,
-    embedder: IEmbedder | None = None,
-    turn_config: TurnDetectorConfig | None = None,
-    audio_config: AudioConfig | None = None,
-    audio_input_config: AudioInputConfig | None = None,
-) -> TurnMonitorSetup:
-    """Wire modules for turn detection monitoring with real mic input.
-
-    All parameters are optional.  Unspecified modules are created with
-    default production configs via ``create_*`` factories.
-
-    Args:
-        asr: ASR module. Default: real GoogleCloudASR.
-        vap: VAP module. Default: real MaAIVAPWrapper (ONNX).
-        turngpt: TurnGPT model. Default: real TurnGPTWrapper (ONNX).
-            Wrapped with ``SyncTurnGPTAdapter`` internally so that
-            probabilities are always up-to-date each frame.
-        embedder: Embedder for prepare similarity gate.
-            Default: StubEmbedder (gate disabled).
-        turn_config: TurnDetector thresholds and timeouts.
-        audio_config: Audio frame configuration (sample rate, etc.).
-        audio_input_config: Microphone device configuration.
-    """
-    _audio_config = audio_config or _AUDIO_CONFIG
-    _asr = asr or create_asr(audio_config=_audio_config)
-    _raw_vap = vap or create_vap(audio_config=_audio_config)
-    _observable_vap = ObservableVAP(_raw_vap)
-    _turngpt = turngpt or create_turngpt()
-    _adapter = SyncTurnGPTAdapter(_turngpt)
-    _embedder = embedder or StubEmbedder()
-
-    _turn_detector = TurnDetector(
-        _observable_vap,
-        _adapter,
-        _embedder,
-        turn_config or TurnDetectorConfig(),
-        _audio_config,
-    )
-
-    _audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
-    _audio_input = create_audio_input(
-        _audio_queue, audio_config=_audio_config, config=audio_input_config,
-    )
-
-    return TurnMonitorSetup(
-        audio_input=_audio_input,
-        asr=_asr,
-        turn_detector=_turn_detector,
-        vap=_observable_vap,
-        audio_queue=_audio_queue,
-    )
-
-
 def run_turn_monitor(
-    setup: TurnMonitorSetup,
+    setup: SandboxSetup,
     *,
     callback: Callable[[TurnMonitorFrame], None] | None = None,
 ) -> None:
     """Run the turn detection monitor until Ctrl+C.
 
-    Feeds real microphone audio through ASR and TurnDetector,
-    reporting per-frame monitoring data via *callback*.
+    Feeds microphone audio through ASR and TurnDetector, reporting
+    per-frame monitoring data via *callback*.
 
     After each ``turn_shift``, resets ASR and TurnDetector and
     continues monitoring the next turn.
-
-    Args:
-        setup: Wired components from :func:`setup_turn_monitor`.
-        callback: Per-frame handler.  Receives a :class:`TurnMonitorFrame`
-            every audio frame (~30 ms).  Default: formatted console output.
     """
     cb = callback or _default_turn_callback
     setup.audio_input.start()
@@ -765,180 +884,23 @@ def run_turn_monitor(
         setup.audio_input.stop()
 
 
-# ---------------------------------------------------------------------------
-# 8. Orchestrator level setup + runner
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class OrchestratorSetup:
-    """Holds all wired components for an Orchestrator-level sandbox run."""
-
-    orchestrator: Orchestrator
-    history: ConversationHistory
-    generator: SpeechGenerator
-    bridge: SandboxBridge
-    tts: CaptureTTS
-    llm: ObservableLLM
-    audio_queue: queue.Queue[AudioFrame]
-    feeder: FrameFeeder
-    memory_storage: IMemoryStorage | None = None
-    retriever: MemoryRetriever | None = None
-    _tmpdir: tempfile.TemporaryDirectory[str] | None = field(default=None, repr=False)
-
-    def cleanup(self) -> None:
-        """Shut down executor and clean up temp files."""
-        self.generator.shutdown()
-        if self._tmpdir is not None:
-            self._tmpdir.cleanup()
-
-
-def setup_orchestrator(
-    asr_texts: list[str],
-    *,
-    llm: ObservableLLM | None = None,
-    tts: CaptureTTS | None = None,
-    episodes: list[Episode] | None = None,
-    profiles: list[Profile] | None = None,
-    history_turns: list[tuple[str, str]] | None = None,
-    session_summaries: list[str] | None = None,
-    system_prompt: str | None = None,
-    embedder: IEmbedder | None = None,
-    llm_config: LLMConfig | None = None,
-    gen_config: SpeechGeneratorConfig | None = None,
-    orch_config: OrchestratorConfig | None = None,
-    memory_config: MemoryConfig | None = None,
-) -> OrchestratorSetup:
-    """Wire up a complete Orchestrator with real internal modules.
-
-    Only hardware-dependent boundaries (ASR, Bridge, LED, VAP, TurnGPT)
-    are stubbed.  Everything else uses production code.
-
-    Args:
-        asr_texts: Scripted ASR utterances.  Include an exit keyword
-            (default ``"goodbye"``) as the last entry for clean exit.
-    """
-    # -- Stubs --
-    asr = ScriptedASR(asr_texts)
-    bridge = SandboxBridge()
-    led = NoOpLED()
-    vap = FakeVAP()
-    turngpt_adapter = SyncTurnGPTAdapter(FakeTurnGPT())
-
-    # -- Token counter --
-    token_counter = create_token_counter("gpt-4o")
-
-    # -- History --
-    history = setup_history(token_counter, history_turns)
-
-    # -- Memory (optional) --
-    tmpdir: tempfile.TemporaryDirectory[str] | None = None
-    retriever: MemoryRetriever | None = None
-    memory_storage: IMemoryStorage | None = None
-    td_embedder: IEmbedder
-
-    if episodes:
-        _embedder = embedder or _lazy_load_embedder()
-        memory_storage, retriever, tmpdir = setup_memory(episodes, _embedder, memory_config)
-        td_embedder = _embedder
-    else:
-        td_embedder = embedder or StubEmbedder()
-
-    # -- Context builder --
-    _profiles = profiles or []
-    if memory_storage and _profiles == []:
-        _profiles = list(memory_storage.get_all_profiles())
-
-    history_config = ConversationHistoryConfig(max_context_tokens=4096, storage_backend="memory")
-    cb = ContextBuilder(
-        history,
-        history_config,
-        system_prompt or DEFAULT_SYSTEM_PROMPT,
-        token_counter,
-        profiles=_profiles or None,
-        session_summaries=session_summaries,
-    )
-
-    # -- LLM + TTS --
-    _tts = tts or CaptureTTS()
-    _llm = llm or ObservableLLM(OpenAILLM(llm_config or LLMConfig(tools=[])))
-
-    # -- SpeechGenerator --
-    _gen_config = gen_config or SpeechGeneratorConfig()
-    generator = SpeechGenerator(
-        cb,
-        _llm,
-        _tts,
-        _gen_config,
-        retriever=retriever,
-        history=history,
-        exclude_session_ids={"sandbox"},
-    )
-
-    # -- TurnDetector --
-    turn_detector = TurnDetector(
-        vap,
-        turngpt_adapter,
-        td_embedder,
-        _FAST_TURN_DETECTOR_CONFIG,
-        _AUDIO_CONFIG,
-    )
-
-    # -- Orchestrator --
-    _orch_config = orch_config or _DEFAULT_ORCH_CONFIG
-    tts_config = TTSConfig(output_sample_rate=24000)
-    truncator = TimestampTruncator()
-
-    orchestrator = Orchestrator(
-        asr=asr,
-        turn_detector=turn_detector,
-        speech_generator=generator,
-        cpp_bridge=bridge,
-        history=history,
-        truncator=truncator,
-        led=led,
-        config=_orch_config,
-        tts_config=tts_config,
-        audio_config=_AUDIO_CONFIG,
-        memory_storage=memory_storage,
-        session_id="sandbox",
-        token_counter=token_counter,
-    )
-
-    # -- Audio queue + feeder --
-    audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
-    feeder = FrameFeeder(audio_queue)
-
-    return OrchestratorSetup(
-        orchestrator=orchestrator,
-        history=history,
-        generator=generator,
-        bridge=bridge,
-        tts=_tts,
-        llm=_llm,
-        audio_queue=audio_queue,
-        feeder=feeder,
-        memory_storage=memory_storage,
-        retriever=retriever,
-        _tmpdir=tmpdir,
-    )
-
-
-def run_orchestrator(setup: OrchestratorSetup) -> None:
+def run_orchestrator(setup: SandboxSetup) -> None:
     """Run the Orchestrator to completion.
 
-    Starts the frame feeder, runs the orchestrator loop, then stops
-    the feeder and resets the generator.
-
-    After return, inspect ``setup.history``, ``setup.tts.calls``,
-    ``setup.llm.calls``, ``setup.bridge.audio_chunks``, etc.
+    Connects the bridge, starts audio input and ASR, then runs the
+    orchestrator frame loop.  Works with both :class:`SandboxBridge`
+    (no-op connect) and real :class:`CppBridge` (WebSocket).
     """
-    setup.feeder.start()
+    setup.bridge.connect()
+    setup.audio_input.start()
+    setup.asr.start()
     try:
         setup.orchestrator.run(setup.audio_queue)
     finally:
-        setup.feeder.stop()
+        setup.asr.stop()
+        setup.audio_input.stop()
         setup.generator.reset()
+        setup.bridge.disconnect()
 
 
 # ---------------------------------------------------------------------------
