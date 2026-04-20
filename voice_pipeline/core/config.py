@@ -166,7 +166,7 @@ class LEDConfig:
     bar_count: int = 8
     ring_count: int = 16
     spi_pin: int = 10
-    brightness: int = 128
+    brightness: int = 255
 
     def __post_init__(self) -> None:
         if not (0 <= self.brightness <= 255):

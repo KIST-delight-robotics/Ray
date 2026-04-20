@@ -10,7 +10,7 @@ from rpi5_ws2812.ws2812 import Color, WS2812SpiDriver
 BAR_COUNT = 8
 RING_COUNT = 16
 LED_COUNT = BAR_COUNT + RING_COUNT
-BRIGHTNESS = 0.5  # 0.0 ~ 1.0
+BRIGHTNESS = 1.0  # 0.0 ~ 1.0
 
 driver = WS2812SpiDriver(spi_bus=0, spi_device=0, led_count=LED_COUNT)
 strip = driver.get_strip()
