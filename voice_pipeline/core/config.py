@@ -95,12 +95,12 @@ class LLMConfig:
             Available: "web_search".
     """
 
-    model: str = "gpt-4o"
+    model: str = "gpt-5.4"
     temperature: float = 0.7
     max_tokens: int = 256
     max_retries: int = 2
     timeout_sec: float = 30.0
-    reasoning_effort: str | None = None
+    reasoning_effort: str | None = "none"
     tools: list[str] = field(default_factory=lambda: ["web_search"])
 
 
