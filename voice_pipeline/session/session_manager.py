@@ -19,7 +19,7 @@ from voice_pipeline.core.interfaces import (
     IWakewordDetector,
 )
 from voice_pipeline.core.types import AudioFrame, CppEventType, LEDState, SystemMode
-from voice_pipeline.orchestrator.orchestrator import Orchestrator
+from voice_pipeline.session_loop import SessionLoop
 
 logger = logging.getLogger("voice_pipeline.session")
 
@@ -30,7 +30,7 @@ _TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 class SessionComponents:
     """Per-session objects created by the session factory."""
 
-    orchestrator: Orchestrator
+    session_loop: SessionLoop
     history: IConversationHistory
     session_id: str
 
@@ -66,7 +66,7 @@ class SessionManager(ISessionManager):
             audio_input: 마이크 캡처 스레드 (``IAudioInput``).
             wakeword: 웨이크워드 감지기 (``IWakewordDetector``).
             session_factory: 세션 진입마다 호출되어 ``SessionComponents``
-                (Orchestrator + ConversationHistory + session_id)를 새로 반환하는 팩토리.
+                (SessionLoop + ConversationHistory + session_id)를 새로 반환하는 팩토리.
             cpp_bridge: C++ 오디오 재생 프로세스 브릿지 (``ICppBridge``).
             led: LED 컨트롤러 (``ILEDController``).
             greeting_audio_path: greeting 오디오 파일 경로.
@@ -91,7 +91,7 @@ class SessionManager(ISessionManager):
         self._session_started = False
 
         self._session_lock = threading.Lock()
-        self._current_orchestrator: Orchestrator | None = None
+        self._current_session_loop: SessionLoop | None = None
         self._current_history: IConversationHistory | None = None
         self._current_session_id: str | None = None
         self._session_started_at: str | None = None
@@ -126,8 +126,8 @@ class SessionManager(ISessionManager):
         """Signal the session manager to shut down gracefully."""
         self._shutdown_event.set()
         with self._session_lock:
-            if self._current_orchestrator is not None:
-                self._current_orchestrator.request_stop()
+            if self._current_session_loop is not None:
+                self._current_session_loop.request_stop()
             if self._session_started and self._current_history is not None:
                 try:
                     self._current_history.save()
@@ -196,7 +196,7 @@ class SessionManager(ISessionManager):
         self._mode = SystemMode.ACTIVE
 
     def _run_active(self) -> None:
-        """ACTIVE mode: create session components, run orchestrator."""
+        """ACTIVE mode: create session components, run session loop."""
         self._drain_audio_queue()
 
         try:
@@ -207,7 +207,7 @@ class SessionManager(ISessionManager):
             return
 
         with self._session_lock:
-            self._current_orchestrator = components.orchestrator
+            self._current_session_loop = components.session_loop
             self._current_history = components.history
             self._current_session_id = components.session_id
             self._session_started_at = datetime.now(UTC).strftime(_TIMESTAMP_FORMAT)
@@ -217,9 +217,9 @@ class SessionManager(ISessionManager):
         logger.info("Session started: %s", components.session_id)
 
         try:
-            self._current_orchestrator.run()
+            self._current_session_loop.run()
         except Exception:
-            logger.error("Orchestrator run failed", exc_info=True)
+            logger.error("SessionLoop run failed", exc_info=True)
 
         self._mode = SystemMode.FAREWELL
 
@@ -262,7 +262,7 @@ class SessionManager(ISessionManager):
         self._led.set_state(LEDState.SLEEPING)
 
         with self._session_lock:
-            self._current_orchestrator = None
+            self._current_session_loop = None
             self._current_history = None
             self._current_session_id = None
             self._session_started_at = None

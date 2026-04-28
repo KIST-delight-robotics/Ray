@@ -48,8 +48,8 @@ from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DB_PATH, _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.writer import MemoryWriter
-from voice_pipeline.orchestrator.orchestrator import Orchestrator
 from voice_pipeline.session.session_manager import SessionComponents, SessionManager
+from voice_pipeline.session_loop import SessionLoop
 from voice_pipeline.trace.trace_store import SQLiteTraceStore
 from voice_pipeline.tts.greeting_audio import ensure_greeting_audio
 from voice_pipeline.tts.tts import OpenAITTS
@@ -176,7 +176,7 @@ def main() -> None:
             exclude_session_ids=exclude_session_ids,
         )
         truncator = TimestampTruncator()
-        orchestrator = Orchestrator(
+        session_loop = SessionLoop(
             asr=asr,
             turn_detector=turn_detector,
             speech_generator=generator,
@@ -191,7 +191,7 @@ def main() -> None:
             token_counter=token_counter,
             trace_store=trace_store,
         )
-        return SessionComponents(orchestrator=orchestrator, history=history, session_id=session_id)
+        return SessionComponents(session_loop=session_loop, history=history, session_id=session_id)
 
     # --- Memory write callback ---
     def on_session_end(session_id: str, started_at: str) -> None:

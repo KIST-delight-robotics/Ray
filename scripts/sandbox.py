@@ -31,10 +31,10 @@ Usage (generation pipeline — stub turn-taking to skip model loading)::
     print(result.clean_text, result.trace.summary())
     setup.cleanup()
 
-Usage (orchestrator with sound — mock server or C++ process required)::
+Usage (session loop with sound — mock server or C++ process required)::
 
     from scripts.sandbox import (
-        setup_sandbox, run_orchestrator,
+        setup_sandbox, run_session_loop,
         ScriptedASR, FakeVAP, FakeTurnGPT,
         apply_fast_turn_detector_config,
     )
@@ -44,7 +44,7 @@ Usage (orchestrator with sound — mock server or C++ process required)::
         asr=ScriptedASR(["hello", "goodbye"]),
         vap=FakeVAP(), turngpt=FakeTurnGPT(),
     )
-    run_orchestrator(setup)
+    run_session_loop(setup)
     setup.cleanup()
 
 Requires: OPENAI_API_KEY for LLM/TTS, GOOGLE_APPLICATION_CREDENTIALS
@@ -104,7 +104,7 @@ from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Episode, Profile
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
-from voice_pipeline.orchestrator.orchestrator import Orchestrator
+from voice_pipeline.session_loop import SessionLoop
 from voice_pipeline.tts.tts import OpenAITTS
 from voice_pipeline.tts.utterance_truncator import TimestampTruncator
 from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
@@ -562,7 +562,7 @@ class SandboxSetup:
     tts: ITTS
     bridge: ICppBridge
     history: ConversationHistory
-    orchestrator: Orchestrator
+    session_loop: SessionLoop
     memory_storage: IMemoryStorage | None = None
     retriever: MemoryRetriever | None = None
     _tmpdir: tempfile.TemporaryDirectory[str] | None = field(default=None, repr=False)
@@ -602,7 +602,7 @@ def setup_sandbox(
 
     - :func:`run_turn_monitor` — mic → ASR → TurnDetector loop
     - :func:`run_pipeline` — text → LLM → TTS
-    - :func:`run_orchestrator` — full Orchestrator frame loop
+    - :func:`run_session_loop` — full SessionLoop frame loop
     """
     # -- Audio input --
     _audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
@@ -669,8 +669,8 @@ def setup_sandbox(
         exclude_session_ids={"sandbox"},
     )
 
-    # -- Orchestrator --
-    orchestrator = Orchestrator(
+    # -- SessionLoop --
+    session_loop = SessionLoop(
         asr=_asr,
         turn_detector=_turn_detector,
         speech_generator=generator,
@@ -816,18 +816,18 @@ def run_turn_monitor(
         setup.audio_input.stop()
 
 
-def run_orchestrator(setup: SandboxSetup) -> None:
-    """Run the Orchestrator to completion.
+def run_session_loop(setup: SandboxSetup) -> None:
+    """Run the SessionLoop to completion.
 
     Connects the bridge, starts audio input and ASR, then runs the
-    orchestrator frame loop.  Works with both :class:`SandboxBridge`
+    session loop.  Works with both :class:`SandboxBridge`
     (no-op connect) and real :class:`CppBridge` (WebSocket).
     """
     setup.bridge.connect()
     setup.audio_input.start()
     setup.asr.start()
     try:
-        setup.orchestrator.run()
+        setup.session_loop.run()
     finally:
         setup.asr.stop()
         setup.audio_input.stop()

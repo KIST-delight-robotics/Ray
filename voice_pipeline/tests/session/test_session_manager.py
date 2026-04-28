@@ -36,7 +36,7 @@ def _make_session_manager(
     mocks = {
         "audio_input": MagicMock(),
         "wakeword": MagicMock(),
-        "orchestrator": MagicMock(),
+        "session_loop": MagicMock(),
         "bridge": MagicMock(),
         "history": MagicMock(),
         "led": MagicMock(),
@@ -46,8 +46,8 @@ def _make_session_manager(
     mocks["audio_input"].error = None
     mocks["wakeword"].feed_audio.return_value = False
     mocks["bridge"].poll_event.return_value = None
-    mocks["orchestrator"].request_stop = MagicMock()
-    mocks["orchestrator"].run = MagicMock()
+    mocks["session_loop"].request_stop = MagicMock()
+    mocks["session_loop"].run = MagicMock()
 
     monkeypatch.setattr(SessionManager, "AUDIO_QUEUE_SIZE", audio_queue_size)
     monkeypatch.setattr(SessionManager, "_GREETING_TIMEOUT_SEC", greeting_timeout_sec)
@@ -56,7 +56,7 @@ def _make_session_manager(
 
     def session_factory() -> SessionComponents:
         return SessionComponents(
-            orchestrator=mocks["orchestrator"],
+            session_loop=mocks["session_loop"],
             history=mocks["history"],
             session_id=str(uuid.uuid4()),
         )
@@ -103,8 +103,8 @@ class TestFullCycle:
             farewell_event,  # farewell done
         ]
 
-        # Orchestrator.run returns immediately
-        mocks["orchestrator"].run.return_value = None
+        # SessionLoop.run returns immediately
+        mocks["session_loop"].run.return_value = None
 
         # Shutdown after one full cycle
         cycle_count = 0
@@ -129,7 +129,7 @@ class TestFullCycle:
         mocks["audio_input"].start.assert_called_once()
         mocks["audio_input"].stop.assert_called_once()
         mocks["bridge"].send_play_file.assert_any_call(sm._greeting_audio_path)
-        mocks["orchestrator"].run.assert_called_once_with()
+        mocks["session_loop"].run.assert_called_once_with()
         mocks["bridge"].send_play_file.assert_any_call(sm._farewell_audio_path)
         mocks["history"].new_session.assert_called_once()
         mocks["history"].save.assert_called_once()
@@ -264,8 +264,8 @@ class TestAudioInputError:
 
 
 class TestActive:
-    def test_drains_queue_before_orchestrator(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Audio queue is drained before orchestrator.run()."""
+    def test_drains_queue_before_session_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Audio queue is drained before session_loop.run()."""
         sm, mocks = _make_session_manager(monkeypatch)
 
         # Put stale frames
@@ -275,7 +275,7 @@ class TestActive:
         sm._run_active()
 
         assert sm._audio_queue.empty()
-        mocks["orchestrator"].run.assert_called_once()
+        mocks["session_loop"].run.assert_called_once()
 
     def test_session_id_from_factory_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Factory-provided session_id is passed to history.new_session."""
@@ -300,19 +300,19 @@ class TestActive:
         sm._run_active()
 
         assert sm._mode == SystemMode.SLEEP
-        mocks["orchestrator"].run.assert_not_called()
+        mocks["session_loop"].run.assert_not_called()
 
 
 class TestShutdown:
     def test_shutdown_calls_request_stop(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """shutdown() calls orchestrator.request_stop() when orchestrator is set."""
+        """shutdown() calls session_loop.request_stop() when session_loop is set."""
         sm, mocks = _make_session_manager(monkeypatch)
-        sm._current_orchestrator = mocks["orchestrator"]
+        sm._current_session_loop = mocks["session_loop"]
 
         sm.shutdown()
 
         assert sm._shutdown_event.is_set()
-        mocks["orchestrator"].request_stop.assert_called_once()
+        mocks["session_loop"].request_stop.assert_called_once()
 
     def test_shutdown_saves_history_if_session_started(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """shutdown() saves history when a session is active."""
@@ -334,15 +334,15 @@ class TestShutdown:
         mocks["history"].save.assert_not_called()
 
     def test_shutdown_during_active(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Shutdown during ACTIVE triggers orchestrator.request_stop."""
+        """Shutdown during ACTIVE triggers session_loop.request_stop."""
         sm, mocks = _make_session_manager(monkeypatch)
 
-        # Orchestrator.run blocks until shutdown
+        # SessionLoop.run blocks until shutdown
         def _blocking_run():
             while not sm._shutdown_event.is_set():
                 time.sleep(0.01)
 
-        mocks["orchestrator"].run.side_effect = _blocking_run
+        mocks["session_loop"].run.side_effect = _blocking_run
 
         t = threading.Thread(target=sm.run)
         # Push frame for wakeword
@@ -357,12 +357,12 @@ class TestShutdown:
         sm.shutdown()
         t.join(timeout=2.0)
 
-        mocks["orchestrator"].request_stop.assert_called_once()
+        mocks["session_loop"].request_stop.assert_called_once()
 
-    def test_shutdown_no_orchestrator(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """shutdown() is safe when no orchestrator is set."""
+    def test_shutdown_no_session_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """shutdown() is safe when no session_loop is set."""
         sm, mocks = _make_session_manager(monkeypatch)
-        # _current_orchestrator is None by default
+        # _current_session_loop is None by default
 
         sm.shutdown()  # Should not raise
         assert sm._shutdown_event.is_set()
@@ -415,17 +415,17 @@ class TestCppBridgeConnect:
 
 class TestMultiSessionIsolation:
     def test_two_sessions_get_independent_components(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Two consecutive sessions get independent history and orchestrator."""
+        """Two consecutive sessions get independent history and session_loop."""
         histories = []
-        orchestrators = []
+        session_loops = []
 
         def tracking_factory() -> SessionComponents:
             orch = MagicMock()
             orch.run = MagicMock()
             hist = MagicMock()
             histories.append(hist)
-            orchestrators.append(orch)
-            return SessionComponents(orchestrator=orch, history=hist, session_id=str(uuid.uuid4()))
+            session_loops.append(orch)
+            return SessionComponents(session_loop=orch, history=hist, session_id=str(uuid.uuid4()))
 
         monkeypatch.setattr(SessionManager, "AUDIO_QUEUE_SIZE", 300)
         monkeypatch.setattr(SessionManager, "_GREETING_TIMEOUT_SEC", 0.01)
@@ -453,9 +453,9 @@ class TestMultiSessionIsolation:
         sm._run_farewell()
 
         assert len(histories) == 2
-        assert len(orchestrators) == 2
+        assert len(session_loops) == 2
         assert histories[0] is not histories[1]
-        assert orchestrators[0] is not orchestrators[1]
+        assert session_loops[0] is not session_loops[1]
 
 
 # ---------------------------------------------------------------------------

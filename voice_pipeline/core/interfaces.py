@@ -821,7 +821,7 @@ class IAudioInput(ABC):
     queue (queue.Queue[AudioFrame], injected via constructor).
 
     Threading: start() and stop() are called from the main thread.
-    The capture thread pushes frames to the queue; the Orchestrator
+    The capture thread pushes frames to the queue; the SessionLoop
     (main) thread consumes them. The ``error`` property is set by the
     capture thread and read by the main thread (use threading.Event
     or equivalent for safe cross-thread signalling).
