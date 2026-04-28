@@ -11,8 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from voice_pipeline.core.config import AudioConfig
-
 # ---------------------------------------------------------------------------
 # WAV helpers
 # ---------------------------------------------------------------------------
@@ -94,15 +92,6 @@ def read_wav_frames(path: Path, frame_duration_ms: int = 30) -> tuple[WavInfo, l
         if len(chunk) == frame_size_bytes:
             frames.append(chunk)
     return info, frames
-
-
-def audio_config_from_wav(info: WavInfo) -> AudioConfig:
-    """Build an AudioConfig matching the WAV file's properties."""
-    return AudioConfig(
-        sample_rate=info.sample_rate,
-        channels=info.channels,
-        sample_width=info.sample_width,
-    )
 
 
 def make_silence_frame(num_samples: int = 480) -> bytes:

@@ -28,9 +28,7 @@ def _ep(
 
 
 def _prof(topic: str, sub_topic: str, content: str) -> Profile:
-    return Profile(
-        id=1, topic=topic, sub_topic=sub_topic, content=content, updated_at="2026-03-15 14:00:00"
-    )
+    return Profile(id=1, topic=topic, sub_topic=sub_topic, content=content, updated_at="2026-03-15 14:00:00")
 
 
 # ---------------------------------------------------------------------------

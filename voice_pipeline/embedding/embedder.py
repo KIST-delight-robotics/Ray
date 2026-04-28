@@ -30,19 +30,26 @@ class SentenceTransformerEmbedder(IEmbedder):
         use_onnx: bool = False,
         expected_dimension: int | None = None,
     ) -> None:
+        """Load a sentence-transformers embedding model.
+
+        Args:
+            model: 로드할 sentence-transformers 모델 이름. 기본 ``all-MiniLM-L6-v2``
+                (384차원, 다국어 기본 성능 양호).
+            use_onnx: ``True``면 ONNX Runtime 백엔드 (CPU inference 가속).
+                ``False``면 PyTorch 기본 경로.
+            expected_dimension: 지정 시 로드된 모델 차원이 일치하지 않으면
+                ``ConfigurationError``. 검증 생략하려면 ``None``.
+        """
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:
-            raise ImportError(
-                "sentence-transformers is required for local embeddings. Install with: uv sync"
-            ) from exc
+            raise ImportError("sentence-transformers is required for local embeddings. Install with: uv sync") from exc
         backend = "onnx" if use_onnx else "torch"
         self._model = SentenceTransformer(model, backend=backend)
         actual_dim = self._model.get_sentence_embedding_dimension()
         if expected_dimension is not None and actual_dim != expected_dimension:
             raise ConfigurationError(
-                f"Embedding model dimension ({actual_dim}) does not match "
-                f"expected_dimension ({expected_dimension})"
+                f"Embedding model dimension ({actual_dim}) does not match expected_dimension ({expected_dimension})"
             )
         self._dimension = actual_dim
         logger.info(
@@ -79,6 +86,14 @@ class OpenAIEmbedder(IEmbedder):
         *,
         dimension: int | None = None,
     ) -> None:
+        """Prepare an OpenAI embeddings client.
+
+        Args:
+            model: OpenAI embeddings 모델 이름.
+            dimension: 임베딩 벡터 차원. ``None``이면 첫 ``embed`` 호출에서
+                자동 감지. ``dimension`` property는 auto-detect 전 접근 시
+                ``RuntimeError``.
+        """
         try:
             import openai
         except ImportError as exc:
@@ -104,14 +119,12 @@ class OpenAIEmbedder(IEmbedder):
     @property
     def dimension(self) -> int:
         if self._dimension is None:
-            raise RuntimeError(
-                "Dimension unknown — call embed() first or provide dimension at construction"
-            )
+            raise RuntimeError("Dimension unknown — call embed() first or provide dimension at construction")
         return self._dimension
 
 
 def create_embedder(
-    model: str,
+    model: str = "all-MiniLM-L6-v2",
     backend: Literal["local", "api"] = "local",
     *,
     use_onnx: bool = False,
@@ -120,11 +133,14 @@ def create_embedder(
     """Factory: create an IEmbedder instance.
 
     Args:
-        model: Model name (sentence-transformers or OpenAI model).
-        backend: ``"local"`` for sentence-transformers, ``"api"`` for OpenAI.
-        use_onnx: Use ONNX Runtime backend (local only).
-        expected_dimension: If provided, validate model dimension matches.
-            For ``"api"`` backend, auto-detected from first call if omitted.
+        model: 모델 이름. ``"local"`` backend는 sentence-transformers 모델명
+            (기본 ``all-MiniLM-L6-v2``, 384차원), ``"api"`` backend는 OpenAI
+            embeddings 모델명.
+        backend: ``"local"``이면 sentence-transformers, ``"api"``이면 OpenAI.
+        use_onnx: ``"local"`` backend에서 ONNX Runtime 사용 여부 (CPU inference 가속).
+        expected_dimension: 지정 시 모델 차원과 일치 여부 검증. ``None``이면 검증 생략.
+            production wiring은 호출부가 명시 전달. ``"api"`` backend의 auto-detect를
+            쓰려면 ``None``.
 
     Returns:
         Configured IEmbedder instance.

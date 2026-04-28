@@ -38,6 +38,8 @@ class ConversationHistory(IConversationHistory):
     reads from SpeechGenerator background thread (via ContextBuilder).
     """
 
+    PREVIOUS_SESSION_COUNT = 3  # 세션 시작 시 memory가 불러올 이전 세션 요약 최대 건수
+
     def __init__(self, backend: IStorageBackend, token_counter: TokenCounter) -> None:
         self._backend = backend
         self._token_counter = token_counter

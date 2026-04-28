@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pytest
 
-from voice_pipeline.core.config import LLMConfig
 from voice_pipeline.llm.exceptions import LLMError
 from voice_pipeline.llm.llm import OpenAILLM
 
@@ -17,7 +16,7 @@ pytestmark = pytest.mark.requires_api
 @pytest.fixture
 def llm(openai_api_key: str) -> OpenAILLM:  # noqa: ARG001
     """Create an OpenAILLM with default config."""
-    return OpenAILLM(LLMConfig())
+    return OpenAILLM()
 
 
 class TestStreamingResponse:
@@ -81,15 +80,15 @@ class TestStreamingResponse:
 
 class TestErrorRecovery:
     def test_invalid_model_propagates_error(self, openai_api_key: str) -> None:  # noqa: ARG002
-        llm = OpenAILLM(LLMConfig(model="not-a-real-model-xyz"))
+        llm = OpenAILLM(model="not-a-real-model-xyz")
         with pytest.raises(LLMError):
             list(llm.generate([{"role": "user", "content": "hi"}]))
 
     def test_recovery_after_error(self, openai_api_key: str) -> None:  # noqa: ARG002
-        bad_llm = OpenAILLM(LLMConfig(model="not-a-real-model-xyz"))
+        bad_llm = OpenAILLM(model="not-a-real-model-xyz")
         with pytest.raises(LLMError):
             list(bad_llm.generate([{"role": "user", "content": "hi"}]))
 
-        good_llm = OpenAILLM(LLMConfig())
+        good_llm = OpenAILLM()
         chunks = list(good_llm.generate([{"role": "user", "content": "Say hello."}]))
         assert len("".join(chunks)) > 0

@@ -12,7 +12,6 @@ from typing import Any
 
 import numpy as np
 
-from voice_pipeline.core.config import MemoryConfig
 from voice_pipeline.core.interfaces import ILLM, IEmbedder, IMemoryStorage
 from voice_pipeline.core.types import TokenCounter
 from voice_pipeline.memory.prompts import (
@@ -32,9 +31,6 @@ from voice_pipeline.memory.vector_index import IVectorIndex
 
 logger = logging.getLogger("voice_pipeline.memory")
 
-# Minimum utterances required to attempt extraction.
-_MIN_UTTERANCES = 2
-
 
 class MemoryWriter:
     """Extracts episodes and profiles from session utterances.
@@ -42,20 +38,25 @@ class MemoryWriter:
     Thread safety: designed to be called from a single thread.
     """
 
+    _MIN_UTTERANCES = 2  # 에피소드 추출 시도에 필요한 최소 utterance 수
+    _WRITE_MAX_INPUT_TOKENS = 8000  # 에피소드 추출 윈도우 최대 토큰 수 (초과 시 분할)
+    _WRITE_WINDOW_OVERLAP_RATIO = 0.25  # 인접 윈도우 overlap 비율 (0.0–1.0)
+    _WRITE_DEDUP_THRESHOLD = 0.8  # 중복 판정 코사인 유사도 임계값
+    _PROFILE_MAX_CONTENT_TOKENS = 128  # 프로필 슬롯 content 최대 토큰 수
+    _PROFILE_CONTENT_WARN_RATIO = 0.7  # content 토큰이 예산의 몇 배를 넘으면 요약 경고 표시
+
     def __init__(
         self,
         storage: IMemoryStorage,
         vector_index: IVectorIndex,
         embedder: IEmbedder,
         llm: ILLM,
-        config: MemoryConfig,
         token_counter: TokenCounter,
     ) -> None:
         self._storage = storage
         self._vector_index = vector_index
         self._embedder = embedder
         self._llm = llm
-        self._config = config
         self._token_counter = token_counter
         self._profile_schema_text = format_profile_schema()
 
@@ -79,7 +80,7 @@ class MemoryWriter:
 
     def _process(self, session_id: str, session_timestamp: str) -> list[Episode]:
         utterances = self._storage.get_utterances(session_id)
-        if len(utterances) < _MIN_UTTERANCES:
+        if len(utterances) < self._MIN_UTTERANCES:
             logger.debug(
                 "Session %s too short (%d utterances), skipping",
                 session_id,
@@ -122,12 +123,9 @@ class MemoryWriter:
     ) -> list[Episode]:
         """Extract episodes from utterances, with windowing if needed."""
         total_tokens = sum(tc for _, _, _, tc in utterances)
-        max_tokens = self._config.write_max_input_tokens
+        max_tokens = self._WRITE_MAX_INPUT_TOKENS
 
-        if total_tokens <= max_tokens:
-            windows = [utterances]
-        else:
-            windows = self._split_into_windows(utterances, max_tokens)
+        windows = [utterances] if total_tokens <= max_tokens else self._split_into_windows(utterances, max_tokens)
 
         all_episodes: list[list[Episode]] = []
         for window in windows:
@@ -254,7 +252,8 @@ class MemoryWriter:
         messages = build_profile_merge_messages(
             existing,
             new_facts,
-            self._config.profile_max_content_tokens,
+            self._PROFILE_MAX_CONTENT_TOKENS,
+            self._PROFILE_CONTENT_WARN_RATIO,
             token_counter=self._token_counter,
         )
 
@@ -364,7 +363,7 @@ class MemoryWriter:
         max_tokens: int,
     ) -> list[list[tuple[str, str, str, int]]]:
         """Split utterances into overlapping windows based on token count."""
-        overlap_tokens = int(max_tokens * self._config.write_window_overlap_ratio)
+        overlap_tokens = int(max_tokens * self._WRITE_WINDOW_OVERLAP_RATIO)
         windows: list[list[tuple[str, str, str, int]]] = []
         current: list[tuple[str, str, str, int]] = []
         current_tokens = 0
@@ -411,7 +410,7 @@ class MemoryWriter:
             return result
 
         result_embeddings = list(self._embedder.embed_batch([ep.text for ep in result]))
-        threshold = self._config.write_dedup_threshold
+        threshold = self._WRITE_DEDUP_THRESHOLD
 
         for window_episodes in episodes_per_window[1:]:
             if not window_episodes:
@@ -425,8 +424,7 @@ class MemoryWriter:
                 best_ri = -1
                 for ri, exist_emb in enumerate(result_embeddings):
                     sim = float(
-                        np.dot(cand_emb, exist_emb)
-                        / (np.linalg.norm(cand_emb) * np.linalg.norm(exist_emb) + 1e-9)
+                        np.dot(cand_emb, exist_emb) / (np.linalg.norm(cand_emb) * np.linalg.norm(exist_emb) + 1e-9)
                     )
                     if sim > best_sim:
                         best_sim = sim
@@ -494,9 +492,7 @@ class MemoryWriter:
     # LLM helper
     # ------------------------------------------------------------------
 
-    def _call_llm(
-        self, messages: list[dict[str, Any]], response_format: dict[str, Any]
-    ) -> str | None:
+    def _call_llm(self, messages: list[dict[str, Any]], response_format: dict[str, Any]) -> str | None:
         """Call LLM and return the full response text. None on failure."""
         try:
             stream = self._llm.generate(messages, tools=[], response_format=response_format)

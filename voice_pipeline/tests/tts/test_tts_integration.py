@@ -9,7 +9,6 @@ import wave
 
 import pytest
 
-from voice_pipeline.core.config import TTSConfig
 from voice_pipeline.tts.exceptions import TTSError
 from voice_pipeline.tts.greeting_audio import synthesize_to_wav
 from voice_pipeline.tts.tts import OpenAITTS
@@ -20,7 +19,7 @@ pytestmark = pytest.mark.requires_api
 @pytest.fixture
 def tts(openai_api_key: str) -> OpenAITTS:  # noqa: ARG001
     """Create an OpenAITTS with default config."""
-    return OpenAITTS(TTSConfig())
+    return OpenAITTS()
 
 
 class TestBasicSynthesis:
@@ -69,7 +68,7 @@ class TestStreamIteration:
 class TestSynthesizeToWav:
     def test_creates_valid_wav_file(self, tts: OpenAITTS, tmp_path) -> None:
         out_path = tmp_path / "output.wav"
-        synthesize_to_wav(tts, "Hello world", out_path, TTSConfig().output_sample_rate)
+        synthesize_to_wav(tts, "Hello world", out_path)
 
         assert out_path.exists()
         with wave.open(str(out_path), "rb") as wf:
@@ -80,19 +79,28 @@ class TestSynthesizeToWav:
 
 
 class TestErrorRecovery:
-    def test_invalid_model_propagates_error(self, openai_api_key: str) -> None:  # noqa: ARG002
-        tts = OpenAITTS(TTSConfig(model="not-a-real-model-xyz"))
+    def test_invalid_model_propagates_error(
+        self,
+        openai_api_key: str,  # noqa: ARG002
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(OpenAITTS, "_MODEL", "not-a-real-model-xyz")
+        tts = OpenAITTS()
         with pytest.raises(TTSError):
             stream = tts.synthesize("Hello")
             list(stream)
 
     def test_recovery_after_error(self, openai_api_key: str) -> None:  # noqa: ARG002
-        bad_tts = OpenAITTS(TTSConfig(model="not-a-real-model-xyz"))
+        # 한 테스트 함수 내 2개 인스턴스가 서로 다른 `_MODEL` 필요 →
+        # monkeypatch teardown이 같은 함수 내에서는 작동하지 않으므로
+        # 인스턴스 attr 직접 세팅으로 class var를 가림.
+        bad_tts = OpenAITTS()
+        bad_tts._MODEL = "not-a-real-model-xyz"
         with pytest.raises(TTSError):
             stream = bad_tts.synthesize("Hello")
             list(stream)
 
-        good_tts = OpenAITTS(TTSConfig())
+        good_tts = OpenAITTS()
         stream = good_tts.synthesize("Hello")
         list(stream)
         assert len(stream.audio) > 0

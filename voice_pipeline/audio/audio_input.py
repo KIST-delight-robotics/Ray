@@ -7,8 +7,13 @@ import logging
 import queue
 import threading
 
+from voice_pipeline.audio.constants import (
+    CHANNELS,
+    FRAME_SIZE_SAMPLES,
+    SAMPLE_RATE,
+    SAMPLE_WIDTH,
+)
 from voice_pipeline.audio.exceptions import AudioInputError
-from voice_pipeline.core.config import AudioConfig, AudioInputConfig
 from voice_pipeline.core.interfaces import IAudioInput
 from voice_pipeline.core.types import AudioFrame
 
@@ -22,15 +27,18 @@ class AudioInput(IAudioInput):
     frames are dropped (never blocks the capture thread).
     """
 
-    def __init__(
-        self,
-        audio_queue: queue.Queue[AudioFrame],
-        audio_config: AudioConfig,
-        config: AudioInputConfig,
-    ) -> None:
+    _THREAD_JOIN_TIMEOUT_SEC = 2.0  # 캡처 스레드 종료 대기 (초)
+    _DEVICE_INDEX: int | None = None  # PyAudio 입력 디바이스 인덱스. None은 시스템 기본 장치
+    _CAPTURE_CHANNELS: int | None = None  # 디바이스에서 캡처할 채널 수. None은 mono (ReSpeaker 6ch는 6)
+    _EXTRACT_CHANNEL = 0  # 다중 채널 캡처 시 mono 추출에 사용할 채널 인덱스 (0-based)
+
+    def __init__(self, audio_queue: queue.Queue[AudioFrame]) -> None:
+        """Initialize capture state and ensure PyAudio is importable.
+
+        Args:
+            audio_queue: 캡처된 오디오 프레임을 push할 공유 큐.
+        """
         self._queue = audio_queue
-        self._audio_config = audio_config
-        self._config = config
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -42,9 +50,7 @@ class AudioInput(IAudioInput):
 
             self._pyaudio_module = pyaudio
         except ImportError as exc:
-            raise AudioInputError(
-                "PyAudio is not installed. Install it with: pip install pyaudio"
-            ) from exc
+            raise AudioInputError("PyAudio is not installed. Install it with: pip install pyaudio") from exc
 
     def start(self) -> None:
         """Start capturing audio. Idempotent."""
@@ -60,7 +66,7 @@ class AudioInput(IAudioInput):
         """Stop capturing audio and release resources."""
         self._stop_event.set()
         if self._thread is not None:
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=self._THREAD_JOIN_TIMEOUT_SEC)
             self._thread = None
 
     @property
@@ -74,32 +80,31 @@ class AudioInput(IAudioInput):
         stream = None
         try:
             pa = self._pyaudio_module.PyAudio()
-            frame_size = self._audio_config.frame_size_samples
 
-            capture_ch = self._config.capture_channels or self._audio_config.channels
-            need_extract = capture_ch != self._audio_config.channels
+            capture_ch = self._CAPTURE_CHANNELS or CHANNELS
+            need_extract = capture_ch != CHANNELS
 
             stream = pa.open(
-                format=pa.get_format_from_width(self._audio_config.sample_width),
+                format=pa.get_format_from_width(SAMPLE_WIDTH),
                 channels=capture_ch,
-                rate=self._audio_config.sample_rate,
+                rate=SAMPLE_RATE,
                 input=True,
-                input_device_index=self._config.device_index,
-                frames_per_buffer=frame_size,
+                input_device_index=self._DEVICE_INDEX,
+                frames_per_buffer=FRAME_SIZE_SAMPLES,
             )
 
             if need_extract:
-                ch_idx = self._config.extract_channel
+                ch_idx = self._EXTRACT_CHANNEL
                 if ch_idx >= capture_ch:
-                    raise AudioInputError(
-                        f"extract_channel ({ch_idx}) >= capture_channels ({capture_ch})"
-                    )
+                    raise AudioInputError(f"extract_channel ({ch_idx}) >= capture_channels ({capture_ch})")
                 logger.info(
-                    "Capturing %dch, extracting CH%d as mono", capture_ch, ch_idx,
+                    "Capturing %dch, extracting CH%d as mono",
+                    capture_ch,
+                    ch_idx,
                 )
 
             while not self._stop_event.is_set():
-                data = stream.read(frame_size, exception_on_overflow=False)
+                data = stream.read(FRAME_SIZE_SAMPLES, exception_on_overflow=False)
                 if need_extract:
                     samples = array.array("h", data)
                     mono = samples[ch_idx::capture_ch]

@@ -7,15 +7,16 @@ import json
 import logging
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from voice_pipeline.core.config import ConversationHistoryConfig
 from voice_pipeline.core.interfaces import IStorageBackend
 
 logger = logging.getLogger("voice_pipeline.history")
 
-# Unified timestamp format (UTC, no timezone offset)
-TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+# Module-level constants
+TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"  # UTC 세션 timestamp 포맷 (no timezone offset)
+_DEFAULT_BACKEND: Literal["memory", "sqlite"] = "sqlite"  # 기본 persistence backend
+_DEFAULT_DB_PATH = "data/ray.db"  # 기본 SQLite 파일 경로 (sqlite backend 사용 시)
 
 
 class MemoryStorageBackend(IStorageBackend):
@@ -45,10 +46,7 @@ class MemoryStorageBackend(IStorageBackend):
         session = self._sessions.get(session_id)
         if session is None:
             return []
-        return [
-            (m["msg_id"], m["turn_id"], copy.deepcopy(m["item"]), m["token_count"])
-            for m in session["messages"]
-        ]
+        return [(m["msg_id"], m["turn_id"], copy.deepcopy(m["item"]), m["token_count"]) for m in session["messages"]]
 
     def append_message(
         self,
@@ -212,8 +210,7 @@ class SQLiteStorageBackend(IStorageBackend):
         """Load all messages for a session."""
         try:
             cursor = self._conn.execute(
-                "SELECT msg_id, turn_id, item_json, token_count "
-                "FROM messages WHERE session_id = ? ORDER BY msg_id",
+                "SELECT msg_id, turn_id, item_json, token_count FROM messages WHERE session_id = ? ORDER BY msg_id",
                 (session_id,),
             )
             return [(row[0], row[1], json.loads(row[2]), row[3]) for row in cursor]
@@ -264,8 +261,7 @@ class SQLiteStorageBackend(IStorageBackend):
         """Update an existing message (write-through)."""
         try:
             self._conn.execute(
-                "UPDATE messages SET item_json = ?, token_count = ? "
-                "WHERE session_id = ? AND msg_id = ?",
+                "UPDATE messages SET item_json = ?, token_count = ? WHERE session_id = ? AND msg_id = ?",
                 (
                     json.dumps(item, ensure_ascii=False),
                     token_count,
@@ -325,13 +321,18 @@ class SQLiteStorageBackend(IStorageBackend):
             logger.debug("Error closing DB connection", exc_info=True)
 
 
-def create_storage_backend(config: ConversationHistoryConfig) -> IStorageBackend:
-    """Factory: create a storage backend from config."""
-    if config.storage_backend == "memory":
+def create_storage_backend(
+    backend: Literal["memory", "sqlite"] | None = None,
+    db_path: str | None = None,
+) -> IStorageBackend:
+    """Factory: create a storage backend.
+
+    Defaults to sqlite at ``data/ray.db`` via module constants.
+    """
+    backend = backend or _DEFAULT_BACKEND
+    if backend == "memory":
         return MemoryStorageBackend()
-    elif config.storage_backend == "sqlite":
-        if not config.storage_path:
-            raise ValueError("storage_path is required for sqlite backend")
-        return SQLiteStorageBackend(config.storage_path)
+    elif backend == "sqlite":
+        return SQLiteStorageBackend(db_path or _DEFAULT_DB_PATH)
     else:
-        raise ValueError(f"Unknown storage backend: {config.storage_backend!r}")
+        raise ValueError(f"Unknown storage backend: {backend!r}")

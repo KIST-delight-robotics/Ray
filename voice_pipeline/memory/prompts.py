@@ -53,9 +53,7 @@ EPISODE_EXTRACTION_SCHEMA: dict[str, Any] = {
                     "properties": {
                         "text": {
                             "type": "string",
-                            "description": (
-                                "Third-person narrative of the episode (1-3 sentences)."
-                            ),
+                            "description": ("Third-person narrative of the episode (1-3 sentences)."),
                         },
                     },
                     "required": ["text"],
@@ -116,10 +114,7 @@ PROFILE_MERGE_SCHEMA: dict[str, Any] = {
                         },
                         "new_content": {
                             "type": ["string", "null"],
-                            "description": (
-                                "Merged content for UPDATE, or new"
-                                " content for APPEND. Null for ABORT."
-                            ),
+                            "description": ("Merged content for UPDATE, or new content for APPEND. Null for ABORT."),
                         },
                     },
                     "required": ["action", "fact_index", "new_content"],
@@ -251,6 +246,7 @@ def build_profile_merge_messages(
     existing_profiles: list[Profile],
     new_facts: list[dict[str, str]],
     max_content_tokens: int,
+    warn_ratio: float,
     token_counter: TokenCounter | None = None,
 ) -> list[dict[str, Any]]:
     """Build messages for profile merge LLM call.
@@ -263,6 +259,7 @@ def build_profile_merge_messages(
         existing_profiles: Current profile slots.
         new_facts: Extracted facts to merge.
         max_content_tokens: Max tokens per slot content.
+        warn_ratio: content 토큰이 예산의 몇 배를 넘으면 요약 경고 표시 (0.0–1.0).
         token_counter: Optional token counter for measuring slot sizes.
 
     Returns:
@@ -284,7 +281,7 @@ def build_profile_merge_messages(
         else:
             current_tokens = token_counter(existing.content) if token_counter else None
             line += f"\n    Current: {existing.content}"
-            if current_tokens is not None and current_tokens > max_content_tokens * 0.7:
+            if current_tokens is not None and current_tokens > max_content_tokens * warn_ratio:
                 line += (
                     f"\n    ⚠ Near token limit ({current_tokens}/{max_content_tokens})."
                     " If updating, summarize to stay under limit."
@@ -324,9 +321,7 @@ EPISODE_DEDUP_SCHEMA: dict[str, Any] = {
             },
             "merged": {
                 "type": ["string", "null"],
-                "description": (
-                    "Merged narrative for MERGE action. Null for KEEP_BOTH / DISCARD_*."
-                ),
+                "description": ("Merged narrative for MERGE action. Null for KEEP_BOTH / DISCARD_*."),
             },
         },
         "required": ["action", "merged"],
@@ -370,9 +365,7 @@ def build_episode_dedup_messages(
         {"role": "system", "content": _EPISODE_DEDUP_SYSTEM},
         {
             "role": "user",
-            "content": _EPISODE_DEDUP_USER_TEMPLATE.format(
-                episode_a=episode_a, episode_b=episode_b
-            ),
+            "content": _EPISODE_DEDUP_USER_TEMPLATE.format(episode_a=episode_a, episode_b=episode_b),
         },
     ]
 

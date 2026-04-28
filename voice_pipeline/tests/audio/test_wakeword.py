@@ -12,22 +12,38 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from voice_pipeline.audio.constants import FRAME_SIZE_SAMPLES
 from voice_pipeline.audio.exceptions import WakewordError
-from voice_pipeline.audio.wakeword import (
-    _VAD_CHUNK_BYTES,
-    WakewordDetector,
-    _State,
-)
-from voice_pipeline.core.config import AudioConfig, WakewordConfig
+from voice_pipeline.audio.wakeword import WakewordDetector, _State
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 # Default audio config: 16kHz, mono, 16-bit, 30ms frames → 480 samples
-_DEFAULT_AUDIO_CONFIG = AudioConfig()
-_FRAME_SAMPLES = _DEFAULT_AUDIO_CONFIG.frame_size_samples  # 480
+_FRAME_SAMPLES = FRAME_SIZE_SAMPLES  # 480
 _FRAME_BYTES = _FRAME_SAMPLES * 2  # 960 bytes
+_VAD_CHUNK_BYTES = WakewordDetector._VAD_CHUNK_BYTES
+
+_CLASS_VAR_KWARGS: dict[str, str] = {
+    "keywords": "_KEYWORDS",
+    "vad_threshold": "_VAD_THRESHOLD",
+    "max_speech_duration_sec": "_MAX_SPEECH_DURATION_SEC",
+    "pre_buffer_ms": "_PRE_BUFFER_MS",
+    "speech_pad_ms": "_SPEECH_PAD_MS",
+    "min_speech_duration_ms": "_MIN_SPEECH_DURATION_MS",
+    "stt_timeout_sec": "_STT_TIMEOUT_SEC",
+}
+
+
+def _make_detector(monkeypatch: pytest.MonkeyPatch | None = None, **kwargs) -> WakewordDetector:
+    """Build a WakewordDetector. Legacy tuning kwargs translated to class var monkeypatch."""
+    for kw, cls_var in _CLASS_VAR_KWARGS.items():
+        if kw in kwargs:
+            if monkeypatch is None:
+                raise AssertionError(f"monkeypatch fixture required for {kw} override")
+            monkeypatch.setattr(WakewordDetector, cls_var, kwargs.pop(kw))
+    return WakewordDetector(**kwargs)
 
 
 def _silence_frame() -> bytes:
@@ -107,7 +123,7 @@ def detector(mock_vad_model, mock_stt_client):
         patch("voice_pipeline.audio.wakeword.load_silero_vad", return_value=mock_vad_model),
         patch("voice_pipeline.audio.wakeword.speech.SpeechClient", return_value=mock_stt_client),
     ):
-        return WakewordDetector(WakewordConfig(), _DEFAULT_AUDIO_CONFIG)
+        return _make_detector()
 
 
 # ---------------------------------------------------------------------------
@@ -172,9 +188,7 @@ class TestSpeechDetection:
             detector.feed_audio(_silence_frame())
         mock_stt_client.recognize.assert_not_called()
 
-    def test_speech_then_silence_triggers_recognition(
-        self, detector, mock_vad_model, mock_stt_client
-    ):
+    def test_speech_then_silence_triggers_recognition(self, detector, mock_vad_model, mock_stt_client):
         """Speech frames followed by silence should trigger STT recognition."""
         mock_stt_client.recognize.return_value = _make_empty_stt_response()
 
@@ -202,9 +216,7 @@ class TestSpeechDetection:
 
         mock_stt_client.recognize.assert_called_once()
 
-    def test_detection_returns_true_on_keyword_match(
-        self, detector, mock_vad_model, mock_stt_client
-    ):
+    def test_detection_returns_true_on_keyword_match(self, detector, mock_vad_model, mock_stt_client):
         """feed_audio returns True when STT transcript contains the keyword."""
         mock_stt_client.recognize.return_value = _make_stt_response(["hey ray"])
 
@@ -227,9 +239,7 @@ class TestSpeechDetection:
 
         assert detected
 
-    def test_detection_returns_false_on_no_keyword(
-        self, detector, mock_vad_model, mock_stt_client
-    ):
+    def test_detection_returns_false_on_no_keyword(self, detector, mock_vad_model, mock_stt_client):
         """feed_audio returns False when STT transcript doesn't contain keyword."""
         mock_stt_client.recognize.return_value = _make_stt_response(["hello world"])
 
@@ -291,15 +301,13 @@ class TestKeywordMatching:
                 return_value=mock_stt_client,
             ),
         ):
-            det = WakewordDetector(WakewordConfig(), _DEFAULT_AUDIO_CONFIG)
+            det = _make_detector()
 
-        assert not self._trigger_recognition(
-            det, mock_vad_model, mock_stt_client, "array of items"
-        )
+        assert not self._trigger_recognition(det, mock_vad_model, mock_stt_client, "array of items")
 
-    def test_multiple_keywords(self, mock_vad_model, mock_stt_client):
+    def test_multiple_keywords(self, mock_vad_model, mock_stt_client, monkeypatch):
         """Multiple keywords: match on any one."""
-        config = WakewordConfig(keywords=("ray", "hello"))
+        keywords = ("ray", "hello")
         with (
             patch("voice_pipeline.audio.wakeword.load_silero_vad", return_value=mock_vad_model),
             patch(
@@ -307,7 +315,7 @@ class TestKeywordMatching:
                 return_value=mock_stt_client,
             ),
         ):
-            det = WakewordDetector(config, _DEFAULT_AUDIO_CONFIG)
+            det = _make_detector(monkeypatch, keywords=keywords)
 
         assert self._trigger_recognition(det, mock_vad_model, mock_stt_client, "hey hello there")
 
@@ -324,7 +332,7 @@ class TestKeywordMatching:
                 return_value=mock_stt_client,
             ),
         ):
-            det = WakewordDetector(WakewordConfig(), _DEFAULT_AUDIO_CONFIG)
+            det = _make_detector()
 
         call_count = 0
 
@@ -356,7 +364,7 @@ class TestKeywordMatching:
                 return_value=mock_stt_client,
             ),
         ):
-            det = WakewordDetector(WakewordConfig(), _DEFAULT_AUDIO_CONFIG)
+            det = _make_detector()
 
         call_count = 0
 
@@ -468,9 +476,8 @@ class TestStateTransitions:
 class TestSafetyLimits:
     """Test safety limits: max duration, min duration."""
 
-    def test_max_speech_duration_forces_recognition(self, mock_vad_model, mock_stt_client):
+    def test_max_speech_duration_forces_recognition(self, mock_vad_model, mock_stt_client, monkeypatch):
         """Speech exceeding max_speech_duration_sec forces recognition."""
-        config = WakewordConfig(max_speech_duration_sec=0.1)  # 100ms
         mock_stt_client.recognize.return_value = _make_empty_stt_response()
 
         with (
@@ -480,7 +487,7 @@ class TestSafetyLimits:
                 return_value=mock_stt_client,
             ),
         ):
-            det = WakewordDetector(config, _DEFAULT_AUDIO_CONFIG)
+            det = _make_detector(monkeypatch, max_speech_duration_sec=0.1)  # 100ms
 
         # All VAD chunks return high probability (continuous speech)
         mock_vad_model.return_value = torch.tensor(0.9)
@@ -493,13 +500,10 @@ class TestSafetyLimits:
         mock_stt_client.recognize.assert_called_once()
         assert det._state is _State.IDLE  # reset after forced recognition
 
-    def test_short_speech_skips_recognition(self, mock_vad_model, mock_stt_client):
-        """Speech shorter than min_speech_duration_ms is ignored."""
-        # min_speech_duration_ms=100, one VAD chunk is 32ms → only 1 chunk of speech
-        config = WakewordConfig(
-            min_speech_duration_ms=100,
-            speech_pad_ms=32,  # just 1 silence chunk triggers recognition check
-        )
+    def test_short_speech_skips_recognition(self, mock_vad_model, mock_stt_client, monkeypatch):
+        """Speech shorter than min_speech_duration_ms (100ms) is ignored."""
+        # speech_pad_ms=32: just 1 silence chunk triggers recognition check
+        # one VAD chunk is 32ms → only 1 chunk of speech (< 100ms default min)
         mock_stt_client.recognize.return_value = _make_empty_stt_response()
 
         with (
@@ -509,7 +513,7 @@ class TestSafetyLimits:
                 return_value=mock_stt_client,
             ),
         ):
-            det = WakewordDetector(config, _DEFAULT_AUDIO_CONFIG)
+            det = _make_detector(monkeypatch, speech_pad_ms=32)
 
         call_count = 0
 
@@ -546,7 +550,7 @@ class TestErrorHandling:
             ),
             pytest.raises(WakewordError, match="Failed to load Silero VAD model"),
         ):
-            WakewordDetector(WakewordConfig(), _DEFAULT_AUDIO_CONFIG)
+            _make_detector()
 
     def test_stt_client_creation_failure_raises_wakeword_error(self, mock_vad_model):
         """Failed STT client creation raises WakewordError."""
@@ -558,7 +562,7 @@ class TestErrorHandling:
             ),
             pytest.raises(WakewordError, match="Failed to create Google STT client"),
         ):
-            WakewordDetector(WakewordConfig(), _DEFAULT_AUDIO_CONFIG)
+            _make_detector()
 
     def test_stt_error_returns_false(self, detector, mock_vad_model, mock_stt_client, caplog):
         """STT recognition error → log warning, return False (fail closed)."""
@@ -713,12 +717,8 @@ class TestVADFailClosed:
 class TestSpeechPadEdge:
     """Test speech_pad_ms <= chunk_duration edge case."""
 
-    def test_speech_pad_equal_to_chunk_duration(self, mock_vad_model, mock_stt_client):
+    def test_speech_pad_equal_to_chunk_duration(self, mock_vad_model, mock_stt_client, monkeypatch):
         """speech_pad_ms == 32 (one chunk) triggers on first silence chunk."""
-        config = WakewordConfig(
-            speech_pad_ms=32,  # exactly one VAD chunk duration
-            min_speech_duration_ms=32,  # allow very short speech
-        )
         mock_stt_client.recognize.return_value = _make_stt_response(["ray"])
 
         with (
@@ -728,7 +728,7 @@ class TestSpeechPadEdge:
                 return_value=mock_stt_client,
             ),
         ):
-            det = WakewordDetector(config, _DEFAULT_AUDIO_CONFIG)
+            det = _make_detector(monkeypatch, speech_pad_ms=32, min_speech_duration_ms=32)
 
         call_count = 0
 

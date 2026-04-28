@@ -1,7 +1,7 @@
 """MaAI VAP wrapper with ONNX encoder and transformer.
 
 Loads pre-exported ONNX files for both encoder and transformer by default.
-If ``transformer_onnx_path`` is empty, falls back to PyTorch transformer
+Toggle ``_USE_ONNX_TRANSFORMER = False`` (class var) for PyTorch fallback
 via MaAI (requires ``maai`` package).
 
 Optimal RPi 5 config: ort_threads=1 (single-threaded).
@@ -25,26 +25,12 @@ try:
 except ImportError:
     torch = None  # type: ignore[assignment]
 
-from voice_pipeline.core.config import AudioConfig, MaAIVAPConfig, TTSConfig
+from voice_pipeline.audio.constants import SAMPLE_RATE
 from voice_pipeline.core.interfaces import IVAP
 from voice_pipeline.core.types import AudioFrame, VAPResult
 from voice_pipeline.turn_taking.exceptions import VAPError
 
 logger = logging.getLogger("voice_pipeline.turn_taking.maai_vap")
-
-_DEFAULT_RESULT = VAPResult(0.0, 0.0, False)
-
-# MaAI model architecture constants (fixed for all lang/frame_rate variants)
-_MAAI_DIM = 256
-_MAAI_NUM_HEADS = 4
-_MAAI_HEAD_DIM = _MAAI_DIM // _MAAI_NUM_HEADS
-_MAAI_CH_LAYERS = 1
-_MAAI_CROSS_LAYERS = 3
-
-
-# ---------------------------------------------------------------------------
-# MaAI VAP wrapper (IVAP implementation)
-# ---------------------------------------------------------------------------
 
 
 class MaAIVAPWrapper(IVAP):
@@ -52,55 +38,78 @@ class MaAIVAPWrapper(IVAP):
 
     Internally stateful: maintains LSTM hidden states for the encoder
     and KV-cache for the transformer across ``feed_audio`` calls.
+
+    Args:
+        tts_sample_rate: Robot(TTS) 출력 샘플레이트. 리샘플링 기준.
     """
+
+    ENCODER_ONNX_PATH = "models/maai/encoder_10hz_5s.onnx"
+    TRANSFORMER_ONNX_PATH = "models/maai/transformer_en_5s.onnx"
+
+    _USE_ONNX_TRANSFORMER = True  # True=ONNX transformer / False=PyTorch fallback
+    _USE_TORCH_COMPILE = True  # torch.compile 활성화 (PyTorch fallback 전용)
+    _FRAME_RATE = 10  # VAP 추론 프레임 레이트 (Hz)
+    _CONTEXT_LEN_SEC = 5.0  # KV 캐시 컨텍스트 길이 (초)
+    _ORT_THREADS = 1  # ONNX Runtime intra-op 스레드 수 (RPi 5 최적 1)
+    _PT_THREADS = 1  # PyTorch 스레드 수 (PyTorch fallback 전용)
+
+    _DEFAULT_RESULT = VAPResult(0.0, 0.0, False)  # 추론 실패/초기 상태 반환값
+    _LANG = "en"  # MaAI 언어 코드 (PyTorch fallback 경로 전용)
+    _VAD_THRESHOLD = 0.5  # user_is_speaking 임계값
+    _TORCH_DEVICE = "cpu"  # MaAI PyTorch 디바이스
+    _TORCH_COMPILE_MODE = "reduce-overhead"  # torch.compile 모드
+
+    # MaAI 모델 아키텍처 (모든 lang/frame_rate 변종에 고정)
+    _MAAI_DIM = 256
+    _MAAI_NUM_HEADS = 4
+    _MAAI_HEAD_DIM = _MAAI_DIM // _MAAI_NUM_HEADS
+    _MAAI_CH_LAYERS = 1
+    _MAAI_CROSS_LAYERS = 3
+    _FRAME_CTX_PADDING = 320  # encoder 입력 padding (MaAI 아키텍처 고정)
 
     def __init__(
         self,
-        config: MaAIVAPConfig,
-        audio_config: AudioConfig,
-        tts_config: TTSConfig,
+        tts_sample_rate: int,
     ) -> None:
-        self._config = config
-        self._audio_config = audio_config
-        self._robot_sample_rate = tts_config.output_sample_rate
-        self._use_onnx_transformer = bool(config.transformer_onnx_path)
-        self._use_torch_compile = not self._use_onnx_transformer and config.use_torch_compile
+        # Snapshot class vars to instance attrs (safe for concurrent fixtures
+        # where another instance may mutate class vars afterwards).
+        self._robot_sample_rate = tts_sample_rate
+        self._use_onnx_transformer = self._USE_ONNX_TRANSFORMER
+        self._use_torch_compile = not self._use_onnx_transformer and self._USE_TORCH_COMPILE
+        self._frame_rate = self._FRAME_RATE
+        self._audio_frame_size = SAMPLE_RATE // self._frame_rate + self._FRAME_CTX_PADDING
+        self._audio_context_len = int(self._CONTEXT_LEN_SEC * self._frame_rate)
 
         # ORT session options (shared by encoder and transformer)
         sess_opts = ort.SessionOptions()
         sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sess_opts.intra_op_num_threads = config.ort_threads
+        sess_opts.intra_op_num_threads = self._ORT_THREADS
 
         # Encoder (ONNX from file)
-        if not config.encoder_onnx_path:
-            raise VAPError("encoder_onnx_path is required")
-        if not os.path.isfile(config.encoder_onnx_path):
-            raise VAPError(f"Encoder ONNX file not found: {config.encoder_onnx_path}")
+        if not self.ENCODER_ONNX_PATH:
+            raise VAPError("ENCODER_ONNX_PATH is required")
+        if not os.path.isfile(self.ENCODER_ONNX_PATH):
+            raise VAPError(f"Encoder ONNX file not found: {self.ENCODER_ONNX_PATH}")
         try:
-            self._sess1 = ort.InferenceSession(config.encoder_onnx_path, sess_opts)
-            self._sess2 = ort.InferenceSession(config.encoder_onnx_path, sess_opts)
+            self._sess1 = ort.InferenceSession(self.ENCODER_ONNX_PATH, sess_opts)
+            self._sess2 = ort.InferenceSession(self.ENCODER_ONNX_PATH, sess_opts)
         except Exception as exc:
             raise VAPError(f"Failed to load ONNX encoder: {exc}") from exc
 
         # Transformer
         if self._use_onnx_transformer:
-            if not os.path.isfile(config.transformer_onnx_path):
-                raise VAPError(f"Transformer ONNX file not found: {config.transformer_onnx_path}")
+            if not os.path.isfile(self.TRANSFORMER_ONNX_PATH):
+                raise VAPError(f"Transformer ONNX file not found: {self.TRANSFORMER_ONNX_PATH}")
             try:
-                self._tfm_sess = ort.InferenceSession(config.transformer_onnx_path, sess_opts)
-                logger.info("ONNX transformer loaded from %s", config.transformer_onnx_path)
+                self._tfm_sess = ort.InferenceSession(self.TRANSFORMER_ONNX_PATH, sess_opts)
+                logger.info("ONNX transformer loaded from %s", self.TRANSFORMER_ONNX_PATH)
             except Exception as exc:
                 raise VAPError(f"Failed to load ONNX transformer: {exc}") from exc
-
-            self._n_ch_layers = _MAAI_CH_LAYERS
-            self._n_cross_layers = _MAAI_CROSS_LAYERS
-            self._nh = _MAAI_NUM_HEADS
-            self._hd = _MAAI_HEAD_DIM
         else:
             # PyTorch transformer requires torch
             if torch is None:
-                raise VAPError("torch is required when transformer_onnx_path is not set")
-            torch.set_num_threads(config.pt_threads)
+                raise VAPError("torch is required when _USE_ONNX_TRANSFORMER is False")
+            torch.set_num_threads(self._PT_THREADS)
 
             # Load MaAI for PyTorch transformer
             try:
@@ -110,21 +119,21 @@ class MaAIVAPWrapper(IVAP):
                 ch2 = MaaiInput.Chunk()
                 self._maai = Maai(
                     mode="vap",
-                    lang=config.lang,
-                    frame_rate=config.frame_rate,
-                    context_len_sec=config.context_len_sec,
+                    lang=self._LANG,
+                    frame_rate=self._frame_rate,
+                    context_len_sec=self._CONTEXT_LEN_SEC,
                     audio_ch1=ch1,
                     audio_ch2=ch2,
-                    device="cpu",
+                    device=self._TORCH_DEVICE,
                     use_kv_cache=True,
                 )
             except Exception as exc:
                 raise VAPError(f"Failed to load MaAI: {exc}") from exc
 
             self._vap = self._maai.vap
-            if config.use_torch_compile:
+            if self._USE_TORCH_COMPILE:
                 try:
-                    self._vap_forward = torch.compile(self._vap.forward, mode="reduce-overhead")
+                    self._vap_forward = torch.compile(self._vap.forward, mode=self._TORCH_COMPILE_MODE)
                     logger.info("torch.compile enabled for transformer")
                 except Exception:
                     logger.warning(
@@ -135,21 +144,15 @@ class MaAIVAPWrapper(IVAP):
             else:
                 self._vap_forward = self._vap.forward
 
-        # Audio buffering constants
-        self._frame_rate = config.frame_rate
-        self._frame_contxt_padding = 320
-        self._audio_frame_size = 16000 // config.frame_rate + self._frame_contxt_padding
-        self._audio_context_len = int(config.context_len_sec * config.frame_rate)
-
         # Mutable state
-        self._h1 = np.zeros((1, 1, 256), dtype=np.float32)
-        self._c1 = np.zeros((1, 1, 256), dtype=np.float32)
-        self._h2 = np.zeros((1, 1, 256), dtype=np.float32)
-        self._c2 = np.zeros((1, 1, 256), dtype=np.float32)
-        self._buf_x1 = np.zeros(self._frame_contxt_padding, dtype=np.float32)
-        self._buf_x2 = np.zeros(self._frame_contxt_padding, dtype=np.float32)
+        self._h1 = np.zeros((1, 1, self._MAAI_DIM), dtype=np.float32)
+        self._c1 = np.zeros((1, 1, self._MAAI_DIM), dtype=np.float32)
+        self._h2 = np.zeros((1, 1, self._MAAI_DIM), dtype=np.float32)
+        self._c2 = np.zeros((1, 1, self._MAAI_DIM), dtype=np.float32)
+        self._buf_x1 = np.zeros(self._FRAME_CTX_PADDING, dtype=np.float32)
+        self._buf_x2 = np.zeros(self._FRAME_CTX_PADDING, dtype=np.float32)
         self._vap_cache: dict | None = None
-        self._cached_result = _DEFAULT_RESULT
+        self._cached_result = self._DEFAULT_RESULT
 
         # Warmup: pre-allocate ORT buffers / trigger torch.compile
         self._warmup()
@@ -157,18 +160,15 @@ class MaAIVAPWrapper(IVAP):
 
         mode = "onnx" if self._use_onnx_transformer else "pytorch"
         logger.info(
-            "MaAIVAPWrapper initialized: frame_rate=%d, context=%.1fs, "
-            "ort_threads=%d, pt_threads=%d, transformer=%s",
-            config.frame_rate,
-            config.context_len_sec,
-            config.ort_threads,
-            config.pt_threads,
+            "MaAIVAPWrapper initialized: frame_rate=%d, context=%.1fs, ort_threads=%d, pt_threads=%d, transformer=%s",
+            self._frame_rate,
+            self._CONTEXT_LEN_SEC,
+            self._ORT_THREADS,
+            self._PT_THREADS,
             mode,
         )
 
-    def feed_audio(
-        self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None
-    ) -> VAPResult:
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
         """Feed one pipeline frame and return voice activity estimates."""
         try:
             x1 = self._pcm_to_numpy(user_audio)
@@ -193,8 +193,8 @@ class MaAIVAPWrapper(IVAP):
         self._c1[:] = 0
         self._h2[:] = 0
         self._c2[:] = 0
-        self._buf_x1 = np.zeros(self._frame_contxt_padding, dtype=np.float32)
-        self._buf_x2 = np.zeros(self._frame_contxt_padding, dtype=np.float32)
+        self._buf_x1 = np.zeros(self._FRAME_CTX_PADDING, dtype=np.float32)
+        self._buf_x2 = np.zeros(self._FRAME_CTX_PADDING, dtype=np.float32)
 
         if self._use_torch_compile:
             # torch.compile: zero values but keep tensor shapes
@@ -204,7 +204,7 @@ class MaAIVAPWrapper(IVAP):
             # ONNX and PyTorch eager: safe to clear entirely
             self._vap_cache = None
 
-        self._cached_result = _DEFAULT_RESULT
+        self._cached_result = self._DEFAULT_RESULT
 
     def _zero_pytorch_cache(self) -> None:
         """Zero PyTorch KV cache values, preserving tensor shapes.
@@ -232,13 +232,13 @@ class MaAIVAPWrapper(IVAP):
 
         # Warmup encoder ORT sessions
         dummy_wav = np.zeros((1, 1, self._audio_frame_size), dtype=np.float32)
-        dummy_h = np.zeros((1, 1, 256), dtype=np.float32)
-        dummy_c = np.zeros((1, 1, 256), dtype=np.float32)
+        dummy_h = np.zeros((1, 1, self._MAAI_DIM), dtype=np.float32)
+        dummy_c = np.zeros((1, 1, self._MAAI_DIM), dtype=np.float32)
         for sess in (self._sess1, self._sess2):
             sess.run(None, {"waveform": dummy_wav, "h_in": dummy_h, "c_in": dummy_c})
 
         # Warmup transformer
-        dummy_e = np.zeros((1, 1, _MAAI_DIM), dtype=np.float32)
+        dummy_e = np.zeros((1, 1, self._MAAI_DIM), dtype=np.float32)
         for _ in range(n_frames):
             if self._use_onnx_transformer:
                 self._process_transformer_onnx(dummy_e, dummy_e)
@@ -266,12 +266,8 @@ class MaAIVAPWrapper(IVAP):
         wav1 = self._buf_x1.reshape(1, 1, -1)
         wav2 = self._buf_x2.reshape(1, 1, -1)
 
-        e1_np, self._h1, self._c1 = self._sess1.run(
-            None, {"waveform": wav1, "h_in": self._h1, "c_in": self._c1}
-        )
-        e2_np, self._h2, self._c2 = self._sess2.run(
-            None, {"waveform": wav2, "h_in": self._h2, "c_in": self._c2}
-        )
+        e1_np, self._h1, self._c1 = self._sess1.run(None, {"waveform": wav1, "h_in": self._h1, "c_in": self._c1})
+        e2_np, self._h2, self._c2 = self._sess2.run(None, {"waveform": wav2, "h_in": self._h2, "c_in": self._c2})
 
         # Transformer forward
         if self._use_onnx_transformer:
@@ -287,13 +283,13 @@ class MaAIVAPWrapper(IVAP):
             logger.debug("VAP inference: %.0fms", elapsed_ms)
 
         # Buffer trimming
-        self._buf_x1 = self._buf_x1[-self._frame_contxt_padding :].copy()
-        self._buf_x2 = self._buf_x2[-self._frame_contxt_padding :].copy()
+        self._buf_x1 = self._buf_x1[-self._FRAME_CTX_PADDING :].copy()
+        self._buf_x2 = self._buf_x2[-self._FRAME_CTX_PADDING :].copy()
 
         # Convert to VAPResult
         p_now = float(out["p_now"])
         p_fut = float(out["p_future"])
-        user_is_speaking = float(out["vad"][0]) > self._config.vad_threshold
+        user_is_speaking = float(out["vad"][0]) > self._VAD_THRESHOLD
 
         return VAPResult(p_now, p_fut, user_is_speaking)
 
@@ -303,8 +299,12 @@ class MaAIVAPWrapper(IVAP):
 
         # Build cache inputs
         if self._vap_cache is None:
-            empty_ch = np.zeros((self._n_ch_layers, 1, self._nh, 0, self._hd), dtype=np.float32)
-            empty_cr = np.zeros((self._n_cross_layers, 1, self._nh, 0, self._hd), dtype=np.float32)
+            empty_ch = np.zeros(
+                (self._MAAI_CH_LAYERS, 1, self._MAAI_NUM_HEADS, 0, self._MAAI_HEAD_DIM), dtype=np.float32
+            )
+            empty_cr = np.zeros(
+                (self._MAAI_CROSS_LAYERS, 1, self._MAAI_NUM_HEADS, 0, self._MAAI_HEAD_DIM), dtype=np.float32
+            )
             cache = {
                 "ar1_k": empty_ch,
                 "ar1_v": empty_ch.copy(),
@@ -368,14 +368,8 @@ class MaAIVAPWrapper(IVAP):
             new_cache: dict = {}
             for key, (k_list, v_list) in self._vap_cache.items():
                 new_cache[key] = (
-                    [
-                        t[..., -limit:, :] if isinstance(t, torch.Tensor) and t.dim() >= 3 else t
-                        for t in k_list
-                    ],
-                    [
-                        t[..., -limit:, :] if isinstance(t, torch.Tensor) and t.dim() >= 3 else t
-                        for t in v_list
-                    ],
+                    [t[..., -limit:, :] if isinstance(t, torch.Tensor) and t.dim() >= 3 else t for t in k_list],
+                    [t[..., -limit:, :] if isinstance(t, torch.Tensor) and t.dim() >= 3 else t for t in v_list],
                 )
             self._vap_cache = new_cache
 
@@ -397,8 +391,8 @@ class MaAIVAPWrapper(IVAP):
 
     def _resample_robot(self, robot: np.ndarray, target_length: int) -> np.ndarray:
         """Resample robot audio from TTS rate to pipeline rate and match length."""
-        if self._robot_sample_rate != self._audio_config.sample_rate:
-            ratio = self._audio_config.sample_rate / self._robot_sample_rate
+        if self._robot_sample_rate != SAMPLE_RATE:
+            ratio = SAMPLE_RATE / self._robot_sample_rate
             n_out = int(len(robot) * ratio)
             indices = np.linspace(0, len(robot) - 1, n_out).astype(np.float64)
             lo = indices.astype(np.int64)

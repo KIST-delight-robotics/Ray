@@ -14,7 +14,6 @@ import pytest
 from websockets.sync.server import ServerConnection, serve
 
 from voice_pipeline.bridge.cpp_bridge import CppBridge
-from voice_pipeline.core.config import CppBridgeConfig
 from voice_pipeline.core.types import CppEventType
 
 pytestmark = pytest.mark.requires_api
@@ -49,25 +48,29 @@ def _mass_event_handler(conn: ServerConnection) -> None:
 
 
 @pytest.fixture
-def stress_config() -> CppBridgeConfig:
-    return CppBridgeConfig(
-        host=_HOST,
-        port=_PORT,
-        reconnect_attempts=2,
-        recv_timeout_sec=0.1,
-        connect_timeout_sec=2.0,
-        close_timeout_sec=2.0,
-    )
+def stress_bridge(make_bridge):
+    """Factory for stress test bridges (uses _PORT, longer connect/close timeouts)."""
+
+    def _make(**overrides) -> CppBridge:
+        return make_bridge(
+            host=_HOST,
+            port=_PORT,
+            connect_timeout_sec=2.0,
+            close_timeout_sec=2.0,
+            **overrides,
+        )
+
+    return _make
 
 
 class TestRapidCycles:
-    def test_rapid_connect_disconnect(self, stress_config: CppBridgeConfig) -> None:
+    def test_rapid_connect_disconnect(self, stress_bridge) -> None:
         """10 rapid connect/disconnect cycles without leaking threads."""
         server = serve(_sink_handler, _HOST, _PORT)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            bridge = CppBridge(stress_config)
+            bridge = stress_bridge()
             for _ in range(10):
                 bridge.connect()
                 assert bridge._running.is_set()
@@ -79,13 +82,13 @@ class TestRapidCycles:
 
 
 class TestHighVolume:
-    def test_stream_1000_audio_chunks(self, stress_config: CppBridgeConfig) -> None:
+    def test_stream_1000_audio_chunks(self, stress_bridge) -> None:
         """Send 1000 audio chunks without errors."""
         server = serve(_sink_handler, _HOST, _PORT)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            bridge = CppBridge(stress_config)
+            bridge = stress_bridge()
             bridge.connect()
             chunk = b"\x00" * 960  # 30ms at 16kHz 16-bit mono
             for _ in range(1000):
@@ -95,13 +98,13 @@ class TestHighVolume:
             server.shutdown()
             thread.join(timeout=5.0)
 
-    def test_receive_500_events(self, stress_config: CppBridgeConfig) -> None:
+    def test_receive_500_events(self, stress_bridge) -> None:
         """Receive 500 events in quick succession."""
         server = serve(_mass_event_handler, _HOST, _PORT)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            bridge = CppBridge(stress_config)
+            bridge = stress_bridge()
             bridge.connect()
 
             # Trigger the flood
@@ -128,13 +131,13 @@ class TestHighVolume:
 
 
 class TestConcurrency:
-    def test_concurrent_send_and_poll(self, stress_config: CppBridgeConfig) -> None:
+    def test_concurrent_send_and_poll(self, stress_bridge) -> None:
         """Concurrent send + poll from different threads — no deadlock."""
         server = serve(_event_flood_handler, _HOST, _PORT)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            bridge = CppBridge(stress_config)
+            bridge = stress_bridge()
             bridge.connect()
 
             errors: list[Exception] = []

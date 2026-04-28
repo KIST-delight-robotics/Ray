@@ -24,7 +24,6 @@ import time
 # Project imports
 sys.path.insert(0, ".")
 from voice_pipeline.bridge.cpp_bridge import CppBridge
-from voice_pipeline.core.config import CppBridgeConfig
 from voice_pipeline.core.types import CppEventType
 
 # ---------------------------------------------------------------------------
@@ -239,8 +238,9 @@ def main() -> None:
             sys.exit(1)
         print(f"C++ process started (PID {cpp_proc.pid})")
 
-    config = CppBridgeConfig(host=args.host, port=args.port)
-    bridge = CppBridge(config)
+    CppBridge._HOST = args.host
+    CppBridge._PORT = args.port
+    bridge = CppBridge()
 
     results: list[tuple[str, bool]] = []
 

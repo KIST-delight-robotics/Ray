@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pytest
 
-from voice_pipeline.core.config import TTSConfig
 from voice_pipeline.tts.tts import OpenAITTS
 
 pytestmark = pytest.mark.requires_api
@@ -16,7 +15,7 @@ pytestmark = pytest.mark.requires_api
 @pytest.fixture
 def tts(openai_api_key: str) -> OpenAITTS:  # noqa: ARG001
     """Create an OpenAITTS with default config."""
-    return OpenAITTS(TTSConfig())
+    return OpenAITTS()
 
 
 class TestRapidSequentialCalls:

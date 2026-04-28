@@ -18,7 +18,6 @@ from pathlib import Path
 # Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from voice_pipeline.core.config import TTSConfig
 from voice_pipeline.tts.greeting_audio import synthesize_to_wav
 from voice_pipeline.tts.tts import OpenAITTS
 
@@ -54,18 +53,16 @@ def main() -> None:
 
     output = Path("output") / f"{args.name}.wav"
 
-    config = TTSConfig(
-        voice=args.voice,
-        model=args.model,
-        speed=args.speed,
-        instructions=args.instructions,
-    )
-    tts = OpenAITTS(config)
+    OpenAITTS._VOICE = args.voice
+    OpenAITTS._MODEL = args.model
+    OpenAITTS._SPEED = args.speed
+    OpenAITTS._INSTRUCTIONS = args.instructions
+    tts = OpenAITTS()
 
-    print(f"Synthesizing ({config.model}, {config.voice}, speed={config.speed})...")
+    print(f"Synthesizing ({OpenAITTS._MODEL}, {OpenAITTS._VOICE}, speed={OpenAITTS._SPEED})...")
     print(f'  Text: "{text[:80]}{"..." if len(text) > 80 else ""}"')
 
-    synthesize_to_wav(tts, text, output, config.output_sample_rate)
+    synthesize_to_wav(tts, text, output)
 
     size = output.stat().st_size
     print(f"  Saved: {output} ({size:,} bytes)")

@@ -8,14 +8,11 @@ from typing import Any
 
 import openai
 
-from voice_pipeline.core.config import TTSConfig
 from voice_pipeline.core.interfaces import ITTS
 from voice_pipeline.core.types import TTSStream
 from voice_pipeline.tts.exceptions import TTSError
 
 logger = logging.getLogger("voice_pipeline.tts")
-
-_SUPPORTS_INSTRUCTIONS: set[str] = {"gpt-4o-mini-tts"}
 
 
 class OpenAITTS(ITTS):
@@ -28,12 +25,33 @@ class OpenAITTS(ITTS):
     closed to release the underlying HTTP connection.
     """
 
-    def __init__(self, config: TTSConfig) -> None:
-        self._config = config
+    OUTPUT_SAMPLE_RATE: int = 24000  # OpenAI TTS API 고정 출력 샘플레이트 (Hz)
+
+    _VOICE: str = "ash"  # OpenAI 음성 프리셋 (예: "ash", "alloy", "coral")
+    _MODEL: str = "tts-1"  # OpenAI TTS 모델 (예: "tts-1", "tts-1-hd", "gpt-4o-mini-tts")
+    _SPEED: float = 1.0  # 재생 속도 (0.25~4.0)
+    _INSTRUCTIONS: str | None = None  # 음성 스타일 지시문 (`gpt-4o-mini-tts` 모델 전용)
+
+    # `instructions` 인자를 지원하는 OpenAI TTS 모델
+    _SUPPORTS_INSTRUCTIONS: frozenset[str] = frozenset({"gpt-4o-mini-tts"})
+
+    _MAX_RETRIES = 2  # 합성 실패 시 자동 재시도 횟수
+    _TIMEOUT_SEC = 30.0  # 합성 응답 대기 최대 시간 (초)
+    _CHUNK_SIZE = 4096  # 스트리밍 오디오 버퍼 크기 (바이트)
+
+    def __init__(self) -> None:
         self._client = openai.OpenAI(
-            max_retries=config.max_retries,
-            timeout=config.timeout_sec,
+            max_retries=self._MAX_RETRIES,
+            timeout=self._TIMEOUT_SEC,
         )
+
+    @property
+    def output_sample_rate(self) -> int:
+        return OpenAITTS.OUTPUT_SAMPLE_RATE
+
+    @property
+    def voice_id(self) -> str:
+        return f"openai|{self._VOICE}|{self._MODEL}|{self._SPEED}|{self._INSTRUCTIONS or ''}"
 
     def synthesize(self, text: str) -> TTSStream:
         """Stream PCM audio from OpenAI TTS API.
@@ -47,21 +65,21 @@ class OpenAITTS(ITTS):
         Raises:
             TTSError: On validation failure or API error.
         """
-        _validate_input(text, self._config.speed)
+        self._validate_input(text)
 
         try:
             kwargs: dict[str, Any] = {
-                "model": self._config.model,
-                "voice": self._config.voice,
+                "model": self._MODEL,
+                "voice": self._VOICE,
                 "input": text,
                 "response_format": "pcm",
-                "speed": self._config.speed,
+                "speed": self._SPEED,
             }
-            if self._config.instructions:
-                if self._config.model in _SUPPORTS_INSTRUCTIONS:
-                    kwargs["instructions"] = self._config.instructions
+            if self._INSTRUCTIONS:
+                if self._MODEL in self._SUPPORTS_INSTRUCTIONS:
+                    kwargs["instructions"] = self._INSTRUCTIONS
                 else:
-                    logger.warning("instructions ignored for model %s", self._config.model)
+                    logger.warning("instructions ignored for model %s", self._MODEL)
 
             response_cm = self._client.audio.speech.with_streaming_response.create(**kwargs)
         except openai.OpenAIError as exc:
@@ -81,11 +99,20 @@ class OpenAITTS(ITTS):
                 exited[0] = True
                 response_cm.__exit__(*exc_info)
 
-        gen = _iter_chunks(response, safe_exit)
+        gen = _iter_chunks(response, safe_exit, self._CHUNK_SIZE)
         return TTSStream(gen, close_fn=lambda: _safe_close(safe_exit))
 
+    def _validate_input(self, text: str) -> None:
+        """Pre-validate input before API call."""
+        if not text or not text.strip():
+            raise TTSError("Text must not be empty or whitespace-only")
+        if len(text) > 4096:
+            raise TTSError(f"Text exceeds 4096 character limit ({len(text)} chars)")
+        if not (0.25 <= self._SPEED <= 4.0):
+            raise TTSError(f"Speed must be 0.25–4.0, got {self._SPEED}")
 
-def _iter_chunks(response: Any, safe_exit: Callable[..., None]) -> Generator[bytes, None, None]:
+
+def _iter_chunks(response: Any, safe_exit: Callable[..., None], chunk_size: int) -> Generator[bytes, None, None]:
     """Yield audio chunks from an already-entered streaming response.
 
     Calls *safe_exit* exactly once on completion, error, or generator close.
@@ -93,7 +120,7 @@ def _iter_chunks(response: Any, safe_exit: Callable[..., None]) -> Generator[byt
     are harmless.
     """
     try:
-        for chunk in response.iter_bytes(chunk_size=4096):  # noqa: UP028
+        for chunk in response.iter_bytes(chunk_size=chunk_size):  # noqa: UP028
             yield chunk
     except GeneratorExit:
         safe_exit(None, None, None)
@@ -114,13 +141,3 @@ def _safe_close(safe_exit: Callable[..., None]) -> None:
         safe_exit(None, None, None)
     except Exception:
         logger.debug("Error closing CM (suppressed)", exc_info=True)
-
-
-def _validate_input(text: str, speed: float) -> None:
-    """Pre-validate input before API call."""
-    if not text or not text.strip():
-        raise TTSError("Text must not be empty or whitespace-only")
-    if len(text) > 4096:
-        raise TTSError(f"Text exceeds 4096 character limit ({len(text)} chars)")
-    if not (0.25 <= speed <= 4.0):
-        raise TTSError(f"Speed must be 0.25–4.0, got {speed}")

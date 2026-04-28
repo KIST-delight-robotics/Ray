@@ -23,7 +23,6 @@ from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.types import Episode
-from voice_pipeline.core.config import MemoryConfig
 
 # --- Args ---
 n_episodes = int(sys.argv[1])
@@ -57,8 +56,7 @@ embedder = SentenceTransformerEmbedder("all-MiniLM-L6-v2", expected_dimension=38
 embedder.embed("warmup")
 
 tmpdir = tempfile.mkdtemp()
-cfg = MemoryConfig(db_path=os.path.join(tmpdir, "bench.db"), embedding_dimension=384)
-storage = SQLiteMemoryStorage(cfg)
+storage = SQLiteMemoryStorage(os.path.join(tmpdir, "bench.db"), dimension=384)
 index = NumpyVectorIndex()
 
 rng = random.Random(42)
@@ -70,21 +68,22 @@ templates = [
 words_a = ["movies", "cooking", "jazz", "hiking", "chess", "yoga", "Python", "Tokyo", "Dune", "camera"]
 words_b = ["excitement", "passion", "interest", "joy", "curiosity", "beauty", "depth"]
 
-texts = [
-    rng.choice(templates).format(rng.choice(words_a), rng.choice(words_b)) + f" ({i})"
-    for i in range(n_episodes)
-]
+texts = [rng.choice(templates).format(rng.choice(words_a), rng.choice(words_b)) + f" ({i})" for i in range(n_episodes)]
 embs = embedder.embed_batch(texts)
 for i, text in enumerate(texts):
     ep = Episode(
-        id=None, text=text, timestamp="2026-03-15 14:00:00",
-        session_id=f"s-{i // 10}", importance=1.0, last_cited_at="2026-03-15 14:00:00",
+        id=None,
+        text=text,
+        timestamp="2026-03-15 14:00:00",
+        session_id=f"s-{i // 10}",
+        importance=1.0,
+        last_cited_at="2026-03-15 14:00:00",
     )
     eid = storage.add_episode(ep)
     storage.update_episode_embedding(eid, embs[i])
     index.add(eid, embs[i])
 
-retriever = MemoryRetriever(storage, index, embedder, cfg)
+retriever = MemoryRetriever(storage, index, embedder)
 
 # Warmup retrieve (so retained buffer, FTS cache etc. are primed)
 retriever.retrieve("warmup query", set())
@@ -104,4 +103,4 @@ storage.close()
 
 # --- Output (tab-separated for easy parsing) ---
 for i, ms in enumerate(times):
-    print(f"{n_episodes}\t{gap_sec}\t{query_mode}\t{i+1}\t{ms:.1f}")
+    print(f"{n_episodes}\t{gap_sec}\t{query_mode}\t{i + 1}\t{ms:.1f}")

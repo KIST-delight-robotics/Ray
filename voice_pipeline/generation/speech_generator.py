@@ -9,10 +9,9 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from voice_pipeline.context.formatters import parse_citation_tag
-from voice_pipeline.core.config import SpeechGeneratorConfig
 from voice_pipeline.core.interfaces import (
     ILLM,
     ITTS,
@@ -50,22 +49,44 @@ class SpeechGenerator(ISpeechGenerator):
       4. Calls retriever.update_citations() with cited indices.
     """
 
+    MAX_WORKERS = 2  # 백그라운드 파이프라인 스레드 풀 크기 — 취소된 run이 API에 blocking되어도 새 prepare 즉시 시작
+    _PIPELINE_MODE: Literal["full", "sentence"] = (
+        "full"  # TTS 파이프라인 모드 — full: LLM 완성 후 TTS, sentence: 문장별 스트리밍
+    )
+    _QUERY_CONTEXT_TURNS = 3  # 메모리 검색 query에 포함할 최근 history turn 수
+    _MIN_FLUSH_WORDS = 4  # sentence 모드에서 TTS flush 전 최소 단어 수 (짧은 감탄사를 다음 문장과 합침)
+    _TTS_EXECUTOR_WORKERS = 2  # sentence 모드 TTS 동시 합성 워커 수 — 문장간 gap 최소화
+    _CONSUMER_JOIN_TIMEOUT_SEC = 120.0  # sentence consumer 정상 완료 · 개별 문장 TTS future 대기 상한 (초)
+    _CANCEL_POLL_INTERVAL_SEC = 0.1  # consumer 스레드 cancel_event 재확인 주기 (초)
+
     def __init__(
         self,
         context_builder: IContextBuilder,
         llm: ILLM,
         tts: ITTS,
-        config: SpeechGeneratorConfig | None = None,
         executor: ThreadPoolExecutor | None = None,
         *,
         retriever: IMemoryRetriever | None = None,
         history: IConversationHistory | None = None,
         exclude_session_ids: set[str] | None = None,
     ) -> None:
+        """Initialize the SpeechGenerator.
+
+        Args:
+            context_builder: LLM context 조립 모듈.
+            llm: LLM 인터페이스.
+            tts: TTS 인터페이스.
+            executor: 백그라운드 파이프라인 ThreadPoolExecutor. ``None``이면
+                내부 생성(`MAX_WORKERS` 기반). 외부 주입 시 shutdown()은
+                executor를 닫지 않음.
+            retriever: 메모리 retriever. ``None``이면 메모리 사용 안 함.
+            history: 세션 대화 이력. retriever query 조립에 사용.
+                ``None``이면 current_text만으로 query 구성.
+            exclude_session_ids: retriever가 제외할 세션 ID 집합.
+        """
         self._context_builder = context_builder
         self._llm = llm
         self._tts = tts
-        self._config = config or SpeechGeneratorConfig()
 
         # Memory integration (all optional)
         self._retriever = retriever
@@ -77,7 +98,7 @@ class SpeechGenerator(ISpeechGenerator):
         self._run_id = 0
         self._cancel_event = threading.Event()
         self._owns_executor = executor is None
-        self._executor = executor or ThreadPoolExecutor(max_workers=self._config.max_workers)
+        self._executor = executor or ThreadPoolExecutor(max_workers=self.MAX_WORKERS)
         self._input_text = ""
         self._text = ""
         self._audio_queue: queue.Queue[bytes] = queue.Queue()
@@ -129,7 +150,7 @@ class SpeechGenerator(ISpeechGenerator):
             self._stream_done = False
             self._trace = PipelineTrace(
                 run_id=run_id,
-                pipeline_mode=self._config.pipeline_mode,
+                pipeline_mode=self._PIPELINE_MODE,
                 created_at=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
                 prepare_ts=time.monotonic(),
             )
@@ -206,7 +227,7 @@ class SpeechGenerator(ISpeechGenerator):
         if self._history is None:
             return current_text
         turns = self._history.get_turns()
-        recent = turns[-self._config.query_context_turns :]
+        recent = turns[-self._QUERY_CONTEXT_TURNS :]
         parts: list[str] = []
         for turn in recent:
             for item in turn.items:
@@ -255,7 +276,7 @@ class SpeechGenerator(ISpeechGenerator):
         cancel_event: threading.Event,
         audio_queue: queue.Queue[bytes],
     ) -> None:
-        if self._config.pipeline_mode == "sentence":
+        if self._PIPELINE_MODE == "sentence":
             self._run_pipeline_sentence(current_text, run_id, cancel_event, audio_queue)
         else:
             self._run_pipeline_full(current_text, run_id, cancel_event, audio_queue)
@@ -397,7 +418,7 @@ class SpeechGenerator(ISpeechGenerator):
             if trace is not None:
                 trace.tts_done_ts = t_tts
 
-            audio_sec = len(total_audio) / (24000 * 2)
+            audio_sec = len(total_audio) / (self._tts.output_sample_rate * 2)
             logger.info(
                 "TTS done (%.1fs): %.1fs audio → STREAMING [run=%d]",
                 t_tts - t_llm,
@@ -484,8 +505,8 @@ class SpeechGenerator(ISpeechGenerator):
 
             llm_stream: LLMStream = self._llm.generate(messages)
 
-            detector = SentenceDetector(min_flush_words=self._config.min_flush_words)
-            tts_executor = ThreadPoolExecutor(max_workers=2)
+            detector = SentenceDetector(min_flush_words=self._MIN_FLUSH_WORDS)
+            tts_executor = ThreadPoolExecutor(max_workers=self._TTS_EXECUTOR_WORKERS)
 
             # Shared state between producer (this thread) and consumer.
             # Consumer writes; producer reads only after consumer_thread.join().
@@ -565,7 +586,7 @@ class SpeechGenerator(ISpeechGenerator):
 
             # 5. Signal consumer to finish, then wait
             future_queue.put(None)
-            consumer_thread.join(timeout=120.0)
+            consumer_thread.join(timeout=self._CONSUMER_JOIN_TIMEOUT_SEC)
             consumer_thread = None  # prevent finally from joining again
 
             if consumer_error:
@@ -596,7 +617,7 @@ class SpeechGenerator(ISpeechGenerator):
             if trace is not None:
                 trace.tts_done_ts = t_done
 
-            audio_sec = len(total_audio) / (24000 * 2)
+            audio_sec = len(total_audio) / (self._tts.output_sample_rate * 2)
             logger.info(
                 "Sentence pipeline done (%.1fs): %.1fs audio [run=%d]",
                 t_done - t0,
@@ -630,6 +651,7 @@ class SpeechGenerator(ISpeechGenerator):
             # Ensure consumer is stopped even on producer error.
             if consumer_thread is not None and consumer_thread.is_alive():
                 future_queue.put(None)
+                # finally cleanup bound — 정상 경로(_CONSUMER_JOIN_TIMEOUT_SEC)와 의미 다름
                 consumer_thread.join(timeout=10.0)
             if tts_executor is not None:
                 tts_executor.shutdown(wait=False)
@@ -658,7 +680,7 @@ class SpeechGenerator(ISpeechGenerator):
 
                 # Block with timeout so we can re-check cancel_event.
                 try:
-                    item = future_queue.get(timeout=0.1)
+                    item = future_queue.get(timeout=self._CANCEL_POLL_INTERVAL_SEC)
                 except queue.Empty:
                     continue
 
@@ -672,7 +694,7 @@ class SpeechGenerator(ISpeechGenerator):
                     first_sentence = False
 
                 try:
-                    tts_stream: TTSStream = future.result(timeout=120.0)
+                    tts_stream: TTSStream = future.result(timeout=self._CONSUMER_JOIN_TIMEOUT_SEC)
                 except Exception as exc:
                     consumer_error.append(exc)
                     return
@@ -714,7 +736,7 @@ class SpeechGenerator(ISpeechGenerator):
                 # Collect timestamps with offset correction.
                 try:
                     for wt in tts_stream.timestamps:
-                        offset_sec = audio_offset_bytes / (24000 * 2)
+                        offset_sec = audio_offset_bytes / (self._tts.output_sample_rate * 2)
                         all_timestamps.append(
                             WordTimestamp(
                                 word=wt.word,

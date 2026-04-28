@@ -24,11 +24,10 @@ from pathlib import Path
 import pytest
 
 from voice_pipeline.asr.asr import GoogleCloudASR
-from voice_pipeline.core.config import ASRConfig, TTSConfig
 from voice_pipeline.tts.greeting_audio import synthesize_to_wav
 from voice_pipeline.tts.tts import OpenAITTS
 
-from .conftest import audio_config_from_wav, make_silence_frames, read_wav_frames
+from .conftest import make_silence_frames, read_wav_frames
 
 pytestmark = pytest.mark.requires_api
 
@@ -51,7 +50,7 @@ def _tts_generate_wav(tts: OpenAITTS, text: str, path: Path) -> Path:
     ffmpeg re-encodes to 16 kHz mono 16-bit PCM for ASR compatibility.
     """
     raw_path = path / "tts_raw.wav"
-    synthesize_to_wav(tts, text, raw_path, TTSConfig().output_sample_rate)
+    synthesize_to_wav(tts, text, raw_path)
 
     fixed_path = path / "tts_fixed.wav"
     subprocess.run(
@@ -85,16 +84,12 @@ def _feed_and_transcribe(
     Returns (final_transcript, unique_interims).
     """
     info, frames = read_wav_frames(wav_path)
-    audio_cfg = audio_config_from_wav(info)
     frame_sec = 30 / 1000
     frame_bytes = (info.sample_rate * 30 // 1000) * info.sample_width * info.channels
 
     silence_frames = make_silence_frames(frame_bytes, silence_sec)
 
-    asr = GoogleCloudASR(
-        asr_config=ASRConfig(language_code=language_code, interim_results=True),
-        audio_config=audio_cfg,
-    )
+    asr = GoogleCloudASR(language_code=language_code)
     asr.start()
     try:
         # Small delay for gRPC stream setup
@@ -146,8 +141,10 @@ class TestTTSToASRRoundTrip:
     """Verify TTS-generated audio is correctly transcribed by ASR."""
 
     @pytest.fixture
-    def tts(self, openai_api_key: str) -> OpenAITTS:
-        return OpenAITTS(TTSConfig(model="tts-1", voice="alloy"))
+    def tts(self, openai_api_key: str, monkeypatch: pytest.MonkeyPatch) -> OpenAITTS:  # noqa: ARG002
+        monkeypatch.setattr(OpenAITTS, "_MODEL", "tts-1")
+        monkeypatch.setattr(OpenAITTS, "_VOICE", "alloy")
+        return OpenAITTS()
 
     @pytest.mark.parametrize(
         "text",
@@ -158,9 +155,7 @@ class TestTTSToASRRoundTrip:
         ],
         ids=["greeting", "pangram", "command"],
     )
-    def test_round_trip_accuracy(
-        self, tts: OpenAITTS, text: str, google_credentials: str, tmp_path: Path
-    ) -> None:
+    def test_round_trip_accuracy(self, tts: OpenAITTS, text: str, google_credentials: str, tmp_path: Path) -> None:
         """TTS output should be transcribed with high word overlap."""
         wav_path = _tts_generate_wav(tts, text, tmp_path)
         final, interims = _feed_and_transcribe(wav_path)
@@ -169,9 +164,7 @@ class TestTTSToASRRoundTrip:
 
         overlap = _word_overlap_ratio(text, final)
         assert overlap >= 0.8, (
-            f"Word overlap {overlap:.0%} below 80% threshold.\n"
-            f"  Expected: {text!r}\n"
-            f"  Got:      {final!r}"
+            f"Word overlap {overlap:.0%} below 80% threshold.\n  Expected: {text!r}\n  Got:      {final!r}"
         )
 
     def test_interim_results_appear_during_streaming(
@@ -189,9 +182,7 @@ class TestTTSToASRRoundTrip:
             f"First interim should contain early words, got: {interims[0]!r}"
         )
 
-    def test_reset_between_two_phrases(
-        self, tts: OpenAITTS, google_credentials: str, tmp_path: Path
-    ) -> None:
+    def test_reset_between_two_phrases(self, tts: OpenAITTS, google_credentials: str, tmp_path: Path) -> None:
         """ASR reset should allow transcribing a second TTS phrase cleanly."""
         text1 = "Good morning."
         text2 = "Good night."
@@ -205,17 +196,13 @@ class TestTTSToASRRoundTrip:
         wav2 = _tts_generate_wav(tts, text2, dir2)
 
         info1, frames1 = read_wav_frames(wav1)
-        info2, frames2 = read_wav_frames(wav2)
-        audio_cfg = audio_config_from_wav(info1)
+        _, frames2 = read_wav_frames(wav2)
 
         frame_bytes = (info1.sample_rate * 30 // 1000) * info1.sample_width
         silence_frames = make_silence_frames(frame_bytes, _SILENCE_SEC)
         frame_sec = 30 / 1000
 
-        asr = GoogleCloudASR(
-            asr_config=ASRConfig(language_code="en-US", interim_results=True),
-            audio_config=audio_cfg,
-        )
+        asr = GoogleCloudASR(language_code="en-US")
         asr.start()
         try:
             time.sleep(0.3)
@@ -247,16 +234,12 @@ class TestTTSToASRRoundTrip:
             assert len(result2) > 0, "Turn 2 should produce a transcript"
 
             # Turn 2 should not contain Turn 1 content
-            assert "morning" not in result2.lower(), (
-                f"Turn 2 should not contain Turn 1 words. Got: {result2!r}"
-            )
+            assert "morning" not in result2.lower(), f"Turn 2 should not contain Turn 1 words. Got: {result2!r}"
             assert _word_overlap_ratio("Good night", result2) >= 0.5
         finally:
             asr.stop()
 
-    def test_tts_streaming_to_asr(
-        self, tts: OpenAITTS, google_credentials: str, tmp_path: Path
-    ) -> None:
+    def test_tts_streaming_to_asr(self, tts: OpenAITTS, google_credentials: str, tmp_path: Path) -> None:
         """TTS streaming PCM → write to WAV → ASR should also work.
 
         Tests the streaming code path (synthesize + iter) as opposed to
@@ -300,7 +283,5 @@ class TestTTSToASRRoundTrip:
         assert len(final) > 0
         overlap = _word_overlap_ratio(text, final)
         assert overlap >= 0.7, (
-            f"Word overlap {overlap:.0%} below 70% threshold.\n"
-            f"  Expected: {text!r}\n"
-            f"  Got:      {final!r}"
+            f"Word overlap {overlap:.0%} below 70% threshold.\n  Expected: {text!r}\n  Got:      {final!r}"
         )

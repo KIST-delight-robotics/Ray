@@ -14,8 +14,8 @@ import pytest
 
 # Import directly to avoid __init__.py triggering torch import
 from voice_pipeline.audio.audio_input import AudioInput
+from voice_pipeline.audio.constants import FRAME_SIZE_SAMPLES
 from voice_pipeline.audio.exceptions import AudioInputError
-from voice_pipeline.core.config import AudioConfig, AudioInputConfig
 from voice_pipeline.core.types import AudioFrame
 
 # ---------------------------------------------------------------------------
@@ -24,6 +24,7 @@ from voice_pipeline.core.types import AudioFrame
 
 
 def _make_audio_input(
+    monkeypatch,
     *,
     queue_size: int = 10,
     device_index: int | None = None,
@@ -31,13 +32,10 @@ def _make_audio_input(
     extract_channel: int = 0,
 ):
     """Create AudioInput with mocked PyAudio."""
+    monkeypatch.setattr(AudioInput, "_DEVICE_INDEX", device_index)
+    monkeypatch.setattr(AudioInput, "_CAPTURE_CHANNELS", capture_channels)
+    monkeypatch.setattr(AudioInput, "_EXTRACT_CHANNEL", extract_channel)
     audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=queue_size)
-    audio_config = AudioConfig()
-    config = AudioInputConfig(
-        device_index=device_index,
-        capture_channels=capture_channels,
-        extract_channel=extract_channel,
-    )
 
     # Provide a mock pyaudio module
     mock_pyaudio = MagicMock()
@@ -45,8 +43,6 @@ def _make_audio_input(
         ai = AudioInput.__new__(AudioInput)
 
     ai._queue = audio_queue
-    ai._audio_config = audio_config
-    ai._config = config
     ai._stop_event = threading.Event()
     ai._thread = None
     ai._error = None
@@ -69,11 +65,7 @@ class TestAudioInputImport:
             importlib.reload(mod)
 
             with pytest.raises(AudioInputError, match="PyAudio is not installed"):
-                mod.AudioInput(
-                    queue.Queue(),
-                    AudioConfig(),
-                    AudioInputConfig(),
-                )
+                mod.AudioInput(queue.Queue())
         finally:
             if original is not None:
                 sys.modules["pyaudio"] = original
@@ -88,9 +80,9 @@ class TestAudioInputImport:
 
 
 class TestStartStop:
-    def test_start_stop_lifecycle(self) -> None:
+    def test_start_stop_lifecycle(self, monkeypatch) -> None:
         """start() creates thread, stop() joins it."""
-        ai, _ = _make_audio_input()
+        ai, _ = _make_audio_input(monkeypatch)
 
         mock_pa_instance = MagicMock()
         mock_stream = MagicMock()
@@ -107,9 +99,9 @@ class TestStartStop:
         ai.stop()
         assert ai._thread is None
 
-    def test_start_idempotent(self) -> None:
+    def test_start_idempotent(self, monkeypatch) -> None:
         """Calling start() twice doesn't create a second thread."""
-        ai, _ = _make_audio_input()
+        ai, _ = _make_audio_input(monkeypatch)
 
         mock_pa_instance = MagicMock()
         mock_stream = MagicMock()
@@ -125,16 +117,16 @@ class TestStartStop:
 
         ai.stop()
 
-    def test_stop_idempotent(self) -> None:
+    def test_stop_idempotent(self, monkeypatch) -> None:
         """Calling stop() without start() doesn't raise."""
-        ai, _ = _make_audio_input()
+        ai, _ = _make_audio_input(monkeypatch)
         ai.stop()  # Should not raise
 
 
 class TestCapture:
-    def test_frames_pushed_to_queue(self) -> None:
+    def test_frames_pushed_to_queue(self, monkeypatch) -> None:
         """Captured frames are pushed to the queue."""
-        ai, audio_queue = _make_audio_input()
+        ai, audio_queue = _make_audio_input(monkeypatch)
 
         mock_pa_instance = MagicMock()
         mock_stream = MagicMock()
@@ -152,9 +144,9 @@ class TestCapture:
 
         assert collected == frames
 
-    def test_queue_full_drops_frame(self) -> None:
+    def test_queue_full_drops_frame(self, monkeypatch) -> None:
         """When queue is full, frames are dropped (not blocked)."""
-        ai, audio_queue = _make_audio_input(queue_size=1)
+        ai, audio_queue = _make_audio_input(monkeypatch, queue_size=1)
 
         mock_pa_instance = MagicMock()
         mock_stream = MagicMock()
@@ -170,9 +162,9 @@ class TestCapture:
         # Thread should have finished without blocking
         assert not ai._thread.is_alive() or ai._stop_event.is_set()
 
-    def test_device_open_failure(self) -> None:
+    def test_device_open_failure(self, monkeypatch) -> None:
         """Device open failure sets _error and thread exits."""
-        ai, _ = _make_audio_input()
+        ai, _ = _make_audio_input(monkeypatch)
 
         mock_pa_instance = MagicMock()
         mock_pa_instance.open.side_effect = OSError("No such device")
@@ -188,15 +180,15 @@ class TestCapture:
 class TestMultiChannelExtract:
     """Tests for multi-channel capture → mono extraction."""
 
-    def test_extracts_first_channel_from_6ch(self) -> None:
+    def test_extracts_first_channel_from_6ch(self, monkeypatch) -> None:
         """6ch frames should be reduced to mono using channel 0."""
-        ai, audio_queue = _make_audio_input(capture_channels=6, extract_channel=0)
+        ai, audio_queue = _make_audio_input(monkeypatch, capture_channels=6, extract_channel=0)
 
         mock_pa_instance = MagicMock()
         mock_stream = MagicMock()
 
         # Build a 6ch frame: ch0=100, ch1=200, ..., ch5=600 (repeated per sample)
-        samples_per_ch = ai._audio_config.frame_size_samples
+        samples_per_ch = FRAME_SIZE_SAMPLES
         raw = b""
         for _ in range(samples_per_ch):
             for ch in range(6):
@@ -214,14 +206,14 @@ class TestMultiChannelExtract:
         assert len(mono) == samples_per_ch
         assert all(s == 100 for s in mono)
 
-    def test_extracts_nonzero_channel(self) -> None:
+    def test_extracts_nonzero_channel(self, monkeypatch) -> None:
         """extract_channel=3 should pick the 4th channel."""
-        ai, audio_queue = _make_audio_input(capture_channels=6, extract_channel=3)
+        ai, audio_queue = _make_audio_input(monkeypatch, capture_channels=6, extract_channel=3)
 
         mock_pa_instance = MagicMock()
         mock_stream = MagicMock()
 
-        samples_per_ch = ai._audio_config.frame_size_samples
+        samples_per_ch = FRAME_SIZE_SAMPLES
         raw = b""
         for _ in range(samples_per_ch):
             for ch in range(6):
@@ -239,13 +231,13 @@ class TestMultiChannelExtract:
         assert len(mono) == samples_per_ch
         assert all(s == 400 for s in mono)
 
-    def test_mono_passthrough_no_extraction(self) -> None:
+    def test_mono_passthrough_no_extraction(self, monkeypatch) -> None:
         """capture_channels=None should pass frames through unchanged."""
-        ai, audio_queue = _make_audio_input(capture_channels=None)
+        ai, audio_queue = _make_audio_input(monkeypatch, capture_channels=None)
 
         mock_pa_instance = MagicMock()
         mock_stream = MagicMock()
-        mono_frame = b"\x01" * (ai._audio_config.frame_size_samples * 2)
+        mono_frame = b"\x01" * (FRAME_SIZE_SAMPLES * 2)
         mock_stream.read.side_effect = _frames_then_stop(ai, [mono_frame])
         mock_pa_instance.open.return_value = mock_stream
         ai._pyaudio_module.PyAudio.return_value = mock_pa_instance
@@ -256,9 +248,9 @@ class TestMultiChannelExtract:
         frame = audio_queue.get_nowait()
         assert frame == mono_frame
 
-    def test_extract_channel_out_of_range_raises(self) -> None:
+    def test_extract_channel_out_of_range_raises(self, monkeypatch) -> None:
         """extract_channel >= capture_channels should raise AudioInputError."""
-        ai, _ = _make_audio_input(capture_channels=6, extract_channel=6)
+        ai, _ = _make_audio_input(monkeypatch, capture_channels=6, extract_channel=6)
 
         mock_pa_instance = MagicMock()
         mock_stream = MagicMock()

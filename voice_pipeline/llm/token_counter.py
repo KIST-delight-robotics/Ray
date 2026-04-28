@@ -10,7 +10,7 @@ from voice_pipeline.core.types import TokenCounter
 
 logger = logging.getLogger("voice_pipeline.llm")
 
-_FALLBACK_ENCODING = "o200k_base"
+_FALLBACK_ENCODING = "o200k_base"  # 알 수 없는 모델의 fallback 인코딩 (GPT-4o 계열 기본)
 
 
 def create_token_counter(model: str) -> TokenCounter:

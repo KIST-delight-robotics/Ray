@@ -14,9 +14,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from voice_pipeline.core.config import AudioConfig, TTSConfig, VAPConfig
-from voice_pipeline.core.exceptions import ConfigurationError
 from voice_pipeline.core.types import VAPResult
+from voice_pipeline.tts.tts import OpenAITTS
 from voice_pipeline.turn_taking.exceptions import VAPError
 
 # ---------------------------------------------------------------------------
@@ -29,27 +28,6 @@ _VAP_MODULE = "voice_pipeline.turn_taking.vap"
 def _make_pcm(n_samples: int, amplitude: int = 0) -> bytes:
     """Create 16-bit PCM bytes of constant amplitude."""
     return struct.pack(f"<{n_samples}h", *([amplitude] * n_samples))
-
-
-def _default_configs(
-    step_sec: float = 0.1,
-    context_sec: float = 20.0,
-    tt_time: float = 0.5,
-    vad_threshold: float = 0.5,
-    device: str = "cpu",
-    tts_rate: int = 24000,
-) -> tuple[VAPConfig, AudioConfig, TTSConfig]:
-    vap_cfg = VAPConfig(
-        model_path="/fake/model.pt",
-        context_sec=context_sec,
-        step_sec=step_sec,
-        tt_time=tt_time,
-        device=device,
-        vad_threshold=vad_threshold,
-    )
-    audio_cfg = AudioConfig(sample_rate=16000, channels=1, frame_duration_ms=30)
-    tts_cfg = TTSConfig(output_sample_rate=tts_rate)
-    return vap_cfg, audio_cfg, tts_cfg
 
 
 def _mock_model_probs(p_now: float = 0.5, p_fut: float = 0.3, vad: float = 0.8):
@@ -71,16 +49,20 @@ def _make_mock_model():
     return mock_model
 
 
-def _build_wrapper(mock_vapgpt_cls, mock_torch_load, **config_kwargs):
-    """Construct a VAPWrapper with mocked model loading."""
+def _build_wrapper(mock_vapgpt_cls, mock_torch_load, *, tts_rate: int = OpenAITTS.OUTPUT_SAMPLE_RATE):
+    """Construct a VAPWrapper with mocked model loading.
+
+    Class var overrides (`_MODEL_PATH`, `_CONTEXT_SEC`, `_STEP_SEC`, `_TT_TIME`)
+    must be applied before this call via `monkeypatch.setattr(VAPWrapper, ...)`.
+    The `_patches` fixture ensures `_MODEL_PATH` is "/fake/model.pt" by default.
+    """
     mock_model = _make_mock_model()
     mock_vapgpt_cls.return_value = mock_model
     mock_torch_load.return_value = {}
 
-    vap_cfg, audio_cfg, tts_cfg = _default_configs(**config_kwargs)
     from voice_pipeline.turn_taking.vap import VAPWrapper
 
-    wrapper = VAPWrapper(vap_cfg, audio_cfg, tts_cfg)
+    wrapper = VAPWrapper(tts_rate)
     return wrapper, mock_model
 
 
@@ -118,9 +100,12 @@ def _inject_vap_module():
 
 
 @pytest.fixture()
-def _patches(_inject_vap_module):
-    """Provide (mock_vapgpt_cls, mock_torch_load) with torch.load also patched."""
+def _patches(_inject_vap_module, monkeypatch):
+    """Provide (mock_vapgpt_cls, mock_torch_load); also default _MODEL_PATH to fake."""
     mock_vapgpt_cls, _ = _inject_vap_module
+    from voice_pipeline.turn_taking.vap import VAPWrapper
+
+    monkeypatch.setattr(VAPWrapper, "_MODEL_PATH", "/fake/model.pt")
     with patch("torch.load") as mock_torch_load:
         yield mock_vapgpt_cls, mock_torch_load
 
@@ -162,11 +147,10 @@ class TestInit:
         mock_cls, mock_load = _patches
         mock_load.side_effect = FileNotFoundError("no file")
 
-        vap_cfg, audio_cfg, tts_cfg = _default_configs()
         from voice_pipeline.turn_taking.vap import VAPWrapper
 
         with pytest.raises(VAPError, match="Failed to load VAP model"):
-            VAPWrapper(vap_cfg, audio_cfg, tts_cfg)
+            VAPWrapper(OpenAITTS.OUTPUT_SAMPLE_RATE)
 
     def test_buffer_shape(self, wrapper):
         assert wrapper._buffer.shape == (1, 2, 320000)  # 20s * 16kHz
@@ -176,20 +160,29 @@ class TestInit:
         _build_wrapper(mock_cls, mock_load)
         mock_load.assert_called_once_with("/fake/model.pt", map_location="cpu", weights_only=True)
 
-    def test_zero_step_samples_raises(self, _patches):
+    def test_zero_step_samples_raises(self, _patches, monkeypatch):
+        from voice_pipeline.turn_taking.vap import VAPWrapper
+
+        monkeypatch.setattr(VAPWrapper, "_STEP_SEC", 0.00001)
         mock_cls, mock_load = _patches
         with pytest.raises(VAPError, match="All must be >= 1"):
-            _build_wrapper(mock_cls, mock_load, step_sec=0.00001)
+            _build_wrapper(mock_cls, mock_load)
 
-    def test_zero_tt_frames_raises(self, _patches):
+    def test_zero_tt_frames_raises(self, _patches, monkeypatch):
+        from voice_pipeline.turn_taking.vap import VAPWrapper
+
+        monkeypatch.setattr(VAPWrapper, "_TT_TIME", 0.001)
         mock_cls, mock_load = _patches
         with pytest.raises(VAPError, match="All must be >= 1"):
-            _build_wrapper(mock_cls, mock_load, tt_time=0.001)
+            _build_wrapper(mock_cls, mock_load)
 
-    def test_zero_context_raises(self, _patches):
+    def test_zero_context_raises(self, _patches, monkeypatch):
+        from voice_pipeline.turn_taking.vap import VAPWrapper
+
+        monkeypatch.setattr(VAPWrapper, "_CONTEXT_SEC", 0.0)
         mock_cls, mock_load = _patches
-        with pytest.raises(ConfigurationError, match="context_sec must be positive"):
-            _build_wrapper(mock_cls, mock_load, context_sec=0.0)
+        with pytest.raises(VAPError, match="All must be >= 1"):
+            _build_wrapper(mock_cls, mock_load)
 
 
 # ---------------------------------------------------------------------------
@@ -436,16 +429,23 @@ class TestInferenceTiming:
     def test_n_samples(self, wrapper):
         assert wrapper._n_samples == 320000  # 20.0 * 16000
 
-    def test_custom_step_sec(self, _patches):
+    def test_custom_step_sec(self, _patches, monkeypatch):
+        from voice_pipeline.turn_taking.vap import VAPWrapper
+
+        monkeypatch.setattr(VAPWrapper, "_STEP_SEC", 0.2)
         mock_cls, mock_load = _patches
-        wrapper, _ = _build_wrapper(mock_cls, mock_load, step_sec=0.2)
+        wrapper, _ = _build_wrapper(mock_cls, mock_load)
         assert wrapper._step_samples == 3200  # 0.2 * 16000
 
-    def test_oversized_frame_clamped(self, _patches):
+    def test_oversized_frame_clamped(self, _patches, monkeypatch):
         """Frame larger than context buffer is clamped to buffer size."""
-        mock_cls, mock_load = _patches
+        from voice_pipeline.turn_taking.vap import VAPWrapper
+
         # Small context buffer: 0.01s = 160 samples
-        wrapper, model = _build_wrapper(mock_cls, mock_load, context_sec=0.01, step_sec=0.005)
+        monkeypatch.setattr(VAPWrapper, "_CONTEXT_SEC", 0.01)
+        monkeypatch.setattr(VAPWrapper, "_STEP_SEC", 0.005)
+        mock_cls, mock_load = _patches
+        wrapper, model = _build_wrapper(mock_cls, mock_load)
         model.probs.return_value = _mock_model_probs()
         # Feed a frame larger than the buffer (480 > 160)
         frame = _make_pcm(480, amplitude=100)

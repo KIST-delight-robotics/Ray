@@ -15,17 +15,25 @@ export OPENAI_API_KEY=sk-...
 ```
 
 
-## Config
+## `OpenAILLM.__init__` 인자
 
-### `LLMConfig`
+| 인자 | Default | 의미 |
+|------|---------|------|
+| `model` | `"gpt-4o"` | OpenAI 모델 이름 |
+| `temperature` | `0.7` | 샘플링 temperature (0.0~2.0) |
+| `max_tokens` | `256` | 응답 최대 토큰 수 (API `max_output_tokens`) |
+| `tools` | `None` | 도구 이름 목록. None이면 기본 도구, `[]`이면 비활성화 |
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `model` | `str` | `"gpt-4o"` | OpenAI model name |
-| `temperature` | `float` | `0.7` | Sampling temperature |
-| `max_tokens` | `int` | `256` | Maximum output tokens (maps to API `max_output_tokens`) |
-| `max_retries` | `int` | `2` | SDK retry count for transient errors (429, 500, 503) |
-| `timeout_sec` | `float` | `30.0` | Request timeout in seconds |
+## 클래스 변수
+
+`OpenAILLM` 클래스 내부 상수.
+
+| 변수 | 값 | 의미 |
+|------|------|------|
+| `_MAX_RETRIES` | `2` | 응답 실패 시 자동 재시도 횟수 |
+| `_TIMEOUT_SEC` | `30.0` | 응답 대기 최대 시간 (초) |
+| `_DEFAULT_TOOLS` | `("web_search",)` | `tools=None`일 때 기본 도구 |
+| `_REASONING_EFFORT` | `None` | reasoning 모델용 effort 레벨 (gpt-5 계열). None=미적용 |
 
 
 ## Usage
@@ -33,10 +41,9 @@ export OPENAI_API_KEY=sk-...
 ### Basic streaming
 
 ```python
-from voice_pipeline.core.config import LLMConfig
 from voice_pipeline.llm import OpenAILLM
 
-llm = OpenAILLM(LLMConfig())
+llm = OpenAILLM()
 messages = [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "Hello!"},

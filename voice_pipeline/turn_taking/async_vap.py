@@ -39,9 +39,7 @@ class AsyncVAP(IVAP):
         self._thread = threading.Thread(target=self._run, daemon=True, name="async-vap")
         self._thread.start()
 
-    def feed_audio(
-        self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None
-    ) -> VAPResult:
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
         """Buffer audio and return the latest cached VAP result (non-blocking)."""
         with self._buffer_lock:
             self._buffer.append((user_audio, robot_audio))

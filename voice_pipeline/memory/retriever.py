@@ -7,7 +7,6 @@ import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from voice_pipeline.core.config import MemoryConfig
 from voice_pipeline.core.interfaces import IEmbedder, IMemoryRetriever, IMemoryStorage
 from voice_pipeline.memory.types import Episode, MemoryReadResult
 from voice_pipeline.memory.vector_index import IVectorIndex
@@ -38,17 +37,24 @@ class MemoryRetriever(IMemoryRetriever):
     be called from the same thread (the orchestrator main loop).
     """
 
+    _MAX_MEMORIES = 10  # 턴당 Block 4 주입 최대 에피소드 수
+    _MIN_NEW_SLOTS = 4  # 새 검색 결과에 확보할 최소 슬롯 수
+    _RETAINED_TTL = 3  # 인용된 메모리가 retained 버퍼에 머무는 턴 수
+    _VECTOR_TOP_K = 20  # 벡터 검색 후보 수
+    _BM25_TOP_K = 20  # BM25 검색 후보 수
+    _RRF_K = 60  # RRF 융합 상수 (원 논문 default 60)
+    _RECENCY_HALF_LIFE_DAYS = 30.0  # 시간 감쇠 반감기 (일)
+    _SALIENCE_THRESHOLD = 0.0  # salience 최소 기준 (0.0 = 비활성화)
+
     def __init__(
         self,
         storage: IMemoryStorage,
         vector_index: IVectorIndex,
         embedder: IEmbedder,
-        config: MemoryConfig,
     ) -> None:
         self._storage = storage
         self._vector_index = vector_index
         self._embedder = embedder
-        self._config = config
 
         self._retained: dict[int, _RetainedEntry] = {}
         self._last_index_to_id: dict[int, int] = {}
@@ -59,7 +65,6 @@ class MemoryRetriever(IMemoryRetriever):
 
     def retrieve(self, query: str, exclude_session_ids: set[str]) -> MemoryReadResult:
         now = datetime.now(UTC)
-        cfg = self._config
 
         # 1. Embed query
         try:
@@ -70,8 +75,8 @@ class MemoryRetriever(IMemoryRetriever):
             return self._build_result_retained_only()
 
         # 2. Search (sequential — both are fast)
-        vector_results = self._vector_index.search(query_vec, cfg.vector_top_k)
-        bm25_results = self._storage.search_bm25(query, cfg.bm25_top_k)
+        vector_results = self._vector_index.search(query_vec, self._VECTOR_TOP_K)
+        bm25_results = self._storage.search_bm25(query, self._BM25_TOP_K)
 
         # 3. RRF fusion
         rrf_scores = self._compute_rrf(vector_results, bm25_results)
@@ -81,9 +86,7 @@ class MemoryRetriever(IMemoryRetriever):
 
         # 4. Load episodes
         episodes_by_id = {
-            ep.id: ep
-            for ep in self._storage.get_episodes_by_ids(list(rrf_scores.keys()))
-            if ep.id is not None
+            ep.id: ep for ep in self._storage.get_episodes_by_ids(list(rrf_scores.keys())) if ep.id is not None
         }
 
         # 5. Session filter
@@ -98,8 +101,8 @@ class MemoryRetriever(IMemoryRetriever):
             salience[eid] = self._compute_salience(rrf_scores[eid], ep, now)
 
         # 7. Threshold filter
-        if cfg.salience_threshold > 0:
-            salience = {eid: s for eid, s in salience.items() if s >= cfg.salience_threshold}
+        if self._SALIENCE_THRESHOLD > 0:
+            salience = {eid: s for eid, s in salience.items() if s >= self._SALIENCE_THRESHOLD}
 
         # Threshold-filtered episodes are treated as search misses for
         # TTL purposes — no point retaining something with negligible salience.
@@ -119,7 +122,7 @@ class MemoryRetriever(IMemoryRetriever):
         new_candidates = [(eid, salience[eid]) for eid in salience if eid not in retained_ids]
         new_candidates.sort(key=lambda x: x[1], reverse=True)
 
-        new_slots = cfg.max_memories - len(retained_list)
+        new_slots = self._MAX_MEMORIES - len(retained_list)
         new_selected = new_candidates[:new_slots]
 
         # 10. New entries join retained with ttl=1
@@ -165,7 +168,7 @@ class MemoryRetriever(IMemoryRetriever):
                 continue
 
             if eid in self._retained:
-                self._retained[eid].ttl = self._config.retained_ttl
+                self._retained[eid].ttl = self._RETAINED_TTL
                 self._retained[eid].episode.last_cited_at = now_str
 
             self._storage.update_episode_cited(eid, now_str)
@@ -184,7 +187,7 @@ class MemoryRetriever(IMemoryRetriever):
         Uses ``1 / (k + rank + 1)`` where rank is 0-based, equivalent
         to the standard formula ``1 / (k + r)`` with 1-based rank r.
         """
-        k = self._config.rrf_k
+        k = self._RRF_K
         scores: dict[int, float] = {}
         for rank, (eid, _score) in enumerate(vector_results):
             scores[eid] = scores.get(eid, 0.0) + 1.0 / (k + rank + 1)
@@ -196,7 +199,7 @@ class MemoryRetriever(IMemoryRetriever):
         """salience = rrf_score × recency_decay × importance."""
         dt = datetime.strptime(episode.last_cited_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
         days = max((now - dt).total_seconds() / _SECONDS_PER_DAY, 0.0)
-        recency_decay = math.exp(-_LN2 * days / self._config.recency_half_life_days)
+        recency_decay = math.exp(-_LN2 * days / self._RECENCY_HALF_LIFE_DAYS)
         return rrf_score * recency_decay * episode.importance
 
     def _decay_retained_ttl(self, search_hit_ids: set[int]) -> None:
@@ -212,7 +215,7 @@ class MemoryRetriever(IMemoryRetriever):
 
     def _cap_retained(self) -> list[_RetainedEntry]:
         """Sort retained entries and evict overflow beyond max_retained."""
-        max_retained = self._config.max_memories - self._config.min_new_slots
+        max_retained = self._MAX_MEMORIES - self._MIN_NEW_SLOTS
         retained_list = sorted(
             self._retained.values(),
             key=lambda e: (e.ttl, e.salience),

@@ -73,9 +73,7 @@ class SQLiteTraceStore:
                 interrupt_latency_ms    REAL    NOT NULL DEFAULT 0
             )
         """)
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_traces_session ON pipeline_traces(session_id)"
-        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_session ON pipeline_traces(session_id)")
         self._conn.commit()
 
     def save(self, trace: PipelineTrace) -> None:

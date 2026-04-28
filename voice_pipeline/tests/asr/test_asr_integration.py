@@ -24,11 +24,9 @@ from pathlib import Path
 
 import pytest
 
-from voice_pipeline.asr.asr import GoogleCloudASR
 from voice_pipeline.asr.exceptions import ASRError
-from voice_pipeline.core.config import ASRConfig
 
-from .conftest import audio_config_from_wav, read_wav_frames
+from .conftest import make_asr_for_wav, read_wav_frames
 
 pytestmark = pytest.mark.requires_api
 
@@ -48,10 +46,7 @@ class TestASRIntegration:
         info, frames = read_wav_frames(speech_wav)
         frame_interval = info.sample_rate * 30 // 1000  # samples per 30ms
         frame_sec = frame_interval / info.sample_rate
-        asr = GoogleCloudASR(
-            asr_config=ASRConfig(language_code=asr_lang, interim_results=True),
-            audio_config=audio_config_from_wav(info),
-        )
+        asr = make_asr_for_wav(info, asr_lang)
         asr.start()
         try:
             got_interim = False
@@ -75,10 +70,7 @@ class TestASRIntegration:
         """Matches orchestrator turn cycle: stream -> reset -> stream again."""
         info, frames = read_wav_frames(speech_wav)
         frame_sec = 30 / 1000
-        asr = GoogleCloudASR(
-            asr_config=ASRConfig(language_code=asr_lang),
-            audio_config=audio_config_from_wav(info),
-        )
+        asr = make_asr_for_wav(info, asr_lang)
         asr.start()
         try:
             # --- Turn 1 ---
@@ -113,10 +105,7 @@ class TestASRIntegration:
         """
         info, frames = read_wav_frames(speech_wav)
         frame_sec = 30 / 1000
-        asr = GoogleCloudASR(
-            asr_config=ASRConfig(language_code=asr_lang),
-            audio_config=audio_config_from_wav(info),
-        )
+        asr = make_asr_for_wav(info, asr_lang)
         asr.start()
 
         # Feed roughly half the frames at real-time pace
@@ -144,10 +133,7 @@ class TestASRErrorRecovery:
         """
         info, frames = read_wav_frames(speech_wav)
         frame_sec = 30 / 1000
-        asr = GoogleCloudASR(
-            asr_config=ASRConfig(language_code="xx-INVALID", interim_results=True),
-            audio_config=audio_config_from_wav(info),
-        )
+        asr = make_asr_for_wav(info, "xx-INVALID")
         asr.start()
         try:
             error_raised = False
@@ -172,13 +158,9 @@ class TestASRErrorRecovery:
         """After an error, stop() + start() should restore normal operation."""
         info, frames = read_wav_frames(speech_wav)
         frame_sec = 30 / 1000
-        audio_cfg = audio_config_from_wav(info)
 
         # Phase 1: trigger error with bad language code
-        asr = GoogleCloudASR(
-            asr_config=ASRConfig(language_code="xx-INVALID"),
-            audio_config=audio_cfg,
-        )
+        asr = make_asr_for_wav(info, "xx-INVALID")
         asr.start()
         for frame in frames[:20]:
             try:
@@ -190,10 +172,7 @@ class TestASRErrorRecovery:
         asr.stop()
 
         # Phase 2: restart with valid config — must succeed
-        asr_good = GoogleCloudASR(
-            asr_config=ASRConfig(language_code=asr_lang, interim_results=True),
-            audio_config=audio_cfg,
-        )
+        asr_good = make_asr_for_wav(info, asr_lang)
         asr_good.start()
         try:
             for frame in frames:
@@ -213,10 +192,7 @@ class TestASRErrorRecovery:
         """
         info, frames = read_wav_frames(speech_wav)
         frame_sec = 30 / 1000
-        asr = GoogleCloudASR(
-            asr_config=ASRConfig(language_code=asr_lang, interim_results=True),
-            audio_config=audio_config_from_wav(info),
-        )
+        asr = make_asr_for_wav(info, asr_lang)
         asr.start()
         try:
             # Feed a few frames then go silent
@@ -244,10 +220,7 @@ class TestASRErrorRecovery:
     def test_double_stop_is_safe(self, speech_wav: Path, asr_lang: str) -> None:
         """Calling stop() twice should not raise or hang."""
         info, frames = read_wav_frames(speech_wav)
-        asr = GoogleCloudASR(
-            asr_config=ASRConfig(language_code=asr_lang),
-            audio_config=audio_config_from_wav(info),
-        )
+        asr = make_asr_for_wav(info, asr_lang)
         asr.start()
         for frame in frames[:5]:
             asr.feed_audio(frame)

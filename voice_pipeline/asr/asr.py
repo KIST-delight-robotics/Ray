@@ -12,21 +12,11 @@ from google.api_core.exceptions import GoogleAPICallError
 from google.cloud import speech
 
 from voice_pipeline.asr.exceptions import ASRError
-from voice_pipeline.core.config import ASRConfig, AudioConfig
+from voice_pipeline.audio.constants import CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH
 from voice_pipeline.core.interfaces import IASR
 from voice_pipeline.core.types import AudioFrame
 
 logger = logging.getLogger("voice_pipeline.asr")
-
-_ENCODING_MAP: dict[int, speech.RecognitionConfig.AudioEncoding] = {
-    2: speech.RecognitionConfig.AudioEncoding.LINEAR16,
-}
-
-_SAMPLE_RATE_MIN = 8000
-_SAMPLE_RATE_MAX = 48000
-
-_QUEUE_MAXSIZE = 300
-_SENTINEL = b""
 
 
 class GoogleCloudASR(IASR):
@@ -37,11 +27,22 @@ class GoogleCloudASR(IASR):
         get_text() to read the latest transcript.  A daemon reader thread
         sends audio to gRPC and reads responses, updating the transcript
         under a lock.
+
+    Args:
+        language_code: BCP-47 언어 코드 (예: "en-US", "ko-KR")
     """
 
-    def __init__(self, asr_config: ASRConfig, audio_config: AudioConfig) -> None:
-        self._asr_config = asr_config
-        self._audio_config = audio_config
+    _MODEL = "latest_long"  # Google STT 모델 (장시간 음성 인식)
+    _QUEUE_MAXSIZE = 300  # 오디오 큐 최대 프레임 수
+    _QUEUE_GET_TIMEOUT_SEC = 1.0  # 오디오 큐 poll 간격 (초)
+    _THREAD_JOIN_TIMEOUT_SEC = 5.0  # reader 스레드 종료 대기 (초)
+    _SENTINEL = b""  # 스트림 종료 신호
+    _ENCODING_MAP: dict[int, speech.RecognitionConfig.AudioEncoding] = {
+        2: speech.RecognitionConfig.AudioEncoding.LINEAR16,
+    }
+
+    def __init__(self, language_code: str = "en-US") -> None:
+        self.language_code = language_code
 
         self._client: speech.SpeechClient | None = None
         self._audio_queue: queue.Queue[bytes] | None = None
@@ -126,33 +127,27 @@ class GoogleCloudASR(IASR):
 
     def _start_stream(self) -> None:
         """Build gRPC config and start the reader thread."""
-        sample_rate = self._audio_config.sample_rate
-        if not (_SAMPLE_RATE_MIN <= sample_rate <= _SAMPLE_RATE_MAX):
-            raise ASRError(
-                f"sample_rate={sample_rate} outside valid range "
-                f"[{_SAMPLE_RATE_MIN}, {_SAMPLE_RATE_MAX}]"
-            )
+        if not (8000 <= SAMPLE_RATE <= 48000):
+            raise ASRError(f"sample_rate={SAMPLE_RATE} outside Google STT valid range [8000, 48000]")
 
-        encoding = _ENCODING_MAP.get(self._audio_config.sample_width)
+        encoding = self._ENCODING_MAP.get(SAMPLE_WIDTH)
         if encoding is None:
-            raise ASRError(
-                f"Unsupported sample_width={self._audio_config.sample_width}; "
-                f"supported: {sorted(_ENCODING_MAP.keys())}"
-            )
+            raise ASRError(f"Unsupported sample_width={SAMPLE_WIDTH}; supported: {sorted(self._ENCODING_MAP.keys())}")
 
         recognition_config = speech.RecognitionConfig(
             encoding=encoding,
-            sample_rate_hertz=self._audio_config.sample_rate,
-            language_code=self._asr_config.language_code,
-            model=self._asr_config.model,
-            audio_channel_count=self._audio_config.channels,
+            sample_rate_hertz=SAMPLE_RATE,
+            language_code=self.language_code,
+            model=self._MODEL,
+            audio_channel_count=CHANNELS,
         )
+        # interim_results=True는 get_text()가 부분 transcript 반환에 의존하므로 고정.
         streaming_config = speech.StreamingRecognitionConfig(
             config=recognition_config,
-            interim_results=self._asr_config.interim_results,
+            interim_results=True,
         )
 
-        self._audio_queue = queue.Queue(maxsize=_QUEUE_MAXSIZE)
+        self._audio_queue = queue.Queue(maxsize=self._QUEUE_MAXSIZE)
         self._running.set()
         self._reader_thread = threading.Thread(
             target=self._read_responses,
@@ -165,9 +160,9 @@ class GoogleCloudASR(IASR):
         """Send sentinel and join the reader thread."""
         if self._audio_queue is not None:
             with contextlib.suppress(queue.Full):
-                self._audio_queue.put_nowait(_SENTINEL)
+                self._audio_queue.put_nowait(self._SENTINEL)
         if self._reader_thread is not None:
-            self._reader_thread.join(timeout=5.0)
+            self._reader_thread.join(timeout=self._THREAD_JOIN_TIMEOUT_SEC)
             if self._reader_thread.is_alive():
                 logger.warning("Reader thread did not exit within timeout")
             self._reader_thread = None
@@ -176,10 +171,10 @@ class GoogleCloudASR(IASR):
         """Yield audio requests from the queue until sentinel or shutdown."""
         while self._running.is_set():
             try:
-                chunk = self._audio_queue.get(timeout=1.0)  # type: ignore[union-attr]
+                chunk = self._audio_queue.get(timeout=self._QUEUE_GET_TIMEOUT_SEC)  # type: ignore[union-attr]
             except queue.Empty:
                 continue
-            if chunk == _SENTINEL:
+            if chunk == self._SENTINEL:
                 return
             yield speech.StreamingRecognizeRequest(audio_content=chunk)
 

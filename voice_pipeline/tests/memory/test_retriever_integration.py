@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pytest
 
-from voice_pipeline.core.config import MemoryConfig
 from voice_pipeline.embedding.embedder import SentenceTransformerEmbedder
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
@@ -21,17 +20,30 @@ pytestmark = pytest.mark.requires_model
 # Helpers
 # ---------------------------------------------------------------------------
 
+_RETRIEVER_CLASS_VAR_MAP = {
+    "max_memories": "_MAX_MEMORIES",
+    "min_new_slots": "_MIN_NEW_SLOTS",
+    "retained_ttl": "_RETAINED_TTL",
+    "vector_top_k": "_VECTOR_TOP_K",
+    "bm25_top_k": "_BM25_TOP_K",
+    "rrf_k": "_RRF_K",
+    "recency_half_life_days": "_RECENCY_HALF_LIFE_DAYS",
+    "salience_threshold": "_SALIENCE_THRESHOLD",
+}
+
 
 def _build_retriever(
     storage: SQLiteMemoryStorage,
     index: NumpyVectorIndex,
     embedder: SentenceTransformerEmbedder,
+    monkeypatch=None,
     **config_overrides,
 ) -> MemoryRetriever:
-    defaults = dict(embedding_dimension=384, max_memories=10, min_new_slots=4)
-    defaults.update(config_overrides)
-    cfg = MemoryConfig(**defaults)
-    return MemoryRetriever(storage, index, embedder, cfg)
+    if config_overrides:
+        assert monkeypatch is not None, "monkeypatch fixture required when overriding retriever tuning"
+        for key, value in config_overrides.items():
+            monkeypatch.setattr(MemoryRetriever, _RETRIEVER_CLASS_VAR_MAP[key], value)
+    return MemoryRetriever(storage, index, embedder)
 
 
 # ---------------------------------------------------------------------------
@@ -63,8 +75,7 @@ class TestVectorSearchReal:
             vector_index,
             shared_embedder,
             make_episode(
-                "The user made cream mushroom pasta from scratch"
-                " and wants to learn Italian cooking.",
+                "The user made cream mushroom pasta from scratch and wants to learn Italian cooking.",
                 session_id="s-old",
             ),
         )
@@ -147,6 +158,7 @@ class TestRetainedBufferReal:
         memory_db: SQLiteMemoryStorage,
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
+        monkeypatch,
     ) -> None:
         """A cited episode remains in results even when the query topic changes."""
         movie_ep = store_episode_with_embedding(
@@ -162,13 +174,11 @@ class TestRetainedBufferReal:
             make_episode("사용자가 파스타 요리를 즐긴다.", session_id="s-old"),
         )
 
-        retriever = _build_retriever(memory_db, vector_index, shared_embedder, retained_ttl=3)
+        retriever = _build_retriever(memory_db, vector_index, shared_embedder, monkeypatch, retained_ttl=3)
 
         # First query: movie topic → cite the movie episode
         result1 = retriever.retrieve("영화를 좋아해", set())
-        movie_display_idx = next(
-            idx for idx, eid in result1.index_to_id.items() if eid == movie_ep.id
-        )
+        movie_display_idx = next(idx for idx, eid in result1.index_to_id.items() if eid == movie_ep.id)
         retriever.update_citations([movie_display_idx])
 
         # Second query: completely different topic
@@ -181,6 +191,7 @@ class TestRetainedBufferReal:
         memory_db: SQLiteMemoryStorage,
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
+        monkeypatch,
     ) -> None:
         """Uncited episodes decay from the retained buffer after TTL expires."""
         movie_ep = store_episode_with_embedding(
@@ -200,6 +211,7 @@ class TestRetainedBufferReal:
             memory_db,
             vector_index,
             shared_embedder,
+            monkeypatch,
             retained_ttl=2,
             max_memories=5,
         )

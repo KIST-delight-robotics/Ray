@@ -16,10 +16,9 @@ Base color: `(233, 233, 50)`.
 
 ```python
 from voice_pipeline.led import LEDController
-from voice_pipeline.core.config import LEDConfig
 from voice_pipeline.core.types import LEDState
 
-controller = LEDController(LEDConfig())
+controller = LEDController()
 
 controller.set_state(LEDState.SLEEPING)
 controller.set_state(LEDState.IDLE)
@@ -27,6 +26,29 @@ controller.set_state(LEDState.OFF)
 
 controller.close()
 ```
+
+## 클래스 변수
+
+`LEDController` 내부 상수. 외부 참조 없음 (`_` prefix).
+
+| 변수 | 값 | 의미 |
+|------|------|------|
+| `_BAR_COUNT` | `8` | 바 세그먼트 LED 개수 |
+| `_RING_COUNT` | `16` | 링 세그먼트 LED 개수 |
+| `_LED_COUNT` | `24` | 전체 LED 개수 |
+| `_BRIGHTNESS` | `1.0` | LED 전체 밝기 (0.0=꺼짐, 1.0=최대) |
+| `_NOOP_SLEEP_SEC` | `0.1` | 애니메이션 없을 때 스레드 폴링 간격 (초) |
+| `_CLOSE_JOIN_TIMEOUT_SEC` | `2.0` | close 시 애니메이션 스레드 종료 대기 (초) |
+| `_ANIMATIONS` | dict | 상태별 애니메이션 맵 |
+
+`StaticAnimation` / `BreathingAnimation` 상수:
+
+| 변수 | 값 | 의미 |
+|------|------|------|
+| `StaticAnimation._FRAME_INTERVAL_SEC` | `0.1` | 렌더 틱 간격 (초) |
+| `BreathingAnimation._CYCLE_SEC` | `4.0` | 페이드 한 주기 시간 (초) |
+| `BreathingAnimation._MIN_BRIGHTNESS` | `0.15` | 페이드 최소 밝기 (0.0~1.0) |
+| `BreathingAnimation._FRAME_INTERVAL_SEC` | `0.03` | 렌더 틱 간격 (초) |
 
 ## Architecture
 
@@ -64,25 +86,18 @@ class PulseAnimation:
         return [(0, 0, v)] * (bar_count + ring_count)
 ```
 
-Pass a custom map to the controller:
+To install a custom animation map, subclass `LEDController` and override `_ANIMATIONS`:
 
 ```python
 from voice_pipeline.core.types import LEDState
+from voice_pipeline.led import LEDController
 
-controller = LEDController(config, animations={
-    LEDState.IDLE: PulseAnimation(),
-    # ... other states
-})
+class CustomLEDController(LEDController):
+    _ANIMATIONS = {
+        LEDState.IDLE: PulseAnimation(),
+        # ... other states
+    }
 ```
-
-## Configuration
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `bar_count` | `8` | LEDs in bar segment (indices 0-7) |
-| `ring_count` | `16` | LEDs in ring segment (indices 8-23) |
-| `spi_pin` | `10` | SPI GPIO pin (Pi 5 SPI0 MOSI) |
-| `brightness` | `128` | Global brightness 0-255 |
 
 ## Hardware Driver
 

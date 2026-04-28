@@ -14,7 +14,6 @@ from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as ws_connect
 
 from voice_pipeline.bridge.exceptions import BridgeError
-from voice_pipeline.core.config import CppBridgeConfig
 from voice_pipeline.core.interfaces import ICppBridge
 from voice_pipeline.core.types import CppEvent, CppEventType
 
@@ -59,8 +58,16 @@ class CppBridge(ICppBridge):
         event so stale threads cannot corrupt a newer connection's state.
     """
 
-    def __init__(self, config: CppBridgeConfig) -> None:
-        self._config = config
+    _HOST = "localhost"  # C++ 프로세스 호스트 주소
+    _PORT = 9200  # C++ 프로세스 WebSocket 포트
+    _RECONNECT_ATTEMPTS = 3  # 연결 실패 시 재시도 횟수
+    _RECV_TIMEOUT_SEC = 1.0  # 메시지 수신 polling 간격 (초)
+    _CONNECT_TIMEOUT_SEC = 5.0  # 연결 수립 최대 대기 시간 (초)
+    _CLOSE_TIMEOUT_SEC = 5.0  # 연결 종료 최대 대기 시간 (초)
+    _RECONNECT_DELAY_SEC = 1.0  # 연결 재시도 사이 대기 시간 (초)
+    _THREAD_JOIN_TIMEOUT_SEC = 5.0  # 수신 스레드 종료 대기 시간 (초)
+
+    def __init__(self) -> None:
         self._conn: ClientConnection | None = None
         self._receiver_thread: threading.Thread | None = None
         self._receiver_stop: threading.Event | None = None
@@ -82,15 +89,15 @@ class CppBridge(ICppBridge):
         # Clean up residual state from a previous failed connection
         self._cleanup()
 
-        uri = f"ws://{self._config.host}:{self._config.port}"
+        uri = f"ws://{self._HOST}:{self._PORT}"
         last_exc: Exception | None = None
 
-        for attempt in range(1, self._config.reconnect_attempts + 1):
+        for attempt in range(1, self._RECONNECT_ATTEMPTS + 1):
             try:
                 conn = ws_connect(
                     uri,
-                    open_timeout=self._config.connect_timeout_sec,
-                    close_timeout=self._config.close_timeout_sec,
+                    open_timeout=self._CONNECT_TIMEOUT_SEC,
+                    close_timeout=self._CLOSE_TIMEOUT_SEC,
                     proxy=None,
                     ping_interval=None,
                     compression=None,
@@ -101,15 +108,13 @@ class CppBridge(ICppBridge):
                 logger.warning(
                     "Connection attempt %d/%d failed: %s",
                     attempt,
-                    self._config.reconnect_attempts,
+                    self._RECONNECT_ATTEMPTS,
                     exc,
                 )
-                if attempt < self._config.reconnect_attempts:
-                    time.sleep(1.0)
+                if attempt < self._RECONNECT_ATTEMPTS:
+                    time.sleep(self._RECONNECT_DELAY_SEC)
         else:
-            raise BridgeError(
-                f"Failed to connect to {uri} after {self._config.reconnect_attempts} attempts"
-            ) from last_exc
+            raise BridgeError(f"Failed to connect to {uri} after {self._RECONNECT_ATTEMPTS} attempts") from last_exc
 
         # Fresh state for new connection
         self._conn = conn
@@ -205,12 +210,12 @@ class CppBridge(ICppBridge):
             self._receiver_stop = None
         if self._conn is not None:
             try:
-                self._conn.close(timeout=self._config.close_timeout_sec)
+                self._conn.close(timeout=self._CLOSE_TIMEOUT_SEC)
             except Exception:
                 logger.debug("Error closing WebSocket (suppressed)", exc_info=True)
             self._conn = None
         if self._receiver_thread is not None:
-            self._receiver_thread.join(timeout=5.0)
+            self._receiver_thread.join(timeout=self._THREAD_JOIN_TIMEOUT_SEC)
             if self._receiver_thread.is_alive():
                 logger.warning("Receiver thread did not exit within timeout")
             self._receiver_thread = None
@@ -219,7 +224,7 @@ class CppBridge(ICppBridge):
         """Read messages from the WebSocket and enqueue events (daemon thread)."""
         while not stop.is_set():
             try:
-                raw = conn.recv(timeout=self._config.recv_timeout_sec)
+                raw = conn.recv(timeout=self._RECV_TIMEOUT_SEC)
             except TimeoutError:
                 continue
             except ConnectionClosed as exc:

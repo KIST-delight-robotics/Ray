@@ -14,7 +14,6 @@ import numpy as np
 import pytest
 import torch
 
-from voice_pipeline.core.config import TurnGPTConfig
 from voice_pipeline.turn_taking.exceptions import TurnGPTError
 
 # ---------------------------------------------------------------------------
@@ -56,9 +55,7 @@ def _make_logits(seq_len: int, trp_prob: float = 0.5) -> torch.Tensor:
 
 def _make_past_kv(n_layers: int = 2, seq_len: int = 5) -> tuple:
     """Create a fake past_key_values tuple."""
-    return tuple(
-        (torch.randn(1, 4, seq_len, 16), torch.randn(1, 4, seq_len, 16)) for _ in range(n_layers)
-    )
+    return tuple((torch.randn(1, 4, seq_len, 16), torch.randn(1, 4, seq_len, 16)) for _ in range(n_layers))
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +97,36 @@ def _make_mock_model(trp_prob: float = 0.5) -> MagicMock:
     return mock_model
 
 
-def _build_wrapper(mock_cls: MagicMock, **kwargs) -> tuple:
+_CLASS_VAR_KWARGS: dict[str, str] = {
+    "backend": "_BACKEND",
+    "onnx_model_path": "_ONNX_MODEL_PATH",
+    "tokenizer_path": "_TOKENIZER_PATH",
+    "onnx_threads": "_ONNX_THREADS",
+    "checkpoint_path": "_CHECKPOINT_PATH",
+    "device": "_DEVICE",
+    "max_context_tokens": "_MAX_CONTEXT_TOKENS",
+    "keep_turns": "_KEEP_TURNS",
+}
+
+
+def _apply_class_vars(monkeypatch: pytest.MonkeyPatch | None, kwargs: dict) -> None:
+    """Translate legacy test kwargs to class var monkeypatch.
+
+    Raises if monkeypatch is required but missing."""
+    from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
+
+    for kw, cls_var in _CLASS_VAR_KWARGS.items():
+        if kw in kwargs:
+            if monkeypatch is None:
+                raise AssertionError(f"monkeypatch fixture required for {kw} override")
+            monkeypatch.setattr(TurnGPTWrapper, cls_var, kwargs.pop(kw))
+
+
+def _build_wrapper(
+    mock_cls: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    **kwargs,
+) -> tuple:
     """Construct a TurnGPTWrapper with mocked model loading.
 
     Returns (wrapper, mock_model).
@@ -108,16 +134,14 @@ def _build_wrapper(mock_cls: MagicMock, **kwargs) -> tuple:
     mock_model = _make_mock_model(kwargs.pop("trp_prob", 0.5))
     mock_cls.load_from_checkpoint.return_value = mock_model
 
-    config = TurnGPTConfig(
-        checkpoint_path=kwargs.get("checkpoint_path", "/fake/turngpt.ckpt"),
-        onnx_model_path="",
-        tokenizer_path="",
-        device=kwargs.get("device", "cpu"),
-        max_context_tokens=kwargs.get("max_context_tokens", 1024),
-    )
+    # 기본 pytorch 모드: backend/checkpoint_path 명시 없으면 default 추가
+    kwargs.setdefault("backend", "pytorch")
+    kwargs.setdefault("checkpoint_path", "/fake/turngpt.ckpt")
+    _apply_class_vars(monkeypatch, kwargs)
+
     from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
-    wrapper = TurnGPTWrapper(config)
+    wrapper = TurnGPTWrapper()
     return wrapper, mock_model
 
 
@@ -147,9 +171,9 @@ def _inject_turngpt_module():
 
 
 @pytest.fixture()
-def wrapper_and_model(_inject_turngpt_module):
+def wrapper_and_model(_inject_turngpt_module, monkeypatch):
     """Return (TurnGPTWrapper, mock_model) with default config."""
-    return _build_wrapper(_inject_turngpt_module)
+    return _build_wrapper(_inject_turngpt_module, monkeypatch)
 
 
 @pytest.fixture()
@@ -170,40 +194,42 @@ def model(wrapper_and_model):
 class TestInit:
     """Model loading, device setup, eval mode."""
 
-    def test_model_loaded_and_eval(self, _inject_turngpt_module):
+    def test_model_loaded_and_eval(self, _inject_turngpt_module, monkeypatch):
         mock_cls = _inject_turngpt_module
-        _, mock_model = _build_wrapper(mock_cls)
+        _, mock_model = _build_wrapper(mock_cls, monkeypatch)
 
         mock_cls.load_from_checkpoint.assert_called_once_with("/fake/turngpt.ckpt")
         mock_model.to.assert_called_once_with("cpu")
         mock_model.eval.assert_called_once()
 
-    def test_load_file_not_found_raises_turngpt_error(self, _inject_turngpt_module):
+    def test_load_file_not_found_raises_turngpt_error(self, _inject_turngpt_module, monkeypatch):
         mock_cls = _inject_turngpt_module
         mock_cls.load_from_checkpoint.side_effect = FileNotFoundError("no file")
 
-        config = TurnGPTConfig(checkpoint_path="/missing.ckpt", onnx_model_path="")
         from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
+        monkeypatch.setattr(TurnGPTWrapper, "_BACKEND", "pytorch")
+        monkeypatch.setattr(TurnGPTWrapper, "_CHECKPOINT_PATH", "/missing.ckpt")
         with pytest.raises(TurnGPTError, match="Failed to load TurnGPT model"):
-            TurnGPTWrapper(config)
+            TurnGPTWrapper()
 
-    def test_load_runtime_error_raises_turngpt_error(self, _inject_turngpt_module):
+    def test_load_runtime_error_raises_turngpt_error(self, _inject_turngpt_module, monkeypatch):
         mock_cls = _inject_turngpt_module
         mock_cls.load_from_checkpoint.side_effect = RuntimeError("corrupt checkpoint")
 
-        config = TurnGPTConfig(checkpoint_path="/bad.ckpt", onnx_model_path="")
         from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
+        monkeypatch.setattr(TurnGPTWrapper, "_BACKEND", "pytorch")
+        monkeypatch.setattr(TurnGPTWrapper, "_CHECKPOINT_PATH", "/bad.ckpt")
         with pytest.raises(TurnGPTError, match="Failed to load TurnGPT model"):
-            TurnGPTWrapper(config)
+            TurnGPTWrapper()
 
-    def test_device_config_respected(self, _inject_turngpt_module):
+    def test_device_config_respected(self, _inject_turngpt_module, monkeypatch):
         mock_cls = _inject_turngpt_module
-        _, mock_model = _build_wrapper(mock_cls, device="cuda")
+        _, mock_model = _build_wrapper(mock_cls, monkeypatch, device="cuda")
         mock_model.to.assert_called_once_with("cuda")
 
-        _, mock_model2 = _build_wrapper(mock_cls, device="cpu")
+        _, mock_model2 = _build_wrapper(mock_cls, monkeypatch, device="cpu")
         mock_model2.to.assert_called_once_with("cpu")
 
 
@@ -224,9 +250,9 @@ class TestPredict:
         wrapper.predict("hello<ts>world")
         model.assert_called_once()
 
-    def test_extracts_last_position(self, _inject_turngpt_module):
+    def test_extracts_last_position(self, _inject_turngpt_module, monkeypatch):
         mock_cls = _inject_turngpt_module
-        wrapper, mock_model = _build_wrapper(mock_cls, trp_prob=0.9)
+        wrapper, mock_model = _build_wrapper(mock_cls, monkeypatch, trp_prob=0.9)
 
         result = wrapper.predict("a<ts>b<ts>c")
         assert result == pytest.approx(0.9, abs=1e-5)
@@ -274,9 +300,9 @@ class TestEdgeCaseInput:
         assert isinstance(result, float)
         model.assert_called_once()
 
-    def test_only_separators(self, _inject_turngpt_module):
+    def test_only_separators(self, _inject_turngpt_module, monkeypatch):
         mock_cls = _inject_turngpt_module
-        wrapper, _ = _build_wrapper(mock_cls)
+        wrapper, _ = _build_wrapper(mock_cls, monkeypatch)
 
         result = wrapper.predict("<ts><ts><ts>")
         assert isinstance(result, float)
@@ -334,7 +360,7 @@ class TestErrorHandling:
         result = wrapper.predict("hello")
         assert result == 0.0
 
-    def test_import_error_raises_turngpt_error(self):
+    def test_import_error_raises_turngpt_error(self, monkeypatch):
         """If turngpt package is missing, constructor raises TurnGPTError."""
         import sys
 
@@ -351,11 +377,12 @@ class TestErrorHandling:
         builtins.__import__ = _fail_import
         try:
             sys.modules.pop("voice_pipeline.turn_taking.turngpt", None)
-            config = TurnGPTConfig(checkpoint_path="/fake.ckpt", onnx_model_path="")
             from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
+            monkeypatch.setattr(TurnGPTWrapper, "_BACKEND", "pytorch")
+            monkeypatch.setattr(TurnGPTWrapper, "_CHECKPOINT_PATH", "/fake.ckpt")
             with pytest.raises(TurnGPTError, match="Failed to load TurnGPT model"):
-                TurnGPTWrapper(config)
+                TurnGPTWrapper()
         finally:
             builtins.__import__ = original_import
             if saved is not None:
@@ -448,11 +475,11 @@ class TestCache:
 class TestWindow:
     """Context window eviction behavior."""
 
-    def test_eviction_triggered_on_overflow(self, _inject_turngpt_module):
+    def test_eviction_triggered_on_overflow(self, _inject_turngpt_module, monkeypatch):
         """Long dialog exceeding max_context_tokens triggers eviction."""
         mock_cls = _inject_turngpt_module
         # max_context_tokens=20: very small window
-        wrapper, model = _build_wrapper(mock_cls, max_context_tokens=20)
+        wrapper, model = _build_wrapper(mock_cls, monkeypatch, max_context_tokens=20)
 
         # "aaaa<ts>bbbb<ts>cccc<ts>dddd" = many tokens
         dialog = "aaaa<ts>bbbb<ts>cccc<ts>dddd<ts>eeee"
@@ -462,10 +489,10 @@ class TestWindow:
         # Tokenizer should have been called multiple times (initial + eviction retries)
         assert model.tokenizer.call_count >= 2
 
-    def test_eviction_removes_oldest_turns(self, _inject_turngpt_module):
+    def test_eviction_removes_oldest_turns(self, _inject_turngpt_module, monkeypatch):
         """After eviction, the oldest turn(s) are removed."""
         mock_cls = _inject_turngpt_module
-        wrapper, model = _build_wrapper(mock_cls, max_context_tokens=20)
+        wrapper, model = _build_wrapper(mock_cls, monkeypatch, max_context_tokens=20)
 
         dialog = "first<ts>second<ts>third<ts>last"
         wrapper.predict(dialog)
@@ -478,18 +505,18 @@ class TestWindow:
         # "last" should still be present
         assert "last" in tokenized_text
 
-    def test_no_eviction_within_limit(self, _inject_turngpt_module):
+    def test_no_eviction_within_limit(self, _inject_turngpt_module, monkeypatch):
         """Short dialog within window — tokenizer called once."""
         mock_cls = _inject_turngpt_module
-        wrapper, model = _build_wrapper(mock_cls, max_context_tokens=1024)
+        wrapper, model = _build_wrapper(mock_cls, monkeypatch, max_context_tokens=1024)
 
         wrapper.predict("hello")
         assert model.tokenizer.call_count == 1
 
-    def test_headroom_prevents_thrashing(self, _inject_turngpt_module):
+    def test_headroom_prevents_thrashing(self, _inject_turngpt_module, monkeypatch):
         """Eviction reduces below headroom target, not just below max."""
         mock_cls = _inject_turngpt_module
-        wrapper, model = _build_wrapper(mock_cls, max_context_tokens=30)
+        wrapper, model = _build_wrapper(mock_cls, monkeypatch, max_context_tokens=30)
 
         # Dialog that's just over limit — eviction should cut to 80% (24 tokens)
         dialog = "aaaa<ts>bbbb<ts>cccc<ts>dddd"
@@ -500,10 +527,10 @@ class TestWindow:
         final_tokens = _char_tokenize(tokenized_text)["input_ids"]
         assert final_tokens.shape[-1] <= int(30 * 0.8)
 
-    def test_single_long_turn_token_truncation(self, _inject_turngpt_module):
+    def test_single_long_turn_token_truncation(self, _inject_turngpt_module, monkeypatch):
         """Single turn exceeding max_context_tokens is left-truncated at token level."""
         mock_cls = _inject_turngpt_module
-        wrapper, model = _build_wrapper(mock_cls, max_context_tokens=10)
+        wrapper, model = _build_wrapper(mock_cls, monkeypatch, max_context_tokens=10)
 
         # No <ts> separator — cannot evict turns, must token-truncate
         long_text = "a" * 30
@@ -580,7 +607,7 @@ def _make_onnx_session_mock(*, has_kv: bool = True) -> MagicMock:
     return mock_sess
 
 
-def _build_onnx_wrapper(**kwargs) -> MagicMock:
+def _build_onnx_wrapper(monkeypatch: pytest.MonkeyPatch, **kwargs) -> MagicMock:
     """Build TurnGPTWrapper in ONNX mode with mocked dependencies."""
 
     has_kv = kwargs.pop("has_kv", True)
@@ -595,13 +622,6 @@ def _build_onnx_wrapper(**kwargs) -> MagicMock:
     }.get(t, 0)
 
     mock_so = MagicMock()
-
-    config = TurnGPTConfig(
-        onnx_model_path="/fake/model.onnx",
-        tokenizer_path="/fake/tokenizer",
-        max_context_tokens=kwargs.get("max_context_tokens", 1024),
-        onnx_threads=kwargs.get("onnx_threads", 4),
-    )
 
     mock_ort_module = MagicMock()
     mock_ort_module.SessionOptions.return_value = mock_so
@@ -618,10 +638,16 @@ def _build_onnx_wrapper(**kwargs) -> MagicMock:
     sys.modules["onnxruntime"] = mock_ort_module
     sys.modules["transformers"] = mock_transformers
 
+    # 기본 onnx 모드 class var 값은 monkeypatch로 통일 (실제 인자 전달 아님).
+    kwargs.setdefault("onnx_model_path", "/fake/model.onnx")
+    kwargs.setdefault("tokenizer_path", "/fake/tokenizer")
+    kwargs.setdefault("onnx_threads", 4)
+    _apply_class_vars(monkeypatch, kwargs)
+
     try:
         from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
-        wrapper = TurnGPTWrapper(config)
+        wrapper = TurnGPTWrapper()
     finally:
         if saved_ort is None:
             sys.modules.pop("onnxruntime", None)
@@ -638,31 +664,24 @@ def _build_onnx_wrapper(**kwargs) -> MagicMock:
 class TestOnnxInit:
     """ONNX backend initialization."""
 
-    def test_backend_set_to_onnx(self):
-        wrapper, _ = _build_onnx_wrapper()
-        assert wrapper._backend == "onnx"
+    def test_backend_set_to_onnx(self, monkeypatch):
+        wrapper, _ = _build_onnx_wrapper(monkeypatch)
+        assert wrapper._BACKEND == "onnx"
 
-    def test_onnx_model_path_empty_uses_pytorch(self, _inject_turngpt_module):
+    def test_onnx_model_path_empty_uses_pytorch(self, _inject_turngpt_module, monkeypatch):
         mock_cls = _inject_turngpt_module
-        wrapper, _ = _build_wrapper(mock_cls)
-        assert wrapper._backend == "pytorch"
+        wrapper, _ = _build_wrapper(mock_cls, monkeypatch)
+        assert wrapper._BACKEND == "pytorch"
 
-    def test_missing_tokenizer_path_raises_turngpt_error(self):
+    def test_missing_tokenizer_path_raises_turngpt_error(self, monkeypatch):
         from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
-        config = TurnGPTConfig(
-            onnx_model_path="/fake/model.onnx",
-            tokenizer_path="",
-        )
-        with pytest.raises(TurnGPTError, match="tokenizer_path is required"):
-            TurnGPTWrapper(config)
+        monkeypatch.setattr(TurnGPTWrapper, "_ONNX_MODEL_PATH", "/fake/model.onnx")
+        monkeypatch.setattr(TurnGPTWrapper, "_TOKENIZER_PATH", "")
+        with pytest.raises(TurnGPTError, match="tokenizer path must not be empty"):
+            TurnGPTWrapper()
 
-    def test_onnx_init_error_raises_turngpt_error(self):
-        config = TurnGPTConfig(
-            onnx_model_path="/fake/model.onnx",
-            tokenizer_path="/fake/tokenizer",
-        )
-
+    def test_onnx_init_error_raises_turngpt_error(self, monkeypatch):
         # Make onnxruntime import fail
         import builtins
 
@@ -678,50 +697,52 @@ class TestOnnxInit:
         try:
             from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
+            monkeypatch.setattr(TurnGPTWrapper, "_ONNX_MODEL_PATH", "/fake/model.onnx")
+            monkeypatch.setattr(TurnGPTWrapper, "_TOKENIZER_PATH", "/fake/tokenizer")
             with pytest.raises(TurnGPTError, match="Failed to load ONNX model"):
-                TurnGPTWrapper(config)
+                TurnGPTWrapper()
         finally:
             builtins.__import__ = original_import
             if saved_ort is not None:
                 sys.modules["onnxruntime"] = saved_ort
 
-    def test_detects_kv_model(self):
-        wrapper, _ = _build_onnx_wrapper(has_kv=True)
+    def test_detects_kv_model(self, monkeypatch):
+        wrapper, _ = _build_onnx_wrapper(monkeypatch, has_kv=True)
         assert wrapper._onnx_has_kv is True
 
-    def test_detects_no_cache_model(self):
-        wrapper, _ = _build_onnx_wrapper(has_kv=False)
+    def test_detects_no_cache_model(self, monkeypatch):
+        wrapper, _ = _build_onnx_wrapper(monkeypatch, has_kv=False)
         assert wrapper._onnx_has_kv is False
 
 
 class TestOnnxPredict:
     """ONNX backend predict() behavior."""
 
-    def test_returns_float_in_range(self):
-        wrapper, _ = _build_onnx_wrapper()
+    def test_returns_float_in_range(self, monkeypatch):
+        wrapper, _ = _build_onnx_wrapper(monkeypatch)
         result = wrapper.predict("hello<ts>how are you")
         assert isinstance(result, float)
         assert 0.0 <= result <= 1.0
 
-    def test_empty_input_returns_default(self):
-        wrapper, _ = _build_onnx_wrapper()
+    def test_empty_input_returns_default(self, monkeypatch):
+        wrapper, _ = _build_onnx_wrapper(monkeypatch)
         assert wrapper.predict("") == 0.0
         assert wrapper.predict("   ") == 0.0
 
-    def test_single_turn(self):
-        wrapper, sess = _build_onnx_wrapper()
+    def test_single_turn(self, monkeypatch):
+        wrapper, sess = _build_onnx_wrapper(monkeypatch)
         result = wrapper.predict("hello")
         assert isinstance(result, float)
         sess.run.assert_called_once()
 
-    def test_multi_turn(self):
-        wrapper, sess = _build_onnx_wrapper()
+    def test_multi_turn(self, monkeypatch):
+        wrapper, sess = _build_onnx_wrapper(monkeypatch)
         result = wrapper.predict("a<ts>b<ts>c")
         assert isinstance(result, float)
         sess.run.assert_called_once()
 
-    def test_no_cache_model(self):
-        wrapper, sess = _build_onnx_wrapper(has_kv=False)
+    def test_no_cache_model(self, monkeypatch):
+        wrapper, sess = _build_onnx_wrapper(monkeypatch, has_kv=False)
         result = wrapper.predict("hello<ts>world")
         assert isinstance(result, float)
         sess.run.assert_called_once()
@@ -734,8 +755,8 @@ class TestOnnxPredict:
 class TestOnnxCache:
     """ONNX KV cache reuse behavior."""
 
-    def test_cache_reuse_on_prefix_match(self):
-        wrapper, sess = _build_onnx_wrapper()
+    def test_cache_reuse_on_prefix_match(self, monkeypatch):
+        wrapper, sess = _build_onnx_wrapper(monkeypatch)
         wrapper.predict("hello")
         sess.run.reset_mock()
 
@@ -747,8 +768,8 @@ class TestOnnxCache:
         # Should have non-empty past
         assert feeds["past_key_0"].shape[2] > 0
 
-    def test_identical_input_returns_cached(self):
-        wrapper, sess = _build_onnx_wrapper()
+    def test_identical_input_returns_cached(self, monkeypatch):
+        wrapper, sess = _build_onnx_wrapper(monkeypatch)
         wrapper.predict("hello<ts>world")
         sess.run.reset_mock()
 
@@ -756,8 +777,8 @@ class TestOnnxCache:
         sess.run.assert_not_called()
         assert isinstance(result, float)
 
-    def test_cache_invalidation_on_prefix_change(self):
-        wrapper, sess = _build_onnx_wrapper()
+    def test_cache_invalidation_on_prefix_change(self, monkeypatch):
+        wrapper, sess = _build_onnx_wrapper(monkeypatch)
         wrapper.predict("hello")
         sess.run.reset_mock()
 
@@ -767,8 +788,8 @@ class TestOnnxCache:
         assert feeds["input_ids"].shape[1] == 5  # full "world"
         assert feeds["past_key_0"].shape[2] == 0  # empty past
 
-    def test_cache_cleared_on_reset(self):
-        wrapper, sess = _build_onnx_wrapper()
+    def test_cache_cleared_on_reset(self, monkeypatch):
+        wrapper, sess = _build_onnx_wrapper(monkeypatch)
         wrapper.predict("hello")
         sess.run.reset_mock()
 
@@ -778,8 +799,8 @@ class TestOnnxCache:
         feeds = sess.run.call_args[0][1]
         assert feeds["past_key_0"].shape[2] == 0
 
-    def test_no_cache_model_no_reuse(self):
-        wrapper, sess = _build_onnx_wrapper(has_kv=False)
+    def test_no_cache_model_no_reuse(self, monkeypatch):
+        wrapper, sess = _build_onnx_wrapper(monkeypatch, has_kv=False)
         wrapper.predict("hello")
         sess.run.reset_mock()
 
@@ -791,14 +812,14 @@ class TestOnnxCache:
 class TestOnnxErrorHandling:
     """ONNX predict error recovery."""
 
-    def test_runtime_error_returns_default(self):
-        wrapper, sess = _build_onnx_wrapper()
+    def test_runtime_error_returns_default(self, monkeypatch):
+        wrapper, sess = _build_onnx_wrapper(monkeypatch)
         sess.run.side_effect = RuntimeError("ORT error")
         result = wrapper.predict("hello")
         assert result == 0.0
 
-    def test_recovery_after_error(self):
-        wrapper, sess = _build_onnx_wrapper()
+    def test_recovery_after_error(self, monkeypatch):
+        wrapper, sess = _build_onnx_wrapper(monkeypatch)
         # Fail first
         sess.run.side_effect = RuntimeError("fail")
         assert wrapper.predict("hello") == 0.0
@@ -818,16 +839,16 @@ class TestOnnxErrorHandling:
 class TestOnnxWindow:
     """ONNX backend window eviction behavior."""
 
-    def test_eviction_triggered_on_overflow(self):
-        wrapper, sess = _build_onnx_wrapper(max_context_tokens=20)
+    def test_eviction_triggered_on_overflow(self, monkeypatch):
+        wrapper, sess = _build_onnx_wrapper(monkeypatch, max_context_tokens=20)
         dialog = "aaaa<ts>bbbb<ts>cccc<ts>dddd<ts>eeee"
         result = wrapper.predict(dialog)
         assert isinstance(result, float)
         # Should have called run (not crash)
         assert sess.run.call_count >= 1
 
-    def test_eviction_removes_oldest_turns(self):
-        wrapper, sess = _build_onnx_wrapper(max_context_tokens=20)
+    def test_eviction_removes_oldest_turns(self, monkeypatch):
+        wrapper, sess = _build_onnx_wrapper(monkeypatch, max_context_tokens=20)
         dialog = "first<ts>second<ts>third<ts>last"
         wrapper.predict(dialog)
         feeds = sess.run.call_args[0][1]
@@ -835,8 +856,8 @@ class TestOnnxWindow:
         # After eviction, should fit within max_context_tokens
         assert ids.shape[1] <= 20
 
-    def test_single_long_turn_token_truncation(self):
-        wrapper, sess = _build_onnx_wrapper(max_context_tokens=10)
+    def test_single_long_turn_token_truncation(self, monkeypatch):
+        wrapper, sess = _build_onnx_wrapper(monkeypatch, max_context_tokens=10)
         long_text = "a" * 30
         result = wrapper.predict(long_text)
         assert isinstance(result, float)

@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 
-from voice_pipeline.core.config import MemoryConfig
 from voice_pipeline.core.interfaces import ILLM, IEmbedder
 from voice_pipeline.core.types import LLMResult, LLMStream
 from voice_pipeline.memory.storage import InMemoryMemoryStorage
@@ -79,25 +78,31 @@ class ConstantEmbedder(IEmbedder):
         return _DIM
 
 
-def _make_config(**overrides: Any) -> MemoryConfig:
-    defaults = {"embedding_dimension": _DIM}
-    defaults.update(overrides)
-    return MemoryConfig(**defaults)
+_WRITER_CLASS_VAR_MAP = {
+    "write_max_input_tokens": "_WRITE_MAX_INPUT_TOKENS",
+    "write_window_overlap_ratio": "_WRITE_WINDOW_OVERLAP_RATIO",
+    "write_dedup_threshold": "_WRITE_DEDUP_THRESHOLD",
+    "profile_max_content_tokens": "_PROFILE_MAX_CONTENT_TOKENS",
+}
+
+
+def _apply_writer_overrides(monkeypatch, **overrides: Any) -> None:
+    """Translate legacy MemoryConfig kwargs into MemoryWriter class var monkeypatches."""
+    for key, value in overrides.items():
+        monkeypatch.setattr(MemoryWriter, _WRITER_CLASS_VAR_MAP[key], value)
 
 
 def _make_writer(
     llm_responses: list[str],
-    config: MemoryConfig | None = None,
     storage: InMemoryMemoryStorage | None = None,
     embedder: IEmbedder | None = None,
 ) -> tuple[MemoryWriter, InMemoryMemoryStorage, NumpyVectorIndex, FakeLLM]:
-    cfg = config or _make_config()
     st = storage or InMemoryMemoryStorage(dimension=_DIM)
     vi = NumpyVectorIndex()
     emb = embedder or FakeEmbedder()
     llm = FakeLLM(llm_responses)
     counter = lambda text: len(text.split())  # noqa: E731
-    writer = MemoryWriter(st, vi, emb, llm, cfg, counter)
+    writer = MemoryWriter(st, vi, emb, llm, counter)
     return writer, st, vi, llm
 
 
@@ -399,20 +404,20 @@ class TestWindowing:
         # Episode extraction + profile extraction = 2 calls
         assert llm._call_count == 2
 
-    def test_long_session_windowed(self) -> None:
+    def test_long_session_windowed(self, monkeypatch) -> None:
         """Session exceeding token limit should be split into windows."""
         ep_json_1 = _episode_response("Episode from window 1.")
         ep_json_2 = _episode_response("Episode from window 2.")
         dedup_json = _dedup_response("KEEP_BOTH")
         facts_json = _profile_facts_response()
-        config = _make_config(
+        _apply_writer_overrides(
+            monkeypatch,
             write_max_input_tokens=25,
             write_window_overlap_ratio=0.0,
             write_dedup_threshold=0.8,
         )
         writer, storage, _, llm = _make_writer(
             [ep_json_1, ep_json_2, dedup_json, facts_json],
-            config=config,
             embedder=ConstantEmbedder(),
         )
         _add_utterances(storage)
@@ -423,7 +428,7 @@ class TestWindowing:
         # 2 extraction + 1 dedup + 1 profile = 4
         assert llm._call_count == 4
 
-    def test_dedup_merge(self) -> None:
+    def test_dedup_merge(self, monkeypatch) -> None:
         """LLM MERGE action combines two episodes into one."""
         ep_json_1 = _episode_response("The user watched Interstellar.")
         ep_json_2 = _episode_response(
@@ -431,19 +436,17 @@ class TestWindowing:
             "The user cried at the ending.",
         )
         # Sequential: candidate 1 → MERGE, candidate 2 → KEEP_BOTH
-        merge_json = _dedup_response(
-            "MERGE", "The user watched Interstellar and was deeply moved to tears."
-        )
+        merge_json = _dedup_response("MERGE", "The user watched Interstellar and was deeply moved to tears.")
         keep_json = _dedup_response("KEEP_BOTH")
         facts_json = _profile_facts_response()
-        config = _make_config(
+        _apply_writer_overrides(
+            monkeypatch,
             write_max_input_tokens=25,
             write_window_overlap_ratio=0.0,
             write_dedup_threshold=0.8,
         )
         writer, storage, _, _ = _make_writer(
             [ep_json_1, ep_json_2, merge_json, keep_json, facts_json],
-            config=config,
             embedder=ConstantEmbedder(),
         )
         _add_utterances(storage)
@@ -455,20 +458,20 @@ class TestWindowing:
         assert "The user watched Interstellar and was deeply moved to tears." in texts
         assert "The user cried at the ending." in texts
 
-    def test_dedup_discard_first(self) -> None:
+    def test_dedup_discard_first(self, monkeypatch) -> None:
         """LLM DISCARD_FIRST replaces the first episode with the second."""
         ep_json_1 = _episode_response("The user likes sci-fi.")
         ep_json_2 = _episode_response("The user loves sci-fi movies, especially Nolan films.")
         dedup_json = _dedup_response("DISCARD_FIRST")
         facts_json = _profile_facts_response()
-        config = _make_config(
+        _apply_writer_overrides(
+            monkeypatch,
             write_max_input_tokens=25,
             write_window_overlap_ratio=0.0,
             write_dedup_threshold=0.8,
         )
         writer, storage, _, _ = _make_writer(
             [ep_json_1, ep_json_2, dedup_json, facts_json],
-            config=config,
             embedder=ConstantEmbedder(),
         )
         _add_utterances(storage)
@@ -478,20 +481,20 @@ class TestWindowing:
         assert len(episodes) == 1
         assert episodes[0].text == "The user loves sci-fi movies, especially Nolan films."
 
-    def test_dedup_discard_second(self) -> None:
+    def test_dedup_discard_second(self, monkeypatch) -> None:
         """LLM DISCARD_SECOND keeps only the first episode."""
         ep_json_1 = _episode_response("The user loves sci-fi movies, especially Nolan films.")
         ep_json_2 = _episode_response("The user likes sci-fi.")
         dedup_json = _dedup_response("DISCARD_SECOND")
         facts_json = _profile_facts_response()
-        config = _make_config(
+        _apply_writer_overrides(
+            monkeypatch,
             write_max_input_tokens=25,
             write_window_overlap_ratio=0.0,
             write_dedup_threshold=0.8,
         )
         writer, storage, _, _ = _make_writer(
             [ep_json_1, ep_json_2, dedup_json, facts_json],
-            config=config,
             embedder=ConstantEmbedder(),
         )
         _add_utterances(storage)
@@ -501,12 +504,13 @@ class TestWindowing:
         assert len(episodes) == 1
         assert episodes[0].text == "The user loves sci-fi movies, especially Nolan films."
 
-    def test_dedup_fallback_on_llm_failure(self) -> None:
+    def test_dedup_fallback_on_llm_failure(self, monkeypatch) -> None:
         """When dedup LLM fails, keep the longer episode."""
         ep_json_1 = _episode_response("Short.")
         ep_json_2 = _episode_response("This is a longer and more detailed episode.")
         facts_json = _profile_facts_response()
-        config = _make_config(
+        _apply_writer_overrides(
+            monkeypatch,
             write_max_input_tokens=25,
             write_window_overlap_ratio=0.0,
             write_dedup_threshold=0.8,
@@ -514,7 +518,6 @@ class TestWindowing:
         # 2 extraction calls succeed, dedup call returns bad JSON, profile call
         writer, storage, _, _ = _make_writer(
             [ep_json_1, ep_json_2, "bad json", facts_json],
-            config=config,
             embedder=ConstantEmbedder(),
         )
         _add_utterances(storage)
@@ -524,18 +527,19 @@ class TestWindowing:
         assert len(episodes) == 1
         assert episodes[0].text == "This is a longer and more detailed episode."
 
-    def test_high_threshold_skips_dedup(self) -> None:
+    def test_high_threshold_skips_dedup(self, monkeypatch) -> None:
         """When no embeddings exceed threshold, no dedup LLM call is made."""
         ep_json_1 = _episode_response("Episode about movies.")
         ep_json_2 = _episode_response("Episode about cooking.")
         facts_json = _profile_facts_response()
         # Random embeddings have near-zero cosine similarity, threshold=0.99 skips all
-        config = _make_config(
+        _apply_writer_overrides(
+            monkeypatch,
             write_max_input_tokens=25,
             write_window_overlap_ratio=0.0,
             write_dedup_threshold=0.99,
         )
-        writer, storage, _, llm = _make_writer([ep_json_1, ep_json_2, facts_json], config=config)
+        writer, storage, _, llm = _make_writer([ep_json_1, ep_json_2, facts_json])
         _add_utterances(storage)
 
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
@@ -544,7 +548,7 @@ class TestWindowing:
         # 2 extraction + 1 profile = 3 (no dedup call)
         assert llm._call_count == 3
 
-    def test_overlap_ratio_based(self) -> None:
+    def test_overlap_ratio_based(self, monkeypatch) -> None:
         """Window overlap uses token ratio, not turn count."""
         # Verify windowing mechanics — dedup skipped via high threshold.
         # max=25, overlap_ratio=0.4 → overlap of 10 tokens
@@ -557,14 +561,13 @@ class TestWindowing:
         ep_json_2 = _episode_response("Window 2 episode.")
         ep_json_3 = _episode_response("Window 3 episode.")
         facts_json = _profile_facts_response()
-        config = _make_config(
+        _apply_writer_overrides(
+            monkeypatch,
             write_max_input_tokens=25,
             write_window_overlap_ratio=0.4,
             write_dedup_threshold=0.99,
         )
-        writer, storage, _, llm = _make_writer(
-            [ep_json_1, ep_json_2, ep_json_3, facts_json], config=config
-        )
+        writer, storage, _, llm = _make_writer([ep_json_1, ep_json_2, ep_json_3, facts_json])
         _add_utterances(storage)
 
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
@@ -587,12 +590,11 @@ class TestErrorHandling:
             def generate(self, messages, tools=None, response_format=None):
                 raise RuntimeError("LLM down")
 
-        cfg = _make_config()
         storage = InMemoryMemoryStorage(dimension=_DIM)
         vi = NumpyVectorIndex()
         emb = FakeEmbedder()
         counter = lambda text: len(text.split())  # noqa: E731
-        writer = MemoryWriter(storage, vi, emb, FailingLLM(), cfg, counter)
+        writer = MemoryWriter(storage, vi, emb, FailingLLM(), counter)
         _add_utterances(storage)
 
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)

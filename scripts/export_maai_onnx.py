@@ -251,10 +251,22 @@ class TransformerONNXWrapper(nn.Module):
         cross2_c_k: torch.Tensor,
         cross2_c_v: torch.Tensor,
     ) -> tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
     ]:
         # --- Channel tower (shared weights, applied to each speaker) ---
         o1 = x1
@@ -263,7 +275,12 @@ class TransformerONNXWrapper(nn.Module):
         dummy = torch.zeros(1, 1, 0, 1)  # unused cross-attn placeholder
         for i, layer in enumerate(self.ch_layers):
             o1, k, v, _, _ = layer(
-                o1, o1, ar1_k[i], ar1_v[i], dummy, dummy,
+                o1,
+                o1,
+                ar1_k[i],
+                ar1_v[i],
+                dummy,
+                dummy,
             )
             new_ar1_k_list.append(k)
             new_ar1_v_list.append(v)
@@ -273,7 +290,12 @@ class TransformerONNXWrapper(nn.Module):
         new_ar2_v_list: list[torch.Tensor] = []
         for i, layer in enumerate(self.ch_layers):
             o2, k, v, _, _ = layer(
-                o2, o2, ar2_k[i], ar2_v[i], dummy, dummy,
+                o2,
+                o2,
+                ar2_k[i],
+                ar2_v[i],
+                dummy,
+                dummy,
             )
             new_ar2_k_list.append(k)
             new_ar2_v_list.append(v)
@@ -292,10 +314,20 @@ class TransformerONNXWrapper(nn.Module):
         for i, layer in enumerate(self.cross_layers):
             z1_in, z2_in = z1, z2
             z1, k1, v1, k1c, v1c = layer(
-                z1_in, z2_in, cross1_k[i], cross1_v[i], cross1_c_k[i], cross1_c_v[i],
+                z1_in,
+                z2_in,
+                cross1_k[i],
+                cross1_v[i],
+                cross1_c_k[i],
+                cross1_c_v[i],
             )
             z2, k2, v2, k2c, v2c = layer(
-                z2_in, z1_in, cross2_k[i], cross2_v[i], cross2_c_k[i], cross2_c_v[i],
+                z2_in,
+                z1_in,
+                cross2_k[i],
+                cross2_v[i],
+                cross2_c_k[i],
+                cross2_c_v[i],
             )
             new_c1_k.append(k1)
             new_c1_v.append(v1)
@@ -323,13 +355,22 @@ class TransformerONNXWrapper(nn.Module):
         vad2 = self.va_classifier(o2).sigmoid()[0, -1, 0]
 
         return (
-            p_now, p_future, vad1, vad2,
-            torch.stack(new_ar1_k_list), torch.stack(new_ar1_v_list),
-            torch.stack(new_ar2_k_list), torch.stack(new_ar2_v_list),
-            torch.stack(new_c1_k), torch.stack(new_c1_v),
-            torch.stack(new_c2_k), torch.stack(new_c2_v),
-            torch.stack(new_c1c_k), torch.stack(new_c1c_v),
-            torch.stack(new_c2c_k), torch.stack(new_c2c_v),
+            p_now,
+            p_future,
+            vad1,
+            vad2,
+            torch.stack(new_ar1_k_list),
+            torch.stack(new_ar1_v_list),
+            torch.stack(new_ar2_k_list),
+            torch.stack(new_ar2_v_list),
+            torch.stack(new_c1_k),
+            torch.stack(new_c1_v),
+            torch.stack(new_c2_k),
+            torch.stack(new_c2_v),
+            torch.stack(new_c1c_k),
+            torch.stack(new_c1c_v),
+            torch.stack(new_c2c_k),
+            torch.stack(new_c2c_v),
         )
 
 
@@ -398,26 +439,55 @@ def export_transformer_onnx(
     dummy_cross_v = torch.zeros(n_cross, 1, num_heads, 0, head_dim)
 
     dummy_inputs = (
-        dummy_x, dummy_x,
-        dummy_ar_k, dummy_ar_v,
-        dummy_ar_k, dummy_ar_v,
-        dummy_cross_k, dummy_cross_v,
-        dummy_cross_k, dummy_cross_v,
-        dummy_cross_k, dummy_cross_v,
-        dummy_cross_k, dummy_cross_v,
+        dummy_x,
+        dummy_x,
+        dummy_ar_k,
+        dummy_ar_v,
+        dummy_ar_k,
+        dummy_ar_v,
+        dummy_cross_k,
+        dummy_cross_v,
+        dummy_cross_k,
+        dummy_cross_v,
+        dummy_cross_k,
+        dummy_cross_v,
+        dummy_cross_k,
+        dummy_cross_v,
     )
 
     input_names = [
-        "x1", "x2",
-        "ar1_k", "ar1_v", "ar2_k", "ar2_v",
-        "cross1_k", "cross1_v", "cross2_k", "cross2_v",
-        "cross1_c_k", "cross1_c_v", "cross2_c_k", "cross2_c_v",
+        "x1",
+        "x2",
+        "ar1_k",
+        "ar1_v",
+        "ar2_k",
+        "ar2_v",
+        "cross1_k",
+        "cross1_v",
+        "cross2_k",
+        "cross2_v",
+        "cross1_c_k",
+        "cross1_c_v",
+        "cross2_c_k",
+        "cross2_c_v",
     ]
     output_names = [
-        "p_now", "p_future", "vad1", "vad2",
-        "out_ar1_k", "out_ar1_v", "out_ar2_k", "out_ar2_v",
-        "out_cross1_k", "out_cross1_v", "out_cross2_k", "out_cross2_v",
-        "out_cross1_c_k", "out_cross1_c_v", "out_cross2_c_k", "out_cross2_c_v",
+        "p_now",
+        "p_future",
+        "vad1",
+        "vad2",
+        "out_ar1_k",
+        "out_ar1_v",
+        "out_ar2_k",
+        "out_ar2_v",
+        "out_cross1_k",
+        "out_cross1_v",
+        "out_cross2_k",
+        "out_cross2_v",
+        "out_cross1_c_k",
+        "out_cross1_c_v",
+        "out_cross2_c_k",
+        "out_cross2_c_v",
     ]
 
     dynamic_axes: dict[str, dict[int, str]] = {
@@ -463,8 +533,7 @@ def main() -> None:
     # Load MaAI model
     from maai import Maai, MaaiInput
 
-    print(f"Loading MaAI (lang={args.lang}, frame_rate={args.frame_rate}, "
-          f"context_len={args.context_len})...")
+    print(f"Loading MaAI (lang={args.lang}, frame_rate={args.frame_rate}, context_len={args.context_len})...")
     ch1 = MaaiInput.Chunk()
     ch2 = MaaiInput.Chunk()
     maai = Maai(

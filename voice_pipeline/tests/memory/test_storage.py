@@ -355,11 +355,9 @@ class TestSQLiteMemoryStorage(_StorageTests):
         self._db_path = str(tmp_path / "test_memory.db")  # type: ignore[operator]
 
     def make_storage(self) -> IMemoryStorage:
-        from voice_pipeline.core.config import MemoryConfig
         from voice_pipeline.memory.storage import SQLiteMemoryStorage
 
-        config = MemoryConfig(db_path=self._db_path)
-        return SQLiteMemoryStorage(config)
+        return SQLiteMemoryStorage(self._db_path)
 
 
 class TestSQLiteMemoryStoragePersistence:
@@ -370,10 +368,9 @@ class TestSQLiteMemoryStoragePersistence:
         self._db_path = str(tmp_path / "test_memory.db")  # type: ignore[operator]
 
     def _make_storage(self) -> IMemoryStorage:
-        from voice_pipeline.core.config import MemoryConfig
         from voice_pipeline.memory.storage import SQLiteMemoryStorage
 
-        return SQLiteMemoryStorage(MemoryConfig(db_path=self._db_path))
+        return SQLiteMemoryStorage(self._db_path)
 
     def test_episode_persists(self) -> None:
         s1 = self._make_storage()

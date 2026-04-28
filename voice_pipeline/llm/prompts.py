@@ -7,9 +7,3 @@ Keep responses to 1-3 sentences.
 
 If memories were relevant, append [MEMORIES: M1, M2] at the very end.\
 """
-
-HISTORY_SUMMARIZATION_PROMPT = """\
-Summarize the following conversation turns into 2-3 concise sentences.
-Preserve key topics, decisions, and any personal details the user shared.
-Write in the same language as the conversation.\
-"""

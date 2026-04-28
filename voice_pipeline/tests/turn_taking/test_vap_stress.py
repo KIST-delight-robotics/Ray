@@ -16,8 +16,8 @@ import time
 
 import pytest
 
-from voice_pipeline.core.config import AudioConfig, TTSConfig, VAPConfig
 from voice_pipeline.core.types import VAPResult
+from voice_pipeline.tts.tts import OpenAITTS
 
 pytestmark = pytest.mark.requires_model
 
@@ -54,20 +54,16 @@ def model_path() -> str:
 
 @pytest.fixture(scope="module")
 def wrapper(model_path: str):
-    """Create a VAPWrapper with real model (shared across module tests)."""
-    vap_cfg = VAPConfig(
-        model_path=model_path,
-        context_sec=5.0,
-        step_sec=0.1,
-        tt_time=0.5,
-        device="cpu",
-    )
-    audio_cfg = AudioConfig(sample_rate=_SAMPLE_RATE, channels=1, frame_duration_ms=30)
-    tts_cfg = TTSConfig(output_sample_rate=24000)
+    """Create a VAPWrapper with real model (shared across module tests).
 
+    Class vars are mutated module-wide for the stress test session.
+    """
     from voice_pipeline.turn_taking.vap import VAPWrapper
 
-    return VAPWrapper(vap_cfg, audio_cfg, tts_cfg)
+    VAPWrapper._MODEL_PATH = model_path
+    VAPWrapper._CONTEXT_SEC = 5.0
+    VAPWrapper._STEP_SEC = 0.1
+    return VAPWrapper(OpenAITTS.OUTPUT_SAMPLE_RATE)
 
 
 # ---------------------------------------------------------------------------

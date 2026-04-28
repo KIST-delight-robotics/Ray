@@ -16,11 +16,13 @@ from typing import Any
 
 import numpy as np
 
-from voice_pipeline.core.config import MemoryConfig
 from voice_pipeline.core.interfaces import IMemoryStorage
 from voice_pipeline.memory.types import Episode, Profile
 
 logger = logging.getLogger("voice_pipeline.memory")
+
+_DEFAULT_DIMENSION = 384  # 기본 embedding 차원 (all-MiniLM-L6-v2 기준)
+_DEFAULT_DB_PATH = "data/ray.db"  # 기본 SQLite 파일 경로 (History/Trace와 공유)
 
 
 class SQLiteMemoryStorage(IMemoryStorage):
@@ -35,11 +37,11 @@ class SQLiteMemoryStorage(IMemoryStorage):
     thread, write-executor thread) do not corrupt the connection state.
     """
 
-    def __init__(self, config: MemoryConfig) -> None:
-        self._db_path = config.db_path
-        self._dimension = config.embedding_dimension
+    def __init__(self, db_path: str, *, dimension: int = _DEFAULT_DIMENSION) -> None:
+        self._db_path = db_path
+        self._dimension = dimension
         self._lock = threading.Lock()
-        self._conn = self._open_db(config.db_path)
+        self._conn = self._open_db(db_path)
         self._create_tables()
         self._migrate()
 
@@ -182,11 +184,7 @@ class SQLiteMemoryStorage(IMemoryStorage):
 
     def add_episode(self, episode: Episode) -> int | None:
         """Persist a new episode."""
-        embedding_blob = (
-            episode.embedding.astype(np.float32).tobytes()
-            if episode.embedding is not None
-            else None
-        )
+        embedding_blob = episode.embedding.astype(np.float32).tobytes() if episode.embedding is not None else None
         with self._lock:
             try:
                 cursor = self._conn.execute(
@@ -300,8 +298,7 @@ class SQLiteMemoryStorage(IMemoryStorage):
         with self._lock:
             try:
                 rows = self._conn.execute(
-                    "SELECT rowid, rank FROM episodes_fts "
-                    "WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?",
+                    "SELECT rowid, rank FROM episodes_fts WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?",
                     (safe_query, top_k),
                 ).fetchall()
                 # FTS5 rank is negative (more negative = better). Negate for
@@ -317,9 +314,7 @@ class SQLiteMemoryStorage(IMemoryStorage):
         """Load all user profile slots."""
         with self._lock:
             try:
-                rows = self._conn.execute(
-                    "SELECT id, topic, sub_topic, content, updated_at FROM profiles"
-                ).fetchall()
+                rows = self._conn.execute("SELECT id, topic, sub_topic, content, updated_at FROM profiles").fetchall()
                 return [
                     Profile(
                         id=row[0],
@@ -340,8 +335,7 @@ class SQLiteMemoryStorage(IMemoryStorage):
             try:
                 if profile.id is not None:
                     self._conn.execute(
-                        "UPDATE profiles SET topic = ?, sub_topic = ?, "
-                        "content = ?, updated_at = ? WHERE id = ?",
+                        "UPDATE profiles SET topic = ?, sub_topic = ?, content = ?, updated_at = ? WHERE id = ?",
                         (
                             profile.topic,
                             profile.sub_topic,
@@ -354,8 +348,7 @@ class SQLiteMemoryStorage(IMemoryStorage):
                     return profile.id
                 else:
                     cursor = self._conn.execute(
-                        "INSERT INTO profiles (topic, sub_topic, content, updated_at) "
-                        "VALUES (?, ?, ?, ?)",
+                        "INSERT INTO profiles (topic, sub_topic, content, updated_at) VALUES (?, ?, ?, ?)",
                         (profile.topic, profile.sub_topic, profile.content, profile.updated_at),
                     )
                     self._conn.commit()
@@ -375,15 +368,12 @@ class SQLiteMemoryStorage(IMemoryStorage):
 
     # --- Utterance ---
 
-    def add_utterance(
-        self, session_id: str, role: str, text: str, timestamp: str, token_count: int = 0
-    ) -> None:
+    def add_utterance(self, session_id: str, role: str, text: str, timestamp: str, token_count: int = 0) -> None:
         """Store a conversation utterance."""
         with self._lock:
             try:
                 self._conn.execute(
-                    "INSERT INTO utterances (session_id, role, text, timestamp, token_count) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO utterances (session_id, role, text, timestamp, token_count) VALUES (?, ?, ?, ?, ?)",
                     (session_id, role, text, timestamp, token_count),
                 )
                 self._conn.commit()
@@ -401,9 +391,7 @@ class SQLiteMemoryStorage(IMemoryStorage):
                 ).fetchall()
                 return [(row[0], row[1], row[2], row[3]) for row in rows]
             except sqlite3.Error:
-                logger.warning(
-                    "Failed to get utterances for session %s", session_id, exc_info=True
-                )
+                logger.warning("Failed to get utterances for session %s", session_id, exc_info=True)
                 return []
 
     # --- Session processing status ---
@@ -416,8 +404,7 @@ class SQLiteMemoryStorage(IMemoryStorage):
 
                 now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO processed_sessions (session_id, processed_at) "
-                    "VALUES (?, ?)",
+                    "INSERT OR IGNORE INTO processed_sessions (session_id, processed_at) VALUES (?, ?)",
                     (session_id, now),
                 )
                 self._conn.commit()
@@ -432,8 +419,7 @@ class SQLiteMemoryStorage(IMemoryStorage):
             try:
                 placeholders = ",".join("?" for _ in session_ids)
                 rows = self._conn.execute(
-                    f"SELECT session_id FROM processed_sessions "
-                    f"WHERE session_id IN ({placeholders})",
+                    f"SELECT session_id FROM processed_sessions WHERE session_id IN ({placeholders})",
                     session_ids,
                 ).fetchall()
                 return {row[0] for row in rows}
@@ -447,9 +433,7 @@ class SQLiteMemoryStorage(IMemoryStorage):
         """Load all episode embeddings for vector index initialization."""
         with self._lock:
             try:
-                rows = self._conn.execute(
-                    "SELECT id, embedding FROM episodes WHERE embedding IS NOT NULL"
-                ).fetchall()
+                rows = self._conn.execute("SELECT id, embedding FROM episodes WHERE embedding IS NOT NULL").fetchall()
                 if not rows:
                     return [], np.empty((0, self._dimension), dtype=np.float32)
                 expected_bytes = self._dimension * 4  # float32
@@ -518,7 +502,7 @@ class InMemoryMemoryStorage(IMemoryStorage):
     by case-insensitive word overlap counting.
     """
 
-    def __init__(self, dimension: int = 384) -> None:
+    def __init__(self, dimension: int = _DEFAULT_DIMENSION) -> None:
         self._dimension = dimension
         self._episodes: dict[int, Episode] = {}
         self._profiles: dict[int, Profile] = {}
@@ -661,9 +645,7 @@ class InMemoryMemoryStorage(IMemoryStorage):
 
     # --- Utterance ---
 
-    def add_utterance(
-        self, session_id: str, role: str, text: str, timestamp: str, token_count: int = 0
-    ) -> None:
+    def add_utterance(self, session_id: str, role: str, text: str, timestamp: str, token_count: int = 0) -> None:
         """Store a conversation utterance."""
         self._utterances.append(
             {

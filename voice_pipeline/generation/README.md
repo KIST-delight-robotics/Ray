@@ -49,11 +49,29 @@ if speech_generator.stream_done:
 - Limitation: cannot interrupt blocking API calls (`next()` on LLM/TTS iterators). Bounded by API timeout configs.
 - `max_workers=2` (default) ensures new runs start immediately while cancelled runs drain.
 
-## Config
+## `SpeechGenerator.__init__` 인자
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `max_workers` | `2` | Thread pool size. 2 prevents new-run delay when cancelled run is blocked on API I/O. |
+| 인자 | Default | 의미 |
+| --- | --- | --- |
+| `context_builder` | — | LLM context 조립 모듈 |
+| `llm` | — | LLM 인터페이스 |
+| `tts` | — | TTS 인터페이스 |
+| `executor` | `None` | 백그라운드 파이프라인 executor. `None`이면 `MAX_WORKERS` 기반 내부 생성. 외부 주입 시 shutdown()은 닫지 않음 |
+| `retriever` | `None` | 메모리 retriever (optional) |
+| `history` | `None` | retriever query 조립용 대화 이력 |
+| `exclude_session_ids` | `None` | retriever가 제외할 세션 ID 집합 |
+
+## 클래스 변수
+
+| 변수 | 값 | 의미 |
+| --- | --- | --- |
+| `MAX_WORKERS` | `2` | 백그라운드 파이프라인 스레드 풀 크기 (외부 executor 공유용) |
+| `_PIPELINE_MODE` | `"full"` | TTS 파이프라인 모드 (`"full"` / `"sentence"`) |
+| `_QUERY_CONTEXT_TURNS` | `3` | 메모리 검색 query에 포함할 최근 history turn 수 |
+| `_MIN_FLUSH_WORDS` | `4` | sentence 모드 TTS flush 최소 단어 수 |
+| `_TTS_EXECUTOR_WORKERS` | `2` | sentence 모드 TTS 동시 합성 워커 수 |
+| `_CONSUMER_JOIN_TIMEOUT_SEC` | `120.0` | sentence consumer · 문장 TTS future 대기 상한 (초) |
+| `_CANCEL_POLL_INTERVAL_SEC` | `0.1` | consumer cancel_event 재확인 poll 주기 (초) |
 
 ## Module Structure
 

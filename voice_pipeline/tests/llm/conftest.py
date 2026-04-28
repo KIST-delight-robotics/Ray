@@ -8,8 +8,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from voice_pipeline.core.config import LLMConfig
-
 # ---------------------------------------------------------------------------
 # Unit test helpers
 # ---------------------------------------------------------------------------
@@ -97,12 +95,6 @@ def create_mock_client(
     mock_stream.close = MagicMock()
     client.responses.create.return_value = mock_stream
     return client
-
-
-@pytest.fixture
-def llm_config() -> LLMConfig:
-    """Default LLMConfig for tests."""
-    return LLMConfig()
 
 
 # ---------------------------------------------------------------------------

@@ -24,18 +24,10 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 
+from voice_pipeline.audio.constants import FRAME_SIZE_BYTES
 from voice_pipeline.context.context_builder import ContextBuilder
-from voice_pipeline.core.config import (
-    AudioConfig,
-    ConversationHistoryConfig,
-    MemoryConfig,
-    OrchestratorConfig,
-    SessionConfig,
-    SpeechGeneratorConfig,
-    TTSConfig,
-    TurnDetectorConfig,
-)
 from voice_pipeline.core.interfaces import (
     IASR,
     ILLM,
@@ -69,6 +61,7 @@ from voice_pipeline.memory.types import Episode
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.orchestrator.orchestrator import Orchestrator
 from voice_pipeline.session.session_manager import SessionComponents, SessionManager
+from voice_pipeline.tts.tts import OpenAITTS
 from voice_pipeline.tts.utterance_truncator import TimestampTruncator
 from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
@@ -77,41 +70,56 @@ from voice_pipeline.turn_taking.turn_detector import TurnDetector
 # Configs tuned for fast deterministic testing
 # ---------------------------------------------------------------------------
 
-AUDIO_CONFIG = AudioConfig(sample_rate=16000, channels=1, frame_duration_ms=30, sample_width=2)
-TTS_CONFIG = TTSConfig(output_sample_rate=24000)
-HISTORY_CONFIG = ConversationHistoryConfig(max_context_tokens=4096)
-GENERATOR_CONFIG = SpeechGeneratorConfig(max_workers=2)
+TTS_SAMPLE_RATE = OpenAITTS.OUTPUT_SAMPLE_RATE
 
-TURN_DETECTOR_CONFIG = TurnDetectorConfig(
-    vap_user_threshold=0.5,
-    min_gap_time_sec=0.03,  # 1 frame → instant turn shift
-    turngpt_thresholds=((0.3, 0.03), (0.0, 0.06)),
-    interrupt_user_threshold=0.5,
-    prepare_turngpt_threshold=0.2,
-    prepare_timeout_sec=0.06,
-)
 
-ORCHESTRATOR_CONFIG = OrchestratorConfig(
-    exit_keywords=("goodbye",),
-    session_timeout_sec=5.0,
-    frame_timeout_sec=0.05,
-    stop_pending_timeout_sec=2.0,
-)
+@pytest.fixture(autouse=True)
+def _fast_turn_detector(monkeypatch):
+    """Override TurnDetector class vars for fast deterministic turn shifts.
 
-SESSION_CONFIG = SessionConfig(
-    audio_queue_size=300,
-    greeting_timeout_sec=2.0,
-    farewell_timeout_sec=2.0,
-    frame_timeout_sec=0.05,
-)
+    autouse for this module. Auto-reverts via monkeypatch so test_turn_detector.py
+    (which expects defaults) isn't polluted.
+    """
+    monkeypatch.setattr(TurnDetector, "_MIN_GAP_TIME_SEC", 0.03)  # 1 frame → instant turn shift
+    monkeypatch.setattr(TurnDetector, "_TURNGPT_THRESHOLDS", ((0.3, 0.03), (0.0, 0.06)))
+    monkeypatch.setattr(TurnDetector, "_PREPARE_TIMEOUT_SEC", 0.06)
+
+
+@pytest.fixture(autouse=True)
+def _fast_session(monkeypatch):
+    """Override SessionManager class vars for fast deterministic session transitions.
+
+    autouse for this module. Auto-reverts via monkeypatch so test_session_manager.py
+    (which sets its own values per test) isn't polluted.
+    """
+    monkeypatch.setattr(SessionManager, "_GREETING_TIMEOUT_SEC", 2.0)
+    monkeypatch.setattr(SessionManager, "_FAREWELL_TIMEOUT_SEC", 2.0)
+    monkeypatch.setattr(SessionManager, "_FRAME_TIMEOUT_SEC", 0.05)
+
+
+@pytest.fixture(autouse=True)
+def _orchestrator_timeouts_autouse(monkeypatch):
+    """Override Orchestrator class vars for fast deterministic integration tests.
+
+    autouse for this module. Auto-reverts via monkeypatch.
+    """
+    monkeypatch.setattr(Orchestrator, "_EXIT_KEYWORDS", ("goodbye",))
+    monkeypatch.setattr(Orchestrator, "_SESSION_TIMEOUT_SEC", 5.0)
+    monkeypatch.setattr(Orchestrator, "_FRAME_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr(Orchestrator, "_STOP_PENDING_TIMEOUT_SEC", 2.0)
+
+
+@pytest.fixture(autouse=True)
+def _memory_retriever_autouse(monkeypatch):
+    """Override MemoryRetriever tuning for smaller deterministic test scope."""
+    monkeypatch.setattr(MemoryRetriever, "_MAX_MEMORIES", 5)
+    monkeypatch.setattr(MemoryRetriever, "_MIN_NEW_SLOTS", 2)
+
 
 GREETING_AUDIO_PATH = "assets/audio/greeting.wav"
 FAREWELL_AUDIO_PATH = "assets/audio/farewell.wav"
 
-FRAME_BYTES = (
-    AUDIO_CONFIG.sample_rate * AUDIO_CONFIG.frame_duration_ms * AUDIO_CONFIG.sample_width // 1000
-)
-SILENCE_FRAME: AudioFrame = b"\x00" * FRAME_BYTES
+SILENCE_FRAME: AudioFrame = b"\x00" * FRAME_SIZE_BYTES
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +183,9 @@ class FakeLLM(ILLM):
 class FakeTTS(ITTS):
     """TTS mock that returns a TTSStream with fake audio and timestamps."""
 
+    output_sample_rate: int = TTS_SAMPLE_RATE
+    voice_id: str = "fake|test"
+
     def __init__(self, chunk_size: int = 4800) -> None:
         # 100ms of 24kHz 16-bit mono audio = 4800 bytes
         self._chunk_size = chunk_size
@@ -200,9 +211,7 @@ class FakeTTS(ITTS):
 class FakeVAP(IVAP):
     """VAP mock: always indicates user is not speaking, robot-favoring probs."""
 
-    def feed_audio(
-        self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None
-    ) -> VAPResult:
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
         return VAPResult(p_now=0.2, p_fut=0.2, user_is_speaking=False)
 
     def reset(self) -> None:
@@ -215,9 +224,7 @@ class InterruptableVAP(IVAP):
     def __init__(self) -> None:
         self.interrupting = False
 
-    def feed_audio(
-        self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None
-    ) -> VAPResult:
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
         if self.interrupting:
             return VAPResult(p_now=0.8, p_fut=0.8, user_is_speaking=True)
         return VAPResult(p_now=0.2, p_fut=0.2, user_is_speaking=False)
@@ -340,39 +347,34 @@ def _make_orchestrator(
     asr: IASR,
     bridge: ScriptedBridge,
     led: FakeLED,
+    audio_queue: queue.Queue[AudioFrame],
     *,
     llm: ILLM | None = None,
     tts: ITTS | None = None,
     vap: IVAP | None = None,
     turngpt: ITurnGPT | None = None,
     executor: ThreadPoolExecutor | None = None,
-    orchestrator_config: OrchestratorConfig | None = None,
-    turn_detector_config: TurnDetectorConfig | None = None,
 ) -> tuple[Orchestrator, ConversationHistory, SpeechGenerator, TurnDetector]:
     """Wire up a full Orchestrator with real internal modules."""
     _vap = vap or FakeVAP()
     _turngpt = turngpt or FakeTurnGPT()
     _llm = llm or FakeLLM()
     _tts = tts or FakeTTS()
-    _executor = executor or ThreadPoolExecutor(max_workers=GENERATOR_CONFIG.max_workers)
+    _executor = executor or ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
 
     storage = MemoryStorageBackend()
     history = ConversationHistory(storage, _simple_token_counter)
     history.new_session("test-session")
 
-    context_builder = ContextBuilder(
-        history, HISTORY_CONFIG, DEFAULT_SYSTEM_PROMPT, _simple_token_counter
-    )
+    context_builder = ContextBuilder(history, DEFAULT_SYSTEM_PROMPT, _simple_token_counter)
     _turngpt_adapter = SyncTurnGPTAdapter(_turngpt)
     _embedder = MagicMock(spec=IEmbedder)
     turn_detector = TurnDetector(
         _vap,
         _turngpt_adapter,
         _embedder,
-        turn_detector_config or TURN_DETECTOR_CONFIG,
-        AUDIO_CONFIG,
     )
-    generator = SpeechGenerator(context_builder, _llm, _tts, GENERATOR_CONFIG, _executor)
+    generator = SpeechGenerator(context_builder, _llm, _tts, _executor)
     truncator = TimestampTruncator()
 
     orchestrator = Orchestrator(
@@ -383,9 +385,8 @@ def _make_orchestrator(
         history=history,
         truncator=truncator,
         led=led,
-        config=orchestrator_config or ORCHESTRATOR_CONFIG,
-        tts_config=TTS_CONFIG,
-        audio_config=AUDIO_CONFIG,
+        audio_queue=audio_queue,
+        tts_sample_rate=TTS_SAMPLE_RATE,
     )
     return orchestrator, history, generator, turn_detector
 
@@ -427,14 +428,14 @@ class TestSingleTurnConversation:
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        orchestrator, history, generator, _ = _make_orchestrator(asr, bridge, led)
-
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        orchestrator, history, generator, _ = _make_orchestrator(asr, bridge, led, audio_queue)
+
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -480,14 +481,14 @@ class TestSingleTurnConversation:
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        orchestrator, _, generator, _ = _make_orchestrator(asr, bridge, led, llm=CapturingLLM())
-
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        orchestrator, _, generator, _ = _make_orchestrator(asr, bridge, led, audio_queue, llm=CapturingLLM())
+
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -522,14 +523,14 @@ class TestMultiTurnConversation:
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        orchestrator, history, generator, _ = _make_orchestrator(asr, bridge, led, llm=llm)
-
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        orchestrator, history, generator, _ = _make_orchestrator(asr, bridge, led, audio_queue, llm=llm)
+
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -568,14 +569,14 @@ class TestMultiTurnConversation:
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        orchestrator, _, generator, _ = _make_orchestrator(asr, bridge, led, llm=CapturingLLM())
-
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        orchestrator, _, generator, _ = _make_orchestrator(asr, bridge, led, audio_queue, llm=CapturingLLM())
+
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -605,7 +606,7 @@ class TestFullSessionLifecycle:
         wakeword = FakeWakeword(trigger_after=1)
         audio_input = FakeAudioInput()
 
-        executor = ThreadPoolExecutor(max_workers=2)
+        executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
 
         def session_factory() -> SessionComponents:
             _, history, generator, _ = (
@@ -619,21 +620,15 @@ class TestFullSessionLifecycle:
             history = ConversationHistory(storage, _simple_token_counter)
             vap = FakeVAP()
             turngpt = FakeTurnGPT()
-            context_builder = ContextBuilder(
-                history, HISTORY_CONFIG, DEFAULT_SYSTEM_PROMPT, _simple_token_counter
-            )
+            context_builder = ContextBuilder(history, DEFAULT_SYSTEM_PROMPT, _simple_token_counter)
             turngpt_adapter = SyncTurnGPTAdapter(turngpt)
             _emb = MagicMock(spec=IEmbedder)
             turn_detector = TurnDetector(
                 vap,
                 turngpt_adapter,
                 _emb,
-                TURN_DETECTOR_CONFIG,
-                AUDIO_CONFIG,
             )
-            generator = SpeechGenerator(
-                context_builder, FakeLLM(), FakeTTS(), GENERATOR_CONFIG, executor
-            )
+            generator = SpeechGenerator(context_builder, FakeLLM(), FakeTTS(), executor)
             truncator = TimestampTruncator()
 
             orchestrator = Orchestrator(
@@ -644,17 +639,14 @@ class TestFullSessionLifecycle:
                 history=history,
                 truncator=truncator,
                 led=led,
-                config=ORCHESTRATOR_CONFIG,
-                tts_config=TTS_CONFIG,
-                audio_config=AUDIO_CONFIG,
+                audio_queue=audio_queue,
+                tts_sample_rate=TTS_SAMPLE_RATE,
             )
             import uuid
 
-            return SessionComponents(
-                orchestrator=orchestrator, history=history, session_id=str(uuid.uuid4())
-            )
+            return SessionComponents(orchestrator=orchestrator, history=history, session_id=str(uuid.uuid4()))
 
-        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=SESSION_CONFIG.audio_queue_size)
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=SessionManager.AUDIO_QUEUE_SIZE)
 
         sm = SessionManager(
             audio_input=audio_input,
@@ -662,7 +654,6 @@ class TestFullSessionLifecycle:
             session_factory=session_factory,
             cpp_bridge=bridge,
             led=led,
-            config=SESSION_CONFIG,
             greeting_audio_path=GREETING_AUDIO_PATH,
             farewell_audio_path=FAREWELL_AUDIO_PATH,
             audio_queue=audio_queue,
@@ -727,6 +718,9 @@ class TestBargeIn:
 
         # Slow TTS: many chunks so streaming takes longer
         class SlowTTS(ITTS):
+            output_sample_rate: int = TTS_SAMPLE_RATE
+            voice_id: str = "fake|slow"
+
             def synthesize(self, text: str) -> TTSStream:
                 chunk = b"\x00" * 4800
 
@@ -737,9 +731,7 @@ class TestBargeIn:
                 words = text.split()
 
                 def ts_fn() -> tuple[WordTimestamp, ...]:
-                    return tuple(
-                        WordTimestamp(w, i * 0.1, (i + 1) * 0.1) for i, w in enumerate(words)
-                    )
+                    return tuple(WordTimestamp(w, i * 0.1, (i + 1) * 0.1) for i, w in enumerate(words))
 
                 return TTSStream(gen(), timestamps_fn=ts_fn)
 
@@ -766,16 +758,16 @@ class TestBargeIn:
 
         int_bridge = InterruptBridge(vap)
 
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         orchestrator, history, generator, _ = _make_orchestrator(
-            asr, int_bridge, led, vap=vap, tts=SlowTTS()
+            asr, int_bridge, led, audio_queue, vap=vap, tts=SlowTTS()
         )
 
-        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -806,30 +798,23 @@ class TestBargeIn:
 class TestSessionTimeout:
     """Orchestrator exits on session timeout when user is silent."""
 
-    def test_timeout_exits_cleanly(self) -> None:
+    def test_timeout_exits_cleanly(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No user speech → session timeout → clean exit."""
         asr = ScriptedASR([])  # Never returns text
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        timeout_config = OrchestratorConfig(
-            exit_keywords=("goodbye",),
-            session_timeout_sec=0.2,
-            frame_timeout_sec=0.05,
-            stop_pending_timeout_sec=2.0,
-        )
-
-        orchestrator, history, generator, _ = _make_orchestrator(
-            asr, bridge, led, orchestrator_config=timeout_config
-        )
+        monkeypatch.setattr(Orchestrator, "_SESSION_TIMEOUT_SEC", 0.2)
 
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        orchestrator, history, generator, _ = _make_orchestrator(asr, bridge, led, audio_queue)
+
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         start = time.monotonic()
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -856,9 +841,9 @@ class TestExternalStop:
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        orchestrator, _, generator, _ = _make_orchestrator(asr, bridge, led)
-
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        orchestrator, _, generator, _ = _make_orchestrator(asr, bridge, led, audio_queue)
+
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
@@ -871,7 +856,7 @@ class TestExternalStop:
         stopper.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -914,16 +899,14 @@ class TestGeneratorFailure:
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        orchestrator, history, generator, _ = _make_orchestrator(
-            asr, bridge, led, llm=EmptyThenRealLLM()
-        )
-
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        orchestrator, history, generator, _ = _make_orchestrator(asr, bridge, led, audio_queue, llm=EmptyThenRealLLM())
+
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -968,6 +951,7 @@ def _make_memory_orchestrator(
     asr: IASR,
     bridge: ScriptedBridge,
     led: FakeLED,
+    audio_queue: queue.Queue[AudioFrame],
     *,
     llm: ILLM | None = None,
     tts: ITTS | None = None,
@@ -987,7 +971,7 @@ def _make_memory_orchestrator(
 
     _llm = llm or FakeLLM()
     _tts = tts or FakeTTS()
-    executor = ThreadPoolExecutor(max_workers=GENERATOR_CONFIG.max_workers)
+    executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
 
     # Conversation history
     conv_storage = MemoryStorageBackend()
@@ -995,7 +979,6 @@ def _make_memory_orchestrator(
     history.new_session(session_id)
 
     # Memory infra
-    memory_config = MemoryConfig(embedding_dimension=_DIM, max_memories=5, min_new_slots=2)
     memory_storage = InMemoryMemoryStorage(dimension=_DIM)
     vector_index = NumpyVectorIndex()
     embedder = _DeterministicEmbedder()
@@ -1010,19 +993,16 @@ def _make_memory_orchestrator(
             memory_storage.update_episode_embedding(eid, emb)
             vector_index.add(eid, emb)
 
-    retriever = MemoryRetriever(memory_storage, vector_index, embedder, memory_config)
+    retriever = MemoryRetriever(memory_storage, vector_index, embedder)
 
     # Context builder
-    context_builder = ContextBuilder(
-        history, HISTORY_CONFIG, DEFAULT_SYSTEM_PROMPT, _simple_token_counter
-    )
+    context_builder = ContextBuilder(history, DEFAULT_SYSTEM_PROMPT, _simple_token_counter)
 
     # Speech generator with memory
     generator = SpeechGenerator(
         context_builder,
         _llm,
         _tts,
-        GENERATOR_CONFIG,
         executor,
         retriever=retriever,
         history=history,
@@ -1034,9 +1014,7 @@ def _make_memory_orchestrator(
     turngpt = FakeTurnGPT()
     turngpt_adapter = SyncTurnGPTAdapter(turngpt)
     _embedder = MagicMock(spec=IEmbedder)
-    turn_detector = TurnDetector(
-        vap, turngpt_adapter, _embedder, TURN_DETECTOR_CONFIG, AUDIO_CONFIG
-    )
+    turn_detector = TurnDetector(vap, turngpt_adapter, _embedder)
 
     truncator = TimestampTruncator()
 
@@ -1048,9 +1026,8 @@ def _make_memory_orchestrator(
         history=history,
         truncator=truncator,
         led=led,
-        config=ORCHESTRATOR_CONFIG,
-        tts_config=TTS_CONFIG,
-        audio_config=AUDIO_CONFIG,
+        audio_queue=audio_queue,
+        tts_sample_rate=TTS_SAMPLE_RATE,
         memory_storage=memory_storage,
         session_id=session_id,
         token_counter=_simple_token_counter,
@@ -1072,16 +1049,14 @@ class TestMemoryUtteranceStorage:
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        orchestrator, history, generator, memory_storage, _ = _make_memory_orchestrator(
-            asr, bridge, led
-        )
-
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        orchestrator, history, generator, memory_storage, _ = _make_memory_orchestrator(asr, bridge, led, audio_queue)
+
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -1103,14 +1078,14 @@ class TestMemoryUtteranceStorage:
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        orchestrator, _, generator, memory_storage, _ = _make_memory_orchestrator(asr, bridge, led)
-
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        orchestrator, _, generator, memory_storage, _ = _make_memory_orchestrator(asr, bridge, led, audio_queue)
+
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -1163,16 +1138,16 @@ class TestMemoryRetrievalInPipeline:
         bridge = ScriptedBridge()
         led = FakeLED()
 
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         orchestrator, _, generator, _, _ = _make_memory_orchestrator(
-            asr, bridge, led, llm=CapturingLLM(), pre_episodes=pre_episodes
+            asr, bridge, led, audio_queue, llm=CapturingLLM(), pre_episodes=pre_episodes
         )
 
-        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -1209,16 +1184,14 @@ class TestMemoryRetrievalInPipeline:
         bridge = ScriptedBridge()
         led = FakeLED()
 
-        orchestrator, _, generator, _, _ = _make_memory_orchestrator(
-            asr, bridge, led, llm=CapturingLLM()
-        )
-
         audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
+        orchestrator, _, generator, _, _ = _make_memory_orchestrator(asr, bridge, led, audio_queue, llm=CapturingLLM())
+
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -1268,16 +1241,16 @@ class TestMemoryCitationInPipeline:
         bridge = ScriptedBridge()
         led = FakeLED()
 
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         orchestrator, history, generator, _, retriever = _make_memory_orchestrator(
-            asr, bridge, led, llm=CitingLLM(), pre_episodes=pre_episodes
+            asr, bridge, led, audio_queue, llm=CitingLLM(), pre_episodes=pre_episodes
         )
 
-        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -1320,16 +1293,16 @@ class TestMemoryCitationInPipeline:
         bridge = ScriptedBridge()
         led = FakeLED()
 
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         orchestrator, _, generator, _, retriever = _make_memory_orchestrator(
-            asr, bridge, led, llm=CitingLLM(), pre_episodes=pre_episodes
+            asr, bridge, led, audio_queue, llm=CitingLLM(), pre_episodes=pre_episodes
         )
 
-        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()
@@ -1361,7 +1334,7 @@ class TestMemorySessionEnd:
         wakeword = FakeWakeword(trigger_after=1)
         audio_input = FakeAudioInput()
 
-        executor = ThreadPoolExecutor(max_workers=2)
+        executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
 
         def session_factory() -> SessionComponents:
             import uuid
@@ -1372,16 +1345,12 @@ class TestMemorySessionEnd:
             hist = ConversationHistory(conv_storage, _simple_token_counter)
             hist.new_session(sid)
 
-            context_builder = ContextBuilder(
-                hist, HISTORY_CONFIG, DEFAULT_SYSTEM_PROMPT, _simple_token_counter
-            )
+            context_builder = ContextBuilder(hist, DEFAULT_SYSTEM_PROMPT, _simple_token_counter)
             vap = FakeVAP()
             turngpt_adapter = SyncTurnGPTAdapter(FakeTurnGPT())
             _emb = MagicMock(spec=IEmbedder)
-            td = TurnDetector(vap, turngpt_adapter, _emb, TURN_DETECTOR_CONFIG, AUDIO_CONFIG)
-            gen = SpeechGenerator(
-                context_builder, FakeLLM(), FakeTTS(), GENERATOR_CONFIG, executor
-            )
+            td = TurnDetector(vap, turngpt_adapter, _emb)
+            gen = SpeechGenerator(context_builder, FakeLLM(), FakeTTS(), executor)
             trunc = TimestampTruncator()
 
             orch = Orchestrator(
@@ -1392,13 +1361,12 @@ class TestMemorySessionEnd:
                 history=hist,
                 truncator=trunc,
                 led=led,
-                config=ORCHESTRATOR_CONFIG,
-                tts_config=TTS_CONFIG,
-                audio_config=AUDIO_CONFIG,
+                audio_queue=audio_queue,
+                tts_sample_rate=TTS_SAMPLE_RATE,
             )
             return SessionComponents(orchestrator=orch, history=hist, session_id=sid)
 
-        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=SESSION_CONFIG.audio_queue_size)
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=SessionManager.AUDIO_QUEUE_SIZE)
 
         sm = SessionManager(
             audio_input=audio_input,
@@ -1406,7 +1374,6 @@ class TestMemorySessionEnd:
             session_factory=session_factory,
             cpp_bridge=bridge,
             led=led,
-            config=SESSION_CONFIG,
             greeting_audio_path=GREETING_AUDIO_PATH,
             farewell_audio_path=FAREWELL_AUDIO_PATH,
             audio_queue=audio_queue,
@@ -1473,6 +1440,9 @@ class TestMemoryBargeIn:
 
         # SlowTTS: 10 chunks, each 100ms at 24kHz = 1 second total
         class SlowTTS(ITTS):
+            output_sample_rate: int = TTS_SAMPLE_RATE
+            voice_id: str = "fake|slow"
+
             def synthesize(self, text: str) -> TTSStream:
                 chunk = b"\x00" * 4800
 
@@ -1483,9 +1453,7 @@ class TestMemoryBargeIn:
                 words = text.split()
 
                 def ts_fn() -> tuple[WordTimestamp, ...]:
-                    return tuple(
-                        WordTimestamp(w, i * 0.1, (i + 1) * 0.1) for i, w in enumerate(words)
-                    )
+                    return tuple(WordTimestamp(w, i * 0.1, (i + 1) * 0.1) for i, w in enumerate(words))
 
                 return TTSStream(gen(), timestamps_fn=ts_fn)
 
@@ -1508,22 +1476,23 @@ class TestMemoryBargeIn:
         led = FakeLED()
         asr = ScriptedASR(["tell me words", "goodbye"])
 
+        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         orchestrator, history, generator, memory_storage, _ = _make_memory_orchestrator(
             asr,
             bridge,
             led,
+            audio_queue,
             llm=LongLLM(),
             tts=SlowTTS(),
         )
         # Patch VAP into the turn detector (replace the default FakeVAP)
         orchestrator._turn_detector._vap = vap
 
-        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
         feeder = FrameFeeder(audio_queue)
         feeder.start()
 
         try:
-            orchestrator.run(audio_queue)
+            orchestrator.run()
         finally:
             feeder.stop()
             generator.reset()

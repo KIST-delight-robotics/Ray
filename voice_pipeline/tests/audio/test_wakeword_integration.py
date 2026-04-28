@@ -13,8 +13,7 @@ from __future__ import annotations
 import pytest
 
 from voice_pipeline.audio.wakeword import WakewordDetector
-from voice_pipeline.core.config import AudioConfig, WakewordConfig
-from voice_pipeline.tests.audio.conftest import audio_config_from_wav, read_wav_frames
+from voice_pipeline.tests.audio.conftest import read_wav_frames
 
 pytestmark = [pytest.mark.requires_api, pytest.mark.requires_model]
 
@@ -24,13 +23,10 @@ pytestmark = [pytest.mark.requires_api, pytest.mark.requires_model]
 # ---------------------------------------------------------------------------
 
 
-def _make_detector(keyword: str, audio_config: AudioConfig) -> WakewordDetector:
-    config = WakewordConfig(
-        keywords=(keyword,),
-        speech_pad_ms=300,
-        max_speech_duration_sec=3.0,
-    )
-    return WakewordDetector(config, audio_config)
+def _make_detector(keyword: str, monkeypatch: pytest.MonkeyPatch) -> WakewordDetector:
+    # max_speech_duration_sec defaults to 3.0 via class var.
+    monkeypatch.setattr(WakewordDetector, "_KEYWORDS", (keyword,))
+    return WakewordDetector()
 
 
 # ---------------------------------------------------------------------------
@@ -41,11 +37,10 @@ def _make_detector(keyword: str, audio_config: AudioConfig) -> WakewordDetector:
 class TestWakewordDetection:
     """Integration tests feeding real WAV files to real VAD + STT."""
 
-    def test_detects_wakeword_in_speech(self, speech_wav, wakeword_keyword):
+    def test_detects_wakeword_in_speech(self, speech_wav, wakeword_keyword, monkeypatch):
         """Feed WAV containing the wakeword → returns True at some point."""
-        info, frames = read_wav_frames(speech_wav)
-        audio_config = audio_config_from_wav(info)
-        detector = _make_detector(wakeword_keyword, audio_config)
+        _, frames = read_wav_frames(speech_wav)
+        detector = _make_detector(wakeword_keyword, monkeypatch)
 
         detected = False
         for frame in frames:
@@ -53,27 +48,23 @@ class TestWakewordDetection:
                 detected = True
                 break
 
-        assert detected, (
-            f"Wakeword '{wakeword_keyword}' not detected in {speech_wav} ({len(frames)} frames)"
-        )
+        assert detected, f"Wakeword '{wakeword_keyword}' not detected in {speech_wav} ({len(frames)} frames)"
 
-    def test_silence_does_not_trigger(self, silence_wav, wakeword_keyword):
+    def test_silence_does_not_trigger(self, silence_wav, wakeword_keyword, monkeypatch):
         """Feed silence → never returns True."""
         if silence_wav is None:
             pytest.skip("WAKEWORD_TEST_SILENCE_WAV not set")
 
-        info, frames = read_wav_frames(silence_wav)
-        audio_config = audio_config_from_wav(info)
-        detector = _make_detector(wakeword_keyword, audio_config)
+        _, frames = read_wav_frames(silence_wav)
+        detector = _make_detector(wakeword_keyword, monkeypatch)
 
         for frame in frames:
             assert not detector.feed_audio(frame), "Wakeword falsely detected in silence"
 
-    def test_multiple_detection_cycles(self, speech_wav, wakeword_keyword):
+    def test_multiple_detection_cycles(self, speech_wav, wakeword_keyword, monkeypatch):
         """Detector can detect the wakeword across multiple cycles."""
-        info, frames = read_wav_frames(speech_wav)
-        audio_config = audio_config_from_wav(info)
-        detector = _make_detector(wakeword_keyword, audio_config)
+        _, frames = read_wav_frames(speech_wav)
+        detector = _make_detector(wakeword_keyword, monkeypatch)
 
         detections = 0
         for _cycle in range(2):

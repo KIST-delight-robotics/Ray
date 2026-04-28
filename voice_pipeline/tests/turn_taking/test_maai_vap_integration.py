@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from voice_pipeline.core.config import AudioConfig, MaAIVAPConfig, TTSConfig
 from voice_pipeline.core.types import VAPResult
+from voice_pipeline.tts.tts import OpenAITTS
 
 if TYPE_CHECKING:
     from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
@@ -40,9 +40,7 @@ def _pcm_silence(n_samples: int = _FRAME_SAMPLES) -> bytes:
 
 def _pcm_tone(n_samples: int = _FRAME_SAMPLES, amplitude: int = 10000) -> bytes:
     """Sine wave PCM (simulated speech-like energy)."""
-    samples = [
-        int(amplitude * math.sin(2 * math.pi * 440 * i / _SAMPLE_RATE)) for i in range(n_samples)
-    ]
+    samples = [int(amplitude * math.sin(2 * math.pi * 440 * i / _SAMPLE_RATE)) for i in range(n_samples)]
     return struct.pack(f"<{n_samples}h", *samples)
 
 
@@ -56,32 +54,34 @@ def _pcm_robot(n_samples: int = 720, amplitude: int = 5000) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def _make_wrapper(transformer_onnx_path: str = "") -> MaAIVAPWrapper:
+def _make_wrapper(*, use_onnx: bool) -> MaAIVAPWrapper:
+    """Construct MaAIVAPWrapper with class-var overrides for test scenario.
+
+    Class vars are mutated just before instantiation; `__init__` snapshots
+    them to instance attrs so the value here is bound to this wrapper even
+    if a later call mutates class vars differently.
+    """
     from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
 
-    cfg = MaAIVAPConfig(
-        frame_rate=10,
-        context_len_sec=5.0,
-        ort_threads=1,
-        pt_threads=1,
-        transformer_onnx_path=transformer_onnx_path,
-        use_torch_compile=False,
-    )
-    audio_cfg = AudioConfig(sample_rate=_SAMPLE_RATE, channels=1, frame_duration_ms=30)
-    tts_cfg = TTSConfig(output_sample_rate=24000)
-    return MaAIVAPWrapper(cfg, audio_cfg, tts_cfg)
+    MaAIVAPWrapper._FRAME_RATE = 10
+    MaAIVAPWrapper._CONTEXT_LEN_SEC = 5.0
+    MaAIVAPWrapper._ORT_THREADS = 1
+    MaAIVAPWrapper._PT_THREADS = 1
+    MaAIVAPWrapper._USE_ONNX_TRANSFORMER = use_onnx
+    MaAIVAPWrapper._USE_TORCH_COMPILE = False
+    return MaAIVAPWrapper(OpenAITTS.OUTPUT_SAMPLE_RATE)
 
 
 @pytest.fixture(scope="module")
 def onnx_wrapper():
     """MaAIVAPWrapper with ONNX encoder + ONNX transformer."""
-    return _make_wrapper(transformer_onnx_path=MaAIVAPConfig.transformer_onnx_path)
+    return _make_wrapper(use_onnx=True)
 
 
 @pytest.fixture(scope="module")
 def pytorch_wrapper():
     """MaAIVAPWrapper with ONNX encoder + PyTorch transformer."""
-    return _make_wrapper(transformer_onnx_path="")
+    return _make_wrapper(use_onnx=False)
 
 
 @pytest.fixture(autouse=True)
@@ -217,12 +217,8 @@ class TestOnnxPytorchEquivalence:
             r_onnx = onnx_wrapper.feed_audio(frame)
             r_pt = pytorch_wrapper.feed_audio(frame)
 
-        assert abs(r_onnx.p_now - r_pt.p_now) < 1e-4, (
-            f"p_now mismatch: onnx={r_onnx.p_now}, pt={r_pt.p_now}"
-        )
-        assert abs(r_onnx.p_fut - r_pt.p_fut) < 1e-4, (
-            f"p_fut mismatch: onnx={r_onnx.p_fut}, pt={r_pt.p_fut}"
-        )
+        assert abs(r_onnx.p_now - r_pt.p_now) < 1e-4, f"p_now mismatch: onnx={r_onnx.p_now}, pt={r_pt.p_now}"
+        assert abs(r_onnx.p_fut - r_pt.p_fut) < 1e-4, f"p_fut mismatch: onnx={r_onnx.p_fut}, pt={r_pt.p_fut}"
         assert r_onnx.user_is_speaking == r_pt.user_is_speaking
 
     def test_stereo_equivalence(self, onnx_wrapper, pytorch_wrapper):

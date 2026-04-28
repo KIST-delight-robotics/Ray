@@ -7,11 +7,12 @@ modules; separate runner functions execute different pipeline segments.
 Usage (turn detection monitor — all real)::
 
     from scripts.sandbox import setup_sandbox, run_turn_monitor
-    from voice_pipeline.core.config import AudioInputConfig
+    from voice_pipeline.audio.audio_input import AudioInput
 
-    setup = setup_sandbox(audio_input_config=AudioInputConfig(
-        device_index=3, capture_channels=6, extract_channel=0,
-    ))
+    AudioInput._DEVICE_INDEX = 3
+    AudioInput._CAPTURE_CHANNELS = 6
+    AudioInput._EXTRACT_CHANNEL = 0
+    setup = setup_sandbox()
     run_turn_monitor(setup)   # Ctrl+C to stop
     setup.cleanup()
 
@@ -35,13 +36,13 @@ Usage (orchestrator with sound — mock server or C++ process required)::
     from scripts.sandbox import (
         setup_sandbox, run_orchestrator,
         ScriptedASR, FakeVAP, FakeTurnGPT,
-        _FAST_TURN_DETECTOR_CONFIG,
+        apply_fast_turn_detector_config,
     )
 
+    apply_fast_turn_detector_config()
     setup = setup_sandbox(
         asr=ScriptedASR(["hello", "goodbye"]),
         vap=FakeVAP(), turngpt=FakeTurnGPT(),
-        turn_config=_FAST_TURN_DETECTOR_CONFIG,
     )
     run_orchestrator(setup)
     setup.cleanup()
@@ -64,22 +65,8 @@ from typing import Any
 
 import numpy as np
 
+from voice_pipeline.audio.constants import FRAME_SIZE_BYTES
 from voice_pipeline.context.context_builder import ContextBuilder
-from voice_pipeline.core.config import (
-    ASRConfig,
-    AudioConfig,
-    AudioInputConfig,
-    ConversationHistoryConfig,
-    CppBridgeConfig,
-    LLMConfig,
-    MaAIVAPConfig,
-    MemoryConfig,
-    OrchestratorConfig,
-    SpeechGeneratorConfig,
-    TTSConfig,
-    TurnDetectorConfig,
-    TurnGPTConfig,
-)
 from voice_pipeline.core.interfaces import (
     IASR,
     ILLM,
@@ -118,6 +105,7 @@ from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Episode, Profile
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.orchestrator.orchestrator import Orchestrator
+from voice_pipeline.tts.tts import OpenAITTS
 from voice_pipeline.tts.utterance_truncator import TimestampTruncator
 from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
@@ -126,24 +114,20 @@ from voice_pipeline.turn_taking.turn_detector import TurnDetector
 # Constants
 # ---------------------------------------------------------------------------
 
-_AUDIO_CONFIG = AudioConfig(sample_rate=16000, channels=1, frame_duration_ms=30, sample_width=2)
-_FRAME_BYTES = (
-    _AUDIO_CONFIG.sample_rate
-    * _AUDIO_CONFIG.frame_duration_ms
-    * _AUDIO_CONFIG.sample_width
-    // 1000
-)
-_SILENCE_FRAME: AudioFrame = b"\x00" * _FRAME_BYTES
+_SILENCE_FRAME: AudioFrame = b"\x00" * FRAME_SIZE_BYTES
 
-# Fast turn-detection config for scripted ASR scenarios (instant turn shift).
-_FAST_TURN_DETECTOR_CONFIG = TurnDetectorConfig(
-    vap_user_threshold=0.5,
-    min_gap_time_sec=0.03,
-    turngpt_thresholds=((0.3, 0.03), (0.0, 0.06)),
-    interrupt_user_threshold=0.5,
-    prepare_turngpt_threshold=0.2,
-    prepare_timeout_sec=0.06,
-)
+
+def apply_fast_turn_detector_config() -> None:
+    """Override TurnDetector class vars for scripted ASR scenarios (instant turn shift).
+
+    Call before ``setup_sandbox`` when using ScriptedASR with FakeVAP/FakeTurnGPT.
+    """
+    from voice_pipeline.turn_taking.turn_detector import TurnDetector
+
+    TurnDetector._MIN_GAP_TIME_SEC = 0.03
+    TurnDetector._TURNGPT_THRESHOLDS = ((0.3, 0.03), (0.0, 0.06))
+    TurnDetector._PREPARE_TIMEOUT_SEC = 0.06
+
 
 # ---------------------------------------------------------------------------
 # 1. Result types
@@ -269,9 +253,7 @@ class ScriptedASR(IASR):
 class FakeVAP(IVAP):
     """Always returns robot-favoring probabilities for fast turn shift."""
 
-    def feed_audio(
-        self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None
-    ) -> VAPResult:
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
         return VAPResult(p_now=0.2, p_fut=0.2, user_is_speaking=False)
 
     def reset(self) -> None:
@@ -341,6 +323,9 @@ class CaptureTTS(ITTS):
     TTS executor in sentence mode.
     """
 
+    output_sample_rate: int = OpenAITTS.OUTPUT_SAMPLE_RATE
+    voice_id: str = "sandbox|capture"
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.calls: list[str] = []
@@ -357,10 +342,7 @@ class CaptureTTS(ITTS):
                 yield chunk
 
         def _ts_fn() -> tuple[WordTimestamp, ...]:
-            return tuple(
-                WordTimestamp(word=w, start_sec=i * 0.1, end_sec=(i + 1) * 0.1)
-                for i, w in enumerate(words)
-            )
+            return tuple(WordTimestamp(word=w, start_sec=i * 0.1, end_sec=(i + 1) * 0.1) for i, w in enumerate(words))
 
         return TTSStream(_gen(), timestamps_fn=_ts_fn)
 
@@ -412,9 +394,7 @@ class ObservableVAP(IVAP):
         self._real = real_vap
         self.last_result: VAPResult = VAPResult(p_now=0.5, p_fut=0.5, user_is_speaking=False)
 
-    def feed_audio(
-        self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None
-    ) -> VAPResult:
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
         result = self._real.feed_audio(user_audio, robot_audio)
         self.last_result = result
         return result
@@ -431,37 +411,23 @@ class ObservableVAP(IVAP):
 def setup_memory(
     episodes: list[Episode],
     embedder: IEmbedder,
-    config: MemoryConfig | None = None,
 ) -> tuple[SQLiteMemoryStorage, MemoryRetriever, tempfile.TemporaryDirectory[str]]:
     """Create an isolated memory store pre-loaded with episodes.
 
     Uses real SQLiteMemoryStorage (FTS5 BM25) for production-identical
     retrieval.  Caller should call ``tmpdir.cleanup()`` when done.
 
+    Override retriever tuning by setting class vars on ``MemoryRetriever``
+    before calling (e.g. ``MemoryRetriever._MAX_MEMORIES = 5``).
+
     Returns:
         (storage, retriever, tmpdir)
     """
     tmpdir = tempfile.TemporaryDirectory()
-    cfg = config or MemoryConfig(
-        db_path=f"{tmpdir.name}/sandbox.db",
-        embedding_dimension=embedder.dimension,
+    storage = SQLiteMemoryStorage(
+        f"{tmpdir.name}/sandbox.db",
+        dimension=embedder.dimension,
     )
-    if cfg.db_path == MemoryConfig().db_path:
-        # Override default path to avoid touching production DB.
-        cfg = MemoryConfig(
-            db_path=f"{tmpdir.name}/sandbox.db",
-            embedding_dimension=cfg.embedding_dimension,
-            max_memories=cfg.max_memories,
-            min_new_slots=cfg.min_new_slots,
-            retained_ttl=cfg.retained_ttl,
-            vector_top_k=cfg.vector_top_k,
-            bm25_top_k=cfg.bm25_top_k,
-            rrf_k=cfg.rrf_k,
-            recency_half_life_days=cfg.recency_half_life_days,
-            salience_threshold=cfg.salience_threshold,
-        )
-
-    storage = SQLiteMemoryStorage(cfg)
 
     # Add episodes and compute embeddings.
     texts = [ep.text for ep in episodes]
@@ -477,7 +443,7 @@ def setup_memory(
     if ids:
         vector_index.load(ids, vecs)
 
-    retriever = MemoryRetriever(storage, vector_index, embedder, cfg)
+    retriever = MemoryRetriever(storage, vector_index, embedder)
     return storage, retriever, tmpdir
 
 
@@ -509,73 +475,63 @@ def setup_history(
 # ---------------------------------------------------------------------------
 
 
-def create_audio_input(
-    audio_queue: queue.Queue[AudioFrame],
-    *,
-    audio_config: AudioConfig | None = None,
-    config: AudioInputConfig | None = None,
-) -> IAudioInput:
+def create_audio_input(audio_queue: queue.Queue[AudioFrame]) -> IAudioInput:
     """Create a real AudioInput with microphone capture.
 
-    Requires PyAudio.
+    Requires PyAudio. Override device/channel by setting class vars on
+    ``AudioInput`` before calling (e.g. ``AudioInput._DEVICE_INDEX = 3``).
     """
     from voice_pipeline.audio.audio_input import AudioInput
 
-    return AudioInput(audio_queue, audio_config or _AUDIO_CONFIG, config or AudioInputConfig())
+    return AudioInput(audio_queue)
 
 
-def create_asr(
-    *,
-    config: ASRConfig | None = None,
-    audio_config: AudioConfig | None = None,
-) -> IASR:
+def create_asr(*, language_code: str = "en-US") -> IASR:
     """Create a real Google Cloud ASR.
 
     Requires ``GOOGLE_APPLICATION_CREDENTIALS`` environment variable.
     """
     from voice_pipeline.asr.asr import GoogleCloudASR
 
-    return GoogleCloudASR(config or ASRConfig(), audio_config or _AUDIO_CONFIG)
+    return GoogleCloudASR(language_code=language_code)
 
 
 def create_vap(
     *,
-    config: MaAIVAPConfig | None = None,
-    audio_config: AudioConfig | None = None,
-    tts_config: TTSConfig | None = None,
+    tts_sample_rate: int = OpenAITTS.OUTPUT_SAMPLE_RATE,
 ) -> IVAP:
     """Create a real MaAI VAP (ONNX).
 
-    Requires ONNX model files at configured paths.
+    Requires ONNX model files at configured paths. Override tuning values
+    by setting class vars on ``MaAIVAPWrapper`` before calling (e.g.
+    ``MaAIVAPWrapper._FRAME_RATE = 20``).
     """
     from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
 
-    return MaAIVAPWrapper(
-        config or MaAIVAPConfig(), audio_config or _AUDIO_CONFIG, tts_config or TTSConfig()
-    )
+    return MaAIVAPWrapper(tts_sample_rate)
 
 
-def create_turngpt(*, config: TurnGPTConfig | None = None) -> ITurnGPT:
+def create_turngpt() -> ITurnGPT:
     """Create a real TurnGPT (ONNX).
 
-    Requires ONNX model and tokenizer files at configured paths.
+    Requires ONNX model and tokenizer files at configured paths. Override tuning values
+    by setting class vars on ``TurnGPTWrapper`` before calling (e.g.
+    ``TurnGPTWrapper._ONNX_THREADS = 4``).
     """
     from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
-    return TurnGPTWrapper(config or TurnGPTConfig())
+    return TurnGPTWrapper()
 
 
-def create_tts(*, config: TTSConfig | None = None) -> ITTS:
+def create_tts() -> ITTS:
     """Create a real OpenAI TTS.
 
     Requires ``OPENAI_API_KEY`` environment variable.
     """
-    from voice_pipeline.tts.tts import OpenAITTS
-
-    return OpenAITTS(config or TTSConfig())
+    return OpenAITTS()
 
 
-def create_bridge(*, config: CppBridgeConfig | None = None) -> ICppBridge:
+def create_bridge() -> ICppBridge:
     """Create a real CppBridge (WebSocket).
 
     Connects to ``localhost:9200`` by default.  Start either the real
@@ -584,7 +540,7 @@ def create_bridge(*, config: CppBridgeConfig | None = None) -> ICppBridge:
     """
     from voice_pipeline.bridge.cpp_bridge import CppBridge
 
-    return CppBridge(config or CppBridgeConfig())
+    return CppBridge()
 
 
 # ---------------------------------------------------------------------------
@@ -628,14 +584,6 @@ def setup_sandbox(
     llm: ILLM | None = None,
     tts: ITTS | None = None,
     bridge: ICppBridge | None = None,
-    # Config overrides
-    audio_input_config: AudioInputConfig | None = None,
-    audio_config: AudioConfig | None = None,
-    turn_config: TurnDetectorConfig | None = None,
-    llm_config: LLMConfig | None = None,
-    gen_config: SpeechGeneratorConfig | None = None,
-    orch_config: OrchestratorConfig | None = None,
-    memory_config: MemoryConfig | None = None,
     # Data
     episodes: list[Episode] | None = None,
     profiles: list[Profile] | None = None,
@@ -656,19 +604,15 @@ def setup_sandbox(
     - :func:`run_pipeline` — text → LLM → TTS
     - :func:`run_orchestrator` — full Orchestrator frame loop
     """
-    _audio_config = audio_config or _AUDIO_CONFIG
-
     # -- Audio input --
     _audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
-    _audio_input = create_audio_input(
-        _audio_queue, audio_config=_audio_config, config=audio_input_config,
-    )
+    _audio_input = create_audio_input(_audio_queue)
 
     # -- ASR --
-    _asr = asr or create_asr(audio_config=_audio_config)
+    _asr = asr or create_asr()
 
     # -- VAP + TurnGPT → TurnDetector --
-    _raw_vap = vap or create_vap(audio_config=_audio_config)
+    _raw_vap = vap or create_vap()
     _observable_vap = ObservableVAP(_raw_vap)
     _turngpt = turngpt or create_turngpt()
     _adapter = SyncTurnGPTAdapter(_turngpt)
@@ -684,7 +628,7 @@ def setup_sandbox(
 
     if episodes:
         _embedder = embedder or _lazy_load_embedder()
-        memory_storage, retriever, tmpdir = setup_memory(episodes, _embedder, memory_config)
+        memory_storage, retriever, tmpdir = setup_memory(episodes, _embedder)
     else:
         _embedder = embedder or StubEmbedder()
 
@@ -692,8 +636,6 @@ def setup_sandbox(
         _observable_vap,
         _adapter,
         _embedder,
-        turn_config or TurnDetectorConfig(),
-        _audio_config,
     )
 
     # -- History --
@@ -704,10 +646,8 @@ def setup_sandbox(
     if memory_storage and _profiles == []:
         _profiles = list(memory_storage.get_all_profiles())
 
-    history_config = ConversationHistoryConfig(max_context_tokens=4096, storage_backend="memory")
     cb = ContextBuilder(
         history,
-        history_config,
         system_prompt or DEFAULT_SYSTEM_PROMPT,
         token_counter,
         profiles=_profiles or None,
@@ -715,7 +655,7 @@ def setup_sandbox(
     )
 
     # -- LLM + TTS + Bridge --
-    _llm = llm or ObservableLLM(OpenAILLM(llm_config or LLMConfig(tools=[])))
+    _llm = llm or ObservableLLM(OpenAILLM(tools=[]))
     _tts = tts or create_tts()
     _bridge = bridge or create_bridge()
 
@@ -724,7 +664,6 @@ def setup_sandbox(
         cb,
         _llm,
         _tts,
-        gen_config or SpeechGeneratorConfig(),
         retriever=retriever,
         history=history,
         exclude_session_ids={"sandbox"},
@@ -739,9 +678,8 @@ def setup_sandbox(
         history=history,
         truncator=TimestampTruncator(),
         led=NoOpLED(),
-        config=orch_config or OrchestratorConfig(),
-        tts_config=TTSConfig(output_sample_rate=24000),
-        audio_config=_audio_config,
+        audio_queue=_audio_queue,
+        tts_sample_rate=OpenAITTS.OUTPUT_SAMPLE_RATE,
         memory_storage=memory_storage,
         session_id="sandbox",
         token_counter=token_counter,
@@ -758,7 +696,7 @@ def setup_sandbox(
         tts=_tts,
         bridge=_bridge,
         history=history,
-        orchestrator=orchestrator,
+        session_loop=session_loop,
         memory_storage=memory_storage,
         retriever=retriever,
         _tmpdir=tmpdir,
@@ -814,14 +752,8 @@ def run_pipeline(
     except RuntimeError:
         response_data = None
 
-    tts_inputs = (
-        list(tts.calls[tts_start:]) if hasattr(tts, "calls") else []
-    )
-    raw_llm_output = (
-        llm.calls[llm_start]
-        if hasattr(llm, "calls") and len(llm.calls) > llm_start
-        else ""
-    )
+    tts_inputs = list(tts.calls[tts_start:]) if hasattr(tts, "calls") else []
+    raw_llm_output = llm.calls[llm_start] if hasattr(llm, "calls") and len(llm.calls) > llm_start else ""
 
     return PipelineResult(
         clean_text=clean_text,
@@ -895,7 +827,7 @@ def run_orchestrator(setup: SandboxSetup) -> None:
     setup.audio_input.start()
     setup.asr.start()
     try:
-        setup.orchestrator.run(setup.audio_queue)
+        setup.orchestrator.run()
     finally:
         setup.asr.stop()
         setup.audio_input.stop()

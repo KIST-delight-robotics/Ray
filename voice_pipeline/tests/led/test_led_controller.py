@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from voice_pipeline.core.config import LEDConfig
 from voice_pipeline.core.types import LEDState
 from voice_pipeline.led.animations import (
     BreathingAnimation,
@@ -27,12 +26,9 @@ from voice_pipeline.led.led_controller import LEDController
 _DRIVER_PATH = "voice_pipeline.led.led_controller._WS2812SpiDriver"
 
 
-def _make_controller(
-    config: LEDConfig | None = None,
-    animations: dict[LEDState, LEDAnimation] | None = None,
-) -> LEDController:
+def _make_controller() -> LEDController:
     """Create a controller in noop mode (no hardware)."""
-    return LEDController(config or LEDConfig(), animations)
+    return LEDController()
 
 
 # ===================================================================
@@ -68,8 +64,9 @@ class TestStaticAnimation:
         anim = StaticAnimation()
         assert anim.frame_interval_sec == 0.1
 
-    def test_frame_interval_custom(self) -> None:
-        anim = StaticAnimation(frame_interval_sec=0.5)
+    def test_frame_interval_class_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(StaticAnimation, "_FRAME_INTERVAL_SEC", 0.5)
+        anim = StaticAnimation()
         assert anim.frame_interval_sec == 0.5
 
     def test_reset_is_noop(self) -> None:
@@ -98,14 +95,15 @@ class TestBreathingAnimation:
             assert pixel == (0, 0, 0)
 
     def test_ring_brightness_varies_with_tick(self) -> None:
-        anim = BreathingAnimation(color=(233, 233, 50), cycle_sec=4.0)
+        anim = BreathingAnimation(color=(233, 233, 50))
         frames = [anim.render(t, 0, 1)[0] for t in range(200)]
         # Not all frames should be the same — brightness changes
         unique = set(frames)
         assert len(unique) > 1
 
-    def test_min_brightness_floor(self) -> None:
-        anim = BreathingAnimation(color=(100, 100, 100), min_brightness=0.2)
+    def test_min_brightness_floor(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(BreathingAnimation, "_MIN_BRIGHTNESS", 0.2)
+        anim = BreathingAnimation(color=(100, 100, 100))
         # tick=0 → phase at minimum (sin starts at -pi/2 → phase=0)
         frame = anim.render(0, 0, 1)
         r, g, b = frame[0]
@@ -210,30 +208,32 @@ class TestControllerNoop:
 
 
 class TestAnimationReset:
-    def test_reset_called_on_state_change(self) -> None:
+    def test_reset_called_on_state_change(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_anim = MagicMock(spec=["reset", "render", "frame_interval_sec"])
         mock_anim.frame_interval_sec = 0.05
         mock_anim.render.return_value = [(0, 0, 0)] * 24
 
         animations = {state: StaticAnimation() for state in LEDState}
         animations[LEDState.IDLE] = mock_anim
+        monkeypatch.setattr(LEDController, "_ANIMATIONS", animations)
 
-        ctrl = _make_controller(animations=animations)
+        ctrl = _make_controller()
         try:
             ctrl.set_state(LEDState.IDLE)
             mock_anim.reset.assert_called_once()
         finally:
             ctrl.close()
 
-    def test_render_called_after_state_set(self) -> None:
+    def test_render_called_after_state_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_anim = MagicMock(spec=["reset", "render", "frame_interval_sec"])
         mock_anim.frame_interval_sec = 0.02
         mock_anim.render.return_value = [(0, 0, 0)] * 24
 
         animations = {state: StaticAnimation() for state in LEDState}
         animations[LEDState.SLEEPING] = mock_anim
+        monkeypatch.setattr(LEDController, "_ANIMATIONS", animations)
 
-        ctrl = _make_controller(animations=animations)
+        ctrl = _make_controller()
         try:
             ctrl.set_state(LEDState.SLEEPING)
             time.sleep(0.5)
@@ -241,15 +241,16 @@ class TestAnimationReset:
         finally:
             ctrl.close()
 
-    def test_reset_called_each_transition(self) -> None:
+    def test_reset_called_each_transition(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_anim = MagicMock(spec=["reset", "render", "frame_interval_sec"])
         mock_anim.frame_interval_sec = 0.05
         mock_anim.render.return_value = [(0, 0, 0)] * 24
 
         animations = {state: StaticAnimation() for state in LEDState}
         animations[LEDState.IDLE] = mock_anim
+        monkeypatch.setattr(LEDController, "_ANIMATIONS", animations)
 
-        ctrl = _make_controller(animations=animations)
+        ctrl = _make_controller()
         try:
             ctrl.set_state(LEDState.IDLE)
             ctrl.set_state(LEDState.SLEEPING)
@@ -265,12 +266,13 @@ class TestAnimationReset:
 
 
 class TestCustomAnimations:
-    def test_custom_animation_map(self) -> None:
+    def test_custom_animation_map(self, monkeypatch: pytest.MonkeyPatch) -> None:
         custom = StaticAnimation(bar_color=(99, 99, 99), ring_color=(11, 11, 11))
         animations = {state: StaticAnimation() for state in LEDState}
         animations[LEDState.SLEEPING] = custom
+        monkeypatch.setattr(LEDController, "_ANIMATIONS", animations)
 
-        ctrl = _make_controller(animations=animations)
+        ctrl = _make_controller()
         try:
             ctrl.set_state(LEDState.SLEEPING)
             anim = ctrl._animations[LEDState.SLEEPING]
@@ -300,11 +302,13 @@ class TestHardwareInit:
 
 
 class TestMissingAnimation:
-    def test_missing_animation_does_not_crash(self) -> None:
+    def test_missing_animation_does_not_crash(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """State with no registered animation should not raise."""
         # Only register OFF, leave IDLE unmapped
         animations = {LEDState.OFF: StaticAnimation()}
-        ctrl = _make_controller(animations=animations)
+        monkeypatch.setattr(LEDController, "_ANIMATIONS", animations)
+
+        ctrl = _make_controller()
         try:
             ctrl.set_state(LEDState.IDLE)
             time.sleep(0.15)  # let animation loop run a few ticks
@@ -319,7 +323,7 @@ class TestMissingAnimation:
 
 
 class TestRenderError:
-    def test_render_exception_suppressed(self) -> None:
+    def test_render_exception_suppressed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A render() that raises should not kill the animation thread."""
         bad_anim = MagicMock(spec=["reset", "render", "frame_interval_sec"])
         bad_anim.frame_interval_sec = 0.02
@@ -327,8 +331,9 @@ class TestRenderError:
 
         animations = {state: StaticAnimation() for state in LEDState}
         animations[LEDState.IDLE] = bad_anim
+        monkeypatch.setattr(LEDController, "_ANIMATIONS", animations)
 
-        ctrl = _make_controller(animations=animations)
+        ctrl = _make_controller()
         try:
             ctrl.set_state(LEDState.IDLE)
             time.sleep(0.5)
@@ -346,17 +351,23 @@ class TestRenderError:
 
 
 class TestStateChangeResponsiveness:
-    def test_set_state_wakes_thread(self) -> None:
+    def test_set_state_wakes_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """set_state() should wake the animation thread, not wait for sleep to expire."""
-        # Use a slow animation (1s interval) for the initial state
-        slow = StaticAnimation(frame_interval_sec=1.0)
-        fast = StaticAnimation(bar_color=(1, 2, 3), frame_interval_sec=0.02)
+        # Mock animations with controllable tick intervals. StaticAnimation은 tick이
+        # 클래스 레벨 고정이라 두 인스턴스에 서로 다른 값을 주입할 수 없어 mock 사용.
+        slow = MagicMock(spec=["reset", "render", "frame_interval_sec"])
+        slow.frame_interval_sec = 1.0
+        slow.render.return_value = [(0, 0, 0)] * 24
+        fast = MagicMock(spec=["reset", "render", "frame_interval_sec"])
+        fast.frame_interval_sec = 0.02
+        fast.render.return_value = [(1, 2, 3)] * 24
 
         animations = {state: StaticAnimation() for state in LEDState}
         animations[LEDState.SLEEPING] = slow
         animations[LEDState.IDLE] = fast
+        monkeypatch.setattr(LEDController, "_ANIMATIONS", animations)
 
-        ctrl = _make_controller(animations=animations)
+        ctrl = _make_controller()
         try:
             ctrl.set_state(LEDState.SLEEPING)
             time.sleep(0.1)  # let it enter the slow sleep
@@ -367,24 +378,3 @@ class TestStateChangeResponsiveness:
             assert ctrl._tick > 0
         finally:
             ctrl.close()
-
-
-# ===================================================================
-# LEDConfig
-# ===================================================================
-
-
-class TestLEDConfig:
-    def test_defaults(self) -> None:
-        cfg = LEDConfig()
-        assert cfg.bar_count == 8
-        assert cfg.ring_count == 16
-        assert cfg.spi_pin == 10
-        assert cfg.brightness == 128
-
-    def test_custom_values(self) -> None:
-        cfg = LEDConfig(bar_count=4, ring_count=8, spi_pin=12, brightness=50)
-        assert cfg.bar_count == 4
-        assert cfg.ring_count == 8
-        assert cfg.spi_pin == 12
-        assert cfg.brightness == 50

@@ -17,16 +17,12 @@ except ImportError:
     torch = None  # type: ignore[assignment]
     load_silero_vad = None  # type: ignore[assignment]
 
+from voice_pipeline.audio.constants import CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH
 from voice_pipeline.audio.exceptions import WakewordError
-from voice_pipeline.core.config import AudioConfig, WakewordConfig
 from voice_pipeline.core.interfaces import IWakewordDetector
 from voice_pipeline.core.types import AudioFrame
 
 logger = logging.getLogger("voice_pipeline.audio")
-
-_VAD_CHUNK_SAMPLES = 512
-_VAD_CHUNK_BYTES = _VAD_CHUNK_SAMPLES * 2  # 16-bit mono
-_VAD_CHUNK_DURATION_MS = 32  # 512 samples @ 16kHz
 
 
 class _State(enum.Enum):
@@ -43,7 +39,7 @@ class WakewordDetector(IWakewordDetector):
            for Silero VAD.
         2. VAD produces a speech probability per chunk. A state machine tracks
            IDLE → SPEECH → TRAILING → IDLE transitions.
-        3. When speech ends (trailing silence exceeds ``speech_pad_ms``), accumulated
+        3. When speech ends (trailing silence exceeds ``_SPEECH_PAD_MS``), accumulated
            PCM is sent to Google STT ``recognize()`` (non-streaming, synchronous).
         4. All transcript alternatives are checked for keyword matches using
            word-boundary regex.
@@ -55,16 +51,36 @@ class WakewordDetector(IWakewordDetector):
     Threading:
         Not thread-safe. SessionManager calls ``feed_audio()`` from a single thread
         (the SLEEP loop). No locking is needed.
+
+    Args:
+        language_code: Google STT BCP-47 언어 코드.
     """
 
-    def __init__(self, config: WakewordConfig, audio_config: AudioConfig) -> None:
-        self._config = config
-        self._audio_config = audio_config
+    # Wakeword 키워드
+    _KEYWORDS: tuple[str, ...] = ("ray",)  # 감지할 트리거 단어 목록
+
+    # Silero VAD 모델 입력 규격
+    _VAD_CHUNK_SAMPLES = 512  # VAD 입력 청크 샘플 수
+    _VAD_CHUNK_BYTES = _VAD_CHUNK_SAMPLES * 2  # 파생: 청크 바이트 수 (16-bit mono)
+    _VAD_CHUNK_DURATION_MS = 32  # 파생: 청크 길이 (512 @ 16kHz)
+
+    _VAD_THRESHOLD = 0.5  # VAD 음성 확률 임계값 (0.0~1.0)
+    _MAX_SPEECH_DURATION_SEC = 3.0  # 이 시간 초과 시 강제 STT 인식 (초)
+    _PRE_BUFFER_MS = 300  # 음성 시작 onset 캡처용 ring buffer 길이 (ms)
+    _SPEECH_PAD_MS = 300  # 음성 종료 검출용 후행 침묵 길이 (ms)
+    _MIN_SPEECH_DURATION_MS = 100  # 이 시간 미만 음성은 STT 인식 스킵 (ms)
+    _STT_TIMEOUT_SEC = 5.0  # Google STT recognize() 응답 대기 시간 (초)
+    _MAX_ALTERNATIVES = 5  # STT 응답에 요청할 대안 수
+
+    def __init__(
+        self,
+        language_code: str = "en-US",
+    ) -> None:
+        self.language_code = language_code
 
         if torch is None or load_silero_vad is None:
             raise WakewordError(
-                "torch and silero-vad are required for wakeword detection. "
-                "Install with: uv sync --extra models-pytorch"
+                "torch and silero-vad are required for wakeword detection. Install with: uv sync --extra models-pytorch"
             )
 
         # Load Silero VAD model
@@ -82,25 +98,21 @@ class WakewordDetector(IWakewordDetector):
         # Pre-build recognition config
         self._recognition_config = speech.RecognitionConfig(
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=audio_config.sample_rate,
-            language_code=config.language_code,
-            audio_channel_count=audio_config.channels,
-            max_alternatives=5,
-            speech_contexts=[speech.SpeechContext(phrases=list(config.keywords))],
+            sample_rate_hertz=SAMPLE_RATE,
+            language_code=language_code,
+            audio_channel_count=CHANNELS,
+            max_alternatives=self._MAX_ALTERNATIVES,
+            speech_contexts=[speech.SpeechContext(phrases=list(self._KEYWORDS))],
         )
 
         # Pre-compile keyword patterns
-        self._keyword_patterns = [
-            re.compile(rf"\b{re.escape(kw)}\b", re.IGNORECASE) for kw in config.keywords
-        ]
+        self._keyword_patterns = [re.compile(rf"\b{re.escape(kw)}\b", re.IGNORECASE) for kw in self._KEYWORDS]
 
         # Bytes per second for duration calculations (accounts for channels + sample width)
-        self._bytes_per_sec = (
-            audio_config.sample_rate * audio_config.sample_width * audio_config.channels
-        )
+        self._bytes_per_sec = SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS
 
         # Pre-buffer: ring buffer of recent chunks for capturing speech onset
-        pre_buffer_chunks = max(1, config.pre_buffer_ms // _VAD_CHUNK_DURATION_MS)
+        pre_buffer_chunks = max(1, self._PRE_BUFFER_MS // self._VAD_CHUNK_DURATION_MS)
         self._pre_buffer: collections.deque[bytes] = collections.deque(
             maxlen=pre_buffer_chunks,
         )
@@ -136,13 +148,13 @@ class WakewordDetector(IWakewordDetector):
         """Feed an audio frame and check for wakeword detection."""
         self._vad_buffer.extend(frame)
 
-        while len(self._vad_buffer) >= _VAD_CHUNK_BYTES:
-            chunk_bytes = bytes(self._vad_buffer[:_VAD_CHUNK_BYTES])
-            del self._vad_buffer[:_VAD_CHUNK_BYTES]
+        while len(self._vad_buffer) >= self._VAD_CHUNK_BYTES:
+            chunk_bytes = bytes(self._vad_buffer[: self._VAD_CHUNK_BYTES])
+            del self._vad_buffer[: self._VAD_CHUNK_BYTES]
 
             tensor = self._bytes_to_tensor(chunk_bytes)
             try:
-                prob = self._vad_model(tensor, self._audio_config.sample_rate).item()
+                prob = self._vad_model(tensor, SAMPLE_RATE).item()
             except Exception:
                 logger.warning("VAD inference failed, resetting", exc_info=True)
                 self._reset()
@@ -160,7 +172,7 @@ class WakewordDetector(IWakewordDetector):
     def _process_vad(self, prob: float, chunk_bytes: bytes) -> None:
         """Update state machine based on VAD probability."""
         if self._state is _State.IDLE:
-            if prob > self._config.vad_threshold:
+            if prob > self._VAD_THRESHOLD:
                 self._state = _State.SPEECH
                 # Prepend pre-buffer to capture speech onset
                 for buffered_chunk in self._pre_buffer:
@@ -172,29 +184,29 @@ class WakewordDetector(IWakewordDetector):
 
         elif self._state is _State.SPEECH:
             self._speech_buffer.extend(chunk_bytes)
-            if prob < self._config.vad_threshold:
+            if prob < self._VAD_THRESHOLD:
                 self._state = _State.TRAILING
                 self._silence_chunks = 1
-                if self._config.speech_pad_ms <= _VAD_CHUNK_DURATION_MS:
+                if self._SPEECH_PAD_MS <= self._VAD_CHUNK_DURATION_MS:
                     self._run_recognition()
                     return
 
         elif self._state is _State.TRAILING:
             self._speech_buffer.extend(chunk_bytes)
-            if prob > self._config.vad_threshold:
+            if prob > self._VAD_THRESHOLD:
                 self._state = _State.SPEECH
                 self._silence_chunks = 0
             else:
                 self._silence_chunks += 1
-                silence_ms = self._silence_chunks * _VAD_CHUNK_DURATION_MS
-                if silence_ms >= self._config.speech_pad_ms:
+                silence_ms = self._silence_chunks * self._VAD_CHUNK_DURATION_MS
+                if silence_ms >= self._SPEECH_PAD_MS:
                     self._run_recognition()
                     return
 
         # Safety cap: force recognition if speech is too long
         if self._state is not _State.IDLE:
             speech_duration_sec = len(self._speech_buffer) / self._bytes_per_sec
-            if speech_duration_sec >= self._config.max_speech_duration_sec:
+            if speech_duration_sec >= self._MAX_SPEECH_DURATION_SEC:
                 self._run_recognition()
 
     # ------------------------------------------------------------------
@@ -206,11 +218,11 @@ class WakewordDetector(IWakewordDetector):
         speech_bytes = bytes(self._speech_buffer)
         speech_duration_ms = len(speech_bytes) * 1000 // self._bytes_per_sec
 
-        if speech_duration_ms < self._config.min_speech_duration_ms:
+        if speech_duration_ms < self._MIN_SPEECH_DURATION_MS:
             logger.debug(
                 "Speech too short (%d ms < %d ms), skipping recognition",
                 speech_duration_ms,
-                self._config.min_speech_duration_ms,
+                self._MIN_SPEECH_DURATION_MS,
             )
             self._reset()
             return
@@ -220,7 +232,7 @@ class WakewordDetector(IWakewordDetector):
             response = self._stt_client.recognize(
                 config=self._recognition_config,
                 audio=audio,
-                timeout=self._config.stt_timeout_sec,
+                timeout=self._STT_TIMEOUT_SEC,
             )
         except Exception:
             logger.warning("Wakeword STT recognition failed", exc_info=True)
@@ -267,4 +279,5 @@ class WakewordDetector(IWakewordDetector):
     def _bytes_to_tensor(pcm_bytes: bytes) -> torch.Tensor:
         """Convert 16-bit mono PCM bytes to a float32 torch tensor."""
         samples = struct.unpack(f"<{len(pcm_bytes) // 2}h", pcm_bytes)
+        # 16-bit signed PCM → float32 [-1, 1]: divide by 2^15
         return torch.tensor(samples, dtype=torch.float32) / 32768.0

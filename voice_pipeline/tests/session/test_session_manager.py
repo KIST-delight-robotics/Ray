@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from voice_pipeline.core.config import SessionConfig
 from voice_pipeline.core.types import (
     AudioFrame,
     CppEvent,
@@ -25,6 +24,7 @@ from voice_pipeline.session.session_manager import SessionComponents, SessionMan
 
 
 def _make_session_manager(
+    monkeypatch: pytest.MonkeyPatch,
     *,
     greeting_timeout_sec: float = 0.1,
     farewell_timeout_sec: float = 0.1,
@@ -49,12 +49,10 @@ def _make_session_manager(
     mocks["orchestrator"].request_stop = MagicMock()
     mocks["orchestrator"].run = MagicMock()
 
-    config = SessionConfig(
-        audio_queue_size=audio_queue_size,
-        greeting_timeout_sec=greeting_timeout_sec,
-        farewell_timeout_sec=farewell_timeout_sec,
-        frame_timeout_sec=frame_timeout_sec,
-    )
+    monkeypatch.setattr(SessionManager, "AUDIO_QUEUE_SIZE", audio_queue_size)
+    monkeypatch.setattr(SessionManager, "_GREETING_TIMEOUT_SEC", greeting_timeout_sec)
+    monkeypatch.setattr(SessionManager, "_FAREWELL_TIMEOUT_SEC", farewell_timeout_sec)
+    monkeypatch.setattr(SessionManager, "_FRAME_TIMEOUT_SEC", frame_timeout_sec)
 
     def session_factory() -> SessionComponents:
         return SessionComponents(
@@ -69,7 +67,6 @@ def _make_session_manager(
         session_factory=session_factory,
         cpp_bridge=mocks["bridge"],
         led=mocks["led"],
-        config=config,
         greeting_audio_path="assets/audio/greeting.wav",
         farewell_audio_path="assets/audio/farewell.wav",
         on_session_end=on_session_end,
@@ -88,9 +85,9 @@ def _frame() -> AudioFrame:
 
 
 class TestFullCycle:
-    def test_sleep_greeting_active_farewell_sleep(self) -> None:
+    def test_sleep_greeting_active_farewell_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Full cycle: wakeword → greeting → active → farewell → sleep."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
 
         # Wakeword detects on first feed
         mocks["wakeword"].feed_audio.return_value = True
@@ -132,16 +129,16 @@ class TestFullCycle:
         mocks["audio_input"].start.assert_called_once()
         mocks["audio_input"].stop.assert_called_once()
         mocks["bridge"].send_play_file.assert_any_call(sm._greeting_audio_path)
-        mocks["orchestrator"].run.assert_called_once_with(sm._audio_queue)
+        mocks["orchestrator"].run.assert_called_once_with()
         mocks["bridge"].send_play_file.assert_any_call(sm._farewell_audio_path)
         mocks["history"].new_session.assert_called_once()
         mocks["history"].save.assert_called_once()
 
 
 class TestGreeting:
-    def test_greeting_timeout(self) -> None:
+    def test_greeting_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Greeting proceeds to ACTIVE even without PLAYBACK_COMPLETE."""
-        sm, mocks = _make_session_manager(greeting_timeout_sec=0.01)
+        sm, mocks = _make_session_manager(monkeypatch, greeting_timeout_sec=0.01)
 
         # No PLAYBACK_COMPLETE ever
         mocks["bridge"].poll_event.return_value = None
@@ -151,9 +148,9 @@ class TestGreeting:
         assert sm._mode == SystemMode.ACTIVE
         mocks["bridge"].send_play_file.assert_called_once_with(sm._greeting_audio_path)
 
-    def test_greeting_flushes_stale_events(self) -> None:
+    def test_greeting_flushes_stale_events(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Stale events are flushed before sending greeting."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
 
         stale = CppEvent(CppEventType.PLAYBACK_COMPLETE)
         fresh = CppEvent(CppEventType.PLAYBACK_COMPLETE)
@@ -165,9 +162,9 @@ class TestGreeting:
         assert sm._mode == SystemMode.ACTIVE
         mocks["bridge"].send_play_file.assert_called_once_with(sm._greeting_audio_path)
 
-    def test_greeting_bridge_error(self) -> None:
+    def test_greeting_bridge_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """send_greeting error doesn't crash SessionManager."""
-        sm, mocks = _make_session_manager(greeting_timeout_sec=0.01)
+        sm, mocks = _make_session_manager(monkeypatch, greeting_timeout_sec=0.01)
 
         mocks["bridge"].send_play_file.side_effect = RuntimeError("Bridge down")
         mocks["bridge"].poll_event.return_value = None
@@ -177,9 +174,9 @@ class TestGreeting:
 
 
 class TestFarewell:
-    def test_farewell_timeout(self) -> None:
+    def test_farewell_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Farewell proceeds to SLEEP even without PLAYBACK_COMPLETE."""
-        sm, mocks = _make_session_manager(farewell_timeout_sec=0.01)
+        sm, mocks = _make_session_manager(monkeypatch, farewell_timeout_sec=0.01)
         sm._session_started = True
         sm._current_history = mocks["history"]
 
@@ -190,9 +187,9 @@ class TestFarewell:
         assert sm._mode == SystemMode.SLEEP
         mocks["history"].save.assert_called_once()
 
-    def test_farewell_flushes_stale_events(self) -> None:
+    def test_farewell_flushes_stale_events(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Stale events are flushed before sending farewell."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
         sm._session_started = True
         sm._current_history = mocks["history"]
 
@@ -205,9 +202,9 @@ class TestFarewell:
         assert sm._mode == SystemMode.SLEEP
         mocks["bridge"].send_play_file.assert_called_once_with(sm._farewell_audio_path)
 
-    def test_farewell_saves_history(self) -> None:
+    def test_farewell_saves_history(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """History is saved during farewell."""
-        sm, mocks = _make_session_manager(farewell_timeout_sec=0.01)
+        sm, mocks = _make_session_manager(monkeypatch, farewell_timeout_sec=0.01)
         sm._session_started = True
         sm._current_history = mocks["history"]
 
@@ -218,9 +215,9 @@ class TestFarewell:
         mocks["history"].save.assert_called_once()
         assert sm._session_started is False
 
-    def test_farewell_poll_event_error(self) -> None:
+    def test_farewell_poll_event_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """poll_event error during farewell doesn't crash."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
         sm._session_started = True
         sm._current_history = mocks["history"]
 
@@ -232,9 +229,9 @@ class TestFarewell:
 
 
 class TestSleep:
-    def test_wakeword_transitions_to_greeting(self) -> None:
+    def test_wakeword_transitions_to_greeting(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Wakeword detection transitions from SLEEP to GREETING."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
 
         mocks["wakeword"].feed_audio.return_value = True
         sm._audio_queue.put(_frame())
@@ -243,9 +240,9 @@ class TestSleep:
 
         assert sm._mode == SystemMode.GREETING
 
-    def test_shutdown_during_sleep(self) -> None:
+    def test_shutdown_during_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Shutdown during SLEEP exits immediately."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
 
         sm._shutdown_event.set()
         sm._run_sleep()
@@ -255,9 +252,9 @@ class TestSleep:
 
 
 class TestAudioInputError:
-    def test_mic_failure_propagates_error(self) -> None:
+    def test_mic_failure_propagates_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Mic capture thread death raises the stored error in SLEEP loop."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
 
         mic_error = OSError("No such device")
         mocks["audio_input"].error = mic_error
@@ -267,9 +264,9 @@ class TestAudioInputError:
 
 
 class TestActive:
-    def test_drains_queue_before_orchestrator(self) -> None:
+    def test_drains_queue_before_orchestrator(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Audio queue is drained before orchestrator.run()."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
 
         # Put stale frames
         for _ in range(5):
@@ -280,9 +277,9 @@ class TestActive:
         assert sm._audio_queue.empty()
         mocks["orchestrator"].run.assert_called_once()
 
-    def test_session_id_from_factory_used(self) -> None:
+    def test_session_id_from_factory_used(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Factory-provided session_id is passed to history.new_session."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
 
         sm._run_active()
 
@@ -293,9 +290,9 @@ class TestActive:
         # SessionManager should store the same session_id
         assert sm._current_session_id == session_id
 
-    def test_factory_failure_returns_to_sleep(self) -> None:
+    def test_factory_failure_returns_to_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Session factory exception → SLEEP, no crash."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
 
         # Replace factory with one that raises
         sm._session_factory = MagicMock(side_effect=RuntimeError("factory boom"))
@@ -307,9 +304,9 @@ class TestActive:
 
 
 class TestShutdown:
-    def test_shutdown_calls_request_stop(self) -> None:
+    def test_shutdown_calls_request_stop(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """shutdown() calls orchestrator.request_stop() when orchestrator is set."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
         sm._current_orchestrator = mocks["orchestrator"]
 
         sm.shutdown()
@@ -317,9 +314,9 @@ class TestShutdown:
         assert sm._shutdown_event.is_set()
         mocks["orchestrator"].request_stop.assert_called_once()
 
-    def test_shutdown_saves_history_if_session_started(self) -> None:
+    def test_shutdown_saves_history_if_session_started(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """shutdown() saves history when a session is active."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
         sm._session_started = True
         sm._current_history = mocks["history"]
 
@@ -327,21 +324,21 @@ class TestShutdown:
 
         mocks["history"].save.assert_called_once()
 
-    def test_shutdown_no_save_if_no_session(self) -> None:
+    def test_shutdown_no_save_if_no_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """shutdown() doesn't save history when no session was started."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
         sm._session_started = False
 
         sm.shutdown()
 
         mocks["history"].save.assert_not_called()
 
-    def test_shutdown_during_active(self) -> None:
+    def test_shutdown_during_active(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Shutdown during ACTIVE triggers orchestrator.request_stop."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
 
         # Orchestrator.run blocks until shutdown
-        def _blocking_run(q):
+        def _blocking_run():
             while not sm._shutdown_event.is_set():
                 time.sleep(0.01)
 
@@ -362,9 +359,9 @@ class TestShutdown:
 
         mocks["orchestrator"].request_stop.assert_called_once()
 
-    def test_shutdown_no_orchestrator(self) -> None:
+    def test_shutdown_no_orchestrator(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """shutdown() is safe when no orchestrator is set."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
         # _current_orchestrator is None by default
 
         sm.shutdown()  # Should not raise
@@ -372,9 +369,9 @@ class TestShutdown:
 
 
 class TestLED:
-    def test_sleep_sets_sleeping(self) -> None:
+    def test_sleep_sets_sleeping(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SLEEP mode sets LED to SLEEPING."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
 
         # Exit immediately
         sm._shutdown_event.set()
@@ -382,9 +379,9 @@ class TestLED:
 
         mocks["led"].set_state.assert_called_with(LEDState.SLEEPING)
 
-    def test_greeting_sets_idle(self) -> None:
+    def test_greeting_sets_idle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """GREETING mode sets LED to IDLE."""
-        sm, mocks = _make_session_manager(greeting_timeout_sec=0.01)
+        sm, mocks = _make_session_manager(monkeypatch, greeting_timeout_sec=0.01)
         mocks["bridge"].poll_event.return_value = None
 
         sm._run_greeting()
@@ -392,9 +389,9 @@ class TestLED:
         led_calls = [c.args[0] for c in mocks["led"].set_state.call_args_list]
         assert LEDState.IDLE in led_calls
 
-    def test_farewell_sets_sleeping(self) -> None:
+    def test_farewell_sets_sleeping(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """FAREWELL sets LED back to SLEEPING."""
-        sm, mocks = _make_session_manager(farewell_timeout_sec=0.01)
+        sm, mocks = _make_session_manager(monkeypatch, farewell_timeout_sec=0.01)
         sm._session_started = True
         sm._current_history = mocks["history"]
         mocks["bridge"].poll_event.return_value = None
@@ -406,9 +403,9 @@ class TestLED:
 
 
 class TestCppBridgeConnect:
-    def test_connect_called_on_startup(self) -> None:
+    def test_connect_called_on_startup(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """cpp_bridge.connect() is called at the start of run()."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
 
         sm._shutdown_event.set()  # Exit immediately
         sm.run()
@@ -417,7 +414,7 @@ class TestCppBridgeConnect:
 
 
 class TestMultiSessionIsolation:
-    def test_two_sessions_get_independent_components(self) -> None:
+    def test_two_sessions_get_independent_components(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Two consecutive sessions get independent history and orchestrator."""
         histories = []
         orchestrators = []
@@ -430,12 +427,10 @@ class TestMultiSessionIsolation:
             orchestrators.append(orch)
             return SessionComponents(orchestrator=orch, history=hist, session_id=str(uuid.uuid4()))
 
-        config = SessionConfig(
-            audio_queue_size=300,
-            greeting_timeout_sec=0.01,
-            farewell_timeout_sec=0.01,
-            frame_timeout_sec=0.01,
-        )
+        monkeypatch.setattr(SessionManager, "AUDIO_QUEUE_SIZE", 300)
+        monkeypatch.setattr(SessionManager, "_GREETING_TIMEOUT_SEC", 0.01)
+        monkeypatch.setattr(SessionManager, "_FAREWELL_TIMEOUT_SEC", 0.01)
+        monkeypatch.setattr(SessionManager, "_FRAME_TIMEOUT_SEC", 0.01)
 
         bridge = MagicMock()
         bridge.poll_event.return_value = None
@@ -446,7 +441,6 @@ class TestMultiSessionIsolation:
             session_factory=tracking_factory,
             cpp_bridge=bridge,
             led=MagicMock(),
-            config=config,
             greeting_audio_path="assets/audio/greeting.wav",
             farewell_audio_path="assets/audio/farewell.wav",
         )
@@ -470,9 +464,9 @@ class TestMultiSessionIsolation:
 
 
 class TestGreetingReconnect:
-    def test_greeting_reconnects_after_bridge_disconnect(self) -> None:
+    def test_greeting_reconnects_after_bridge_disconnect(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """If bridge is disconnected, _run_greeting() reconnects and proceeds."""
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
 
         greeting_event = CppEvent(CppEventType.PLAYBACK_COMPLETE)
         mocks["bridge"].poll_event.side_effect = [
@@ -486,11 +480,11 @@ class TestGreetingReconnect:
         mocks["bridge"].send_play_file.assert_called_once_with(sm._greeting_audio_path)
         assert sm._mode == SystemMode.ACTIVE
 
-    def test_greeting_reconnect_failure_returns_to_sleep(self) -> None:
+    def test_greeting_reconnect_failure_returns_to_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """If reconnect fails, _run_greeting() returns to SLEEP without entering ACTIVE."""
         from voice_pipeline.bridge.exceptions import BridgeError
 
-        sm, mocks = _make_session_manager()
+        sm, mocks = _make_session_manager(monkeypatch)
         mocks["bridge"].connect.side_effect = BridgeError("Connection refused")
 
         sm._run_greeting()
@@ -505,10 +499,10 @@ class TestGreetingReconnect:
 
 
 class TestOnSessionEnd:
-    def test_callback_called_in_farewell(self) -> None:
+    def test_callback_called_in_farewell(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """on_session_end is called during farewell with session_id and started_at."""
         callback = MagicMock()
-        sm, mocks = _make_session_manager(farewell_timeout_sec=0.01, on_session_end=callback)
+        sm, mocks = _make_session_manager(monkeypatch, farewell_timeout_sec=0.01, on_session_end=callback)
         mocks["bridge"].poll_event.return_value = None
 
         # Simulate a session that went through _run_active
@@ -520,10 +514,10 @@ class TestOnSessionEnd:
 
         callback.assert_called_once_with(session_id, started_at)
 
-    def test_callback_error_doesnt_crash_farewell(self) -> None:
+    def test_callback_error_doesnt_crash_farewell(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """If on_session_end raises, farewell still completes."""
         callback = MagicMock(side_effect=RuntimeError("write failed"))
-        sm, mocks = _make_session_manager(farewell_timeout_sec=0.01, on_session_end=callback)
+        sm, mocks = _make_session_manager(monkeypatch, farewell_timeout_sec=0.01, on_session_end=callback)
         mocks["bridge"].poll_event.return_value = None
 
         sm._run_active()
@@ -532,9 +526,9 @@ class TestOnSessionEnd:
         assert sm._mode == SystemMode.SLEEP
         callback.assert_called_once()
 
-    def test_no_callback_backward_compat(self) -> None:
+    def test_no_callback_backward_compat(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without on_session_end, farewell works as before."""
-        sm, mocks = _make_session_manager(farewell_timeout_sec=0.01)
+        sm, mocks = _make_session_manager(monkeypatch, farewell_timeout_sec=0.01)
         mocks["bridge"].poll_event.return_value = None
 
         sm._run_active()
@@ -543,10 +537,10 @@ class TestOnSessionEnd:
         assert sm._mode == SystemMode.SLEEP
         mocks["history"].save.assert_called_once()
 
-    def test_callback_called_on_shutdown(self) -> None:
+    def test_callback_called_on_shutdown(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """shutdown() triggers on_session_end if a session is active."""
         callback = MagicMock()
-        sm, mocks = _make_session_manager(on_session_end=callback)
+        sm, mocks = _make_session_manager(monkeypatch, on_session_end=callback)
 
         # Simulate an active session
         sm._run_active()

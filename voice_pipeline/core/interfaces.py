@@ -425,6 +425,19 @@ class ITTS(ABC):
     Thread-safe: concurrent synthesize() calls are independent.
     """
 
+    @property
+    @abstractmethod
+    def output_sample_rate(self) -> int:
+        """PCM 출력 샘플레이트 (Hz). vendor/모델별로 고정값."""
+
+    @property
+    @abstractmethod
+    def voice_id(self) -> str:
+        """동일 음성 설정을 식별하는 문자열 (vendor + 설정 조합).
+
+        cache 무효화 등 "같은 음성인지" 비교에 사용.
+        """
+
     @abstractmethod
     def synthesize(self, text: str) -> TTSStream:
         """Synthesize speech from text.
@@ -568,9 +581,7 @@ class IVAP(ABC):
     """
 
     @abstractmethod
-    def feed_audio(
-        self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None
-    ) -> VAPResult:
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
         """Feed pipeline audio and return voice activity estimates.
 
         Args:
@@ -1032,9 +1043,7 @@ class IMemoryStorage(ABC):
     # --- Utterance ---
 
     @abstractmethod
-    def add_utterance(
-        self, session_id: str, role: str, text: str, timestamp: str, token_count: int = 0
-    ) -> None:
+    def add_utterance(self, session_id: str, role: str, text: str, timestamp: str, token_count: int = 0) -> None:
         """Store a conversation utterance for later memory extraction.
 
         Args:

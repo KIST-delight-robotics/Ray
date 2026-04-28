@@ -15,8 +15,6 @@ import time
 
 import pytest
 
-from voice_pipeline.core.config import TurnGPTConfig
-
 pytestmark = pytest.mark.requires_model
 
 # ---------------------------------------------------------------------------
@@ -37,11 +35,18 @@ def checkpoint_path() -> str:
 @pytest.fixture(scope="module")
 def wrapper(checkpoint_path: str):
     """Create a TurnGPTWrapper with real model (shared across module tests)."""
-    config = TurnGPTConfig(checkpoint_path=checkpoint_path, onnx_model_path="", device="cpu")
-
     from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
-    return TurnGPTWrapper(config)
+    # device defaults to "cpu" via class var; no override needed.
+    saved_backend = TurnGPTWrapper._BACKEND
+    saved_ckpt = TurnGPTWrapper._CHECKPOINT_PATH
+    TurnGPTWrapper._BACKEND = "pytorch"
+    TurnGPTWrapper._CHECKPOINT_PATH = checkpoint_path
+    try:
+        yield TurnGPTWrapper()
+    finally:
+        TurnGPTWrapper._BACKEND = saved_backend
+        TurnGPTWrapper._CHECKPOINT_PATH = saved_ckpt
 
 
 @pytest.fixture(autouse=True)

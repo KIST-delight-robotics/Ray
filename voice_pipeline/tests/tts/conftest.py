@@ -7,8 +7,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from voice_pipeline.core.config import TTSConfig
-
 # ---------------------------------------------------------------------------
 # Unit test helpers
 # ---------------------------------------------------------------------------
@@ -59,12 +57,6 @@ def create_mock_client(
     client.audio.speech.with_streaming_response.create.return_value = mock_cm
 
     return client
-
-
-@pytest.fixture
-def tts_config() -> TTSConfig:
-    """Default TTSConfig for tests."""
-    return TTSConfig()
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pytest
 
-from voice_pipeline.core.config import LLMConfig
 from voice_pipeline.llm.llm import OpenAILLM
 
 pytestmark = pytest.mark.requires_api
@@ -16,7 +15,7 @@ pytestmark = pytest.mark.requires_api
 @pytest.fixture
 def llm(openai_api_key: str) -> OpenAILLM:  # noqa: ARG001
     """Create an OpenAILLM with default config."""
-    return OpenAILLM(LLMConfig())
+    return OpenAILLM()
 
 
 class TestRapidSequentialCalls:
@@ -46,7 +45,7 @@ class TestPartialConsumption:
 
 class TestMaxTokensRespected:
     def test_short_max_tokens(self, openai_api_key: str) -> None:  # noqa: ARG002
-        llm = OpenAILLM(LLMConfig(max_tokens=20))
+        llm = OpenAILLM(max_tokens=20)
         chunks = list(
             llm.generate(
                 [

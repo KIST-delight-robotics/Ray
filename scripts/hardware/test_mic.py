@@ -15,7 +15,7 @@ import time
 import wave
 
 from voice_pipeline.audio.audio_input import AudioInput
-from voice_pipeline.core.config import AudioConfig, AudioInputConfig
+from voice_pipeline.audio.constants import CHANNELS, FRAME_DURATION_MS, SAMPLE_RATE, SAMPLE_WIDTH
 from voice_pipeline.core.types import AudioFrame
 
 
@@ -28,11 +28,7 @@ def list_devices() -> None:
     for i in range(pa.get_device_count()):
         info = pa.get_device_info_by_index(i)
         if info["maxInputChannels"] > 0:
-            print(
-                f"  [{i}] {info['name']}"
-                f"  (channels={info['maxInputChannels']},"
-                f" rate={info['defaultSampleRate']})"
-            )
+            print(f"  [{i}] {info['name']}  (channels={info['maxInputChannels']}, rate={info['defaultSampleRate']})")
     print()
     pa.terminate()
 
@@ -62,17 +58,17 @@ def main() -> None:
 
     list_devices()
 
-    audio_config = AudioConfig()  # 16kHz, mono, 30ms frames, 16-bit
-    input_config = AudioInputConfig(device_index=args.device)
+    if args.device is not None:
+        AudioInput._DEVICE_INDEX = args.device
     audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
 
     print(
-        f"Recording for {args.seconds}s  (rate={audio_config.sample_rate}, "
-        f"frame={audio_config.frame_duration_ms}ms, device={args.device or 'default'})"
+        f"Recording for {args.seconds}s  (rate={SAMPLE_RATE}, "
+        f"frame={FRAME_DURATION_MS}ms, device={args.device or 'default'})"
     )
     print("Speak into the microphone...\n")
 
-    audio_input = AudioInput(audio_queue, audio_config, input_config)
+    audio_input = AudioInput(audio_queue)
     audio_input.start()
 
     frames: list[AudioFrame] = []
@@ -101,7 +97,7 @@ def main() -> None:
     finally:
         audio_input.stop()
 
-    duration_s = len(frames) * audio_config.frame_duration_ms / 1000
+    duration_s = len(frames) * FRAME_DURATION_MS / 1000
     print(f"\n\nDone. Captured {frame_count} frames ({duration_s:.1f}s)")
 
     if audio_input._error:
@@ -115,9 +111,9 @@ def main() -> None:
     # Save to WAV
     out_path = "test_recording.wav"
     with wave.open(out_path, "wb") as wf:
-        wf.setnchannels(audio_config.channels)
-        wf.setsampwidth(audio_config.sample_width)
-        wf.setframerate(audio_config.sample_rate)
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(SAMPLE_WIDTH)
+        wf.setframerate(SAMPLE_RATE)
         wf.writeframes(b"".join(frames))
 
     print(f"Saved to {out_path}")

@@ -9,8 +9,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from voice_pipeline.core.config import GreetingAudioConfig, TTSConfig
 from voice_pipeline.core.types import TTSStream
+from voice_pipeline.tts import greeting_audio as greeting_audio_module
 from voice_pipeline.tts.greeting_audio import (
     _cache_key,
     ensure_greeting_audio,
@@ -26,9 +26,14 @@ SAMPLE_RATE = 24000
 PCM_SILENCE = struct.pack(f"<{100}h", *([0] * 100))
 
 
-def _make_tts_mock(pcm_chunks: list[bytes] | None = None) -> MagicMock:
+def _make_tts_mock(
+    pcm_chunks: list[bytes] | None = None,
+    voice_id: str = "openai|alloy|tts-1|1.0|",
+) -> MagicMock:
     """Create a mock ITTS whose synthesize() returns a TTSStream."""
     mock = MagicMock()
+    mock.voice_id = voice_id
+    mock.output_sample_rate = SAMPLE_RATE
     chunks = pcm_chunks if pcm_chunks is not None else [PCM_SILENCE]
 
     def _synthesize(text: str) -> TTSStream:  # noqa: ARG001
@@ -60,7 +65,7 @@ class TestSynthesizeToWav:
         tts = _make_tts_mock()
         out = tmp_path / "output.wav"
 
-        synthesize_to_wav(tts, "hello", out, SAMPLE_RATE)
+        synthesize_to_wav(tts, "hello", out)
 
         assert out.exists()
         channels, sampwidth, framerate, frames = _read_wav(out)
@@ -73,7 +78,7 @@ class TestSynthesizeToWav:
         tts = _make_tts_mock()
         out = tmp_path / "sub" / "dir" / "output.wav"
 
-        synthesize_to_wav(tts, "hello", out, SAMPLE_RATE)
+        synthesize_to_wav(tts, "hello", out)
 
         assert out.exists()
 
@@ -83,7 +88,7 @@ class TestSynthesizeToWav:
         tts = _make_tts_mock([chunk_a, chunk_b])
         out = tmp_path / "output.wav"
 
-        synthesize_to_wav(tts, "hello", out, SAMPLE_RATE)
+        synthesize_to_wav(tts, "hello", out)
 
         _, _, _, frames = _read_wav(out)
         assert frames == chunk_a + chunk_b
@@ -92,13 +97,14 @@ class TestSynthesizeToWav:
         tts = _make_tts_mock()
         out = tmp_path / "output.wav"
 
-        synthesize_to_wav(tts, "hello", out, SAMPLE_RATE)
+        synthesize_to_wav(tts, "hello", out)
 
         tts.synthesize.assert_called_once_with("hello")
 
     def test_closes_stream_on_error(self, tmp_path: Path) -> None:
         """Stream is closed even if iteration raises."""
         mock = MagicMock()
+        mock.output_sample_rate = SAMPLE_RATE
 
         def _bad_gen():
             yield b"\x00\x00"
@@ -109,7 +115,7 @@ class TestSynthesizeToWav:
         out = tmp_path / "output.wav"
 
         with pytest.raises(RuntimeError, match="boom"):
-            synthesize_to_wav(mock, "hello", out, SAMPLE_RATE)
+            synthesize_to_wav(mock, "hello", out)
 
         assert stream._closed
 
@@ -120,94 +126,90 @@ class TestSynthesizeToWav:
 
 
 class TestEnsureGreetingAudio:
-    def test_generates_missing_files(self, tmp_path: Path) -> None:
-        tts = _make_tts_mock()
-        tts_config = TTSConfig(voice="coral", model="tts-1")
-        greeting_config = GreetingAudioConfig(audio_dir=str(tmp_path))
+    def test_generates_missing_files(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        tts = _make_tts_mock(voice_id="openai|coral|tts-1|1.0|")
+        monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
 
-        paths = ensure_greeting_audio(tts, tts_config, greeting_config)
+        paths = ensure_greeting_audio(tts)
 
         assert tts.synthesize.call_count == 2
         assert Path(paths.greeting).exists()
         assert Path(paths.farewell).exists()
 
-    def test_skips_existing_files(self, tmp_path: Path) -> None:
-        tts = _make_tts_mock()
-        tts_config = TTSConfig(voice="coral", model="tts-1")
-        greeting_config = GreetingAudioConfig(audio_dir=str(tmp_path))
+    def test_skips_existing_files(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        tts = _make_tts_mock(voice_id="openai|coral|tts-1|1.0|")
+        monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
 
         # Pre-create the expected files
         for label, text in (
-            ("greeting", greeting_config.greeting_text),
-            ("farewell", greeting_config.farewell_text),
+            ("greeting", greeting_audio_module._GREETING_TEXT),
+            ("farewell", greeting_audio_module._FAREWELL_TEXT),
         ):
-            key = _cache_key(tts_config, text)
+            key = _cache_key(tts, text)
             (tmp_path / f"{label}_{key}.wav").write_bytes(b"fake")
 
-        ensure_greeting_audio(tts, tts_config, greeting_config)
+        ensure_greeting_audio(tts)
 
         tts.synthesize.assert_not_called()
 
-    def test_returns_correct_paths(self, tmp_path: Path) -> None:
-        tts = _make_tts_mock()
-        tts_config = TTSConfig(voice="alloy", model="tts-1")
-        greeting_config = GreetingAudioConfig(audio_dir=str(tmp_path))
+    def test_returns_correct_paths(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        tts = _make_tts_mock(voice_id="openai|alloy|tts-1|1.0|")
+        monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
 
-        paths = ensure_greeting_audio(tts, tts_config, greeting_config)
+        paths = ensure_greeting_audio(tts)
 
-        g_key = _cache_key(tts_config, greeting_config.greeting_text)
-        f_key = _cache_key(tts_config, greeting_config.farewell_text)
+        g_key = _cache_key(tts, greeting_audio_module._GREETING_TEXT)
+        f_key = _cache_key(tts, greeting_audio_module._FAREWELL_TEXT)
         assert paths.greeting == str(tmp_path / f"greeting_{g_key}.wav")
         assert paths.farewell == str(tmp_path / f"farewell_{f_key}.wav")
 
-    def test_config_change_triggers_regeneration(self, tmp_path: Path) -> None:
-        tts = _make_tts_mock()
-        greeting_config = GreetingAudioConfig(audio_dir=str(tmp_path))
+    def test_voice_change_triggers_regeneration(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
 
         # First run with voice "alloy"
-        config_v1 = TTSConfig(voice="alloy", model="tts-1")
-        paths_v1 = ensure_greeting_audio(tts, config_v1, greeting_config)
-        assert tts.synthesize.call_count == 2
+        tts_v1 = _make_tts_mock(voice_id="openai|alloy|tts-1|1.0|")
+        paths_v1 = ensure_greeting_audio(tts_v1)
+        assert tts_v1.synthesize.call_count == 2
 
         # Second run with voice "coral" — should regenerate
-        tts.synthesize.reset_mock()
-        config_v2 = TTSConfig(voice="coral", model="tts-1")
-        paths_v2 = ensure_greeting_audio(tts, config_v2, greeting_config)
-        assert tts.synthesize.call_count == 2
+        tts_v2 = _make_tts_mock(voice_id="openai|coral|tts-1|1.0|")
+        paths_v2 = ensure_greeting_audio(tts_v2)
+        assert tts_v2.synthesize.call_count == 2
 
         # Different paths, both exist
         assert paths_v1.greeting != paths_v2.greeting
         assert Path(paths_v1.greeting).exists()
         assert Path(paths_v2.greeting).exists()
 
-    def test_text_change_triggers_regeneration(self, tmp_path: Path) -> None:
-        tts = _make_tts_mock()
-        tts_config = TTSConfig(voice="alloy", model="tts-1")
+    def test_text_change_triggers_regeneration(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        tts = _make_tts_mock(voice_id="openai|alloy|tts-1|1.0|")
+        monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
 
-        config_v1 = GreetingAudioConfig(audio_dir=str(tmp_path), greeting_text="안녕!")
-        paths_v1 = ensure_greeting_audio(tts, tts_config, config_v1)
+        monkeypatch.setattr(greeting_audio_module, "_GREETING_TEXT", "안녕!")
+        paths_v1 = ensure_greeting_audio(tts)
         assert tts.synthesize.call_count == 2
 
         tts.synthesize.reset_mock()
-        config_v2 = GreetingAudioConfig(audio_dir=str(tmp_path), greeting_text="반가워요!")
-        paths_v2 = ensure_greeting_audio(tts, tts_config, config_v2)
+        monkeypatch.setattr(greeting_audio_module, "_GREETING_TEXT", "반가워요!")
+        paths_v2 = ensure_greeting_audio(tts)
         # greeting regenerated, farewell skipped (same text)
         assert tts.synthesize.call_count == 1
         assert paths_v1.greeting != paths_v2.greeting
         assert paths_v1.farewell == paths_v2.farewell
 
-    def test_tts_error_falls_back(self, tmp_path: Path) -> None:
+    def test_tts_error_falls_back(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         tts = MagicMock()
+        tts.voice_id = "openai|alloy|tts-1|1.0|"
+        tts.output_sample_rate = SAMPLE_RATE
         tts.synthesize.side_effect = RuntimeError("API down")
-        tts_config = TTSConfig(voice="alloy", model="tts-1")
-        greeting_config = GreetingAudioConfig(audio_dir=str(tmp_path))
+        monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
 
-        paths = ensure_greeting_audio(tts, tts_config, greeting_config)
+        paths = ensure_greeting_audio(tts)
 
-        assert paths.greeting == greeting_config.fallback_greeting_path
-        assert paths.farewell == greeting_config.fallback_farewell_path
+        assert paths.greeting == greeting_audio_module._FALLBACK_GREETING_PATH
+        assert paths.farewell == greeting_audio_module._FALLBACK_FAREWELL_PATH
 
-    def test_partial_failure_falls_back_individually(self, tmp_path: Path) -> None:
+    def test_partial_failure_falls_back_individually(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Greeting succeeds, farewell fails → only farewell uses fallback."""
         call_count = 0
 
@@ -219,12 +221,13 @@ class TestEnsureGreetingAudio:
             raise RuntimeError("API down")
 
         tts = MagicMock()
+        tts.voice_id = "openai|alloy|tts-1|1.0|"
+        tts.output_sample_rate = SAMPLE_RATE
         tts.synthesize.side_effect = _fail_on_second
-        tts_config = TTSConfig(voice="alloy", model="tts-1")
-        greeting_config = GreetingAudioConfig(audio_dir=str(tmp_path))
+        monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
 
-        paths = ensure_greeting_audio(tts, tts_config, greeting_config)
+        paths = ensure_greeting_audio(tts)
 
         assert Path(paths.greeting).exists()
-        assert paths.greeting != greeting_config.fallback_greeting_path
-        assert paths.farewell == greeting_config.fallback_farewell_path
+        assert paths.greeting != greeting_audio_module._FALLBACK_GREETING_PATH
+        assert paths.farewell == greeting_audio_module._FALLBACK_FAREWELL_PATH

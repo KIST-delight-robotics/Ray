@@ -19,7 +19,6 @@ from voice_pipeline.context.formatters import (
     format_memory_block,
     format_profile_block,
 )
-from voice_pipeline.core.config import ConversationHistoryConfig
 from voice_pipeline.core.interfaces import IContextBuilder, IConversationHistory
 from voice_pipeline.core.types import TokenCounter
 
@@ -45,17 +44,21 @@ class ContextBuilder(IContextBuilder):
     Token budget allocation order:
       1. Base overhead + tool definitions
       2. System prompt  (Block 1)
-      3. Profile block  (Block 2, capped at ``max_profile_tokens``)
-      4. Prev sessions  (Block 3 front, capped at ``max_prev_session_tokens``)
-      5. Memory block   (Block 4, **dedicated** ``max_memory_tokens``)
+      3. Profile block  (Block 2, capped at ``_MAX_PROFILE_TOKENS``)
+      4. Prev sessions  (Block 3 front, capped at ``_MAX_PREV_SESSION_TOKENS``)
+      5. Memory block   (Block 4, **dedicated** ``_MAX_MEMORY_TOKENS``)
       6. Current user message
       7. Current session history  (remainder, reverse-chronological atomic)
     """
 
+    _MAX_CONTEXT_TOKENS = 4096  # LLM 입력 전체 토큰 예산 (모든 블록 합산 상한)
+    _MAX_MEMORY_TOKENS = 512  # retrieved memory 블록 전용 예산 (초과 시 낮은 salience 순 drop)
+    _MAX_PROFILE_TOKENS = 256  # profile 블록 전용 예산 (초과 시 블록 skip)
+    _MAX_PREV_SESSION_TOKENS = 512  # previous session summary 블록 전용 예산 (초과 시 오래된 순 drop)
+
     def __init__(
         self,
         history: IConversationHistory,
-        config: ConversationHistoryConfig,
         system_prompt: str,
         token_counter: TokenCounter,
         tools_token_cost: int = 0,
@@ -63,7 +66,6 @@ class ContextBuilder(IContextBuilder):
         session_summaries: list[str] | None = None,
     ) -> None:
         self._history = history
-        self._config = config
         self._system_prompt = system_prompt
         self._token_counter = token_counter
         self._tools_token_cost = tools_token_cost
@@ -71,9 +73,7 @@ class ContextBuilder(IContextBuilder):
         # Pre-format and pre-count session-level blocks (immutable)
         self._profile_text = format_profile_block(profiles or [])
         self._profile_tokens = (
-            self._token_counter(self._profile_text) + _PER_MESSAGE_OVERHEAD_TOKENS
-            if self._profile_text
-            else 0
+            self._token_counter(self._profile_text) + _PER_MESSAGE_OVERHEAD_TOKENS if self._profile_text else 0
         )
 
         self._summary_msgs: list[tuple[str, int]] = []  # (text, token_cost)
@@ -98,7 +98,7 @@ class ContextBuilder(IContextBuilder):
           6. Reserve current user message.
           7. Fill remaining budget with history turns (most recent first).
         """
-        budget = self._config.max_context_tokens
+        budget = self._MAX_CONTEXT_TOKENS
 
         # 1. Fixed overhead
         budget -= _BASE_OVERHEAD_TOKENS + self._tools_token_cost
@@ -110,17 +110,13 @@ class ContextBuilder(IContextBuilder):
             messages.append({"role": "system", "content": self._system_prompt})
             budget -= self._token_counter(self._system_prompt) + _PER_MESSAGE_OVERHEAD_TOKENS
 
-        # 3. Profile (Block 2) — capped at max_profile_tokens
-        if (
-            self._profile_text
-            and self._profile_tokens <= self._config.max_profile_tokens
-            and self._profile_tokens <= budget
-        ):
+        # 3. Profile (Block 2) — capped at _MAX_PROFILE_TOKENS
+        if self._profile_text and self._profile_tokens <= self._MAX_PROFILE_TOKENS and self._profile_tokens <= budget:
             messages.append({"role": "developer", "content": self._profile_text})
             budget -= self._profile_tokens
 
         # 4. Previous session summaries (Block 3 front) — capped total
-        summary_budget = min(self._config.max_prev_session_tokens, budget)
+        summary_budget = min(self._MAX_PREV_SESSION_TOKENS, budget)
         summary_spent = 0
         summary_msgs_to_add: list[dict[str, Any]] = []
         for text, cost in self._summary_msgs:
@@ -138,7 +134,7 @@ class ContextBuilder(IContextBuilder):
             memory_text = format_memory_block(memory_result)
             memory_cost = self._token_counter(memory_text) + _PER_MESSAGE_OVERHEAD_TOKENS
             # If over cap, drop lowest-salience episodes (from tail) until it fits
-            max_mem = self._config.max_memory_tokens
+            max_mem = self._MAX_MEMORY_TOKENS
             if memory_cost > max_mem:
                 from voice_pipeline.memory.types import MemoryReadResult
 
@@ -151,11 +147,7 @@ class ContextBuilder(IContextBuilder):
                     idx_map.pop(len(eps) + 1, None)
                     trimmed = MemoryReadResult(eps, scores, idx_map)
                     memory_text = format_memory_block(trimmed)
-                    memory_cost = (
-                        self._token_counter(memory_text) + _PER_MESSAGE_OVERHEAD_TOKENS
-                        if memory_text
-                        else 0
-                    )
+                    memory_cost = self._token_counter(memory_text) + _PER_MESSAGE_OVERHEAD_TOKENS if memory_text else 0
                 if not memory_text:
                     memory_cost = 0
         budget -= memory_cost  # reserve even before history fill

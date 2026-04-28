@@ -19,12 +19,6 @@ import time
 import pytest
 
 from voice_pipeline.context.context_builder import ContextBuilder
-from voice_pipeline.core.config import (
-    ConversationHistoryConfig,
-    LLMConfig,
-    SpeechGeneratorConfig,
-    TTSConfig,
-)
 from voice_pipeline.core.types import GeneratorState
 from voice_pipeline.generation.speech_generator import SpeechGenerator
 from voice_pipeline.history.conversation_history import ConversationHistory
@@ -43,9 +37,7 @@ _POLL_INTERVAL = 0.05  # seconds
 _TIMEOUT = 30.0  # seconds — generous for API latency
 
 
-def _wait_for_state(
-    gen: SpeechGenerator, target: GeneratorState, timeout: float = _TIMEOUT
-) -> None:
+def _wait_for_state(gen: SpeechGenerator, target: GeneratorState, timeout: float = _TIMEOUT) -> None:
     """Poll until SpeechGenerator reaches the target state or times out."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -94,32 +86,27 @@ def openai_api_key() -> str:
 
 
 @pytest.fixture
-def speech_generator(openai_api_key: str) -> SpeechGenerator:
+def speech_generator(openai_api_key: str, monkeypatch: pytest.MonkeyPatch) -> SpeechGenerator:
     """Build a full SpeechGenerator wired to real APIs."""
-    llm_config = LLMConfig(model="gpt-4o-mini", temperature=0.3, max_tokens=128)
-    tts_config = TTSConfig(model="tts-1", voice="alloy")
-    history_config = ConversationHistoryConfig(max_context_tokens=2048)
+    monkeypatch.setattr(ContextBuilder, "_MAX_CONTEXT_TOKENS", 2048)
+    llm = OpenAILLM(model="gpt-4o-mini", temperature=0.3, max_tokens=128)
 
-    token_counter = create_token_counter(llm_config.model)
+    token_counter = create_token_counter(llm.model)
     history = ConversationHistory(MemoryStorageBackend(), token_counter)
     history.new_session("integration-test")
     context_builder = ContextBuilder(
         history=history,
-        config=history_config,
-        system_prompt=(
-            "You are Ray, a friendly voice assistant. Keep responses very short (1-2 sentences)."
-        ),
+        system_prompt=("You are Ray, a friendly voice assistant. Keep responses very short (1-2 sentences)."),
         token_counter=token_counter,
     )
-
-    llm = OpenAILLM(llm_config)
-    tts = OpenAITTS(tts_config)
+    monkeypatch.setattr(OpenAITTS, "_MODEL", "tts-1")
+    monkeypatch.setattr(OpenAITTS, "_VOICE", "alloy")
+    tts = OpenAITTS()
 
     gen = SpeechGenerator(
         context_builder=context_builder,
         llm=llm,
         tts=tts,
-        config=SpeechGeneratorConfig(max_workers=2),
     )
     yield gen
     gen.shutdown()

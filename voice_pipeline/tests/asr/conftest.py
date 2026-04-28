@@ -10,8 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from voice_pipeline.core.config import AudioConfig
-
 _SAMPLE_RATE_MIN = 8000
 _SAMPLE_RATE_MAX = 48000
 
@@ -100,13 +98,11 @@ def read_wav_frames(path: Path, frame_duration_ms: int = 30) -> tuple[WavInfo, l
     return info, frames
 
 
-def audio_config_from_wav(info: WavInfo) -> AudioConfig:
-    """Build an AudioConfig matching the WAV file's properties."""
-    return AudioConfig(
-        sample_rate=info.sample_rate,
-        channels=info.channels,
-        sample_width=info.sample_width,
-    )
+def make_asr_for_wav(info: WavInfo, language_code: str = "en-US"):  # noqa: ARG001
+    """Build a GoogleCloudASR. ``info`` is accepted for symmetry with other helpers."""
+    from voice_pipeline.asr.asr import GoogleCloudASR
+
+    return GoogleCloudASR(language_code=language_code)
 
 
 # ---------------------------------------------------------------------------

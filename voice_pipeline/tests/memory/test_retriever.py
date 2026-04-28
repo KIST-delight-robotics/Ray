@@ -6,8 +6,8 @@ from datetime import UTC, datetime
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
-from voice_pipeline.core.config import MemoryConfig
 from voice_pipeline.core.interfaces import IEmbedder
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import InMemoryMemoryStorage
@@ -67,20 +67,35 @@ class _FakeEmbedder(IEmbedder):
         return _DIM
 
 
-def _make_config(**overrides: object) -> MemoryConfig:
-    defaults = dict(
-        embedding_dimension=_DIM,
+_RETRIEVER_CLASS_VAR_MAP = {
+    "max_memories": "_MAX_MEMORIES",
+    "min_new_slots": "_MIN_NEW_SLOTS",
+    "retained_ttl": "_RETAINED_TTL",
+    "vector_top_k": "_VECTOR_TOP_K",
+    "bm25_top_k": "_BM25_TOP_K",
+    "rrf_k": "_RRF_K",
+    "recency_half_life_days": "_RECENCY_HALF_LIFE_DAYS",
+    "salience_threshold": "_SALIENCE_THRESHOLD",
+}
+
+
+def _apply_retriever_overrides(monkeypatch, **overrides: object) -> None:
+    """Translate legacy MemoryConfig kwargs into MemoryRetriever class var monkeypatches."""
+    for key, value in overrides.items():
+        monkeypatch.setattr(MemoryRetriever, _RETRIEVER_CLASS_VAR_MAP[key], value)
+
+
+@pytest.fixture(autouse=True)
+def _default_retriever_overrides(monkeypatch):
+    """Default test tuning — smaller values for deterministic unit tests."""
+    _apply_retriever_overrides(
+        monkeypatch,
         max_memories=5,
         min_new_slots=2,
         retained_ttl=3,
         vector_top_k=10,
         bm25_top_k=10,
-        rrf_k=60,
-        recency_half_life_days=30.0,
-        salience_threshold=0.0,
     )
-    defaults.update(overrides)
-    return MemoryConfig(**defaults)  # type: ignore[arg-type]
 
 
 def _fixed_now() -> datetime:
@@ -93,10 +108,8 @@ _NOW_PATH = "voice_pipeline.memory.retriever.datetime"
 def _setup(
     episodes: list[Episode] | None = None,
     query_vec: np.ndarray | None = None,
-    config: MemoryConfig | None = None,
 ) -> tuple[MemoryRetriever, InMemoryMemoryStorage, NumpyVectorIndex]:
     """Create a retriever with pre-populated storage and vector index."""
-    cfg = config or _make_config()
     storage = InMemoryMemoryStorage(dimension=_DIM)
     index = NumpyVectorIndex()
     embedder = _FakeEmbedder(query_vec)
@@ -107,7 +120,7 @@ def _setup(
             if ep.embedding is not None and eid is not None:
                 index.add(eid, ep.embedding)
 
-    retriever = MemoryRetriever(storage, index, embedder, cfg)
+    retriever = MemoryRetriever(storage, index, embedder)
     return retriever, storage, index
 
 
@@ -240,10 +253,12 @@ class TestSalience:
         triv_idx = next(i for i, ep in enumerate(result.episodes) if "trivial" in ep.text)
         assert result.scores[imp_idx] > result.scores[triv_idx]
 
-    def test_half_life_decay(self) -> None:
+    def test_half_life_decay(self, monkeypatch) -> None:
         """At exactly half_life days, recency_decay ≈ 0.5."""
         v = _vec(1.0, 0.0)
         half_life = 30.0
+        _apply_retriever_overrides(monkeypatch, recency_half_life_days=half_life)
+
         # Episode timestamped exactly half_life days before now
         ep = _make_episode(
             text="half life test",
@@ -251,8 +266,7 @@ class TestSalience:
             importance=1.0,
             embedding=v,
         )
-        cfg = _make_config(recency_half_life_days=half_life)
-        retriever, _, _ = _setup([ep], query_vec=_vec(1.0, 0.0), config=cfg)
+        retriever, _, _ = _setup([ep], query_vec=_vec(1.0, 0.0))
 
         now = datetime(2026, 3, 31, 12, 0, 0, tzinfo=UTC)
         with patch(_NOW_PATH) as mock_dt:
@@ -267,7 +281,7 @@ class TestSalience:
             importance=1.0,
             embedding=v.copy(),
         )
-        retriever2, _, _ = _setup([ep_fresh], query_vec=_vec(1.0, 0.0), config=cfg)
+        retriever2, _, _ = _setup([ep_fresh], query_vec=_vec(1.0, 0.0))
         with patch(_NOW_PATH) as mock_dt:
             mock_dt.now.return_value = now
             mock_dt.strptime = datetime.strptime
@@ -337,12 +351,12 @@ class TestFiltering:
 
 
 class TestSlotAllocation:
-    def test_max_memories_limits_output(self) -> None:
+    def test_max_memories_limits_output(self, monkeypatch) -> None:
         """No more than max_memories episodes returned."""
         v = _vec(1.0, 0.0)
-        cfg = _make_config(max_memories=3, min_new_slots=1)
+        _apply_retriever_overrides(monkeypatch, max_memories=3, min_new_slots=1)
         eps = [_make_episode(text=f"episode {i} scifi", embedding=v.copy()) for i in range(10)]
-        retriever, _, _ = _setup(eps, query_vec=_vec(1.0, 0.0), config=cfg)
+        retriever, _, _ = _setup(eps, query_vec=_vec(1.0, 0.0))
 
         with patch(_NOW_PATH) as mock_dt:
             mock_dt.now.return_value = _fixed_now()
@@ -351,13 +365,13 @@ class TestSlotAllocation:
 
         assert len(result.episodes) <= 3
 
-    def test_min_new_slots_guaranteed(self) -> None:
+    def test_min_new_slots_guaranteed(self, monkeypatch) -> None:
         """Even with retained entries, at least min_new_slots new results appear."""
         v = _vec(1.0, 0.0)
-        cfg = _make_config(max_memories=5, min_new_slots=2, retained_ttl=3)
+        _apply_retriever_overrides(monkeypatch, max_memories=5, min_new_slots=2, retained_ttl=3)
 
         eps = [_make_episode(text=f"episode {i} scifi", embedding=v.copy()) for i in range(10)]
-        retriever, _, _ = _setup(eps, query_vec=_vec(1.0, 0.0), config=cfg)
+        retriever, _, _ = _setup(eps, query_vec=_vec(1.0, 0.0))
 
         # First retrieve — all are new
         with patch(_NOW_PATH) as mock_dt:
@@ -376,18 +390,18 @@ class TestSlotAllocation:
 
         # Structural check: entries with high TTL (carried from cited)
         # are capped at max_retained, the rest entered as new (ttl=1)
-        carried = sum(1 for e in retriever._retained.values() if e.ttl == cfg.retained_ttl)
+        carried = sum(1 for e in retriever._retained.values() if e.ttl == MemoryRetriever._RETAINED_TTL)
         new_entries = sum(1 for e in retriever._retained.values() if e.ttl == 1)
         assert carried <= 3  # max_retained = 5 - 2
         assert new_entries >= 2  # min_new_slots
 
-    def test_retained_overflow_evicts_by_ttl_then_salience(self) -> None:
+    def test_retained_overflow_evicts_by_ttl_then_salience(self, monkeypatch) -> None:
         """When retained exceeds max, lowest TTL (then salience) evicted."""
         v = _vec(1.0, 0.0)
-        cfg = _make_config(max_memories=4, min_new_slots=1, retained_ttl=3)
+        _apply_retriever_overrides(monkeypatch, max_memories=4, min_new_slots=1, retained_ttl=3)
 
         eps = [_make_episode(text=f"episode {i} scifi", embedding=v.copy()) for i in range(6)]
-        retriever, _, _ = _setup(eps, query_vec=_vec(1.0, 0.0), config=cfg)
+        retriever, _, _ = _setup(eps, query_vec=_vec(1.0, 0.0))
 
         # First retrieve: get 4 episodes
         with patch(_NOW_PATH) as mock_dt:
@@ -417,12 +431,12 @@ class TestRetainedBuffer:
         self,
     ) -> tuple[MemoryRetriever, InMemoryMemoryStorage, NumpyVectorIndex]:
         v = _vec(1.0, 0.0)
-        cfg = _make_config(max_memories=5, min_new_slots=2, retained_ttl=3)
+        # Autouse fixture already applies max_memories=5, min_new_slots=2, retained_ttl=3.
         eps = [
             _make_episode(text="target episode scifi", embedding=v.copy()),
             _make_episode(text="other episode scifi", embedding=v.copy()),
         ]
-        return _setup(eps, query_vec=_vec(1.0, 0.0), config=cfg)
+        return _setup(eps, query_vec=_vec(1.0, 0.0))
 
     def test_new_entry_gets_ttl_1(self) -> None:
         """New search result enters retained with TTL=1."""
@@ -473,11 +487,12 @@ class TestRetainedBuffer:
 
         assert retriever._retained[eid].ttl == ttl_before
 
-    def test_search_miss_decrements_ttl(self) -> None:
+    def test_search_miss_decrements_ttl(self, monkeypatch) -> None:
         """Retained entry NOT in search results: TTL -= 1."""
         v_target = _vec(1.0, 0.0)
         v_distract = _vec(0.0, 1.0)
-        cfg = _make_config(
+        _apply_retriever_overrides(
+            monkeypatch,
             max_memories=5,
             min_new_slots=2,
             retained_ttl=3,
@@ -487,14 +502,10 @@ class TestRetainedBuffer:
 
         # Target + distractors aligned to the second query direction
         target = _make_episode(text="target episode scifi", embedding=v_target)
-        distractors = [
-            _make_episode(text=f"distractor {i} movie", embedding=v_distract.copy())
-            for i in range(5)
-        ]
+        distractors = [_make_episode(text=f"distractor {i} movie", embedding=v_distract.copy()) for i in range(5)]
         retriever, _, _ = _setup(
             [target] + distractors,
             query_vec=v_target,
-            config=cfg,
         )
 
         # Retrieve with v_target → target found
@@ -523,11 +534,12 @@ class TestRetainedBuffer:
 
         assert retriever._retained[eid].ttl == 2
 
-    def test_ttl_zero_evicts(self) -> None:
+    def test_ttl_zero_evicts(self, monkeypatch) -> None:
         """Entry with TTL=0 is evicted from retained buffer."""
         v_target = _vec(1.0, 0.0)
         v_distract = _vec(0.0, 1.0)
-        cfg = _make_config(
+        _apply_retriever_overrides(
+            monkeypatch,
             max_memories=5,
             min_new_slots=2,
             retained_ttl=1,
@@ -536,14 +548,10 @@ class TestRetainedBuffer:
         )
 
         target = _make_episode(text="target episode scifi", embedding=v_target)
-        distractors = [
-            _make_episode(text=f"distractor {i} movie", embedding=v_distract.copy())
-            for i in range(5)
-        ]
+        distractors = [_make_episode(text=f"distractor {i} movie", embedding=v_distract.copy()) for i in range(5)]
         retriever, _, _ = _setup(
             [target] + distractors,
             query_vec=v_target,
-            config=cfg,
         )
 
         # Retrieve and cite → TTL = 1
@@ -571,11 +579,12 @@ class TestRetainedBuffer:
 
         assert eid not in retriever._retained
 
-    def test_cited_then_misses_survive_ttl_turns(self) -> None:
+    def test_cited_then_misses_survive_ttl_turns(self, monkeypatch) -> None:
         """Cited entry survives retained_ttl turns of misses before eviction."""
         v_target = _vec(1.0, 0.0)
         v_distract = _vec(0.0, 1.0)
-        cfg = _make_config(
+        _apply_retriever_overrides(
+            monkeypatch,
             max_memories=5,
             min_new_slots=2,
             retained_ttl=3,
@@ -584,14 +593,10 @@ class TestRetainedBuffer:
         )
 
         target = _make_episode(text="target episode scifi", embedding=v_target)
-        distractors = [
-            _make_episode(text=f"distractor {i} movie", embedding=v_distract.copy())
-            for i in range(5)
-        ]
+        distractors = [_make_episode(text=f"distractor {i} movie", embedding=v_distract.copy()) for i in range(5)]
         retriever, _, _ = _setup(
             [target] + distractors,
             query_vec=v_target,
-            config=cfg,
         )
 
         with patch(_NOW_PATH) as mock_dt:
@@ -712,9 +717,9 @@ class TestResultStructure:
     def test_retained_before_new(self) -> None:
         """Retained episodes appear before new ones in the result."""
         v = _vec(1.0, 0.0)
-        cfg = _make_config(max_memories=5, min_new_slots=2, retained_ttl=3)
+        # Autouse fixture already applies max_memories=5, min_new_slots=2, retained_ttl=3.
         eps = [_make_episode(text=f"ep {i} scifi", embedding=v.copy()) for i in range(5)]
-        retriever, _, _ = _setup(eps, query_vec=v, config=cfg)
+        retriever, _, _ = _setup(eps, query_vec=v)
 
         with patch(_NOW_PATH) as mock_dt:
             mock_dt.now.return_value = _fixed_now()
@@ -768,17 +773,17 @@ class TestResultStructure:
 
 
 class TestFullCycle:
-    def test_retrieve_cite_retrieve(self) -> None:
+    def test_retrieve_cite_retrieve(self, monkeypatch) -> None:
         """Full cycle: add episodes → retrieve → cite → retrieve again."""
         v = _vec(1.0, 0.0)
-        cfg = _make_config(max_memories=3, min_new_slots=1, retained_ttl=3)
+        _apply_retriever_overrides(monkeypatch, max_memories=3, min_new_slots=1, retained_ttl=3)
 
         eps = [
             _make_episode(text="liked interstellar scifi", embedding=v.copy(), importance=0.9),
             _make_episode(text="enjoyed dune scifi", embedding=v.copy(), importance=0.8),
             _make_episode(text="watched matrix scifi", embedding=v.copy(), importance=0.6),
         ]
-        retriever, storage, _ = _setup(eps, query_vec=v, config=cfg)
+        retriever, storage, _ = _setup(eps, query_vec=v)
 
         # Turn 1: retrieve
         with patch(_NOW_PATH) as mock_dt:
@@ -828,10 +833,9 @@ class TestEdgeCases:
             def dimension(self) -> int:
                 return _DIM
 
-        cfg = _make_config()
         storage = InMemoryMemoryStorage(dimension=_DIM)
         index = NumpyVectorIndex()
-        retriever = MemoryRetriever(storage, index, _FailingEmbedder(), cfg)
+        retriever = MemoryRetriever(storage, index, _FailingEmbedder())
 
         result = retriever.retrieve("anything", set())
 
@@ -891,11 +895,12 @@ class TestEdgeCases:
         assert len(result.episodes) == 1
         assert result.scores[0] == 0.0
 
-    def test_retained_only_path(self) -> None:
+    def test_retained_only_path(self, monkeypatch) -> None:
         """When search returns nothing, retained entries still appear."""
         v_target = _vec(1.0, 0.0)
         v_distract = _vec(0.0, 1.0)
-        cfg = _make_config(
+        _apply_retriever_overrides(
+            monkeypatch,
             max_memories=5,
             min_new_slots=2,
             retained_ttl=3,
@@ -904,14 +909,10 @@ class TestEdgeCases:
         )
 
         target = _make_episode(text="target episode scifi", embedding=v_target)
-        distractors = [
-            _make_episode(text=f"distractor {i} movie", embedding=v_distract.copy())
-            for i in range(5)
-        ]
+        distractors = [_make_episode(text=f"distractor {i} movie", embedding=v_distract.copy()) for i in range(5)]
         retriever, _, _ = _setup(
             [target] + distractors,
             query_vec=v_target,
-            config=cfg,
         )
 
         # First retrieve — target found and cited

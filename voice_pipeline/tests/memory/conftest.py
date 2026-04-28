@@ -6,7 +6,6 @@ import os
 
 import pytest
 
-from voice_pipeline.core.config import LLMConfig, MemoryConfig
 from voice_pipeline.embedding.embedder import SentenceTransformerEmbedder
 from voice_pipeline.llm.llm import OpenAILLM
 from voice_pipeline.llm.token_counter import create_token_counter
@@ -117,8 +116,7 @@ def shared_embedder() -> SentenceTransformerEmbedder:
 @pytest.fixture(scope="session")
 def write_llm(openai_api_key: str) -> OpenAILLM:
     """Session-scoped LLM for writer integration tests."""
-    cfg = LLMConfig(model="gpt-4o-mini", temperature=0.0, max_tokens=4096, tools=[])
-    return OpenAILLM(cfg)
+    return OpenAILLM(model="gpt-4o-mini", temperature=0.0, max_tokens=4096, tools=[])
 
 
 @pytest.fixture(scope="session")
@@ -132,13 +130,8 @@ def token_counter():
 
 
 @pytest.fixture
-def memory_config(tmp_path) -> MemoryConfig:
-    return MemoryConfig(db_path=str(tmp_path / "test_memory.db"), embedding_dimension=384)
-
-
-@pytest.fixture
-def memory_db(memory_config: MemoryConfig) -> SQLiteMemoryStorage:
-    storage = SQLiteMemoryStorage(memory_config)
+def memory_db(tmp_path) -> SQLiteMemoryStorage:
+    storage = SQLiteMemoryStorage(str(tmp_path / "test_memory.db"), dimension=384)
     yield storage
     storage.close()
 

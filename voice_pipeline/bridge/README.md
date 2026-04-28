@@ -7,10 +7,8 @@ C++ runs a WebSocket server; Python connects as a client.
 
 ```python
 from voice_pipeline.bridge import CppBridge
-from voice_pipeline.core.config import CppBridgeConfig
 
-config = CppBridgeConfig(host="localhost", port=8765)
-bridge = CppBridge(config)
+bridge = CppBridge()
 
 bridge.connect()
 
@@ -57,23 +55,28 @@ All messages are JSON text frames over WebSocket.
 `playback_complete` is sent for both normal completion and after a `stop` interrupt.
 Python distinguishes the two by tracking whether it sent `stop` (STOP_PENDING state).
 
-## Configuration
+## 클래스 변수
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `host` | `localhost` | WebSocket server host |
-| `port` | `8765` | WebSocket server port |
-| `reconnect_attempts` | `3` | Max connection retries |
-| `recv_timeout_sec` | `1.0` | Receiver loop poll interval |
-| `connect_timeout_sec` | `5.0` | WebSocket handshake timeout |
-| `close_timeout_sec` | `5.0` | WebSocket close handshake timeout |
+`CppBridge` 클래스 내부 상수.
+
+| 변수 | 값 | 의미 |
+|------|------|------|
+| `_HOST` | `"localhost"` | C++ 프로세스 호스트 주소 |
+| `_PORT` | `9200` | C++ 프로세스 WebSocket 포트 |
+| `_RECONNECT_ATTEMPTS` | `3` | 연결 실패 시 재시도 횟수 |
+| `_RECV_TIMEOUT_SEC` | `1.0` | 메시지 수신 polling 간격 (초) |
+| `_CONNECT_TIMEOUT_SEC` | `5.0` | 연결 수립 최대 대기 시간 (초) |
+| `_CLOSE_TIMEOUT_SEC` | `5.0` | 연결 종료 최대 대기 시간 (초) |
+| `_RECONNECT_DELAY_SEC` | `1.0` | 연결 재시도 사이 대기 시간 (초) |
+| `_THREAD_JOIN_TIMEOUT_SEC` | `5.0` | 수신 스레드 종료 대기 시간 (초) |
 
 ## Remote Deployment
 
-C++ (RPi)와 Python (PC)을 분리 실행할 수 있다. C++ 서버가 `0.0.0.0`으로 바인드하므로 `host`만 변경하면 된다.
+C++ (RPi)와 Python (PC)을 분리 실행할 수 있다. C++ 서버가 `0.0.0.0`으로 바인드하므로 `_HOST`만 변경하면 된다.
 
 ```python
-config = CppBridgeConfig(host="192.168.x.x", port=8765)  # RPi IP
+CppBridge._HOST = "192.168.x.x"  # RPi IP
+bridge = CppBridge()
 ```
 
 연결 확인: `scripts/test_ws_connection.py --host 192.168.x.x`

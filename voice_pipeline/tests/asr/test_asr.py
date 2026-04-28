@@ -10,23 +10,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from voice_pipeline.asr.asr import _SENTINEL, GoogleCloudASR
+from voice_pipeline.asr.asr import GoogleCloudASR
 from voice_pipeline.asr.exceptions import ASRError
-from voice_pipeline.core.config import ASRConfig, AudioConfig
+
+_SENTINEL = GoogleCloudASR._SENTINEL
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_asr(
-    asr_config: ASRConfig | None = None,
-    audio_config: AudioConfig | None = None,
-) -> GoogleCloudASR:
-    return GoogleCloudASR(
-        asr_config=asr_config or ASRConfig(),
-        audio_config=audio_config or AudioConfig(),
-    )
+def _make_asr(language_code: str = "en-US") -> GoogleCloudASR:
+    return GoogleCloudASR(language_code=language_code)
 
 
 def _make_response(transcript: str, *, is_final: bool = False) -> MagicMock:
@@ -123,9 +118,7 @@ class TestStartStop:
             block.set()
             asr.stop()
 
-    def test_start_while_running_is_noop(
-        self, mock_client_cls: MagicMock, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_start_while_running_is_noop(self, mock_client_cls: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
         mock_client = MagicMock()
         mock_client.streaming_recognize.return_value = iter([])
         mock_client_cls.return_value = mock_client
@@ -428,9 +421,7 @@ class TestTranscription:
         finally:
             asr.stop()
 
-    def test_multi_result_final_clears_preceding_interims(
-        self, mock_client_cls: MagicMock
-    ) -> None:
+    def test_multi_result_final_clears_preceding_interims(self, mock_client_cls: MagicMock) -> None:
         """A final in a multi-result response clears interims that preceded it."""
         done = threading.Event()
         # Two interims, then a final that covers everything
@@ -516,9 +507,7 @@ class TestReset:
         finally:
             asr.stop()
 
-    def test_reset_when_not_running(
-        self, mock_client_cls: MagicMock, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_reset_when_not_running(self, mock_client_cls: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
         asr = _make_asr()
         with caplog.at_level(logging.WARNING, logger="voice_pipeline.asr"):
             asr.reset()
@@ -632,9 +621,7 @@ class TestErrorPropagation:
 
 @patch("voice_pipeline.asr.asr.speech.SpeechClient")
 class TestEdgeCases:
-    def test_stop_with_thread_join_timeout(
-        self, mock_client_cls: MagicMock, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_stop_with_thread_join_timeout(self, mock_client_cls: MagicMock, caplog: pytest.LogCaptureFixture) -> None:
         hang_event = threading.Event()
 
         def fake_streaming_recognize(config, requests):
@@ -657,9 +644,7 @@ class TestEdgeCases:
             if asr._reader_thread is not None:
                 asr._reader_thread.join(timeout=0.1)
                 if asr._reader_thread.is_alive():
-                    logging.getLogger("voice_pipeline.asr").warning(
-                        "Reader thread did not exit within timeout"
-                    )
+                    logging.getLogger("voice_pipeline.asr").warning("Reader thread did not exit within timeout")
                 asr._reader_thread = None
 
         asr._stop_stream = fast_stop_stream  # type: ignore[method-assign]
@@ -699,12 +684,12 @@ class TestEdgeCases:
             block_event.set()
             asr.stop()
 
-    def test_unsupported_sample_width(self, mock_client_cls: MagicMock) -> None:
+    def test_unsupported_sample_width(self, mock_client_cls: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
 
-        audio_config = AudioConfig(sample_width=4)
-        asr = _make_asr(audio_config=audio_config)
+        monkeypatch.setattr("voice_pipeline.asr.asr.SAMPLE_WIDTH", 4)
+        asr = _make_asr()
 
         with pytest.raises(ASRError, match="sample_width=4"):
             asr.start()
@@ -713,33 +698,34 @@ class TestEdgeCases:
         assert asr._client is None
         mock_client.transport.close.assert_called_once()
 
-    def test_sample_rate_too_low(self, mock_client_cls: MagicMock) -> None:
+    def test_sample_rate_too_low(self, mock_client_cls: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
 
-        audio_config = AudioConfig(sample_rate=4000)
-        asr = _make_asr(audio_config=audio_config)
+        monkeypatch.setattr("voice_pipeline.asr.asr.SAMPLE_RATE", 4000)
+        asr = _make_asr()
 
         with pytest.raises(ASRError, match="sample_rate=4000"):
             asr.start()
 
-    def test_sample_rate_too_high(self, mock_client_cls: MagicMock) -> None:
+    def test_sample_rate_too_high(self, mock_client_cls: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
 
-        audio_config = AudioConfig(sample_rate=96000)
-        asr = _make_asr(audio_config=audio_config)
+        monkeypatch.setattr("voice_pipeline.asr.asr.SAMPLE_RATE", 96000)
+        asr = _make_asr()
 
         with pytest.raises(ASRError, match="sample_rate=96000"):
             asr.start()
 
-    def test_sample_rate_boundary_valid(self, mock_client_cls: MagicMock) -> None:
+    def test_sample_rate_boundary_valid(self, mock_client_cls: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_client = MagicMock()
         mock_client.streaming_recognize.return_value = iter([])
         mock_client_cls.return_value = mock_client
 
         for rate in (8000, 48000):
-            asr = _make_asr(audio_config=AudioConfig(sample_rate=rate))
+            monkeypatch.setattr("voice_pipeline.asr.asr.SAMPLE_RATE", rate)
+            asr = _make_asr()
             asr.start()
             asr.stop()
 

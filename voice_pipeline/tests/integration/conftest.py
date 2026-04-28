@@ -9,8 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from voice_pipeline.core.config import AudioConfig
-
 # ---------------------------------------------------------------------------
 # WAV helpers (reusable across cross-module tests)
 # ---------------------------------------------------------------------------
@@ -60,18 +58,7 @@ def read_wav_frames(path: Path, frame_duration_ms: int = 30) -> tuple[WavInfo, l
     return info, frames
 
 
-def audio_config_from_wav(info: WavInfo) -> AudioConfig:
-    """Build an AudioConfig matching the WAV file's properties."""
-    return AudioConfig(
-        sample_rate=info.sample_rate,
-        channels=info.channels,
-        sample_width=info.sample_width,
-    )
-
-
-def make_silence_frames(
-    frame_bytes: int, duration_sec: float, frame_duration_ms: int = 30
-) -> list[bytes]:
+def make_silence_frames(frame_bytes: int, duration_sec: float, frame_duration_ms: int = 30) -> list[bytes]:
     """Generate silence frames to simulate continued mic input after speech."""
     n_frames = int(duration_sec / (frame_duration_ms / 1000))
     silence = b"\x00" * frame_bytes

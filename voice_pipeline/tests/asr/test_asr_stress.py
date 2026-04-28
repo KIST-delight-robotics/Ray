@@ -24,10 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from voice_pipeline.asr.asr import GoogleCloudASR
-from voice_pipeline.core.config import ASRConfig
-
-from .conftest import audio_config_from_wav, read_wav_frames
+from .conftest import make_asr_for_wav, read_wav_frames
 
 pytestmark = pytest.mark.requires_api
 
@@ -47,11 +44,7 @@ class TestASRStress:
         """
         info, frames = read_wav_frames(speech_wav)
         frame_sec = 30 / 1000
-        audio_cfg = audio_config_from_wav(info)
-        asr = GoogleCloudASR(
-            asr_config=ASRConfig(language_code=asr_lang, interim_results=True),
-            audio_config=audio_cfg,
-        )
+        asr = make_asr_for_wav(info, asr_lang)
         asr.start()
         try:
             n_cycles = 5
@@ -84,10 +77,7 @@ class TestASRStress:
         """
         info, frames = read_wav_frames(speech_wav)
         frame_sec = 30 / 1000
-        asr = GoogleCloudASR(
-            asr_config=ASRConfig(language_code=asr_lang, interim_results=True),
-            audio_config=audio_config_from_wav(info),
-        )
+        asr = make_asr_for_wav(info, asr_lang)
         asr.start()
         try:
             # Stream the audio 3 times consecutively (within one turn)
@@ -111,15 +101,11 @@ class TestASRStress:
         """
         info, frames = read_wav_frames(speech_wav)
         frame_sec = 30 / 1000
-        audio_cfg = audio_config_from_wav(info)
         n_cycles = 3
         frames_per_cycle = max(20, len(frames) // 5)
 
         for cycle in range(n_cycles):
-            asr = GoogleCloudASR(
-                asr_config=ASRConfig(language_code=asr_lang, interim_results=True),
-                audio_config=audio_cfg,
-            )
+            asr = make_asr_for_wav(info, asr_lang)
             asr.start()
             try:
                 for frame in frames[:frames_per_cycle]:
@@ -135,10 +121,7 @@ class TestASRStress:
             assert asr._client is None, f"Cycle {cycle}: client not cleaned up"
 
         # Final cycle: verify full transcript works
-        asr = GoogleCloudASR(
-            asr_config=ASRConfig(language_code=asr_lang, interim_results=True),
-            audio_config=audio_cfg,
-        )
+        asr = make_asr_for_wav(info, asr_lang)
         asr.start()
         try:
             for frame in frames:
@@ -157,10 +140,7 @@ class TestASRStress:
         false positive turn detection).
         """
         info, _ = read_wav_frames(speech_wav)
-        asr = GoogleCloudASR(
-            asr_config=ASRConfig(language_code=asr_lang),
-            audio_config=audio_config_from_wav(info),
-        )
+        asr = make_asr_for_wav(info, asr_lang)
         asr.start()
         try:
             for _ in range(5):

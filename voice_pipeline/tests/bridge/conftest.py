@@ -4,24 +4,48 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Callable
 from unittest.mock import MagicMock
 
 import pytest
 
-from voice_pipeline.core.config import CppBridgeConfig
+from voice_pipeline.bridge.cpp_bridge import CppBridge
 
 
 @pytest.fixture
-def config() -> CppBridgeConfig:
-    """Default CppBridgeConfig with fast timeouts for tests."""
-    return CppBridgeConfig(
-        host="localhost",
-        port=18765,
-        reconnect_attempts=2,
-        recv_timeout_sec=0.1,
-        connect_timeout_sec=1.0,
-        close_timeout_sec=1.0,
-    )
+def make_bridge(monkeypatch: pytest.MonkeyPatch) -> Callable[..., CppBridge]:
+    """테스트용 fast-timeout CppBridge 생성.
+
+    Test-wide class var defaults을 미리 설정한 뒤, 레거시 kwargs(host, port,
+    reconnect_attempts, recv/connect/close_timeout_sec)는 class var
+    monkeypatch로 변환해 적용한다.
+    """
+
+    monkeypatch.setattr(CppBridge, "_RECONNECT_ATTEMPTS", 2)
+    monkeypatch.setattr(CppBridge, "_RECV_TIMEOUT_SEC", 0.1)
+    monkeypatch.setattr(CppBridge, "_CONNECT_TIMEOUT_SEC", 1.0)
+    monkeypatch.setattr(CppBridge, "_CLOSE_TIMEOUT_SEC", 1.0)
+    monkeypatch.setattr(CppBridge, "_HOST", "localhost")
+    monkeypatch.setattr(CppBridge, "_PORT", 18765)
+
+    _CLASS_VAR_MAP = {
+        "host": "_HOST",
+        "port": "_PORT",
+        "reconnect_attempts": "_RECONNECT_ATTEMPTS",
+        "recv_timeout_sec": "_RECV_TIMEOUT_SEC",
+        "connect_timeout_sec": "_CONNECT_TIMEOUT_SEC",
+        "close_timeout_sec": "_CLOSE_TIMEOUT_SEC",
+    }
+
+    def _make(**overrides) -> CppBridge:
+        for key, value in overrides.items():
+            if key in _CLASS_VAR_MAP:
+                monkeypatch.setattr(CppBridge, _CLASS_VAR_MAP[key], value)
+            else:
+                raise TypeError(f"Unknown override: {key}")
+        return CppBridge()
+
+    return _make
 
 
 @pytest.fixture

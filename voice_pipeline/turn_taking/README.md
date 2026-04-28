@@ -18,22 +18,30 @@ uv pip install einops omegaconf
 
 #### Model File
 
-A pre-trained state_dict is included in the repo at `example/VAP_3mmz3t0u_50Hz_ad20s_134-epoch9-val_2.56.pt`. Set `VAPConfig.model_path` to the file path.
+A pre-trained state_dict is included in the repo at `example/VAP_3mmz3t0u_50Hz_ad20s_134-epoch9-val_2.56.pt`. 다른 체크포인트를 쓰려면 `VAPWrapper._MODEL_PATH`를 인스턴스 생성 전 변경.
 
 #### CPC Checkpoint Caveat
 
 The VAP encoder uses a CPC (Contrastive Predictive Coding) component that may **auto-download** a checkpoint on first use if the expected file is missing. See `vap/encoder_components.py` lines 371–377. Ensure network access is available on first run, or pre-download the checkpoint.
 
-#### Config
+#### `VAPWrapper.__init__` 인자
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `model_path` | `""` | Path to VAP state_dict `.pt` file |
-| `context_sec` | `20.0` | Rolling buffer duration (seconds) |
-| `step_sec` | `0.1` | Inference interval (seconds) |
-| `tt_time` | `0.5` | Turn-taking lookahead for averaging (seconds) |
-| `device` | `"cpu"` | Torch device (`"cpu"` or `"cuda"`) |
-| `vad_threshold` | `0.5` | Threshold for `user_is_speaking` |
+| 인자 | Default | 의미 |
+|------|---------|------|
+| `tts_sample_rate` | — | Robot(TTS) 출력 샘플레이트 (필수) |
+
+#### `VAPWrapper` 클래스 변수
+
+| 변수 | 값 | 의미 |
+|------|------|------|
+| `_DEFAULT_RESULT` | `VAPResult(0.0, 0.0, False)` | 초기/실패 시 반환값 |
+| `_MODEL_PATH` | `"external/.../VAP_3mmz3t0u_50Hz_ad20s_134-epoch9-val_2.56.pt"` | VAP state_dict `.pt` 파일 경로 |
+| `_CONTEXT_SEC` | `20.0` | 롤링 버퍼 길이 (초) |
+| `_STEP_SEC` | `0.1` | 추론 간격 (초) |
+| `_TT_TIME` | `0.5` | turn-taking 평균화 lookahead (초) |
+| `_DEVICE` | `"cpu"` | PyTorch 디바이스 (`"cpu"` / `"cuda"`) |
+| `_VAD_THRESHOLD` | `0.5` | `user_is_speaking` 임계값 |
+| `_VAP_FRAME_HZ` | `50` | VAP 체크포인트 내부 프레임 레이트 (Hz) |
 
 ### TurnGPT
 
@@ -48,9 +56,11 @@ uv pip install -e external/TurnGPT
 
 #### Backends
 
-**PyTorch** (default): Uses `load_from_checkpoint` (PyTorch Lightning). Set `TurnGPTConfig.checkpoint_path`.
+Select via `TurnGPTWrapper._BACKEND = "onnx" | "pytorch"` (class var, 생성 전 변경).
 
-**ONNX** (recommended for RPi): Uses ONNX Runtime. Set `TurnGPTConfig.onnx_model_path` and `tokenizer_path`. Requires `onnxruntime` and `transformers` packages. PyTorch is still required (tokenization uses torch tensors).
+**ONNX** (default, recommended for RPi): Uses ONNX Runtime. Reads `_ONNX_MODEL_PATH`, `_TOKENIZER_PATH`, `_ONNX_THREADS`. Requires `onnxruntime` and `transformers` packages. PyTorch is still required (tokenization uses torch tensors).
+
+**PyTorch**: Uses `load_from_checkpoint` (PyTorch Lightning). Reads `_CHECKPOINT_PATH`, `_DEVICE`.
 
 ONNX models are exported via scripts in `turngpt_training/scripts/`. Place them in `models/turngpt/`. Tokenizer is included at `models/turngpt/tokenizer/`. Four variants available:
 
@@ -69,31 +79,47 @@ For integration and stress tests, export the env var:
 export TURNGPT_CHECKPOINT_PATH=/path/to/turngpt.ckpt
 ```
 
-#### Config
+#### `TurnGPTWrapper` 클래스 변수
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `checkpoint_path` | `""` | Path to TurnGPT checkpoint file (PyTorch mode) |
-| `onnx_model_path` | `""` | Path to ONNX model file. When set, uses ONNX Runtime |
-| `tokenizer_path` | `""` | Path to saved tokenizer directory (required for ONNX mode) |
-| `device` | `"cpu"` | Torch device (PyTorch mode only) |
-| `max_context_tokens` | `1024` | Max tokens before old turns are evicted (GPT-2 limit). `0` = no limit |
-| `onnx_threads` | `2` | ONNX Runtime intra-op threads. 2 is optimal on RPi 5 (4-core) |
+| 변수 | 값 | 의미 |
+|------|------|------|
+| `_BACKEND` | `"onnx"` | 추론 백엔드 (`"onnx"` / `"pytorch"`) |
+| `_ONNX_MODEL_PATH` | `"models/turngpt/turngpt_v2_kvcache_int8.onnx"` | ONNX 모델 파일 경로 |
+| `_TOKENIZER_PATH` | `"models/turngpt/tokenizer"` | ONNX 토크나이저 디렉토리 |
+| `_ONNX_THREADS` | `2` | ONNX Runtime intra-op 스레드 수 (RPi 5 4-코어 최적 2) |
+| `_CHECKPOINT_PATH` | `"models/turngpt/turngpt.ckpt"` | PyTorch 체크포인트 경로 (PyTorch 모드) |
+| `_NUM_LAYERS` | `12` | GPT-2 레이어 수 |
+| `_NUM_HEADS` | `12` | GPT-2 attention head 수 |
+| `_HEAD_DIM` | `64` | GPT-2 head 차원 |
+| `_FALLBACK_PROBABILITY` | `0.0` | 추론 실패/빈 입력 시 반환 확률 |
+| `_DEVICE` | `"cpu"` | PyTorch 디바이스 (`"cpu"` / `"cuda"`) |
+| `_MAX_CONTEXT_TOKENS` | `1024` | 모델 입력 최대 토큰 수. `0`이면 무제한 |
+| `_KEEP_TURNS` | `2` | 토큰 초과 시 유지할 최근 완료 턴 수 |
+| `_ONNX_PROVIDERS` | `("CPUExecutionProvider",)` | ONNX Runtime 실행 프로바이더 |
 
 ### TurnDetector
 
 Combines VAP and TurnGPT outputs with timing heuristics. No external dependencies beyond the two wrappers above.
 
-#### Config
+#### `TurnDetector.__init__` 인자
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `vap_user_threshold` | `0.5` | p_now/p_fut below this = "favors robot" |
-| `min_gap_time_sec` | `0.5` | Sustained VAP robot-favor duration for turn-shift |
-| `turngpt_thresholds` | `((0.3, 0.5), (0.2, 1.0), (0.1, 2.0), (0.0, 3.0))` | Graduated (prob, timeout_sec) pairs |
-| `interrupt_user_threshold` | `0.5` | p_now/p_fut above this = "favors user" |
-| `prepare_turngpt_threshold` | `0.2` | TurnGPT prob above this triggers prepare |
-| `prepare_timeout_sec` | `0.2` | Time since last ASR change to trigger prepare |
+| 인자 | Default | 의미 |
+|------|---------|------|
+| `vap` | — | VAP 모델 (`IVAP`). 세션마다 신규 `AsyncVAP` 주입 |
+| `turngpt` | — | TurnGPT 어댑터 (`AsyncTurnGPT` / `SyncTurnGPTAdapter`) |
+| `embedder` | — | 임베딩 공급자 (`IEmbedder`). prepare 유사도 게이트용 |
+
+#### `TurnDetector` 클래스 변수
+
+| 변수 | 값 | 의미 |
+|------|------|------|
+| `_VAP_USER_THRESHOLD` | `0.5` | p_now/p_fut가 이 값 미만이면 "robot 선호" |
+| `_MIN_GAP_TIME_SEC` | `0.5` | turn-shift 판단에 필요한 VAP robot-선호 지속 시간 (초) |
+| `_TURNGPT_THRESHOLDS` | `((0.3, 0.5), (0.2, 1.0), (0.1, 2.0), (0.0, 3.0))` | 단계별 `(prob 하한, timeout 초)` |
+| `_INTERRUPT_USER_THRESHOLD` | `0.5` | p_now/p_fut가 이 값 초과면 "user 선호" |
+| `_PREPARE_TURNGPT_THRESHOLD` | `0.2` | prepare 트리거 TurnGPT 확률 |
+| `_PREPARE_TIMEOUT_SEC` | `0.2` | 마지막 ASR 변화 후 prepare 트리거까지 시간 (초) |
+| `_SIMILARITY_THRESHOLD` | `0.8` | 직전 prepare 텍스트와의 유사도 이 값 이상이면 skip |
 
 ### MaAI VAP
 
@@ -120,21 +146,37 @@ Output: `models/maai/encoder_{frame_rate}hz.onnx`, `models/maai/transformer_{lan
 
 **Full ONNX** (default, recommended): Both CPC encoder and GPT transformer run via ONNX Runtime. No PyTorch dependency at inference time. Mean latency ~24ms on RPi 5.
 
-**Hybrid** (`transformer_onnx_path=""`): ONNX encoder + PyTorch transformer. Optional `torch.compile` for ~22% speedup. Requires `maai` package and `torch`.
+**Hybrid** (`_USE_ONNX_TRANSFORMER = False`): ONNX encoder + PyTorch transformer. Optional `torch.compile` via `_USE_TORCH_COMPILE` for ~22% speedup. Requires `maai` package and `torch`. 생성 전 class var 변경.
 
-#### Config
+#### `MaAIVAPWrapper.__init__` 인자
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `lang` | `"en"` | Language code for MaAI model |
-| `frame_rate` | `10` | VAP inference frame rate (Hz) |
-| `context_len_sec` | `5.0` | KV cache context length (seconds) |
-| `vad_threshold` | `0.5` | Threshold for `user_is_speaking` |
-| `ort_threads` | `1` | ONNX Runtime intra-op threads. 1 is optimal on RPi 5 |
-| `pt_threads` | `1` | PyTorch threads (PyTorch transformer mode only) |
-| `encoder_onnx_path` | `"models/maai/encoder_10hz_5s.onnx"` | Path to pre-exported encoder ONNX file |
-| `transformer_onnx_path` | `"models/maai/transformer_en_5s.onnx"` | Path to pre-exported transformer ONNX. Empty = PyTorch fallback |
-| `use_torch_compile` | `True` | Enable torch.compile (PyTorch mode only) |
+| 인자 | Default | 의미 |
+|------|---------|------|
+| `tts_sample_rate` | — | Robot(TTS) 출력 샘플레이트 (필수) |
+
+#### `MaAIVAPWrapper` 클래스 변수
+
+| 변수 | 값 | 의미 |
+|------|------|------|
+| `ENCODER_ONNX_PATH` | `"models/maai/encoder_10hz_5s.onnx"` | encoder ONNX 기본 경로 (외부 참조 가능) |
+| `TRANSFORMER_ONNX_PATH` | `"models/maai/transformer_en_5s.onnx"` | transformer ONNX 기본 경로 (외부 참조 가능) |
+| `_USE_ONNX_TRANSFORMER` | `True` | transformer 백엔드 선택 (True=ONNX / False=PyTorch fallback) |
+| `_USE_TORCH_COMPILE` | `True` | torch.compile 활성화 (PyTorch fallback 전용) |
+| `_FRAME_RATE` | `10` | VAP 추론 프레임 레이트 (Hz) |
+| `_CONTEXT_LEN_SEC` | `5.0` | KV 캐시 컨텍스트 길이 (초) |
+| `_ORT_THREADS` | `1` | ONNX Runtime intra-op 스레드 수 (RPi 5 최적 1) |
+| `_PT_THREADS` | `1` | PyTorch 스레드 수 (PyTorch fallback 전용) |
+| `_DEFAULT_RESULT` | `VAPResult(0.0, 0.0, False)` | 초기/실패 시 반환값 |
+| `_LANG` | `"en"` | MaAI 언어 코드 (PyTorch fallback 전용) |
+| `_VAD_THRESHOLD` | `0.5` | `user_is_speaking` 임계값 |
+| `_TORCH_DEVICE` | `"cpu"` | MaAI PyTorch 디바이스 |
+| `_TORCH_COMPILE_MODE` | `"reduce-overhead"` | torch.compile 모드 |
+| `_MAAI_DIM` | `256` | MaAI hidden dimension |
+| `_MAAI_NUM_HEADS` | `4` | MaAI attention head 수 |
+| `_MAAI_HEAD_DIM` | `64` | MaAI head 차원 (`_MAAI_DIM / _MAAI_NUM_HEADS`) |
+| `_MAAI_CH_LAYERS` | `1` | MaAI channel-attention 레이어 수 |
+| `_MAAI_CROSS_LAYERS` | `3` | MaAI cross-attention 레이어 수 |
+| `_FRAME_CTX_PADDING` | `320` | encoder 입력 padding (MaAI 아키텍처 고정) |
 
 #### RPi 5 Performance (full ONNX, ort_threads=1)
 

@@ -14,7 +14,6 @@ import os
 
 import pytest
 
-from voice_pipeline.core.config import TurnGPTConfig
 from voice_pipeline.turn_taking.exceptions import TurnGPTError
 
 pytestmark = pytest.mark.requires_model
@@ -37,11 +36,17 @@ def checkpoint_path() -> str:
 @pytest.fixture(scope="module")
 def wrapper(checkpoint_path: str):
     """Create a TurnGPTWrapper with real model (shared across module tests)."""
-    config = TurnGPTConfig(checkpoint_path=checkpoint_path, onnx_model_path="", device="cpu")
-
     from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
-    return TurnGPTWrapper(config)
+    saved_backend = TurnGPTWrapper._BACKEND
+    saved_ckpt = TurnGPTWrapper._CHECKPOINT_PATH
+    TurnGPTWrapper._BACKEND = "pytorch"
+    TurnGPTWrapper._CHECKPOINT_PATH = checkpoint_path
+    try:
+        yield TurnGPTWrapper()
+    finally:
+        TurnGPTWrapper._BACKEND = saved_backend
+        TurnGPTWrapper._CHECKPOINT_PATH = saved_ckpt
 
 
 @pytest.fixture(autouse=True)
@@ -171,14 +176,10 @@ class TestTurnCycle:
 class TestErrorHandling:
     """Invalid checkpoint path raises TurnGPTError."""
 
-    def test_invalid_checkpoint_path_raises(self):
-        config = TurnGPTConfig(
-            checkpoint_path="/nonexistent/model.ckpt",
-            onnx_model_path="",
-            device="cpu",
-        )
-
+    def test_invalid_checkpoint_path_raises(self, monkeypatch):
         from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
+        monkeypatch.setattr(TurnGPTWrapper, "_BACKEND", "pytorch")
+        monkeypatch.setattr(TurnGPTWrapper, "_CHECKPOINT_PATH", "/nonexistent/model.ckpt")
         with pytest.raises(TurnGPTError, match="Failed to load TurnGPT model"):
-            TurnGPTWrapper(config)
+            TurnGPTWrapper()

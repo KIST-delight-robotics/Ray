@@ -6,7 +6,6 @@ import logging
 import threading
 from typing import Any
 
-from voice_pipeline.core.config import LEDConfig
 from voice_pipeline.core.interfaces import ILEDController
 from voice_pipeline.core.types import LEDState
 from voice_pipeline.led.animations import RGB, BreathingAnimation, LEDAnimation, StaticAnimation
@@ -27,19 +26,6 @@ try:
 except ImportError:
     pass
 
-# ---------------------------------------------------------------------------
-# Default animation map (placeholder colors)
-# ---------------------------------------------------------------------------
-
-_OFF: RGB = (0, 0, 0)
-_BASE: RGB = (233, 233, 50)
-
-_DEFAULT_ANIMATIONS: dict[LEDState, LEDAnimation] = {
-    LEDState.OFF: StaticAnimation(bar_color=_OFF, ring_color=_OFF),
-    LEDState.SLEEPING: BreathingAnimation(color=_BASE),
-    LEDState.IDLE: StaticAnimation(bar_color=_BASE, ring_color=_BASE),
-}
-
 
 # ---------------------------------------------------------------------------
 # LEDController
@@ -56,26 +42,25 @@ class LEDController(ILEDController):
     Threading:
         A daemon thread runs the animation loop. ``set_state()`` is thread-safe
         and swaps the active animation under a lock. ``close()`` stops the thread.
-
-    Args:
-        config: LED configuration (counts, SPI pin, brightness).
-        animations: Optional custom animation map. Defaults to built-in
-            static-color placeholders.
     """
 
-    def __init__(
-        self,
-        config: LEDConfig,
-        animations: dict[LEDState, LEDAnimation] | None = None,
-    ) -> None:
-        self._config = config
-        self._bar_count = config.bar_count
-        self._ring_count = config.ring_count
-        self._led_count = config.bar_count + config.ring_count
-        if animations is not None:
-            self._animations = dict(animations)
-        else:
-            self._animations = dict(_DEFAULT_ANIMATIONS)
+    _BAR_COUNT = 8  # 바 세그먼트 LED 개수
+    _RING_COUNT = 16  # 링 세그먼트 LED 개수
+    _LED_COUNT = _BAR_COUNT + _RING_COUNT  # 전체 LED 개수
+    _BRIGHTNESS = 1.0  # LED 전체 밝기 (0.0=꺼짐, 1.0=최대)
+    _NOOP_SLEEP_SEC = 0.1  # 애니메이션 없을 때 스레드 폴링 간격 (초)
+    _CLOSE_JOIN_TIMEOUT_SEC = 2.0  # close 시 애니메이션 스레드 종료 대기 (초)
+
+    # 상태별 애니메이션 맵 (단색 플레이스홀더)
+    _ANIMATIONS: dict[LEDState, LEDAnimation] = {
+        LEDState.OFF: StaticAnimation(bar_color=(0, 0, 0), ring_color=(0, 0, 0)),
+        LEDState.SLEEPING: BreathingAnimation(color=(233, 233, 50)),
+        LEDState.IDLE: StaticAnimation(bar_color=(233, 233, 50), ring_color=(233, 233, 50)),
+    }
+
+    def __init__(self) -> None:
+        self._animations = dict(self._ANIMATIONS)
+        self._brightness = self._BRIGHTNESS
 
         self._lock = threading.Lock()
         self._state = LEDState.OFF
@@ -85,7 +70,7 @@ class LEDController(ILEDController):
 
         # Hardware strip (None = noop fallback)
         self._strip: Any = None
-        self._init_strip(config)
+        self._init_strip()
 
         # Start animation thread
         self._thread = threading.Thread(
@@ -99,7 +84,7 @@ class LEDController(ILEDController):
     # Hardware init
     # ------------------------------------------------------------------
 
-    def _init_strip(self, config: LEDConfig) -> None:
+    def _init_strip(self) -> None:
         if _WS2812SpiDriver is None:
             logger.info("rpi5_ws2812 not available — LED controller running in noop mode")
             return
@@ -107,16 +92,16 @@ class LEDController(ILEDController):
             driver = _WS2812SpiDriver(
                 spi_bus=0,
                 spi_device=0,
-                led_count=self._led_count,
+                led_count=self._LED_COUNT,
             )
             self._strip = driver.get_strip()
-            self._strip.set_brightness(config.brightness / 255.0)
+            self._strip.set_brightness(self._brightness)
             logger.info(
-                "LED strip initialized: %d LEDs (bar=%d, ring=%d), brightness=%d",
-                self._led_count,
-                self._bar_count,
-                self._ring_count,
-                config.brightness,
+                "LED strip initialized: %d LEDs (bar=%d, ring=%d), brightness=%.2f",
+                self._LED_COUNT,
+                self._BAR_COUNT,
+                self._RING_COUNT,
+                self._brightness,
             )
         except Exception as exc:
             raise LEDError(f"Failed to initialize LED strip: {exc}") from exc
@@ -149,7 +134,7 @@ class LEDController(ILEDController):
         """Stop the animation thread and turn off LEDs."""
         self._stop_event.set()
         self._state_changed.set()  # wake thread if sleeping
-        self._thread.join(timeout=2.0)
+        self._thread.join(timeout=self._CLOSE_JOIN_TIMEOUT_SEC)
         if self._thread.is_alive():
             logger.warning("LED animation thread did not exit within timeout")
         self._apply_off()
@@ -168,11 +153,11 @@ class LEDController(ILEDController):
 
             if anim is None:
                 self._apply_frame(self._off_frame())
-                self._wait(0.1)
+                self._wait(self._NOOP_SLEEP_SEC)
                 continue
 
             try:
-                frame = anim.render(tick, self._bar_count, self._ring_count)
+                frame = anim.render(tick, self._BAR_COUNT, self._RING_COUNT)
                 self._apply_frame(frame)
             except Exception:
                 logger.debug("Animation render error (suppressed)", exc_info=True)
@@ -185,7 +170,7 @@ class LEDController(ILEDController):
         self._state_changed.wait(timeout=seconds)
 
     def _off_frame(self) -> list[RGB]:
-        return [_OFF] * self._led_count
+        return [(0, 0, 0)] * self._LED_COUNT
 
     # ------------------------------------------------------------------
     # Strip helpers

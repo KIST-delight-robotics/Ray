@@ -16,7 +16,6 @@ import time
 
 from voice_pipeline.audio.audio_input import AudioInput
 from voice_pipeline.audio.wakeword import WakewordDetector
-from voice_pipeline.core.config import AudioConfig, AudioInputConfig, WakewordConfig
 from voice_pipeline.core.types import AudioFrame
 
 logging.basicConfig(
@@ -35,20 +34,18 @@ def main() -> None:
     parser.add_argument("--language", type=str, default="en-US", help="STT language code")
     args = parser.parse_args()
 
-    audio_config = AudioConfig()
-    input_config = AudioInputConfig(device_index=args.device)
-    wakeword_config = WakewordConfig(
-        keywords=(args.keyword,),
-        language_code=args.language,
-    )
+    if args.device is not None:
+        AudioInput._DEVICE_INDEX = args.device
 
     audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=300)
 
+    WakewordDetector._KEYWORDS = (args.keyword,)
+
     print(f"Initializing wakeword detector (keyword='{args.keyword}', lang={args.language})...")
-    detector = WakewordDetector(wakeword_config, audio_config)
+    detector = WakewordDetector(language_code=args.language)
 
     print(f"Starting mic capture (device={args.device or 'default'})...")
-    audio_input = AudioInput(audio_queue, audio_config, input_config)
+    audio_input = AudioInput(audio_queue)
     audio_input.start()
 
     print(f"\nListening for wakeword '{args.keyword}'... (Ctrl+C to stop)\n")
@@ -75,9 +72,7 @@ def main() -> None:
             # Periodic status
             if frame_count % 333 == 0:  # ~every 10s
                 elapsed = time.monotonic() - start
-                print(
-                    f"  [{elapsed:.0f}s] {frame_count} frames processed, {detections} detections"
-                )
+                print(f"  [{elapsed:.0f}s] {frame_count} frames processed, {detections} detections")
 
     except KeyboardInterrupt:
         elapsed = time.monotonic() - start

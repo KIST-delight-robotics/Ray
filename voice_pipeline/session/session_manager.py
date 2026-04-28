@@ -10,7 +10,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from voice_pipeline.core.config import SessionConfig
 from voice_pipeline.core.interfaces import (
     IAudioInput,
     IConversationHistory,
@@ -43,6 +42,12 @@ class SessionManager(ISessionManager):
     ensuring clean state isolation between conversations.
     """
 
+    AUDIO_QUEUE_SIZE = 300  # 오디오 프레임 공유 큐 최대 크기 (30ms frame 기준 약 9초 buffer)
+    _GREETING_TIMEOUT_SEC = 10.0  # greeting 재생 완료 최대 대기 시간 (초)
+    _FAREWELL_TIMEOUT_SEC = 10.0  # farewell 재생 완료 최대 대기 시간 (초)
+    _FRAME_TIMEOUT_SEC = 0.1  # SLEEP 모드 프레임 대기 timeout (초)
+    _POLL_INTERVAL_SEC = 0.05  # greeting/farewell 재생 대기 polling 주기 (초)
+
     def __init__(
         self,
         audio_input: IAudioInput,
@@ -50,25 +55,37 @@ class SessionManager(ISessionManager):
         session_factory: Callable[[], SessionComponents],
         cpp_bridge: ICppBridge,
         led: ILEDController,
-        config: SessionConfig,
         greeting_audio_path: str,
         farewell_audio_path: str,
         audio_queue: queue.Queue[AudioFrame] | None = None,
         on_session_end: Callable[[str, str], None] | None = None,
     ) -> None:
+        """Initialize the session manager.
+
+        Args:
+            audio_input: 마이크 캡처 스레드 (``IAudioInput``).
+            wakeword: 웨이크워드 감지기 (``IWakewordDetector``).
+            session_factory: 세션 진입마다 호출되어 ``SessionComponents``
+                (Orchestrator + ConversationHistory + session_id)를 새로 반환하는 팩토리.
+            cpp_bridge: C++ 오디오 재생 프로세스 브릿지 (``ICppBridge``).
+            led: LED 컨트롤러 (``ILEDController``).
+            greeting_audio_path: greeting 오디오 파일 경로.
+            farewell_audio_path: farewell 오디오 파일 경로.
+            audio_queue: AudioInput과 공유하는 프레임 큐. ``None``이면
+                ``AUDIO_QUEUE_SIZE`` 크기로 내부 생성.
+            on_session_end: 세션 종료 시 호출되는 콜백
+                ``(session_id, started_at) -> None``. ``None``이면 콜백 미실행.
+        """
         self._audio_input = audio_input
         self._wakeword = wakeword
         self._session_factory = session_factory
         self._bridge = cpp_bridge
         self._led = led
-        self._config = config
         self._greeting_audio_path = greeting_audio_path
         self._farewell_audio_path = farewell_audio_path
         self._on_session_end = on_session_end
 
-        self._audio_queue: queue.Queue[AudioFrame] = audio_queue or queue.Queue(
-            maxsize=config.audio_queue_size
-        )
+        self._audio_queue: queue.Queue[AudioFrame] = audio_queue or queue.Queue(maxsize=self.AUDIO_QUEUE_SIZE)
         self._shutdown_event = threading.Event()
         self._mode = SystemMode.SLEEP
         self._session_started = False
@@ -129,7 +146,7 @@ class SessionManager(ISessionManager):
 
         while not self._shutdown_event.is_set():
             try:
-                frame = self._audio_queue.get(timeout=self._config.frame_timeout_sec)
+                frame = self._audio_queue.get(timeout=self._FRAME_TIMEOUT_SEC)
             except queue.Empty:
                 if self._audio_input.error is not None:
                     logger.error("Audio capture thread died: %s", self._audio_input.error)
@@ -158,7 +175,7 @@ class SessionManager(ISessionManager):
         except Exception:
             logger.warning("Failed to send greeting", exc_info=True)
 
-        deadline = time.monotonic() + self._config.greeting_timeout_sec
+        deadline = time.monotonic() + self._GREETING_TIMEOUT_SEC
         while not self._shutdown_event.is_set():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -174,7 +191,7 @@ class SessionManager(ISessionManager):
             if event is not None and event.event_type == CppEventType.PLAYBACK_COMPLETE:
                 break
 
-            time.sleep(min(0.05, remaining))
+            time.sleep(min(self._POLL_INTERVAL_SEC, remaining))
 
         self._mode = SystemMode.ACTIVE
 
@@ -200,7 +217,7 @@ class SessionManager(ISessionManager):
         logger.info("Session started: %s", components.session_id)
 
         try:
-            self._current_orchestrator.run(self._audio_queue)
+            self._current_orchestrator.run()
         except Exception:
             logger.error("Orchestrator run failed", exc_info=True)
 
@@ -215,7 +232,7 @@ class SessionManager(ISessionManager):
         except Exception:
             logger.warning("Failed to send farewell", exc_info=True)
 
-        deadline = time.monotonic() + self._config.farewell_timeout_sec
+        deadline = time.monotonic() + self._FAREWELL_TIMEOUT_SEC
         while not self._shutdown_event.is_set():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -231,7 +248,7 @@ class SessionManager(ISessionManager):
             if event is not None and event.event_type == CppEventType.PLAYBACK_COMPLETE:
                 break
 
-            time.sleep(min(0.05, remaining))
+            time.sleep(min(self._POLL_INTERVAL_SEC, remaining))
 
         if self._session_started and self._current_history is not None:
             try:

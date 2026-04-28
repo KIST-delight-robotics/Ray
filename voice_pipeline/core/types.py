@@ -26,7 +26,7 @@ TokenCounter = Callable[[str], int]
 # ---------------------------------------------------------------------------
 
 AudioFrame = bytes
-"""Raw PCM audio bytes for one capture frame. Size determined by AudioConfig."""
+"""Raw PCM audio bytes for one capture frame. Size determined by audio.constants."""
 
 
 # ---------------------------------------------------------------------------
@@ -158,9 +158,7 @@ class WordTimestamp:
         if self.end_sec < 0:
             raise ValueError(f"end_sec must be non-negative, got {self.end_sec}")
         if self.start_sec > self.end_sec:
-            raise ValueError(
-                f"start_sec ({self.start_sec}) must not exceed end_sec ({self.end_sec})"
-            )
+            raise ValueError(f"start_sec ({self.start_sec}) must not exceed end_sec ({self.end_sec})")
 
 
 @dataclass(frozen=True)
@@ -594,9 +592,7 @@ class PipelineTrace:
             "tts_ms": self._delta_ms(self.tts_start_ts, self.tts_done_ts),
             "tts_ttfc_ms": self._delta_ms(self.tts_start_ts, self.tts_first_chunk_ts),
             "prepare_to_streaming_ms": self._delta_ms(self.prepare_ts, self.tts_first_chunk_ts),
-            "turn_shift_to_playback_ms": self._delta_ms(
-                self.turn_shift_ts, self.playback_started_ts
-            ),
+            "turn_shift_to_playback_ms": self._delta_ms(self.turn_shift_ts, self.playback_started_ts),
             "speculative_ms": speculative_ms,
             "bridge_ms": self._delta_ms(self.begin_streaming_ts, self.playback_started_ts),
             "interrupt_latency_ms": self._delta_ms(self.interrupt_ts, self.interrupt_ack_ts),

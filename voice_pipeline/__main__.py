@@ -35,7 +35,6 @@ from voice_pipeline.context.formatters import (
     format_raw_transcript_block,
     format_session_summary_block,
 )
-from voice_pipeline.core.config import PipelineConfig
 from voice_pipeline.embedding.embedder import create_embedder
 from voice_pipeline.generation.speech_generator import SpeechGenerator
 from voice_pipeline.history.conversation_history import ConversationHistory
@@ -46,7 +45,7 @@ from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
 from voice_pipeline.llm.token_counter import create_token_counter
 from voice_pipeline.llm.tools import get_tools_token_cost
 from voice_pipeline.memory.retriever import MemoryRetriever
-from voice_pipeline.memory.storage import SQLiteMemoryStorage
+from voice_pipeline.memory.storage import _DEFAULT_DB_PATH, _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.writer import MemoryWriter
 from voice_pipeline.orchestrator.orchestrator import Orchestrator
@@ -74,47 +73,42 @@ def main() -> None:
         if "=" in entry:
             name, level = entry.split("=", 1)
             logging.getLogger(name.strip()).setLevel(level.strip().upper())
-    config = PipelineConfig()
+
+    # 공유 언어 설정 (Google STT 기반 ASR + Wakeword가 동일 언어 사용)
+    language_code = "en-US"
 
     # --- Process-level singletons (expensive init, reused across sessions) ---
-    asr = GoogleCloudASR(config.asr, config.audio)
-    llm = OpenAILLM(config.llm)
-    tts = OpenAITTS(config.tts)
-    vap = MaAIVAPWrapper(config.maai_vap, config.audio, config.tts)
-    turngpt = TurnGPTWrapper(config.turngpt)
-    bridge = CppBridge(config.cpp_bridge)
-    wakeword = WakewordDetector(config.wakeword, config.audio)
-    led = LEDController(config.led)
-    storage = create_storage_backend(config.history)
-    executor = ThreadPoolExecutor(max_workers=config.speech_generator.max_workers)
-    token_counter = create_token_counter(config.llm.model)
-    tools_token_cost = get_tools_token_cost(config.llm.tools)
+    asr = GoogleCloudASR(language_code=language_code)
+    llm = OpenAILLM(model="gpt-5.4", temperature=0.7, max_tokens=256, tools=["web_search"])
+    tts = OpenAITTS()
+    vap = MaAIVAPWrapper(tts.output_sample_rate)
+    turngpt = TurnGPTWrapper()
+    bridge = CppBridge()
+    wakeword = WakewordDetector(language_code=language_code)
+    led = LEDController()
+    storage = create_storage_backend()
+    executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
+    token_counter = create_token_counter(llm.model)
+    tools_token_cost = get_tools_token_cost(llm.tools)
 
     # --- Memory system (process-level) ---
-    embedder = create_embedder(
-        config.memory.embedding_model,
-        config.memory.embedding_backend,
-        use_onnx=config.memory.use_onnx,
-        expected_dimension=config.memory.embedding_dimension,
-    )
-    memory_storage = SQLiteMemoryStorage(config.memory)
-    trace_store = SQLiteTraceStore(config.memory.db_path)
+    embedder = create_embedder(expected_dimension=_DEFAULT_DIMENSION)
+    memory_storage = SQLiteMemoryStorage(_DEFAULT_DB_PATH)
+    trace_store = SQLiteTraceStore(_DEFAULT_DB_PATH)
     vector_index = NumpyVectorIndex()
     ids, vectors = memory_storage.load_all_embeddings()
     if ids:
         vector_index.load(ids, vectors)
-    write_llm = OpenAILLM(config.memory.write_llm)
-    memory_writer = MemoryWriter(
-        memory_storage, vector_index, embedder, write_llm, config.memory, token_counter
-    )
+    write_llm = OpenAILLM(model="gpt-4o-mini", temperature=0.0, max_tokens=4096, tools=[])
+    memory_writer = MemoryWriter(memory_storage, vector_index, embedder, write_llm, token_counter)
     write_executor = ThreadPoolExecutor(max_workers=1)
 
     # --- Pre-generate greeting/farewell audio ---
-    greeting_paths = ensure_greeting_audio(tts, config.tts, config.greeting_audio)
+    greeting_paths = ensure_greeting_audio(tts)
 
     # --- Audio queue + input ---
-    audio_queue = queue.Queue(maxsize=config.session.audio_queue_size)
-    audio_input = AudioInput(audio_queue, config.audio, config.audio_input)
+    audio_queue = queue.Queue(maxsize=SessionManager.AUDIO_QUEUE_SIZE)
+    audio_input = AudioInput(audio_queue)
 
     # Restore default ALSA error handler
     if _asound is not None:
@@ -136,9 +130,7 @@ def main() -> None:
 
         # Memory: load profiles + previous session summaries (3-way logic)
         profiles = memory_storage.get_all_profiles()
-        recent = storage.get_recent_sessions(
-            config.history.previous_session_count, exclude_session_id=session_id
-        )
+        recent = storage.get_recent_sessions(ConversationHistory.PREVIOUS_SESSION_COUNT, exclude_session_id=session_id)
         recent_session_ids = [s[0] for s in recent]
         session_episodes = memory_storage.get_episodes_by_session_ids(recent_session_ids)
         processed_ids = memory_storage.get_processed_session_ids(recent_session_ids)
@@ -160,10 +152,9 @@ def main() -> None:
         prev_async.extend([async_vap, async_turngpt])
 
         history = ConversationHistory(storage, token_counter)
-        retriever = MemoryRetriever(memory_storage, vector_index, embedder, config.memory)
+        retriever = MemoryRetriever(memory_storage, vector_index, embedder)
         context_builder = ContextBuilder(
             history,
-            config.history,
             DEFAULT_SYSTEM_PROMPT,
             token_counter,
             tools_token_cost=tools_token_cost,
@@ -174,14 +165,11 @@ def main() -> None:
             async_vap,
             async_turngpt,
             embedder,
-            config.turn_detector,
-            config.audio,
         )
         generator = SpeechGenerator(
             context_builder,
             llm,
             tts,
-            config.speech_generator,
             executor,
             retriever=retriever,
             history=history,
@@ -196,9 +184,8 @@ def main() -> None:
             history=history,
             truncator=truncator,
             led=led,
-            config=config.orchestrator,
-            tts_config=config.tts,
-            audio_config=config.audio,
+            audio_queue=audio_queue,
+            tts_sample_rate=tts.output_sample_rate,
             memory_storage=memory_storage,
             session_id=session_id,
             token_counter=token_counter,
@@ -217,7 +204,6 @@ def main() -> None:
         session_factory=session_factory,
         cpp_bridge=bridge,
         led=led,
-        config=config.session,
         greeting_audio_path=greeting_paths.greeting,
         farewell_audio_path=greeting_paths.farewell,
         audio_queue=audio_queue,

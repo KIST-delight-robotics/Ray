@@ -16,24 +16,26 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 ```
 
 
-## Config
+## `GoogleCloudASR.__init__` 인자
 
-### `ASRConfig`
+| 인자 | Default | 의미 |
+|------|---------|------|
+| `language_code` | `"en-US"` | BCP-47 언어 코드 |
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `language_code` | `str` | `"en-US"` | BCP-47 language code |
-| `model` | `str` | `"latest_long"` | Recognition model |
-| `interim_results` | `bool` | `True` | Return interim transcripts during streaming |
+## 클래스 변수
 
-### `AudioConfig` (shared across all audio-consuming modules)
+`GoogleCloudASR` 클래스 내부 상수.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `sample_rate` | `int` | `16000` | Sample rate in Hz (API: 8000–48000) |
-| `channels` | `int` | `1` | Channel count (pipeline uses mono) |
-| `sample_width` | `int` | `2` | Bytes per sample (pipeline uses 16-bit PCM / LINEAR16) |
-| `frame_duration_ms` | `int` | `30` | Frame size for `feed_audio()` |
+| 변수 | 값 | 의미 |
+|------|------|------|
+| `_MODEL` | `"latest_long"` | Google STT 모델 (장시간 음성 인식) |
+| `_QUEUE_MAXSIZE` | `300` | 오디오 큐 최대 프레임 수 (~9초 @ 30ms 프레임) |
+| `_QUEUE_GET_TIMEOUT_SEC` | `1.0` | 오디오 큐 poll 간격 (초) |
+| `_THREAD_JOIN_TIMEOUT_SEC` | `5.0` | reader 스레드 종료 대기 (초) |
+| `_SENTINEL` | `b""` | 스트림 종료 신호 |
+| `_ENCODING_MAP` | dict | sample_width → AudioEncoding 매핑 |
+
+샘플레이트·채널 수·sample_width는 `voice_pipeline/audio/constants.py`에서 직접 참조한다.
 
 
 ## Usage

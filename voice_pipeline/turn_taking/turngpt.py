@@ -15,11 +15,10 @@ Both backends use KV cache to avoid reprocessing stable prefix tokens.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
-from voice_pipeline.core.config import TurnGPTConfig
 from voice_pipeline.core.interfaces import ITurnGPT
 from voice_pipeline.turn_taking.exceptions import TurnGPTError
 
@@ -28,73 +27,77 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("voice_pipeline.turn_taking.turngpt")
 
-_DEFAULT_PROBABILITY = 0.0
-
-# GPT-2 architecture constants (TurnGPT is always GPT-2 based)
-_NUM_LAYERS = 12
-_NUM_HEADS = 12
-_HEAD_DIM = 64
-
 
 class TurnGPTWrapper(ITurnGPT):
     """ITurnGPT implementation wrapping the external TurnGPT model.
 
     Maintains a KV cache across ``predict()`` calls so that only new tokens
     are forwarded through the model when the dialog prefix is unchanged.
-
-    Backend is selected by config: if ``onnx_model_path`` is set, uses ONNX
-    Runtime; otherwise loads the PyTorch checkpoint.
     """
 
-    def __init__(self, config: TurnGPTConfig) -> None:
-        self._max_context_tokens = config.max_context_tokens
-        self._keep_turns = config.keep_turns
-        self._backend: str  # "pytorch" or "onnx"
+    # 백엔드 / 모델 경로 (배포 튜닝값)
+    _BACKEND: Literal["onnx", "pytorch"] = "onnx"  # 추론 경로: ONNX Runtime vs PyTorch Lightning
+    _ONNX_MODEL_PATH: str = (
+        "models/turngpt/turngpt_v2_kvcache_int8.onnx"  # ONNX 모델 파일 경로 (기본값은 RPi용 int8+KV캐시)
+    )
+    _TOKENIZER_PATH: str = "models/turngpt/tokenizer"  # ONNX 모드 토크나이저 디렉토리
+    _ONNX_THREADS: int = 2  # ONNX Runtime intra-op 스레드 수 (RPi 5 4-코어 기준 2가 최적)
+    _CHECKPOINT_PATH: str = "models/turngpt/turngpt.ckpt"  # PyTorch 체크포인트 경로 (PyTorch 모드)
 
-        if config.onnx_model_path:
-            self._backend = "onnx"
-            self._init_onnx(config)
+    # GPT-2 아키텍처 (TurnGPT는 GPT-2 기반 고정)
+    _NUM_LAYERS = 12
+    _NUM_HEADS = 12
+    _HEAD_DIM = 64
+
+    _FALLBACK_PROBABILITY = 0.0  # 추론 실패/빈 입력 시 반환할 turn-shift 확률
+    _DEVICE = "cpu"  # PyTorch 디바이스 ("cpu" / "cuda")
+    _MAX_CONTEXT_TOKENS = 1024  # 모델 입력 최대 토큰 수 (GPT-2 상한). 초과 시 오래된 턴 제거. 0이면 무제한
+    _KEEP_TURNS = 2  # 토큰 초과 시 유지할 최근 완료 턴 수 (진행 중 턴은 항상 유지)
+    _ONNX_PROVIDERS = ("CPUExecutionProvider",)  # ONNX Runtime 실행 프로바이더
+
+    def __init__(self) -> None:
+        if self._BACKEND == "onnx":
+            self._init_onnx()
         else:
-            self._backend = "pytorch"
-            self._init_pytorch(config)
+            self._init_pytorch()
 
         self._cached_input_ids: Tensor | np.ndarray | None = None
         self._past_key_values: Any = None  # tuple (pytorch) or dict (onnx)
-        self._cached_trp_prob: float = _DEFAULT_PROBABILITY
+        self._cached_trp_prob: float = self._FALLBACK_PROBABILITY
 
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
 
-    def _init_pytorch(self, config: TurnGPTConfig) -> None:
+    def _init_pytorch(self) -> None:
         try:
             import torch
             from turngpt import TurnGPT
 
             self._torch = torch
-            model = TurnGPT.load_from_checkpoint(config.checkpoint_path)
-            self._model = model.to(config.device).eval()
+            model = TurnGPT.load_from_checkpoint(self._CHECKPOINT_PATH)
+            self._model = model.to(self._DEVICE).eval()
             self._tokenizer = model.tokenizer
         except Exception as exc:
             raise TurnGPTError(f"Failed to load TurnGPT model: {exc}") from exc
 
-    def _init_onnx(self, config: TurnGPTConfig) -> None:
-        if not config.tokenizer_path:
-            raise TurnGPTError("tokenizer_path is required when onnx_model_path is set")
+    def _init_onnx(self) -> None:
+        if not self._TOKENIZER_PATH:
+            raise TurnGPTError("TurnGPT tokenizer path must not be empty")
         try:
             import onnxruntime as ort
             from transformers import GPT2TokenizerFast
 
             so = ort.SessionOptions()
             so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            so.intra_op_num_threads = config.onnx_threads
+            so.intra_op_num_threads = self._ONNX_THREADS
             self._ort_session = ort.InferenceSession(
-                config.onnx_model_path,
+                self._ONNX_MODEL_PATH,
                 so,
-                providers=["CPUExecutionProvider"],
+                providers=list(self._ONNX_PROVIDERS),
             )
             self._hf_tokenizer = GPT2TokenizerFast.from_pretrained(
-                config.tokenizer_path,
+                self._TOKENIZER_PATH,
             )
             self._eos_token_id = self._hf_tokenizer.eos_token_id
             self._sp1_id = self._hf_tokenizer.convert_tokens_to_ids("<speaker1>")
@@ -124,17 +127,17 @@ class TurnGPTWrapper(ITurnGPT):
             Turn-shift probability in [0, 1].
         """
         if not dialog_text or not dialog_text.strip():
-            return _DEFAULT_PROBABILITY
+            return self._FALLBACK_PROBABILITY
 
         try:
             input_ids, speaker_ids = self._tokenize_with_window(dialog_text)
-            if self._backend == "onnx":
+            if self._BACKEND == "onnx":
                 return self._onnx_forward_with_cache(input_ids, speaker_ids)
             return self._pytorch_forward_with_cache(input_ids, speaker_ids)
         except Exception:
             logger.warning("TurnGPT inference error, returning default", exc_info=True)
             self._clear_cache()
-            return _DEFAULT_PROBABILITY
+            return self._FALLBACK_PROBABILITY
 
     def reset(self) -> None:
         """Reset internal state for a new conversation."""
@@ -144,13 +147,11 @@ class TurnGPTWrapper(ITurnGPT):
     # Tokenization (shared)
     # ------------------------------------------------------------------
 
-    def _tokenize_with_window(
-        self, dialog_text: str
-    ) -> tuple[Tensor | np.ndarray, Tensor | np.ndarray]:
+    def _tokenize_with_window(self, dialog_text: str) -> tuple[Tensor | np.ndarray, Tensor | np.ndarray]:
         """Tokenize dialog, evicting old turns if over max_context_tokens.
 
-        Keeps the last ``keep_turns`` completed turns plus the current
-        incomplete turn.  ``max_context_tokens`` acts as a hard truncation
+        Keeps the last ``_KEEP_TURNS`` completed turns plus the current
+        incomplete turn.  ``_MAX_CONTEXT_TOKENS`` acts as a hard truncation
         safety net.
 
         The KV cache is NOT cleared here — the forward methods use prefix
@@ -159,14 +160,13 @@ class TurnGPTWrapper(ITurnGPT):
         """
         input_ids, speaker_ids = self._tokenize(dialog_text)
 
-        max_tokens = self._max_context_tokens
+        max_tokens = self._MAX_CONTEXT_TOKENS
         if max_tokens <= 0 or input_ids.shape[-1] <= max_tokens:
             return input_ids, speaker_ids
 
         parts = dialog_text.split("<ts>")
         # parts[-1] is the current incomplete turn, parts[:-1] are completed.
-        # Keep the last keep_turns completed turns + the incomplete turn.
-        n_keep = self._keep_turns + 1  # +1 for current incomplete turn
+        n_keep = self._KEEP_TURNS + 1  # +1 for current incomplete turn
         if len(parts) > n_keep:
             trimmed = "<ts>".join(parts[-n_keep:])
             input_ids, speaker_ids = self._tokenize(trimmed)
@@ -182,7 +182,7 @@ class TurnGPTWrapper(ITurnGPT):
 
         Returns torch Tensors for PyTorch backend, numpy arrays for ONNX.
         """
-        if self._backend == "pytorch":
+        if self._BACKEND == "pytorch":
             encoded = self._tokenizer(text, return_tensors="pt")
             return encoded["input_ids"], encoded["speaker_ids"]
 
@@ -290,7 +290,7 @@ class TurnGPTWrapper(ITurnGPT):
                 input_ids,
                 speaker_ids,
                 0,
-                _empty_past(),
+                self._empty_past(),
             )
             self._cached_input_ids = input_ids
             self._past_key_values = presents
@@ -327,7 +327,7 @@ class TurnGPTWrapper(ITurnGPT):
         outputs = self._ort_session.run(None, feeds)
 
         presents = {}
-        for i in range(_NUM_LAYERS):
+        for i in range(self._NUM_LAYERS):
             presents[f"past_key_{i}"] = outputs[1 + i * 2]
             presents[f"past_value_{i}"] = outputs[2 + i * 2]
 
@@ -347,6 +347,15 @@ class TurnGPTWrapper(ITurnGPT):
         outputs = self._ort_session.run(None, feeds)
         return _extract_trp_numpy(outputs[0], self._eos_token_id)
 
+    def _empty_past(self) -> dict[str, np.ndarray]:
+        """Create empty past KV tensors for ONNX KV-cache model."""
+        d: dict[str, np.ndarray] = {}
+        shape = (1, self._NUM_HEADS, 0, self._HEAD_DIM)
+        for i in range(self._NUM_LAYERS):
+            d[f"past_key_{i}"] = np.zeros(shape, dtype=np.float32)
+            d[f"past_value_{i}"] = np.zeros(shape, dtype=np.float32)
+        return d
+
     # ------------------------------------------------------------------
     # Cache management
     # ------------------------------------------------------------------
@@ -354,7 +363,7 @@ class TurnGPTWrapper(ITurnGPT):
     def _clear_cache(self) -> None:
         self._cached_input_ids = None
         self._past_key_values = None
-        self._cached_trp_prob = _DEFAULT_PROBABILITY
+        self._cached_trp_prob = self._FALLBACK_PROBABILITY
 
 
 # ======================================================================
@@ -411,21 +420,6 @@ def _extract_trp_numpy(logits: np.ndarray, eos_token_id: int) -> float:
     exp = np.exp(shifted)
     probs = exp / exp.sum(axis=-1, keepdims=True)
     return float(probs[0, -1, eos_token_id])
-
-
-def _empty_past() -> dict[str, np.ndarray]:
-    """Create empty past KV tensors for ONNX KV-cache model."""
-    d: dict[str, np.ndarray] = {}
-    for i in range(_NUM_LAYERS):
-        d[f"past_key_{i}"] = np.zeros(
-            (1, _NUM_HEADS, 0, _HEAD_DIM),
-            dtype=np.float32,
-        )
-        d[f"past_value_{i}"] = np.zeros(
-            (1, _NUM_HEADS, 0, _HEAD_DIM),
-            dtype=np.float32,
-        )
-    return d
 
 
 def _slice_past_pytorch(past_key_values: tuple, prefix_len: int) -> tuple:

@@ -16,7 +16,6 @@ from websockets.frames import Close
 
 from voice_pipeline.bridge.cpp_bridge import CppBridge, _parse_event
 from voice_pipeline.bridge.exceptions import BridgeError
-from voice_pipeline.core.config import CppBridgeConfig
 from voice_pipeline.core.types import CppEvent, CppEventType
 
 # ---------------------------------------------------------------------------
@@ -31,9 +30,8 @@ def _make_close_exc(code: int = 1006, reason: str = "gone") -> ConnectionClosed:
     return ConnectionClosed(Close(code, reason), None)
 
 
-def _make_bridge(config: CppBridgeConfig, mock_conn: MagicMock) -> CppBridge:
-    """Create a CppBridge and connect it with a mocked WebSocket."""
-    bridge = CppBridge(config)
+def _connect_with_mock(bridge: CppBridge, mock_conn: MagicMock) -> CppBridge:
+    """Connect bridge using mocked WebSocket."""
     with patch(_WS_CONNECT, return_value=mock_conn):
         bridge.connect()
     return bridge
@@ -85,37 +83,37 @@ class TestEventParsing:
 
 
 class TestIdleState:
-    def test_send_audio_before_connect(self, config: CppBridgeConfig) -> None:
-        bridge = CppBridge(config)
+    def test_send_audio_before_connect(self, make_bridge) -> None:
+        bridge = make_bridge()
         with pytest.raises(BridgeError, match="Not connected"):
             bridge.send_audio(b"\x00" * 100)
 
-    def test_send_stop_before_connect(self, config: CppBridgeConfig) -> None:
-        bridge = CppBridge(config)
+    def test_send_stop_before_connect(self, make_bridge) -> None:
+        bridge = make_bridge()
         with pytest.raises(BridgeError, match="Not connected"):
             bridge.send_stop()
 
-    def test_send_stream_start_before_connect(self, config: CppBridgeConfig) -> None:
-        bridge = CppBridge(config)
+    def test_send_stream_start_before_connect(self, make_bridge) -> None:
+        bridge = make_bridge()
         with pytest.raises(BridgeError, match="Not connected"):
             bridge.send_stream_start()
 
-    def test_send_audio_end_before_connect(self, config: CppBridgeConfig) -> None:
-        bridge = CppBridge(config)
+    def test_send_audio_end_before_connect(self, make_bridge) -> None:
+        bridge = make_bridge()
         with pytest.raises(BridgeError, match="Not connected"):
             bridge.send_audio_end()
 
-    def test_send_play_file_before_connect(self, config: CppBridgeConfig) -> None:
-        bridge = CppBridge(config)
+    def test_send_play_file_before_connect(self, make_bridge) -> None:
+        bridge = make_bridge()
         with pytest.raises(BridgeError, match="Not connected"):
             bridge.send_play_file("test.wav")
 
-    def test_poll_event_before_connect(self, config: CppBridgeConfig) -> None:
-        bridge = CppBridge(config)
+    def test_poll_event_before_connect(self, make_bridge) -> None:
+        bridge = make_bridge()
         assert bridge.poll_event() is None
 
-    def test_disconnect_before_connect_is_noop(self, config: CppBridgeConfig) -> None:
-        bridge = CppBridge(config)
+    def test_disconnect_before_connect_is_noop(self, make_bridge) -> None:
+        bridge = make_bridge()
         bridge.disconnect()  # should not raise
 
 
@@ -125,60 +123,56 @@ class TestIdleState:
 
 
 class TestConnectDisconnect:
-    def test_connect_starts_receiver_thread(
-        self, config: CppBridgeConfig, mock_conn: MagicMock
-    ) -> None:
-        bridge = _make_bridge(config, mock_conn)
+    def test_connect_starts_receiver_thread(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
         assert bridge._running.is_set()
         assert bridge._receiver_thread is not None
         assert bridge._receiver_thread.is_alive()
         bridge.disconnect()
 
-    def test_disconnect_cleans_up(self, config: CppBridgeConfig, mock_conn: MagicMock) -> None:
-        bridge = _make_bridge(config, mock_conn)
+    def test_disconnect_cleans_up(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
         bridge.disconnect()
         assert not bridge._running.is_set()
         assert bridge._conn is None
         assert bridge._receiver_thread is None
         mock_conn.close.assert_called_once()
 
-    def test_connect_retry_on_failure(self, config: CppBridgeConfig) -> None:
+    def test_connect_retry_on_failure(self, make_bridge) -> None:
         mock_conn = MagicMock()
         mock_conn.recv = MagicMock(side_effect=TimeoutError)
         with patch(_WS_CONNECT, side_effect=[OSError("refused"), mock_conn]) as ws:
-            bridge = CppBridge(config)
+            bridge = make_bridge()
             bridge.connect()
             assert ws.call_count == 2
             assert bridge._running.is_set()
         bridge.disconnect()
 
-    def test_all_retries_exhausted(self, config: CppBridgeConfig) -> None:
+    def test_all_retries_exhausted(self, make_bridge) -> None:
         with patch(_WS_CONNECT, side_effect=OSError("refused")):
-            bridge = CppBridge(config)
+            bridge = make_bridge()
             with pytest.raises(BridgeError, match="Failed to connect"):
                 bridge.connect()
 
-    def test_connect_while_connected_is_noop(
-        self, config: CppBridgeConfig, mock_conn: MagicMock
-    ) -> None:
-        bridge = _make_bridge(config, mock_conn)
+    def test_connect_while_connected_is_noop(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
         # Second connect should log warning, not create new connection
         with patch(_WS_CONNECT) as ws:
             bridge.connect()
             ws.assert_not_called()
         bridge.disconnect()
 
-    def test_idempotent_disconnect(self, config: CppBridgeConfig, mock_conn: MagicMock) -> None:
-        bridge = _make_bridge(config, mock_conn)
+    def test_idempotent_disconnect(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
         bridge.disconnect()
         bridge.disconnect()  # should not raise
         mock_conn.close.assert_called_once()
 
-    def test_disconnect_after_receiver_failure(self, config: CppBridgeConfig) -> None:
+    def test_disconnect_after_receiver_failure(self, make_bridge) -> None:
         """disconnect() cleans up even after receiver thread already cleared _running."""
         mock_conn = MagicMock()
         mock_conn.recv = MagicMock(side_effect=_make_close_exc())
-        bridge = _make_bridge(config, mock_conn)
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
 
         # Wait for receiver to detect connection loss and clear _running
         deadline = time.monotonic() + 2.0
@@ -191,10 +185,8 @@ class TestConnectDisconnect:
         assert bridge._conn is None
         assert bridge._receiver_thread is None
 
-    def test_reconnect_clears_stale_state(
-        self, config: CppBridgeConfig, mock_conn: MagicMock
-    ) -> None:
-        bridge = _make_bridge(config, mock_conn)
+    def test_reconnect_clears_stale_state(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
         # Inject a stale event
         bridge._event_queue.put(CppEvent(event_type=CppEventType.PLAYBACK_STARTED))
         bridge.disconnect()
@@ -216,10 +208,8 @@ class TestConnectDisconnect:
 
 
 class TestSendMethods:
-    def test_send_audio_encodes_base64(
-        self, config: CppBridgeConfig, mock_conn: MagicMock
-    ) -> None:
-        bridge = _make_bridge(config, mock_conn)
+    def test_send_audio_encodes_base64(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
         audio = b"\x01\x02\x03\x04"
         bridge.send_audio(audio)
 
@@ -228,38 +218,36 @@ class TestSendMethods:
         assert base64.b64decode(sent["data"]) == audio
         bridge.disconnect()
 
-    def test_send_stop(self, config: CppBridgeConfig, mock_conn: MagicMock) -> None:
-        bridge = _make_bridge(config, mock_conn)
+    def test_send_stop(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
         bridge.send_stop()
         sent = json.loads(mock_conn.send.call_args[0][0])
         assert sent == {"type": "stop"}
         bridge.disconnect()
 
-    def test_send_stream_start(self, config: CppBridgeConfig, mock_conn: MagicMock) -> None:
-        bridge = _make_bridge(config, mock_conn)
+    def test_send_stream_start(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
         bridge.send_stream_start()
         sent = json.loads(mock_conn.send.call_args[0][0])
         assert sent == {"type": "stream_start"}
         bridge.disconnect()
 
-    def test_send_audio_end(self, config: CppBridgeConfig, mock_conn: MagicMock) -> None:
-        bridge = _make_bridge(config, mock_conn)
+    def test_send_audio_end(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
         bridge.send_audio_end()
         sent = json.loads(mock_conn.send.call_args[0][0])
         assert sent == {"type": "audio_end"}
         bridge.disconnect()
 
-    def test_send_play_file(self, config: CppBridgeConfig, mock_conn: MagicMock) -> None:
-        bridge = _make_bridge(config, mock_conn)
+    def test_send_play_file(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
         bridge.send_play_file("assets/audio/awake.wav")
         sent = json.loads(mock_conn.send.call_args[0][0])
         assert sent == {"type": "play_file", "file_path": "assets/audio/awake.wav"}
         bridge.disconnect()
 
-    def test_connection_closed_during_send(
-        self, config: CppBridgeConfig, mock_conn: MagicMock
-    ) -> None:
-        bridge = _make_bridge(config, mock_conn)
+    def test_connection_closed_during_send(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
         mock_conn.send.side_effect = _make_close_exc()
         with pytest.raises(BridgeError, match="Connection lost during send"):
             bridge.send_stop()
@@ -272,15 +260,13 @@ class TestSendMethods:
 
 
 class TestPollEvent:
-    def test_empty_returns_none(self, config: CppBridgeConfig, mock_conn: MagicMock) -> None:
-        bridge = _make_bridge(config, mock_conn)
+    def test_empty_returns_none(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
         assert bridge.poll_event() is None
         bridge.disconnect()
 
-    def test_queued_events_returned_fifo(
-        self, config: CppBridgeConfig, mock_conn: MagicMock
-    ) -> None:
-        bridge = _make_bridge(config, mock_conn)
+    def test_queued_events_returned_fifo(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
         e1 = CppEvent(event_type=CppEventType.PLAYBACK_STARTED)
         e2 = CppEvent(event_type=CppEventType.PLAYBACK_COMPLETE)
         bridge._event_queue.put(e1)
@@ -297,7 +283,7 @@ class TestPollEvent:
 
 
 class TestReceiverThread:
-    def test_events_enqueued(self, config: CppBridgeConfig) -> None:
+    def test_events_enqueued(self, make_bridge) -> None:
         """Receiver thread parses JSON messages and enqueues CppEvents."""
         messages = [
             '{"type": "playback_started"}',
@@ -315,7 +301,7 @@ class TestReceiverThread:
 
         mock_conn = MagicMock()
         mock_conn.recv = mock_recv
-        bridge = _make_bridge(config, mock_conn)
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
 
         # Give receiver thread time to process
         deadline = time.monotonic() + 2.0
@@ -326,11 +312,11 @@ class TestReceiverThread:
         assert bridge.poll_event() == CppEvent(event_type=CppEventType.PLAYBACK_COMPLETE)
         bridge.disconnect()
 
-    def test_connection_loss_stores_error(self, config: CppBridgeConfig) -> None:
+    def test_connection_loss_stores_error(self, make_bridge) -> None:
         """ConnectionClosed in receiver stores BridgeError."""
         mock_conn = MagicMock()
         mock_conn.recv = MagicMock(side_effect=_make_close_exc())
-        bridge = _make_bridge(config, mock_conn)
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
 
         # Wait for receiver to detect connection loss
         deadline = time.monotonic() + 2.0
@@ -342,7 +328,7 @@ class TestReceiverThread:
             bridge.poll_event()
         bridge.disconnect()
 
-    def test_unparseable_messages_skipped(self, config: CppBridgeConfig) -> None:
+    def test_unparseable_messages_skipped(self, make_bridge) -> None:
         """Bad JSON is skipped, valid messages still enqueued."""
         messages = [
             "not valid json",
@@ -360,7 +346,7 @@ class TestReceiverThread:
 
         mock_conn = MagicMock()
         mock_conn.recv = mock_recv
-        bridge = _make_bridge(config, mock_conn)
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
 
         deadline = time.monotonic() + 2.0
         while bridge._event_queue.qsize() < 1 and time.monotonic() < deadline:
@@ -369,7 +355,7 @@ class TestReceiverThread:
         assert bridge.poll_event() == CppEvent(event_type=CppEventType.PLAYBACK_COMPLETE)
         bridge.disconnect()
 
-    def test_non_dict_json_skipped(self, config: CppBridgeConfig) -> None:
+    def test_non_dict_json_skipped(self, make_bridge) -> None:
         """Non-dict JSON (list, null, number) is skipped without killing receiver."""
         messages = [
             "[1, 2, 3]",
@@ -389,7 +375,7 @@ class TestReceiverThread:
 
         mock_conn = MagicMock()
         mock_conn.recv = mock_recv
-        bridge = _make_bridge(config, mock_conn)
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
 
         deadline = time.monotonic() + 2.0
         while bridge._event_queue.qsize() < 1 and time.monotonic() < deadline:
@@ -406,10 +392,10 @@ class TestReceiverThread:
 
 
 class TestErrorPropagation:
-    def test_error_surfaced_via_poll_event(self, config: CppBridgeConfig) -> None:
+    def test_error_surfaced_via_poll_event(self, make_bridge) -> None:
         mock_conn = MagicMock()
         mock_conn.recv = MagicMock(side_effect=_make_close_exc())
-        bridge = _make_bridge(config, mock_conn)
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
 
         deadline = time.monotonic() + 2.0
         while bridge._running.is_set() and time.monotonic() < deadline:
@@ -419,10 +405,10 @@ class TestErrorPropagation:
             bridge.poll_event()
         bridge.disconnect()
 
-    def test_error_surfaced_via_send(self, config: CppBridgeConfig) -> None:
+    def test_error_surfaced_via_send(self, make_bridge) -> None:
         mock_conn = MagicMock()
         mock_conn.recv = MagicMock(side_effect=_make_close_exc())
-        bridge = _make_bridge(config, mock_conn)
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
 
         deadline = time.monotonic() + 2.0
         while bridge._running.is_set() and time.monotonic() < deadline:
@@ -432,10 +418,10 @@ class TestErrorPropagation:
             bridge.send_stop()
         bridge.disconnect()
 
-    def test_error_cleared_after_raise(self, config: CppBridgeConfig) -> None:
+    def test_error_cleared_after_raise(self, make_bridge) -> None:
         mock_conn = MagicMock()
         mock_conn.recv = MagicMock(side_effect=_make_close_exc())
-        bridge = _make_bridge(config, mock_conn)
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
 
         deadline = time.monotonic() + 2.0
         while bridge._running.is_set() and time.monotonic() < deadline:

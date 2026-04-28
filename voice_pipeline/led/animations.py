@@ -45,22 +45,25 @@ class StaticAnimation:
 
     Useful as a baseline implementation and placeholder for states that
     don't need dynamic effects.
+
+    Args:
+        bar_color: 바 세그먼트 색상.
+        ring_color: 링 세그먼트 색상.
     """
+
+    _FRAME_INTERVAL_SEC = 0.1  # 렌더 틱 간격 (초)
 
     def __init__(
         self,
         bar_color: RGB = (0, 0, 0),
         ring_color: RGB = (0, 0, 0),
-        *,
-        frame_interval_sec: float = 0.1,
     ) -> None:
         self._bar_color = bar_color
         self._ring_color = ring_color
-        self._frame_interval_sec = frame_interval_sec
 
     @property
     def frame_interval_sec(self) -> float:
-        return self._frame_interval_sec
+        return self._FRAME_INTERVAL_SEC
 
     def reset(self) -> None:
         pass
@@ -72,36 +75,36 @@ class StaticAnimation:
 class BreathingAnimation:
     """Smooth breathing (fade in/out) animation using a sine curve.
 
-    Brightness oscillates between ``min_brightness`` and 1.0 over
-    ``cycle_sec`` seconds, applied to the base color for ring LEDs.
+    Brightness oscillates between ``_MIN_BRIGHTNESS`` and 1.0 over
+    ``_CYCLE_SEC`` seconds, applied to the base color for ring LEDs.
     Bar LEDs remain off.
+
+    Args:
+        color: 링 세그먼트 기본 색상.
     """
+
+    _CYCLE_SEC = 4.0  # 페이드 한 주기 시간 (초)
+    _MIN_BRIGHTNESS = 0.15  # 페이드 최소 밝기 (0.0~1.0)
+    _FRAME_INTERVAL_SEC = 0.03  # 렌더 틱 간격 (초)
 
     def __init__(
         self,
         color: RGB = (233, 233, 50),
-        *,
-        cycle_sec: float = 4.0,
-        min_brightness: float = 0.15,
-        frame_interval_sec: float = 0.03,
     ) -> None:
         self._color = color
-        self._cycle_sec = cycle_sec
-        self._min_brightness = min_brightness
-        self._frame_interval_sec = frame_interval_sec
 
     @property
     def frame_interval_sec(self) -> float:
-        return self._frame_interval_sec
+        return self._FRAME_INTERVAL_SEC
 
     def reset(self) -> None:
         pass
 
     def render(self, tick: int, bar_count: int, ring_count: int) -> list[RGB]:
-        t = tick * self._frame_interval_sec
-        # sine oscillates 0→1→0 over cycle_sec
-        phase = (math.sin(2 * math.pi * t / self._cycle_sec - math.pi / 2) + 1) / 2
-        brightness = self._min_brightness + (1.0 - self._min_brightness) * phase
+        t = tick * self._FRAME_INTERVAL_SEC
+        # sine oscillates 0→1→0 over _CYCLE_SEC
+        phase = (math.sin(2 * math.pi * t / self._CYCLE_SEC - math.pi / 2) + 1) / 2
+        brightness = self._MIN_BRIGHTNESS + (1.0 - self._MIN_BRIGHTNESS) * phase
         r = int(self._color[0] * brightness)
         g = int(self._color[1] * brightness)
         b = int(self._color[2] * brightness)

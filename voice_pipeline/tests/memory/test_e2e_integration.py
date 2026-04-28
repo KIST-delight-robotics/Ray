@@ -9,7 +9,6 @@ from __future__ import annotations
 import pytest
 
 from voice_pipeline.context.formatters import format_memory_block, parse_citation_tag
-from voice_pipeline.core.config import MemoryConfig
 from voice_pipeline.core.types import TokenCounter
 from voice_pipeline.embedding.embedder import SentenceTransformerEmbedder
 from voice_pipeline.llm.llm import OpenAILLM
@@ -36,14 +35,13 @@ def _write_session(
     index: NumpyVectorIndex,
     embedder: SentenceTransformerEmbedder,
     llm: OpenAILLM,
-    config: MemoryConfig,
     token_counter: TokenCounter,
     session_id: str,
     timestamp: str,
     conversation: list[tuple[str, str, str, int]],
 ):
     populate_utterances(storage, session_id, conversation)
-    writer = MemoryWriter(storage, index, embedder, llm, config, token_counter)
+    writer = MemoryWriter(storage, index, embedder, llm, token_counter)
     return writer.process_session(session_id, timestamp)
 
 
@@ -61,7 +59,6 @@ class TestWriteThenRetrieve:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        memory_config: MemoryConfig,
         token_counter: TokenCounter,
     ) -> None:
         """Written episodes are retrievable by a relevant query."""
@@ -70,7 +67,6 @@ class TestWriteThenRetrieve:
             vector_index,
             shared_embedder,
             write_llm,
-            memory_config,
             token_counter,
             "s-movie",
             "2026-04-01 10:00:00",
@@ -78,7 +74,7 @@ class TestWriteThenRetrieve:
         )
         assert len(episodes) >= 1
 
-        retriever = MemoryRetriever(memory_db, vector_index, shared_embedder, memory_config)
+        retriever = MemoryRetriever(memory_db, vector_index, shared_embedder)
         result = retriever.retrieve("인터스텔라 영화", set())
 
         assert len(result.episodes) >= 1
@@ -95,7 +91,6 @@ class TestWriteThenRetrieve:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        memory_config: MemoryConfig,
         token_counter: TokenCounter,
     ) -> None:
         """Movie query ranks movie-session episodes above cooking-session episodes."""
@@ -104,7 +99,6 @@ class TestWriteThenRetrieve:
             vector_index,
             shared_embedder,
             write_llm,
-            memory_config,
             token_counter,
             "s-movie",
             "2026-04-01 10:00:00",
@@ -115,7 +109,6 @@ class TestWriteThenRetrieve:
             vector_index,
             shared_embedder,
             write_llm,
-            memory_config,
             token_counter,
             "s-cook",
             "2026-04-01 12:00:00",
@@ -123,20 +116,12 @@ class TestWriteThenRetrieve:
         )
         assert len(movie_eps) >= 1 and len(cook_eps) >= 1
 
-        retriever = MemoryRetriever(memory_db, vector_index, shared_embedder, memory_config)
+        retriever = MemoryRetriever(memory_db, vector_index, shared_embedder)
         result = retriever.retrieve("영화를 봤어", set())
 
         if len(result.episodes) >= 2:
-            movie_scores = [
-                result.scores[i]
-                for i, ep in enumerate(result.episodes)
-                if ep.session_id == "s-movie"
-            ]
-            cook_scores = [
-                result.scores[i]
-                for i, ep in enumerate(result.episodes)
-                if ep.session_id == "s-cook"
-            ]
+            movie_scores = [result.scores[i] for i, ep in enumerate(result.episodes) if ep.session_id == "s-movie"]
+            cook_scores = [result.scores[i] for i, ep in enumerate(result.episodes) if ep.session_id == "s-cook"]
             if movie_scores and cook_scores:
                 assert max(movie_scores) > max(cook_scores), (
                     "Best movie score should exceed best cooking score for a movie query"
@@ -157,7 +142,6 @@ class TestContextIntegration:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        memory_config: MemoryConfig,
         token_counter: TokenCounter,
     ) -> None:
         """format_memory_block produces [M1] tags from real retrieval results."""
@@ -166,14 +150,13 @@ class TestContextIntegration:
             vector_index,
             shared_embedder,
             write_llm,
-            memory_config,
             token_counter,
             "s1",
             "2026-04-01 10:00:00",
             CONVERSATION_MOVIE,
         )
 
-        retriever = MemoryRetriever(memory_db, vector_index, shared_embedder, memory_config)
+        retriever = MemoryRetriever(memory_db, vector_index, shared_embedder)
         result = retriever.retrieve("영화", set())
         assert len(result.episodes) >= 1
 
@@ -188,7 +171,6 @@ class TestContextIntegration:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        memory_config: MemoryConfig,
         token_counter: TokenCounter,
     ) -> None:
         """Full citation roundtrip: format → simulated LLM response → parse → update."""
@@ -197,14 +179,13 @@ class TestContextIntegration:
             vector_index,
             shared_embedder,
             write_llm,
-            memory_config,
             token_counter,
             "s1",
             "2026-04-01 10:00:00",
             CONVERSATION_MOVIE,
         )
 
-        retriever = MemoryRetriever(memory_db, vector_index, shared_embedder, memory_config)
+        retriever = MemoryRetriever(memory_db, vector_index, shared_embedder)
         result = retriever.retrieve("영화", set())
         assert len(result.episodes) >= 1
 
@@ -224,4 +205,4 @@ class TestContextIntegration:
 
         # Verify retained buffer was updated
         assert db_id in retriever._retained
-        assert retriever._retained[db_id].ttl == memory_config.retained_ttl
+        assert retriever._retained[db_id].ttl == MemoryRetriever._RETAINED_TTL

@@ -15,7 +15,6 @@ from websockets.sync.server import ServerConnection, serve
 
 from voice_pipeline.bridge.cpp_bridge import CppBridge
 from voice_pipeline.bridge.exceptions import BridgeError
-from voice_pipeline.core.config import CppBridgeConfig
 from voice_pipeline.core.types import CppEventType
 
 pytestmark = pytest.mark.requires_api
@@ -69,15 +68,19 @@ def _collector_handler(collected: list[dict]):
 
 
 @pytest.fixture
-def echo_config() -> CppBridgeConfig:
-    return CppBridgeConfig(
-        host=_HOST,
-        port=_PORT,
-        reconnect_attempts=2,
-        recv_timeout_sec=0.1,
-        connect_timeout_sec=2.0,
-        close_timeout_sec=2.0,
-    )
+def echo_bridge(make_bridge):
+    """Factory for echo test bridges (uses _PORT, longer connect/close timeouts)."""
+
+    def _make(**overrides) -> CppBridge:
+        return make_bridge(
+            host=_HOST,
+            port=_PORT,
+            connect_timeout_sec=2.0,
+            close_timeout_sec=2.0,
+            **overrides,
+        )
+
+    return _make
 
 
 @pytest.fixture
@@ -108,26 +111,24 @@ def silent_server():
 
 
 class TestLifecycle:
-    def test_connect_disconnect(self, echo_config: CppBridgeConfig, echo_server) -> None:
-        bridge = CppBridge(echo_config)
+    def test_connect_disconnect(self, echo_bridge, echo_server) -> None:
+        bridge = echo_bridge()
         bridge.connect()
         assert bridge._running.is_set()
         bridge.disconnect()
         assert not bridge._running.is_set()
 
-    def test_connect_to_nonexistent_server(self) -> None:
-        config = CppBridgeConfig(
-            host=_HOST,
-            port=19877,  # nothing listening
-            reconnect_attempts=1,
-            connect_timeout_sec=1.0,
-        )
-        bridge = CppBridge(config)
+    def test_connect_to_nonexistent_server(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(CppBridge, "_RECONNECT_ATTEMPTS", 1)
+        monkeypatch.setattr(CppBridge, "_CONNECT_TIMEOUT_SEC", 1.0)
+        monkeypatch.setattr(CppBridge, "_HOST", _HOST)
+        monkeypatch.setattr(CppBridge, "_PORT", 19877)
+        bridge = CppBridge()  # nothing listening
         with pytest.raises(BridgeError, match="Failed to connect"):
             bridge.connect()
 
-    def test_disconnect_then_reconnect(self, echo_config: CppBridgeConfig, echo_server) -> None:
-        bridge = CppBridge(echo_config)
+    def test_disconnect_then_reconnect(self, echo_bridge, echo_server) -> None:
+        bridge = echo_bridge()
         bridge.connect()
         bridge.disconnect()
 
@@ -137,13 +138,13 @@ class TestLifecycle:
 
 
 class TestSendReceive:
-    def test_server_receives_commands(self, echo_config: CppBridgeConfig) -> None:
+    def test_server_receives_commands(self, echo_bridge) -> None:
         collected: list[dict] = []
         server = serve(_collector_handler(collected), _HOST, _PORT)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            bridge = CppBridge(echo_config)
+            bridge = echo_bridge()
             bridge.connect()
 
             bridge.send_stop()
@@ -168,8 +169,8 @@ class TestSendReceive:
             server.shutdown()
             thread.join(timeout=5.0)
 
-    def test_round_trip_audio_to_event(self, echo_config: CppBridgeConfig, echo_server) -> None:
-        bridge = CppBridge(echo_config)
+    def test_round_trip_audio_to_event(self, echo_bridge, echo_server) -> None:
+        bridge = echo_bridge()
         bridge.connect()
         bridge.send_audio(b"\x00" * 100)
 
@@ -186,8 +187,8 @@ class TestSendReceive:
         assert event.event_type == CppEventType.PLAYBACK_STARTED
         bridge.disconnect()
 
-    def test_round_trip_stop_to_complete(self, echo_config: CppBridgeConfig, echo_server) -> None:
-        bridge = CppBridge(echo_config)
+    def test_round_trip_stop_to_complete(self, echo_bridge, echo_server) -> None:
+        bridge = echo_bridge()
         bridge.connect()
         bridge.send_stop()
 
@@ -205,14 +206,14 @@ class TestSendReceive:
 
 
 class TestServerFailure:
-    def test_server_disconnect_detected(self, echo_config: CppBridgeConfig) -> None:
+    def test_server_disconnect_detected(self, echo_bridge) -> None:
         """Explicit server-side close is detected as BridgeError."""
         _server_connections.clear()
         server = serve(_tracking_handler, _HOST, _PORT)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            bridge = CppBridge(echo_config)
+            bridge = echo_bridge()
             bridge.connect()
 
             # Wait for server to register the connection

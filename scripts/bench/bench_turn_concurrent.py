@@ -33,12 +33,7 @@ from bench_turn_model import (  # noqa: E402
     numpy_to_pcm16,
 )
 
-from voice_pipeline.core.config import (  # noqa: E402
-    AudioConfig,
-    MaAIVAPConfig,
-    TTSConfig,
-    TurnGPTConfig,
-)
+from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper  # noqa: E402
 
 
 @dataclass
@@ -70,25 +65,18 @@ def run_concurrent_benchmark(
     n_inputs = len(all_inputs)
 
     # --- Create models ---
-    from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
     from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
     print("  Loading VAP (maai-full-onnx)...")
-    vap_config = MaAIVAPConfig(
-        frame_rate=vap_frame_rate,
-        ort_threads=vap_ort_threads,
-        encoder_onnx_path=MaAIVAPConfig.encoder_onnx_path,
-        transformer_onnx_path=MaAIVAPConfig.transformer_onnx_path,
-    )
-    vap = MaAIVAPWrapper(vap_config, AudioConfig(), TTSConfig())
+    from voice_pipeline.tts.tts import OpenAITTS
+
+    MaAIVAPWrapper._FRAME_RATE = vap_frame_rate
+    MaAIVAPWrapper._ORT_THREADS = vap_ort_threads
+    vap = MaAIVAPWrapper(OpenAITTS.OUTPUT_SAMPLE_RATE)
 
     print("  Loading TurnGPT (onnx-int8)...")
-    tgpt_config = TurnGPTConfig(
-        onnx_model_path="models/turngpt/turngpt_v2_kvcache_int8.onnx",
-        tokenizer_path="models/turngpt/tokenizer",
-        onnx_threads=tgpt_onnx_threads,
-    )
-    tgpt = TurnGPTWrapper(tgpt_config)
+    TurnGPTWrapper._ONNX_THREADS = tgpt_onnx_threads  # scripts: 직접 class var 재할당 허용
+    tgpt = TurnGPTWrapper()
     print("  Models loaded.")
 
     # --- Warmup both ---
@@ -297,13 +285,19 @@ def print_concurrent_results(
     tgpt_budget = 1000 / settings["tgpt_rate"]
     vap_headroom = vap_budget - cv.p99_ms
     tgpt_headroom = tgpt_budget - ct.p99_ms
-    print(f"  VAP    P99={cv.p99_ms:.1f}ms / budget={vap_budget:.0f}ms → headroom {vap_headroom:.0f}ms ({vap_headroom / vap_budget * 100:.0f}%)")
-    print(f"  TurnGPT P99={ct.p99_ms:.1f}ms / budget={tgpt_budget:.0f}ms → headroom {tgpt_headroom:.0f}ms ({tgpt_headroom / tgpt_budget * 100:.0f}%)")
+    print(
+        f"  VAP    P99={cv.p99_ms:.1f}ms / budget={vap_budget:.0f}ms → headroom {vap_headroom:.0f}ms ({vap_headroom / vap_budget * 100:.0f}%)"
+    )
+    print(
+        f"  TurnGPT P99={ct.p99_ms:.1f}ms / budget={tgpt_budget:.0f}ms → headroom {tgpt_headroom:.0f}ms ({tgpt_headroom / tgpt_budget * 100:.0f}%)"
+    )
 
     # Can we raise VAP to 20Hz?
     vap_20hz_budget = 50.0
     vap_20hz_headroom = vap_20hz_budget - cv.p99_ms
-    print(f"\n  VAP@20Hz feasibility: P99={cv.p99_ms:.1f}ms / budget=50ms → headroom {vap_20hz_headroom:.0f}ms ({'OK' if vap_20hz_headroom > 0 else 'NO'})")
+    print(
+        f"\n  VAP@20Hz feasibility: P99={cv.p99_ms:.1f}ms / budget=50ms → headroom {vap_20hz_headroom:.0f}ms ({'OK' if vap_20hz_headroom > 0 else 'NO'})"
+    )
 
     print(f"\n{sep}\n")
 
@@ -358,8 +352,12 @@ def main() -> None:
         print_concurrent_results(solo_vap, solo_tgpt, result, settings)
     else:
         # Fallback: just print concurrent results
-        print(f"\n  VAP (concurrent): mean={result.vap.mean_ms:.1f}ms, P95={result.vap.p95_ms:.1f}ms, P99={result.vap.p99_ms:.1f}ms")
-        print(f"  TurnGPT (concurrent): mean={result.turngpt.mean_ms:.1f}ms, P95={result.turngpt.p95_ms:.1f}ms, P99={result.turngpt.p99_ms:.1f}ms")
+        print(
+            f"\n  VAP (concurrent): mean={result.vap.mean_ms:.1f}ms, P95={result.vap.p95_ms:.1f}ms, P99={result.vap.p99_ms:.1f}ms"
+        )
+        print(
+            f"  TurnGPT (concurrent): mean={result.turngpt.mean_ms:.1f}ms, P95={result.turngpt.p95_ms:.1f}ms, P99={result.turngpt.p99_ms:.1f}ms"
+        )
 
 
 if __name__ == "__main__":

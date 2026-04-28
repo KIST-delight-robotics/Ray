@@ -9,7 +9,6 @@ from typing import Any
 
 import openai
 
-from voice_pipeline.core.config import LLMConfig
 from voice_pipeline.core.interfaces import ILLM
 from voice_pipeline.core.types import LLMMetrics, LLMResult, LLMStream, ToolCall, Usage
 from voice_pipeline.llm.exceptions import LLMError
@@ -26,14 +25,34 @@ class OpenAILLM(ILLM):
 
     Returns LLMStream: iterate for text deltas, access ``.result``
     after consumption for LLMResult (text, tool_calls, metrics).
+
+    Args:
+        model: OpenAI 모델 이름 (예: "gpt-4o", "gpt-4o-mini", "gpt-5.4").
+        temperature: 샘플링 temperature (0.0~2.0).
+        max_tokens: 응답 최대 토큰 수.
+        tools: 활성화할 도구 이름 목록. None이면 기본 도구, ``[]``이면 명시적 비활성화.
     """
 
-    def __init__(self, config: LLMConfig) -> None:
-        self._config = config
-        self._tools = resolve_tools(config.tools) if config.tools else []
+    _MAX_RETRIES = 2  # 응답 실패 시 자동 재시도 횟수
+    _TIMEOUT_SEC = 30.0  # 응답 대기 최대 시간 (초)
+    _DEFAULT_TOOLS: tuple[str, ...] = ("web_search",)  # tools=None일 때 기본 도구
+    _REASONING_EFFORT: str | None = "none"  # reasoning 모델용 effort 레벨 (gpt-5 계열). None=미적용
+
+    def __init__(
+        self,
+        model: str = "gpt-5.4",
+        temperature: float = 0.7,
+        max_tokens: int = 256,
+        tools: list[str] | None = None,
+    ) -> None:
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.tools: list[str] = list(tools) if tools is not None else list(self._DEFAULT_TOOLS)
+        self._resolved_tools = resolve_tools(self.tools) if self.tools else []
         self._client = openai.OpenAI(
-            max_retries=config.max_retries,
-            timeout=config.timeout_sec,
+            max_retries=self._MAX_RETRIES,
+            timeout=self._TIMEOUT_SEC,
         )
 
     def generate(
@@ -59,22 +78,22 @@ class OpenAILLM(ILLM):
         instructions, input_messages = _split_system_message(messages)
 
         # Resolve tools: None → config default, [] → no tools
-        resolved_tools = self._tools if tools is None else tools
+        resolved_tools = self._resolved_tools if tools is None else tools
 
         start_time = time.monotonic()
 
         try:
             kwargs: dict[str, Any] = {
-                "model": self._config.model,
+                "model": self.model,
                 "input": input_messages,
-                "temperature": self._config.temperature,
-                "max_output_tokens": self._config.max_tokens,
+                "temperature": self.temperature,
+                "max_output_tokens": self.max_tokens,
                 "stream": True,
             }
             if instructions is not None:
                 kwargs["instructions"] = instructions
-            if self._config.reasoning_effort is not None:
-                kwargs["reasoning"] = {"effort": self._config.reasoning_effort}
+            if self._REASONING_EFFORT is not None:
+                kwargs["reasoning"] = {"effort": self._REASONING_EFFORT}
             if resolved_tools:
                 kwargs["tools"] = resolved_tools
             if response_format is not None:
@@ -86,7 +105,7 @@ class OpenAILLM(ILLM):
             raise LLMError(str(exc)) from exc
 
         # Shared mutable state between generator and result_fn
-        state = _StreamState(model=self._config.model, start_time=start_time)
+        state = _StreamState(model=self.model, start_time=start_time)
 
         gen = _iter_stream(stream, state)
 
@@ -123,9 +142,7 @@ class _StreamState:
         end_time = time.monotonic()
         latency_ms = int((end_time - self.start_time) * 1000)
         ttft_ms = (
-            int((self.first_token_time - self.start_time) * 1000)
-            if self.first_token_time is not None
-            else latency_ms
+            int((self.first_token_time - self.start_time) * 1000) if self.first_token_time is not None else latency_ms
         )
 
         metrics = self._extract_metrics(latency_ms, ttft_ms)
@@ -146,13 +163,8 @@ class _StreamState:
             usage = Usage(
                 input_tokens=usage_data.input_tokens,
                 output_tokens=usage_data.output_tokens,
-                cached_tokens=getattr(
-                    getattr(usage_data, "input_tokens_details", None), "cached_tokens", 0
-                )
-                or 0,
-                reasoning_tokens=getattr(
-                    getattr(usage_data, "output_tokens_details", None), "reasoning_tokens", 0
-                )
+                cached_tokens=getattr(getattr(usage_data, "input_tokens_details", None), "cached_tokens", 0) or 0,
+                reasoning_tokens=getattr(getattr(usage_data, "output_tokens_details", None), "reasoning_tokens", 0)
                 or 0,
             )
         except (AttributeError, TypeError):

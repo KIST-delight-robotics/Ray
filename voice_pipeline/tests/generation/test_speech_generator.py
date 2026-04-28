@@ -10,7 +10,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from voice_pipeline.core.config import SpeechGeneratorConfig
 from voice_pipeline.core.interfaces import (
     ILLM,
     ITTS,
@@ -33,6 +32,18 @@ from voice_pipeline.memory.types import Episode, MemoryReadResult
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _make_tts_mock() -> MagicMock:
+    """Create a Mock TTS with required ITTS attributes set.
+
+    Abstract properties (output_sample_rate, voice_id) are recognized by
+    spec=ITTS but not auto-populated, so we set them explicitly here.
+    """
+    tts = MagicMock(spec=ITTS)
+    tts.output_sample_rate = 24000
+    tts.voice_id = "test|mock"
+    return tts
 
 
 def _make_llm_stream(
@@ -93,13 +104,11 @@ def _make_deps(
     else:
         llm.generate.return_value = _make_llm_stream(["Hello", " there!"])
 
-    tts = MagicMock(spec=ITTS)
+    tts = _make_tts_mock()
     if tts_chunks is not None:
         tts.synthesize.return_value = _make_tts_stream(tts_chunks, tts_timestamps)
     else:
-        tts.synthesize.return_value = _make_tts_stream(
-            [b"\x00" * 100, b"\x01" * 100], tts_timestamps
-        )
+        tts.synthesize.return_value = _make_tts_stream([b"\x00" * 100, b"\x01" * 100], tts_timestamps)
 
     return context_builder, llm, tts
 
@@ -202,10 +211,10 @@ class TestPrepareRestart:
         llm = MagicMock(spec=ILLM)
         llm.generate.side_effect = slow_generate
 
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
         tts.synthesize.return_value = _make_tts_stream([b"\xaa" * 50])
 
-        gen = SpeechGenerator(cb, llm, tts, SpeechGeneratorConfig(max_workers=2))
+        gen = SpeechGenerator(cb, llm, tts)
 
         gen.prepare("first")
         time.sleep(0.05)  # Let first run start
@@ -239,10 +248,10 @@ class TestPrepareDuringStreaming:
                 return _make_slow_tts_stream([b"\x01"] * 20, delay=0.05)
             return _make_tts_stream([b"\x02" * 50])
 
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
         tts.synthesize.side_effect = make_tts_stream
 
-        gen = SpeechGenerator(cb, llm, tts, SpeechGeneratorConfig(max_workers=2))
+        gen = SpeechGenerator(cb, llm, tts)
 
         gen.prepare("first")
         _wait_for_state(gen, GeneratorState.STREAMING)
@@ -278,7 +287,7 @@ class TestCancel:
         llm = MagicMock(spec=ILLM)
         llm.generate.side_effect = slow_generate
 
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
 
         gen = SpeechGenerator(cb, llm, tts)
 
@@ -396,7 +405,7 @@ class TestPipelineFailure:
         llm = MagicMock(spec=ILLM)
         llm.generate.side_effect = RuntimeError("LLM error")
 
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
 
         gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hello")
@@ -414,7 +423,7 @@ class TestPipelineFailure:
         llm = MagicMock(spec=ILLM)
         llm.generate.return_value = _make_llm_stream(["some text"])
 
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
         tts.synthesize.side_effect = RuntimeError("TTS error")
 
         gen = SpeechGenerator(cb, llm, tts)
@@ -435,7 +444,7 @@ class TestEmptyLLMResponse:
         llm = MagicMock(spec=ILLM)
         llm.generate.return_value = _make_llm_stream(["", "  ", ""])
 
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
 
         gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hello")
@@ -451,7 +460,7 @@ class TestEmptyLLMResponse:
         llm = MagicMock(spec=ILLM)
         llm.generate.return_value = _make_llm_stream(["   \n\t  "])
 
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
 
         gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hello")
@@ -471,7 +480,7 @@ class TestZeroChunkTTS:
         llm = MagicMock(spec=ILLM)
         llm.generate.return_value = _make_llm_stream(["some text"])
 
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
         tts.synthesize.return_value = _make_tts_stream([])
 
         gen = SpeechGenerator(cb, llm, tts)
@@ -499,7 +508,7 @@ class TestShutdown:
         llm = MagicMock(spec=ILLM)
         llm.generate.side_effect = cancellable_generate
 
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
 
         gen = SpeechGenerator(cb, llm, tts)
         # Capture the cancel event before submitting
@@ -538,10 +547,10 @@ class TestStaleRunDiscarded:
         llm = MagicMock(spec=ILLM)
         llm.generate.side_effect = sequenced_generate
 
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
         tts.synthesize.return_value = _make_tts_stream([b"\xff" * 50])
 
-        gen = SpeechGenerator(cb, llm, tts, SpeechGeneratorConfig(max_workers=2))
+        gen = SpeechGenerator(cb, llm, tts)
 
         gen.prepare("first")
         time.sleep(0.05)
@@ -644,10 +653,10 @@ class TestInputTextLifecycle:
         llm = MagicMock(spec=ILLM)
         llm.generate.side_effect = slow_generate
 
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
         tts.synthesize.return_value = _make_tts_stream([b"\x00" * 50])
 
-        gen = SpeechGenerator(cb, llm, tts, SpeechGeneratorConfig(max_workers=2))
+        gen = SpeechGenerator(cb, llm, tts)
 
         gen.prepare("first")
         assert gen.input_text == "first"
@@ -689,7 +698,7 @@ class TestCancelDoesNotSetFailed:
         llm = MagicMock(spec=ILLM)
         llm.generate.side_effect = failing_generate
 
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
 
         gen = SpeechGenerator(cb, llm, tts)
 
@@ -756,7 +765,7 @@ class TestMemoryIntegration:
         llm = MagicMock(spec=ILLM)
         llm.generate.return_value = _make_llm_stream(["Great movie!", "\n[MEMORIES: M1, M2]"])
 
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
         tts.synthesize.return_value = _make_tts_stream([b"\x00" * 100])
 
         ep1 = _make_episode("Ep one", eid=10)
@@ -866,7 +875,16 @@ class TestMemoryIntegration:
 # Sentence mode helpers
 # ---------------------------------------------------------------------------
 
-_SENTENCE_CONFIG = SpeechGeneratorConfig(pipeline_mode="sentence", min_flush_words=1)
+
+@pytest.fixture
+def sentence_mode(monkeypatch):
+    """Activate sentence mode with min_flush_words=1 for a test.
+
+    Non-autouse: full-mode regression tests in this file must not be
+    polluted. Request explicitly via fixture argument.
+    """
+    monkeypatch.setattr(SpeechGenerator, "_PIPELINE_MODE", "sentence")
+    monkeypatch.setattr(SpeechGenerator, "_MIN_FLUSH_WORDS", 1)
 
 
 def _make_sequential_tts(
@@ -874,18 +892,14 @@ def _make_sequential_tts(
     timestamps_per_call: list[tuple[WordTimestamp, ...]] | None = None,
 ) -> MagicMock:
     """Create a TTS mock that returns different streams for each call."""
-    tts = MagicMock(spec=ITTS)
+    tts = _make_tts_mock()
     call_idx = [0]
 
     def _side_effect(text: str) -> TTSStream:
         idx = call_idx[0]
         call_idx[0] += 1
         chunks = responses[idx] if idx < len(responses) else [b"\x00" * 50]
-        ts = (
-            timestamps_per_call[idx]
-            if timestamps_per_call and idx < len(timestamps_per_call)
-            else ()
-        )
+        ts = timestamps_per_call[idx] if timestamps_per_call and idx < len(timestamps_per_call) else ()
         return _make_tts_stream(chunks, ts)
 
     tts.synthesize.side_effect = _side_effect
@@ -900,14 +914,14 @@ def _make_sequential_tts(
 class TestSentenceModeSingleSentence:
     """Single sentence in sentence mode behaves like full mode."""
 
-    def test_single_sentence(self) -> None:
+    def test_single_sentence(self, sentence_mode) -> None:
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
         llm.generate.return_value = _make_llm_stream(["Hello there!"])
         tts = _make_sequential_tts([[b"\x00" * 100, b"\x01" * 100]])
 
-        gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG)
+        gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hi")
         _wait_for_stream_done(gen)
         chunks = _drain_audio(gen)
@@ -922,14 +936,14 @@ class TestSentenceModeSingleSentence:
 class TestSentenceModeMultipleSentences:
     """Multiple sentences → multiple TTS calls, audio in order."""
 
-    def test_two_sentences(self) -> None:
+    def test_two_sentences(self, sentence_mode) -> None:
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
         llm.generate.return_value = _make_llm_stream(["First sentence. Second sentence."])
         tts = _make_sequential_tts([[b"\x01" * 100], [b"\x02" * 100]])
 
-        gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG)
+        gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hi")
         _wait_for_stream_done(gen)
         chunks = _drain_audio(gen)
@@ -948,7 +962,7 @@ class TestSentenceModeMultipleSentences:
         assert idx1 < idx2
         gen.shutdown()
 
-    def test_streaming_chunks_across_sentences(self) -> None:
+    def test_streaming_chunks_across_sentences(self, sentence_mode) -> None:
         """LLM yields text in small chunks that span sentence boundaries."""
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
@@ -956,7 +970,7 @@ class TestSentenceModeMultipleSentences:
         llm.generate.return_value = _make_llm_stream(["Hello ", "there. ", "How are ", "you? "])
         tts = _make_sequential_tts([[b"\x01" * 50], [b"\x02" * 50]])
 
-        gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG)
+        gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hi")
         _wait_for_stream_done(gen)
         _drain_audio(gen)
@@ -967,14 +981,14 @@ class TestSentenceModeMultipleSentences:
         assert "How are you" in data.text
         gen.shutdown()
 
-    def test_three_sentences(self) -> None:
+    def test_three_sentences(self, sentence_mode) -> None:
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
         llm.generate.return_value = _make_llm_stream(["First. Second! Third? "])
         tts = _make_sequential_tts([[b"\x01" * 50], [b"\x02" * 50], [b"\x03" * 50]])
 
-        gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG)
+        gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hi")
         _wait_for_stream_done(gen)
         _drain_audio(gen)
@@ -987,8 +1001,9 @@ class TestSentenceModeMultipleSentences:
 class TestSentenceModeMinFlushWords:
     """Short sentences below threshold accumulate with next."""
 
-    def test_short_accumulated_with_next(self) -> None:
-        config = SpeechGeneratorConfig(pipeline_mode="sentence", min_flush_words=4)
+    def test_short_accumulated_with_next(self, monkeypatch) -> None:
+        monkeypatch.setattr(SpeechGenerator, "_PIPELINE_MODE", "sentence")
+        monkeypatch.setattr(SpeechGenerator, "_MIN_FLUSH_WORDS", 4)
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
@@ -996,7 +1011,7 @@ class TestSentenceModeMinFlushWords:
         llm.generate.return_value = _make_llm_stream(["Sure! That sounds really great."])
         tts = _make_sequential_tts([[b"\x00" * 100]])
 
-        gen = SpeechGenerator(cb, llm, tts, config)
+        gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hi")
         _wait_for_stream_done(gen)
         _drain_audio(gen)
@@ -1012,7 +1027,7 @@ class TestSentenceModeMinFlushWords:
 class TestSentenceModeCitation:
     """Citation tag handling in sentence mode."""
 
-    def test_citation_stripped(self) -> None:
+    def test_citation_stripped(self, sentence_mode) -> None:
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
@@ -1025,7 +1040,7 @@ class TestSentenceModeCitation:
         retriever = MagicMock(spec=IMemoryRetriever)
         retriever.retrieve.return_value = mem_result
 
-        gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG, retriever=retriever)
+        gen = SpeechGenerator(cb, llm, tts, retriever=retriever)
         gen.prepare("movies")
         _wait_for_stream_done(gen)
         _drain_audio(gen)
@@ -1037,13 +1052,11 @@ class TestSentenceModeCitation:
         retriever.update_citations.assert_called_once_with([1, 2])
         gen.shutdown()
 
-    def test_citation_after_multiple_sentences(self) -> None:
+    def test_citation_after_multiple_sentences(self, sentence_mode) -> None:
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
-        llm.generate.return_value = _make_llm_stream(
-            ["First sentence. Second sentence. [MEMORIES: M1]"]
-        )
+        llm.generate.return_value = _make_llm_stream(["First sentence. Second sentence. [MEMORIES: M1]"])
         tts = _make_sequential_tts([[b"\x01" * 50], [b"\x02" * 50]])
 
         ep = _make_episode("Ep", eid=5)
@@ -1051,7 +1064,7 @@ class TestSentenceModeCitation:
         retriever = MagicMock(spec=IMemoryRetriever)
         retriever.retrieve.return_value = mem_result
 
-        gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG, retriever=retriever)
+        gen = SpeechGenerator(cb, llm, tts, retriever=retriever)
         gen.prepare("hi")
         _wait_for_stream_done(gen)
         _drain_audio(gen)
@@ -1066,7 +1079,7 @@ class TestSentenceModeCitation:
 class TestSentenceModeCancel:
     """Cancel during sentence pipeline."""
 
-    def test_cancel_returns_idle(self) -> None:
+    def test_cancel_returns_idle(self, sentence_mode) -> None:
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
@@ -1074,7 +1087,7 @@ class TestSentenceModeCancel:
         llm.generate.return_value = _make_llm_stream(["Hello. World. "])
         tts = _make_sequential_tts([[b"\x00" * 100], [b"\x00" * 100]])
 
-        gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG)
+        gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hi")
         gen.cancel()
 
@@ -1086,28 +1099,28 @@ class TestSentenceModeCancel:
 class TestSentenceModeEmptyLLM:
     """Empty LLM output → FAILED in sentence mode."""
 
-    def test_empty_text(self) -> None:
+    def test_empty_text(self, sentence_mode) -> None:
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
         llm.generate.return_value = _make_llm_stream([""])
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
 
-        gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG)
+        gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hi")
         _wait_for_state(gen, GeneratorState.FAILED)
 
         assert gen.state == GeneratorState.FAILED
         gen.shutdown()
 
-    def test_whitespace_only(self) -> None:
+    def test_whitespace_only(self, sentence_mode) -> None:
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
         llm.generate.return_value = _make_llm_stream(["   \n  "])
-        tts = MagicMock(spec=ITTS)
+        tts = _make_tts_mock()
 
-        gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG)
+        gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hi")
         _wait_for_state(gen, GeneratorState.FAILED)
 
@@ -1118,14 +1131,14 @@ class TestSentenceModeEmptyLLM:
 class TestSentenceModeStateTransitions:
     """PREPARING → STREAMING → stream_done lifecycle."""
 
-    def test_state_progression(self) -> None:
+    def test_state_progression(self, sentence_mode) -> None:
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
         llm.generate.return_value = _make_llm_stream(["Hello world. "])
         tts = _make_sequential_tts([[b"\x00" * 100]])
 
-        gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG)
+        gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hi")
 
         assert gen.state == GeneratorState.PREPARING
@@ -1141,7 +1154,7 @@ class TestSentenceModeStateTransitions:
         assert data.text == "Hello world."
         gen.shutdown()
 
-    def test_get_text_during_streaming(self) -> None:
+    def test_get_text_during_streaming(self, sentence_mode) -> None:
         """get_text() returns accumulated text while streaming."""
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
@@ -1149,7 +1162,7 @@ class TestSentenceModeStateTransitions:
         llm.generate.return_value = _make_llm_stream(["Hello world. "])
         tts = _make_sequential_tts([[b"\x00" * 100]])
 
-        gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG)
+        gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hi")
         _wait_for_state(gen, GeneratorState.STREAMING)
 
@@ -1161,7 +1174,7 @@ class TestSentenceModeStateTransitions:
 class TestSentenceModeTimestamps:
     """Timestamp offset correction across sentences."""
 
-    def test_timestamps_offset_adjusted(self) -> None:
+    def test_timestamps_offset_adjusted(self, sentence_mode) -> None:
         cb = MagicMock(spec=IContextBuilder)
         cb.build.return_value = [{"role": "user", "content": "hi"}]
         llm = MagicMock(spec=ILLM)
@@ -1176,7 +1189,7 @@ class TestSentenceModeTimestamps:
             timestamps_per_call=[ts1, ts2],
         )
 
-        gen = SpeechGenerator(cb, llm, tts, _SENTENCE_CONFIG)
+        gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hi")
         _wait_for_stream_done(gen)
         _drain_audio(gen)
@@ -1197,9 +1210,8 @@ class TestFullModeRegression:
     """Explicit pipeline_mode='full' still works after dispatch refactor."""
 
     def test_full_mode_explicit(self) -> None:
-        config = SpeechGeneratorConfig(pipeline_mode="full")
         cb, llm, tts = _make_deps()
-        gen = SpeechGenerator(cb, llm, tts, config)
+        gen = SpeechGenerator(cb, llm, tts)
         gen.prepare("hello")
         _wait_for_stream_done(gen)
         _drain_audio(gen)

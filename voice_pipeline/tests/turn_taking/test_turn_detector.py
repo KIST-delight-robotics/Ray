@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from voice_pipeline.core.config import AudioConfig, TurnDetectorConfig
 from voice_pipeline.core.interfaces import IVAP, IEmbedder, ITurnGPT
 from voice_pipeline.core.types import TurnDecision, VAPResult
 from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
@@ -20,7 +19,6 @@ from voice_pipeline.turn_taking.turn_detector import TurnDetector, _TurnState
 # ---------------------------------------------------------------------------
 
 # 30ms frames at 16kHz -> each frame = 0.03s
-AUDIO_CFG = AudioConfig(sample_rate=16000, channels=1, frame_duration_ms=30)
 FRAME = b"\x00" * (16000 * 30 // 1000 * 2)  # 30ms of silence at 16kHz, 16-bit
 ROBOT_FRAME = b"\x00" * 100  # dummy robot audio
 
@@ -45,14 +43,15 @@ def _make_embedder_mock(similarity: float = 0.0) -> MagicMock:
 
 
 def _make_detector(
-    config: TurnDetectorConfig | None = None,
     vap_results: list[VAPResult] | None = None,
     turngpt_prob: float = 0.0,
     embedder: MagicMock | None = None,
 ) -> tuple[TurnDetector, MagicMock, MagicMock]:
     """Create a TurnDetector with mocked VAP and TurnGPT.
 
-    Returns (detector, mock_vap, mock_turngpt).
+    Returns (detector, mock_vap, mock_turngpt). Tests that need non-default
+    thresholds should ``monkeypatch.setattr(TurnDetector, "_...", value)``
+    before calling.
     """
     mock_vap = MagicMock(spec=IVAP)
     mock_turngpt = MagicMock(spec=ITurnGPT)
@@ -65,11 +64,10 @@ def _make_detector(
 
     mock_turngpt.predict.return_value = turngpt_prob
 
-    cfg = config or TurnDetectorConfig()
     if embedder is None:
         embedder = _make_embedder_mock(similarity=0.0)
     adapter = SyncTurnGPTAdapter(mock_turngpt)
-    detector = TurnDetector(mock_vap, adapter, embedder, cfg, AUDIO_CFG)
+    detector = TurnDetector(mock_vap, adapter, embedder)
     return detector, mock_vap, mock_turngpt
 
 
