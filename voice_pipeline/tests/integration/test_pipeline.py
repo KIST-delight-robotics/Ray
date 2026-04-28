@@ -1,7 +1,7 @@
 """Full pipeline integration tests.
 
 Tests the complete voice pipeline flow with mocked external boundaries:
-  Real: SessionManager, SessionLoop, SpeechGenerator, ContextBuilder,
+  Real: SessionLoop, SpeechGenerator, ContextBuilder,
         ConversationHistory, TurnDetector, TimestampTruncator, MemoryStorageBackend
   Mocked: ASR, LLM, TTS, CppBridge, VAP, TurnGPT, Wakeword, AudioInput, LED
 
@@ -33,12 +33,10 @@ from voice_pipeline.core.interfaces import (
     ILLM,
     ITTS,
     IVAP,
-    IAudioInput,
     ICppBridge,
     IEmbedder,
     ILEDController,
     ITurnGPT,
-    IWakewordDetector,
 )
 from voice_pipeline.core.types import (
     AudioFrame,
@@ -59,7 +57,6 @@ from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import InMemoryMemoryStorage
 from voice_pipeline.memory.types import Episode
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
-from voice_pipeline.session.session_manager import SessionComponents, SessionManager
 from voice_pipeline.session_loop import SessionLoop
 from voice_pipeline.tts.tts import OpenAITTS
 from voice_pipeline.tts.utterance_truncator import TimestampTruncator
@@ -83,18 +80,6 @@ def _fast_turn_detector(monkeypatch):
     monkeypatch.setattr(TurnDetector, "_MIN_GAP_TIME_SEC", 0.03)  # 1 frame → instant turn shift
     monkeypatch.setattr(TurnDetector, "_TURNGPT_THRESHOLDS", ((0.3, 0.03), (0.0, 0.06)))
     monkeypatch.setattr(TurnDetector, "_PREPARE_TIMEOUT_SEC", 0.06)
-
-
-@pytest.fixture(autouse=True)
-def _fast_session(monkeypatch):
-    """Override SessionManager class vars for fast deterministic session transitions.
-
-    autouse for this module. Auto-reverts via monkeypatch so test_session_manager.py
-    (which sets its own values per test) isn't polluted.
-    """
-    monkeypatch.setattr(SessionManager, "_GREETING_TIMEOUT_SEC", 2.0)
-    monkeypatch.setattr(SessionManager, "_FAREWELL_TIMEOUT_SEC", 2.0)
-    monkeypatch.setattr(SessionManager, "_FRAME_TIMEOUT_SEC", 0.05)
 
 
 @pytest.fixture(autouse=True)
@@ -302,35 +287,6 @@ class FakeLED(ILEDController):
 
     def close(self) -> None:
         pass
-
-
-class FakeWakeword(IWakewordDetector):
-    """Wakeword mock that triggers after N calls."""
-
-    def __init__(self, trigger_after: int = 1) -> None:
-        self._trigger_after = trigger_after
-        self._count = 0
-
-    def feed_audio(self, frame: AudioFrame) -> bool:
-        self._count += 1
-        return self._count >= self._trigger_after
-
-    def close(self) -> None:
-        pass
-
-
-class FakeAudioInput(IAudioInput):
-    """AudioInput mock (no-op, frames fed directly to queue by test)."""
-
-    def start(self) -> None:
-        pass
-
-    def stop(self) -> None:
-        pass
-
-    @property
-    def error(self) -> Exception | None:
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -591,114 +547,6 @@ class TestMultiTurnConversation:
 
 
 # ---------------------------------------------------------------------------
-# Test: Full session lifecycle (SessionManager level)
-# ---------------------------------------------------------------------------
-
-
-class TestFullSessionLifecycle:
-    """SLEEP → wakeword → GREETING → ACTIVE → FAREWELL → SLEEP."""
-
-    def test_complete_session_cycle(self) -> None:
-        """Full cycle with real SessionLoop inside SessionManager."""
-        asr = ScriptedASR(["hello", "goodbye"])
-        bridge = ScriptedBridge()
-        led = FakeLED()
-        wakeword = FakeWakeword(trigger_after=1)
-        audio_input = FakeAudioInput()
-
-        executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
-
-        def session_factory() -> SessionComponents:
-            _, history, generator, _ = (
-                _make_session_loop.__wrapped__(asr, bridge, led, executor=executor)
-                if hasattr(_make_session_loop, "__wrapped__")
-                else (None, None, None, None)
-            )
-
-            # Build fresh components using the shared bridge/led/asr
-            storage = MemoryStorageBackend()
-            history = ConversationHistory(storage, _simple_token_counter)
-            vap = FakeVAP()
-            turngpt = FakeTurnGPT()
-            context_builder = ContextBuilder(history, DEFAULT_SYSTEM_PROMPT, _simple_token_counter)
-            turngpt_adapter = SyncTurnGPTAdapter(turngpt)
-            _emb = MagicMock(spec=IEmbedder)
-            turn_detector = TurnDetector(
-                vap,
-                turngpt_adapter,
-                _emb,
-            )
-            generator = SpeechGenerator(context_builder, FakeLLM(), FakeTTS(), executor)
-            truncator = TimestampTruncator()
-
-            session_loop = SessionLoop(
-                asr=asr,
-                turn_detector=turn_detector,
-                speech_generator=generator,
-                cpp_bridge=bridge,
-                history=history,
-                truncator=truncator,
-                led=led,
-                audio_queue=audio_queue,
-                tts_sample_rate=TTS_SAMPLE_RATE,
-            )
-            import uuid
-
-            return SessionComponents(session_loop=session_loop, history=history, session_id=str(uuid.uuid4()))
-
-        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=SessionManager.AUDIO_QUEUE_SIZE)
-
-        sm = SessionManager(
-            audio_input=audio_input,
-            wakeword=wakeword,
-            session_factory=session_factory,
-            cpp_bridge=bridge,
-            led=led,
-            greeting_audio_path=GREETING_AUDIO_PATH,
-            farewell_audio_path=FAREWELL_AUDIO_PATH,
-            audio_queue=audio_queue,
-        )
-
-        feeder = FrameFeeder(audio_queue)
-        feeder.start()
-
-        # Run SessionManager in background, stop after one cycle
-        original_run_sleep = sm._run_sleep
-
-        call_count = 0
-
-        def _shutdown_on_second_sleep() -> None:
-            nonlocal call_count
-            call_count += 1
-            if call_count >= 2:
-                sm._shutdown_event.set()
-                return
-            original_run_sleep()
-
-        sm._run_sleep = _shutdown_on_second_sleep
-
-        try:
-            sm.run()
-        finally:
-            feeder.stop()
-            executor.shutdown(wait=True)
-
-        # --- Assertions ---
-        # Bridge connected and disconnected
-        assert bridge._connected is False  # disconnect called in run() finally
-
-        # Greeting and farewell files sent
-        assert GREETING_AUDIO_PATH in bridge.play_files
-        assert FAREWELL_AUDIO_PATH in bridge.play_files
-
-        # SessionLoop ran (audio was streamed)
-        assert bridge.stream_start_count >= 1
-
-        # LED went through full lifecycle
-        assert LEDState.SLEEPING in led.states
-        assert LEDState.IDLE in led.states
-
-
 # ---------------------------------------------------------------------------
 # Test: Barge-in (interrupt during playback)
 # ---------------------------------------------------------------------------
@@ -1311,104 +1159,6 @@ class TestMemoryCitationInPipeline:
         assert len(retriever._retained) >= 1
         cited_ep = pre_episodes[0]
         assert cited_ep.id in retriever._retained
-
-
-# ---------------------------------------------------------------------------
-# Test: Memory — SessionManager triggers session-end callback
-# ---------------------------------------------------------------------------
-
-
-class TestMemorySessionEnd:
-    """SessionManager invokes on_session_end callback at session termination."""
-
-    def test_session_end_callback_invoked(self) -> None:
-        """on_session_end receives the correct session_id and timestamp."""
-        callback_calls: list[tuple[str, str]] = []
-
-        def on_session_end(session_id: str, started_at: str) -> None:
-            callback_calls.append((session_id, started_at))
-
-        asr = ScriptedASR(["hello", "goodbye"])
-        bridge = ScriptedBridge()
-        led = FakeLED()
-        wakeword = FakeWakeword(trigger_after=1)
-        audio_input = FakeAudioInput()
-
-        executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
-
-        def session_factory() -> SessionComponents:
-            import uuid
-
-            sid = str(uuid.uuid4())
-
-            conv_storage = MemoryStorageBackend()
-            hist = ConversationHistory(conv_storage, _simple_token_counter)
-            hist.new_session(sid)
-
-            context_builder = ContextBuilder(hist, DEFAULT_SYSTEM_PROMPT, _simple_token_counter)
-            vap = FakeVAP()
-            turngpt_adapter = SyncTurnGPTAdapter(FakeTurnGPT())
-            _emb = MagicMock(spec=IEmbedder)
-            td = TurnDetector(vap, turngpt_adapter, _emb)
-            gen = SpeechGenerator(context_builder, FakeLLM(), FakeTTS(), executor)
-            trunc = TimestampTruncator()
-
-            orch = SessionLoop(
-                asr=asr,
-                turn_detector=td,
-                speech_generator=gen,
-                cpp_bridge=bridge,
-                history=hist,
-                truncator=trunc,
-                led=led,
-                audio_queue=audio_queue,
-                tts_sample_rate=TTS_SAMPLE_RATE,
-            )
-            return SessionComponents(session_loop=orch, history=hist, session_id=sid)
-
-        audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=SessionManager.AUDIO_QUEUE_SIZE)
-
-        sm = SessionManager(
-            audio_input=audio_input,
-            wakeword=wakeword,
-            session_factory=session_factory,
-            cpp_bridge=bridge,
-            led=led,
-            greeting_audio_path=GREETING_AUDIO_PATH,
-            farewell_audio_path=FAREWELL_AUDIO_PATH,
-            audio_queue=audio_queue,
-            on_session_end=on_session_end,
-        )
-
-        feeder = FrameFeeder(audio_queue)
-        feeder.start()
-
-        original_run_sleep = sm._run_sleep
-        call_count = 0
-
-        def _shutdown_on_second_sleep() -> None:
-            nonlocal call_count
-            call_count += 1
-            if call_count >= 2:
-                sm._shutdown_event.set()
-                return
-            original_run_sleep()
-
-        sm._run_sleep = _shutdown_on_second_sleep
-
-        try:
-            sm.run()
-        finally:
-            feeder.stop()
-            executor.shutdown(wait=True)
-
-        # Callback should have been invoked once with a valid session_id and timestamp
-        assert len(callback_calls) == 1
-        sid, started_at = callback_calls[0]
-        assert len(sid) > 0
-        assert len(started_at) > 0
-        # Timestamp format: "YYYY-MM-DD HH:MM:SS"
-        assert len(started_at) == 19
 
 
 # ---------------------------------------------------------------------------

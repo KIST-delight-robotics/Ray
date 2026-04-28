@@ -523,7 +523,7 @@ class ICppBridge(ABC):
 class IWakewordDetector(ABC):
     """Wakeword detection interface.
 
-    Minimal — no start/stop/reset; SessionManager controls when to feed frames.
+    Minimal — no start/stop/reset; the SLEEP loop controls when to feed frames.
     """
 
     @abstractmethod
@@ -842,26 +842,6 @@ class IAudioInput(ABC):
 
         Returns None if the thread is running normally.
         """
-
-
-# ---------------------------------------------------------------------------
-# SessionManager
-# ---------------------------------------------------------------------------
-
-
-class ISessionManager(ABC):
-    """Top-level state machine interface.
-
-    Manages SLEEP → GREETING → ACTIVE → FAREWELL → SLEEP cycle.
-    """
-
-    @abstractmethod
-    def run(self) -> None:
-        """Run the session manager main loop."""
-
-    @abstractmethod
-    def shutdown(self) -> None:
-        """Signal the session manager to shut down gracefully."""
 
 
 # ---------------------------------------------------------------------------

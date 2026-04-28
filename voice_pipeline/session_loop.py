@@ -37,6 +37,15 @@ logger = logging.getLogger("voice_pipeline.session_loop")
 
 
 @dataclass
+class SessionComponents:
+    """Per-session objects created by the session factory."""
+
+    session_loop: SessionLoop
+    history: IConversationHistory
+    session_id: str
+
+
+@dataclass
 class _PendingTruncation:
     """Deferred truncation state for barge-in during streaming."""
 
@@ -75,6 +84,7 @@ class SessionLoop:
         session_id: str | None = None,
         token_counter: TokenCounter | None = None,
         trace_store: object | None = None,
+        shutdown_event: threading.Event | None = None,
     ) -> None:
         """Initialize the SessionLoop.
 
@@ -98,6 +108,8 @@ class SessionLoop:
                 계산용. ``None``이면 0.
             trace_store: pipeline latency trace store. ``None``이면
                 trace 저장 skip.
+            shutdown_event: 프로세스 전역 종료 시그널. ``None``이면
+                ``request_stop()``으로만 중단 가능.
         """
         self._asr = asr
         self._turn_detector = turn_detector
@@ -112,6 +124,7 @@ class SessionLoop:
         self._session_id = session_id
         self._token_counter = token_counter
         self._trace_store = trace_store
+        self._shutdown_event = shutdown_event
 
         # External stop signal
         self._stop_event = threading.Event()
@@ -256,9 +269,12 @@ class SessionLoop:
 
     def _run_frame(self) -> bool:
         """Process one frame (or batch of frames). Returns True to exit the loop."""
-        # 0. Check external stop signal
+        # 0. Check stop / shutdown signals
         if self._stop_event.is_set():
             logger.info("External stop requested — exiting")
+            return True
+        if self._shutdown_event is not None and self._shutdown_event.is_set():
+            logger.info("Shutdown signal — exiting")
             return True
 
         # 1. Get audio frame + drain any backed-up frames

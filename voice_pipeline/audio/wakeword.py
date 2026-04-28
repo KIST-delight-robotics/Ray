@@ -49,8 +49,8 @@ class WakewordDetector(IWakewordDetector):
         - Transient VAD/STT/network errors log a warning and return ``False`` (fail closed).
 
     Threading:
-        Not thread-safe. SessionManager calls ``feed_audio()`` from a single thread
-        (the SLEEP loop). No locking is needed.
+        Not thread-safe. Called from a single thread (the SLEEP loop).
+        No locking is needed.
 
     Args:
         language_code: Google STT BCP-47 언어 코드.

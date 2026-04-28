@@ -23,8 +23,11 @@ except Exception:
     _asound = None
 import queue
 import signal
+import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 
 from voice_pipeline.asr.asr import GoogleCloudASR
 from voice_pipeline.audio.audio_input import AudioInput
@@ -35,6 +38,7 @@ from voice_pipeline.context.formatters import (
     format_raw_transcript_block,
     format_session_summary_block,
 )
+from voice_pipeline.core.types import AudioFrame, CppEventType, LEDState, SystemMode
 from voice_pipeline.embedding.embedder import create_embedder
 from voice_pipeline.generation.speech_generator import SpeechGenerator
 from voice_pipeline.history.conversation_history import ConversationHistory
@@ -48,8 +52,7 @@ from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DB_PATH, _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.writer import MemoryWriter
-from voice_pipeline.session.session_manager import SessionComponents, SessionManager
-from voice_pipeline.session_loop import SessionLoop
+from voice_pipeline.session_loop import SessionComponents, SessionLoop
 from voice_pipeline.trace.trace_store import SQLiteTraceStore
 from voice_pipeline.tts.greeting_audio import ensure_greeting_audio
 from voice_pipeline.tts.tts import OpenAITTS
@@ -60,6 +63,61 @@ from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
 from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
+logger = logging.getLogger("voice_pipeline")
+
+_AUDIO_QUEUE_SIZE = 300
+_GREETING_TIMEOUT_SEC = 10.0
+_FAREWELL_TIMEOUT_SEC = 10.0
+_FRAME_TIMEOUT_SEC = 0.1
+_POLL_INTERVAL_SEC = 0.05
+_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _flush_bridge_events(bridge: CppBridge) -> None:
+    try:
+        while bridge.poll_event() is not None:
+            pass
+    except Exception:
+        logger.debug("Error flushing bridge events", exc_info=True)
+
+
+def _drain_audio_queue(audio_queue: queue.Queue[AudioFrame]) -> None:
+    while True:
+        try:
+            audio_queue.get_nowait()
+        except queue.Empty:
+            break
+
+
+def _wait_playback(
+    bridge: CppBridge,
+    shutdown_event: threading.Event,
+    timeout: float,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while not shutdown_event.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            event = bridge.poll_event()
+        except Exception:
+            logger.warning("Bridge poll_event error during playback wait", exc_info=True)
+            break
+        if event is not None and event.event_type == CppEventType.PLAYBACK_COMPLETE:
+            break
+        time.sleep(min(_POLL_INTERVAL_SEC, remaining))
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 
 def main() -> None:
     """Launch the voice pipeline."""
@@ -67,17 +125,15 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(name)-40s %(levelname)-7s %(message)s",
     )
-    # Per-module log level: LOG_LEVEL="voice_pipeline.turn_taking=DEBUG"
     for entry in os.environ.get("LOG_LEVEL", "").split(","):
         entry = entry.strip()
         if "=" in entry:
             name, level = entry.split("=", 1)
             logging.getLogger(name.strip()).setLevel(level.strip().upper())
 
-    # 공유 언어 설정 (Google STT 기반 ASR + Wakeword가 동일 언어 사용)
     language_code = "en-US"
 
-    # --- Process-level singletons (expensive init, reused across sessions) ---
+    # --- Process-level singletons ---
     asr = GoogleCloudASR(language_code=language_code)
     llm = OpenAILLM(model="gpt-5.4", temperature=0.7, max_tokens=256, tools=["web_search"])
     tts = OpenAITTS()
@@ -91,7 +147,7 @@ def main() -> None:
     token_counter = create_token_counter(llm.model)
     tools_token_cost = get_tools_token_cost(llm.tools)
 
-    # --- Memory system (process-level) ---
+    # --- Memory system ---
     embedder = create_embedder(expected_dimension=_DEFAULT_DIMENSION)
     memory_storage = SQLiteMemoryStorage(_DEFAULT_DB_PATH)
     trace_store = SQLiteTraceStore(_DEFAULT_DB_PATH)
@@ -107,18 +163,17 @@ def main() -> None:
     greeting_paths = ensure_greeting_audio(tts)
 
     # --- Audio queue + input ---
-    audio_queue = queue.Queue(maxsize=SessionManager.AUDIO_QUEUE_SIZE)
+    audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=_AUDIO_QUEUE_SIZE)
     audio_input = AudioInput(audio_queue)
 
-    # Restore default ALSA error handler
     if _asound is not None:
         _asound.snd_lib_error_set_handler(None)
 
-    # --- Session factory: creates fresh per-session components ---
+    # --- Session factory ---
     prev_async: list[AsyncVAP | AsyncTurnGPT] = []
+    shutdown_event = threading.Event()
 
     def session_factory() -> SessionComponents:
-        # Stop async wrappers from the previous session
         for wrapper in prev_async:
             wrapper.stop()
         prev_async.clear()
@@ -128,7 +183,6 @@ def main() -> None:
 
         session_id = str(uuid.uuid4())
 
-        # Memory: load profiles + previous session summaries (3-way logic)
         profiles = memory_storage.get_all_profiles()
         recent = storage.get_recent_sessions(ConversationHistory.PREVIOUS_SESSION_COUNT, exclude_session_id=session_id)
         recent_session_ids = [s[0] for s in recent]
@@ -140,7 +194,7 @@ def main() -> None:
             if episodes:
                 session_summaries.append(format_session_summary_block(started_at, episodes))
             elif sid in processed_ids:
-                continue  # extracted but 0 episodes — skip
+                continue
             else:
                 utterances = memory_storage.get_utterances(sid)
                 if utterances:
@@ -161,11 +215,7 @@ def main() -> None:
             profiles=profiles,
             session_summaries=session_summaries,
         )
-        turn_detector = TurnDetector(
-            async_vap,
-            async_turngpt,
-            embedder,
-        )
+        turn_detector = TurnDetector(async_vap, async_turngpt, embedder)
         generator = SpeechGenerator(
             context_builder,
             llm,
@@ -190,49 +240,146 @@ def main() -> None:
             session_id=session_id,
             token_counter=token_counter,
             trace_store=trace_store,
+            shutdown_event=shutdown_event,
         )
         return SessionComponents(session_loop=session_loop, history=history, session_id=session_id)
 
-    # --- Memory write callback ---
-    def on_session_end(session_id: str, started_at: str) -> None:
-        write_executor.submit(memory_writer.process_session, session_id, started_at)
-
-    # --- SessionManager ---
-    sm = SessionManager(
-        audio_input=audio_input,
-        wakeword=wakeword,
-        session_factory=session_factory,
-        cpp_bridge=bridge,
-        led=led,
-        greeting_audio_path=greeting_paths.greeting,
-        farewell_audio_path=greeting_paths.farewell,
-        audio_queue=audio_queue,
-        on_session_end=on_session_end,
-    )
-
     # --- Signal handling ---
     def _handle_signal(*_: object) -> None:
-        sm.shutdown()
+        shutdown_event.set()
 
     signal.signal(signal.SIGINT, _handle_signal)
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, _handle_signal)
 
-    # --- Run ---
+    # --- Mode loop ---
+    mode = SystemMode.SLEEP
+    current_history = None
+    current_session_id: str | None = None
+    session_started_at: str | None = None
+    session_started = False
+
+    logger.info("Pipeline starting")
+    bridge.connect()
+    audio_input.start()
     try:
-        sm.run()
+        while not shutdown_event.is_set():
+            # ---- SLEEP ----
+            if mode == SystemMode.SLEEP:
+                led.set_state(LEDState.SLEEPING)
+                while not shutdown_event.is_set():
+                    try:
+                        frame = audio_queue.get(timeout=_FRAME_TIMEOUT_SEC)
+                    except queue.Empty:
+                        if audio_input.error is not None:
+                            raise audio_input.error from None
+                        continue
+                    if wakeword.feed_audio(frame):
+                        logger.info("Wakeword detected — transitioning to GREETING")
+                        mode = SystemMode.GREETING
+                        break
+
+            # ---- GREETING ----
+            elif mode == SystemMode.GREETING:
+                try:
+                    bridge.connect()
+                except Exception:
+                    logger.error("Bridge connect failed — returning to SLEEP", exc_info=True)
+                    mode = SystemMode.SLEEP
+                    continue
+
+                _flush_bridge_events(bridge)
+                led.set_state(LEDState.IDLE)
+
+                try:
+                    bridge.send_play_file(greeting_paths.greeting)
+                except Exception:
+                    logger.warning("Failed to send greeting", exc_info=True)
+
+                _wait_playback(bridge, shutdown_event, _GREETING_TIMEOUT_SEC)
+                mode = SystemMode.ACTIVE
+
+            # ---- ACTIVE ----
+            elif mode == SystemMode.ACTIVE:
+                _drain_audio_queue(audio_queue)
+                try:
+                    components = session_factory()
+                except Exception:
+                    logger.error("Session factory failed", exc_info=True)
+                    mode = SystemMode.SLEEP
+                    continue
+
+                current_history = components.history
+                current_session_id = components.session_id
+                session_started_at = datetime.now(UTC).strftime(_TIMESTAMP_FORMAT)
+                session_started = True
+
+                current_history.new_session(components.session_id)
+                logger.info("Session started: %s", components.session_id)
+
+                try:
+                    components.session_loop.run()
+                except Exception:
+                    logger.error("SessionLoop run failed", exc_info=True)
+
+                mode = SystemMode.FAREWELL
+
+            # ---- FAREWELL ----
+            elif mode == SystemMode.FAREWELL:
+                _flush_bridge_events(bridge)
+
+                try:
+                    bridge.send_play_file(greeting_paths.farewell)
+                except Exception:
+                    logger.warning("Failed to send farewell", exc_info=True)
+
+                _wait_playback(bridge, shutdown_event, _FAREWELL_TIMEOUT_SEC)
+
+                if session_started and current_history is not None:
+                    try:
+                        current_history.save()
+                    except Exception:
+                        logger.warning("History save error in farewell", exc_info=True)
+                    if current_session_id and session_started_at:
+                        try:
+                            write_executor.submit(memory_writer.process_session, current_session_id, session_started_at)
+                        except Exception:
+                            logger.warning("on_session_end callback failed", exc_info=True)
+
+                session_started = False
+                _drain_audio_queue(audio_queue)
+                led.set_state(LEDState.SLEEPING)
+                current_history = None
+                current_session_id = None
+                session_started_at = None
+                mode = SystemMode.SLEEP
+                logger.info("Session ended — returning to SLEEP")
+
     finally:
+        if session_started and current_history is not None:
+            try:
+                current_history.save()
+            except Exception:
+                logger.warning("History save error on shutdown", exc_info=True)
+            if current_session_id and session_started_at:
+                try:
+                    write_executor.submit(memory_writer.process_session, current_session_id, session_started_at)
+                except Exception:
+                    logger.warning("on_session_end callback failed on shutdown", exc_info=True)
+
+        audio_input.stop()
+        bridge.disconnect()
         for wrapper in prev_async:
             wrapper.stop()
         prev_async.clear()
         write_executor.shutdown(wait=True)
         executor.shutdown(wait=True)
         asr.stop()
-        bridge.disconnect()
         wakeword.close()
         led.close()
         memory_storage.close()
         trace_store.close()
+        logger.info("Pipeline stopped")
 
 
 if __name__ == "__main__":
