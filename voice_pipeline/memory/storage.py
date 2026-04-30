@@ -394,6 +394,33 @@ class SQLiteMemoryStorage(IMemoryStorage):
                 logger.warning("Failed to get utterances for session %s", session_id, exc_info=True)
                 return []
 
+    def get_recent_sessions(
+        self,
+        limit: int,
+        exclude_session_id: str | None = None,
+    ) -> list[tuple[str, str]]:
+        """Return recent sessions based on utterance timestamps."""
+        with self._lock:
+            try:
+                if exclude_session_id:
+                    rows = self._conn.execute(
+                        "SELECT session_id, MIN(timestamp) as started_at "
+                        "FROM utterances WHERE session_id != ? "
+                        "GROUP BY session_id ORDER BY started_at DESC LIMIT ?",
+                        (exclude_session_id, limit),
+                    ).fetchall()
+                else:
+                    rows = self._conn.execute(
+                        "SELECT session_id, MIN(timestamp) as started_at "
+                        "FROM utterances "
+                        "GROUP BY session_id ORDER BY started_at DESC LIMIT ?",
+                        (limit,),
+                    ).fetchall()
+                return [(row[0], row[1]) for row in rows]
+            except sqlite3.Error:
+                logger.warning("Failed to get recent sessions", exc_info=True)
+                return []
+
     # --- Session processing status ---
 
     def mark_session_processed(self, session_id: str) -> None:
@@ -664,6 +691,22 @@ class InMemoryMemoryStorage(IMemoryStorage):
             for u in self._utterances
             if u["session_id"] == session_id
         ]
+
+    def get_recent_sessions(
+        self,
+        limit: int,
+        exclude_session_id: str | None = None,
+    ) -> list[tuple[str, str]]:
+        """Return recent sessions based on utterance timestamps."""
+        sessions: dict[str, str] = {}
+        for u in self._utterances:
+            sid = u["session_id"]
+            if sid == exclude_session_id:
+                continue
+            if sid not in sessions or u["timestamp"] < sessions[sid]:
+                sessions[sid] = u["timestamp"]
+        ordered = sorted(sessions.items(), key=lambda x: x[1], reverse=True)
+        return ordered[:limit]
 
     # --- Session processing status ---
 

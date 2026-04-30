@@ -20,7 +20,7 @@ from voice_pipeline.context.formatters import (
     format_profile_block,
     load_session_context,
 )
-from voice_pipeline.core.interfaces import IContextBuilder, IConversationHistory, IMemoryStorage, IStorageBackend
+from voice_pipeline.core.interfaces import IContextBuilder, IConversationHistory, IMemoryStorage
 from voice_pipeline.core.types import TokenCounter
 
 if TYPE_CHECKING:
@@ -67,7 +67,6 @@ class ContextBuilder(IContextBuilder):
         session_summaries: list[str] | None = None,
         *,
         memory_storage: IMemoryStorage | None = None,
-        storage: IStorageBackend | None = None,
         session_id: str | None = None,
         recent_count: int = 0,
     ) -> None:
@@ -78,9 +77,9 @@ class ContextBuilder(IContextBuilder):
 
         # Load session context if storage is provided
         self.exclude_session_ids: set[str] = set()
-        if memory_storage is not None and storage is not None and session_id is not None:
+        if memory_storage is not None and session_id is not None:
             profiles, session_summaries, self.exclude_session_ids = load_session_context(
-                memory_storage, storage, session_id, recent_count
+                memory_storage, session_id, recent_count
             )
 
         # Pre-format and pre-count session-level blocks (immutable)

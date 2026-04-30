@@ -194,7 +194,6 @@ def main() -> None:
             executor,
             tools_token_cost=tools_token_cost,
             memory_storage=memory_storage,
-            storage=storage,
             retriever=retriever,
             session_id=session_id,
         )

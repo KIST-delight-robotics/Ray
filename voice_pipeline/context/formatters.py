@@ -6,7 +6,7 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
-from voice_pipeline.core.interfaces import IMemoryStorage, IStorageBackend
+from voice_pipeline.core.interfaces import IMemoryStorage
 
 if TYPE_CHECKING:
     from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
@@ -161,7 +161,6 @@ def parse_citation_tag(text: str) -> tuple[str, list[int]]:
 
 def load_session_context(
     memory_storage: IMemoryStorage,
-    storage: IStorageBackend,
     session_id: str,
     recent_count: int,
 ) -> tuple[list[Profile], list[str], set[str]]:
@@ -171,13 +170,13 @@ def load_session_context(
         (profiles, session_summaries, exclude_session_ids)
     """
     profiles = memory_storage.get_all_profiles()
-    recent = storage.get_recent_sessions(recent_count, exclude_session_id=session_id)
+    recent = memory_storage.get_recent_sessions(recent_count, exclude_session_id=session_id)
     recent_session_ids = [s[0] for s in recent]
     session_episodes = memory_storage.get_episodes_by_session_ids(recent_session_ids)
     processed_ids = memory_storage.get_processed_session_ids(recent_session_ids)
 
     session_summaries: list[str] = []
-    for sid, started_at, _ended_at in recent:
+    for sid, started_at in recent:
         episodes = session_episodes.get(sid, [])
         if episodes:
             session_summaries.append(format_session_summary_block(started_at, episodes))

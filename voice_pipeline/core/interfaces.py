@@ -1061,6 +1061,23 @@ class IMemoryStorage(ABC):
         """
 
     @abstractmethod
+    def get_recent_sessions(
+        self,
+        limit: int,
+        exclude_session_id: str | None = None,
+    ) -> list[tuple[str, str]]:
+        """Return the most recent sessions that have utterances.
+
+        Args:
+            limit: Maximum number of sessions.
+            exclude_session_id: Session ID to exclude (e.g. current).
+
+        Returns:
+            List of (session_id, started_at) ordered by started_at desc.
+            started_at is the timestamp of the first utterance in the session.
+        """
+
+    @abstractmethod
     def get_processed_session_ids(self, session_ids: list[str]) -> set[str]:
         """Check which sessions have been processed.
 

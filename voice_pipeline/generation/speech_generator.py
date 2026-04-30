@@ -20,7 +20,6 @@ from voice_pipeline.core.interfaces import (
     IMemoryRetriever,
     IMemoryStorage,
     ISpeechGenerator,
-    IStorageBackend,
 )
 from voice_pipeline.core.types import (
     GeneratorState,
@@ -73,7 +72,6 @@ class SpeechGenerator(ISpeechGenerator):
         *,
         tools_token_cost: int = 0,
         memory_storage: IMemoryStorage | None = None,
-        storage: IStorageBackend | None = None,
         retriever: IMemoryRetriever | None = None,
         session_id: str | None = None,
     ) -> None:
@@ -91,7 +89,6 @@ class SpeechGenerator(ISpeechGenerator):
             tools_token_cost: tool 정의가 차지하는 토큰 수.
             memory_storage: 메모리 스토리지 — profiles/summaries 로딩 및
                 retriever에 전달. ``None``이면 메모리 사용 안 함.
-            storage: history 스토리지 백엔드 — 이전 세션 조회용.
             retriever: 메모리 retriever. ``None``이면 메모리 검색 안 함.
             session_id: 현재 세션 ID. context 로딩 및 retriever 제외용.
         """
@@ -101,7 +98,6 @@ class SpeechGenerator(ISpeechGenerator):
             token_counter,
             tools_token_cost=tools_token_cost,
             memory_storage=memory_storage,
-            storage=storage,
             session_id=session_id,
             recent_count=history.PREVIOUS_SESSION_COUNT if hasattr(history, "PREVIOUS_SESSION_COUNT") else 3,
         )
