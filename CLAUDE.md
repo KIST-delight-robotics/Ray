@@ -11,10 +11,10 @@ SLEEP ──(wakeword)──▶ GREETING ──▶ ACTIVE ──(exit keyword/ti
 ```
 
 ```
-SessionManager (top-level state machine)
+__main__.py (mode loop + DI)
 ├─ AudioInput (separate thread → audio_queue)
 ├─ SLEEP:  audio_queue → WakewordDetector
-└─ ACTIVE: Orchestrator
+└─ ACTIVE: SessionLoop
              ├── ASR
              ├── TurnDetector (VAP + TurnGPT)
              ├── SpeechGenerator (ContextBuilder → LLM → TTS)
@@ -28,14 +28,17 @@ SessionManager (top-level state machine)
 
 ```
 voice_pipeline/
+├── __main__.py                # Entry point, DI, mode loop (SLEEP/GREETING/ACTIVE/FAREWELL)
+├── session_loop.py            # ACTIVE mode frame-driven conversation loop (SessionLoop)
+│
 ├── core/
 │   ├── types.py               # Shared data types (TurnDecision, ResponseData, PipelineTrace, etc.)
 │   ├── interfaces.py          # All module interfaces (IASR, ITTS, ILLM, etc.)
-│   ├── exceptions.py          # PipelineError base only
-│   └── config.py              # Dataclass-based configuration
+│   └── exceptions.py          # PipelineError base only
 │
 ├── audio/
 │   ├── audio_input.py         # Mic capture → audio_queue
+│   ├── constants.py           # Audio format constants (sample rate, frame size, etc.)
 │   ├── wakeword.py            # Wakeword detection (Silero VAD + Google STT)
 │   └── exceptions.py
 │
@@ -105,13 +108,8 @@ voice_pipeline/
 ├── trace/
 │   └── trace_store.py         # Pipeline latency trace storage (SQLite / in-memory)
 │
-├── orchestrator/
-│   └── orchestrator.py        # ACTIVE mode conversation loop
-│
-├── session/
-│   └── session_manager.py     # Top-level state machine
-│
 └── tests/
+    ├── test_session_loop.py   # SessionLoop unit tests
     ├── core/
     ├── audio/
     ├── asr/
@@ -124,10 +122,8 @@ voice_pipeline/
     ├── bridge/
     ├── led/
     ├── embedding/
-    ├── orchestrator/
     ├── memory/
     ├── trace/
-    ├── session/
     └── integration/
 
 scripts/
@@ -171,10 +167,10 @@ Some modules (VAP, TurnGPT, Wakeword etc.) wrap externally cloned model reposito
 
 - **Interfaces**: `I` prefix (`IASR`, `ITTS`). All defined in `core/interfaces.py`. Inject via constructor using interface types.
 - **Vendor abstraction**: ASR, LLM, TTS are interface-backed. Impl selection via config.
-- **Dependency direction**: always `module → core`. Modules must not import each other directly. TurnDetector does not know about SpeechGenerator or ASR; Orchestrator wires them.
+- **Dependency direction**: always `module → core`. Modules must not import each other directly. TurnDetector does not know about SpeechGenerator or ASR; `__main__.py` wires them.
 - **Type hints** required. **Docstrings** required on interface methods.
-- **Configuration**: `core/config.py` dataclass-based. Add fields as modules are implemented.
-- **Logging**: `voice_pipeline.*` namespace (`voice_pipeline.asr`, `voice_pipeline.orchestrator`, etc.)
+- **Configuration**: per-module class variables and constructor parameters. No centralized config object.
+- **Logging**: `voice_pipeline.*` namespace (`voice_pipeline.asr`, `voice_pipeline.session_loop`, etc.)
 
 
 ## Concurrency Model
@@ -182,16 +178,16 @@ Some modules (VAP, TurnGPT, Wakeword etc.) wrap externally cloned model reposito
 threading + `queue.Queue` based.
 
 - AudioInput: separate thread → `audio_queue`
-- Orchestrator: main thread, frame-driven sync loop via `audio_queue.get(timeout=...)`
+- SessionLoop: main thread, frame-driven sync loop via `audio_queue.get(timeout=...)`
 - SpeechGenerator: `concurrent.futures.ThreadPoolExecutor` for background LLM+TTS
-- CppBridge: WebSocket receiver on separate thread → `event_queue` → Orchestrator consumes via `poll_event()`
+- CppBridge: WebSocket receiver on separate thread → `event_queue` → SessionLoop consumes via `poll_event()`
 - Minimize shared state between threads. Use `threading.Lock` when necessary.
 
 
 ## Error Handling
 
 - Inside modules: handle transient errors with retries. Raise module exception when retries exhausted.
-- Orchestrator fallback policy:
+- SessionLoop fallback policy:
   - ASR / LLM / TTS failure → skip the current turn, stay in ACTIVE.
   - CppBridge disconnect → terminate session (→ FAREWELL → SLEEP). Reconnect attempted in GREETING before next session.
   - Audio starvation (no frames for `audio_starvation_timeout_sec`) → terminate session (→ FAREWELL → SLEEP).
@@ -225,12 +221,12 @@ uv run pytest -m ''                              # everything
 
 - **Module-local**: Place in `tests/<module>/`, not `tests/integration/` (which is reserved for cross-module tests).
 - **Environment variables** for test inputs (file paths, language codes, etc.) — never hardcoded.
-- **Mirror orchestrator usage**: test the same call patterns the orchestrator will use (e.g., frame-by-frame feed+get, reset between turns, mid-stream stop).
+- **Mirror SessionLoop usage**: test the same call patterns SessionLoop will use (e.g., frame-by-frame feed+get, reset between turns, mid-stream stop).
 - **Error recovery**: test real failure scenarios — invalid credentials, errors during streaming, recovery via reset/restart.
 
 ### Bug reproduction
 
-Do **not** add pytest test files to reproduce or verify bugs. Use `scripts/sandbox.py` instead — it runs the actual production code path (SpeechGenerator, Orchestrator) with controlled inputs. See `scripts/sandbox.py` module docstring for usage.
+Do **not** add pytest test files to reproduce or verify bugs. Use `scripts/sandbox.py` instead — it runs the actual production code path (SpeechGenerator, SessionLoop) with controlled inputs. See `scripts/sandbox.py` module docstring for usage.
 
 
 ## Decision Log
@@ -255,7 +251,7 @@ Exclude:
 ```
 
 - **type**: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`
-- **scope**: module name (`core`, `asr`, `tts`, `orchestrator`, …) or `project` for cross-cutting changes
+- **scope**: module name (`core`, `asr`, `tts`, `session_loop`, …) or `project` for cross-cutting changes
 - **subject**: lowercase, imperative, no period (e.g. `add ASR interface`)
 
 Commit at natural checkpoints — when a task is complete and before starting the next one. Don’t split a single task into multiple commits.
