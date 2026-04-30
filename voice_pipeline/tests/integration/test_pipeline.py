@@ -27,7 +27,6 @@ import numpy as np
 import pytest
 
 from voice_pipeline.audio.constants import FRAME_SIZE_BYTES
-from voice_pipeline.context.context_builder import ContextBuilder
 from voice_pipeline.core.interfaces import (
     IASR,
     ILLM,
@@ -322,7 +321,6 @@ def _make_session_loop(
     history = ConversationHistory(storage, _simple_token_counter)
     history.new_session("test-session")
 
-    context_builder = ContextBuilder(history, DEFAULT_SYSTEM_PROMPT, _simple_token_counter)
     _turngpt_adapter = SyncTurnGPTAdapter(_turngpt)
     _embedder = MagicMock(spec=IEmbedder)
     turn_detector = TurnDetector(
@@ -330,7 +328,7 @@ def _make_session_loop(
         _turngpt_adapter,
         _embedder,
     )
-    generator = SpeechGenerator(context_builder, _llm, _tts, _executor)
+    generator = SpeechGenerator(_llm, _tts, history, _simple_token_counter, DEFAULT_SYSTEM_PROMPT, _executor)
     truncator = TimestampTruncator()
 
     session_loop = SessionLoop(
@@ -843,18 +841,16 @@ def _make_memory_session_loop(
 
     retriever = MemoryRetriever(memory_storage, vector_index, embedder)
 
-    # Context builder
-    context_builder = ContextBuilder(history, DEFAULT_SYSTEM_PROMPT, _simple_token_counter)
-
     # Speech generator with memory
     generator = SpeechGenerator(
-        context_builder,
         _llm,
         _tts,
+        history,
+        _simple_token_counter,
+        DEFAULT_SYSTEM_PROMPT,
         executor,
         retriever=retriever,
-        history=history,
-        exclude_session_ids={session_id},
+        session_id=session_id,
     )
 
     # Turn detector

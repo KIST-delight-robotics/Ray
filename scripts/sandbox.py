@@ -66,7 +66,6 @@ from typing import Any
 import numpy as np
 
 from voice_pipeline.audio.constants import FRAME_SIZE_BYTES
-from voice_pipeline.context.context_builder import ContextBuilder
 from voice_pipeline.core.interfaces import (
     IASR,
     ILLM,
@@ -641,19 +640,6 @@ def setup_sandbox(
     # -- History --
     history = setup_history(token_counter, history_turns)
 
-    # -- Context builder --
-    _profiles = profiles or []
-    if memory_storage and _profiles == []:
-        _profiles = list(memory_storage.get_all_profiles())
-
-    cb = ContextBuilder(
-        history,
-        system_prompt or DEFAULT_SYSTEM_PROMPT,
-        token_counter,
-        profiles=_profiles or None,
-        session_summaries=session_summaries,
-    )
-
     # -- LLM + TTS + Bridge --
     _llm = llm or ObservableLLM(OpenAILLM(tools=[]))
     _tts = tts or create_tts()
@@ -661,12 +647,13 @@ def setup_sandbox(
 
     # -- SpeechGenerator --
     generator = SpeechGenerator(
-        cb,
         _llm,
         _tts,
+        history,
+        token_counter,
+        system_prompt or DEFAULT_SYSTEM_PROMPT,
         retriever=retriever,
-        history=history,
-        exclude_session_ids={"sandbox"},
+        session_id="sandbox",
     )
 
     # -- SessionLoop --

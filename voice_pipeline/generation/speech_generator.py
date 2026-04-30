@@ -11,14 +11,16 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
+from voice_pipeline.context.context_builder import ContextBuilder
 from voice_pipeline.context.formatters import parse_citation_tag
 from voice_pipeline.core.interfaces import (
     ILLM,
     ITTS,
-    IContextBuilder,
     IConversationHistory,
     IMemoryRetriever,
+    IMemoryStorage,
     ISpeechGenerator,
+    IStorageBackend,
 )
 from voice_pipeline.core.types import (
     GeneratorState,
@@ -26,6 +28,7 @@ from voice_pipeline.core.types import (
     LLMStream,
     PipelineTrace,
     ResponseData,
+    TokenCounter,
     TTSStream,
     WordTimestamp,
 )
@@ -61,37 +64,54 @@ class SpeechGenerator(ISpeechGenerator):
 
     def __init__(
         self,
-        context_builder: IContextBuilder,
         llm: ILLM,
         tts: ITTS,
+        history: IConversationHistory,
+        token_counter: TokenCounter,
+        system_prompt: str,
         executor: ThreadPoolExecutor | None = None,
         *,
+        tools_token_cost: int = 0,
+        memory_storage: IMemoryStorage | None = None,
+        storage: IStorageBackend | None = None,
         retriever: IMemoryRetriever | None = None,
-        history: IConversationHistory | None = None,
-        exclude_session_ids: set[str] | None = None,
+        session_id: str | None = None,
     ) -> None:
         """Initialize the SpeechGenerator.
 
         Args:
-            context_builder: LLM context 조립 모듈.
             llm: LLM 인터페이스.
             tts: TTS 인터페이스.
+            history: 세션 대화 이력 (ContextBuilder 및 retriever query에 공유).
+            token_counter: 토큰 카운터 콜러블.
+            system_prompt: LLM 시스템 프롬프트.
             executor: 백그라운드 파이프라인 ThreadPoolExecutor. ``None``이면
-                내부 생성(`MAX_WORKERS` 기반). 외부 주입 시 shutdown()은
+                내부 생성(``MAX_WORKERS`` 기반). 외부 주입 시 shutdown()은
                 executor를 닫지 않음.
-            retriever: 메모리 retriever. ``None``이면 메모리 사용 안 함.
-            history: 세션 대화 이력. retriever query 조립에 사용.
-                ``None``이면 current_text만으로 query 구성.
-            exclude_session_ids: retriever가 제외할 세션 ID 집합.
+            tools_token_cost: tool 정의가 차지하는 토큰 수.
+            memory_storage: 메모리 스토리지 — profiles/summaries 로딩 및
+                retriever에 전달. ``None``이면 메모리 사용 안 함.
+            storage: history 스토리지 백엔드 — 이전 세션 조회용.
+            retriever: 메모리 retriever. ``None``이면 메모리 검색 안 함.
+            session_id: 현재 세션 ID. context 로딩 및 retriever 제외용.
         """
-        self._context_builder = context_builder
+        self._context_builder = ContextBuilder(
+            history,
+            system_prompt,
+            token_counter,
+            tools_token_cost=tools_token_cost,
+            memory_storage=memory_storage,
+            storage=storage,
+            session_id=session_id,
+            recent_count=history.PREVIOUS_SESSION_COUNT if hasattr(history, "PREVIOUS_SESSION_COUNT") else 3,
+        )
         self._llm = llm
         self._tts = tts
 
         # Memory integration (all optional)
         self._retriever = retriever
         self._history = history
-        self._exclude_session_ids = exclude_session_ids or set()
+        self._exclude_session_ids = self._context_builder.exclude_session_ids
 
         self._lock = threading.Lock()
         self._state = GeneratorState.IDLE

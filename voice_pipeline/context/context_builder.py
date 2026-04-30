@@ -18,8 +18,9 @@ from typing import TYPE_CHECKING, Any
 from voice_pipeline.context.formatters import (
     format_memory_block,
     format_profile_block,
+    load_session_context,
 )
-from voice_pipeline.core.interfaces import IContextBuilder, IConversationHistory
+from voice_pipeline.core.interfaces import IContextBuilder, IConversationHistory, IMemoryStorage, IStorageBackend
 from voice_pipeline.core.types import TokenCounter
 
 if TYPE_CHECKING:
@@ -64,11 +65,23 @@ class ContextBuilder(IContextBuilder):
         tools_token_cost: int = 0,
         profiles: list[Profile] | None = None,
         session_summaries: list[str] | None = None,
+        *,
+        memory_storage: IMemoryStorage | None = None,
+        storage: IStorageBackend | None = None,
+        session_id: str | None = None,
+        recent_count: int = 0,
     ) -> None:
         self._history = history
         self._system_prompt = system_prompt
         self._token_counter = token_counter
         self._tools_token_cost = tools_token_cost
+
+        # Load session context if storage is provided
+        self.exclude_session_ids: set[str] = set()
+        if memory_storage is not None and storage is not None and session_id is not None:
+            profiles, session_summaries, self.exclude_session_ids = load_session_context(
+                memory_storage, storage, session_id, recent_count
+            )
 
         # Pre-format and pre-count session-level blocks (immutable)
         self._profile_text = format_profile_block(profiles or [])

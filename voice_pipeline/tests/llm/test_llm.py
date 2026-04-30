@@ -253,7 +253,7 @@ class TestClientConfig:
         list(llm.generate([_user_msg("hi")]))
 
         call_kwargs = client.responses.create.call_args[1]
-        assert call_kwargs["model"] == "gpt-4o"
+        assert call_kwargs["model"] == "gpt-5.4"
         assert call_kwargs["temperature"] == 0.7
         assert call_kwargs["max_output_tokens"] == 256
 
@@ -268,15 +268,15 @@ class TestClientConfig:
         assert call_kwargs["temperature"] == 0.3
         assert call_kwargs["max_output_tokens"] == 100
 
-    def test_reasoning_effort_omitted_by_default(self) -> None:
-        """Default config (gpt-4o) should not send reasoning param."""
+    def test_reasoning_effort_default(self) -> None:
+        """Default model (gpt-5.4) sends reasoning with effort=none."""
         client = create_mock_client(make_stream_events(["ok"]))
         llm = _build_llm(client)
 
         list(llm.generate([_user_msg("hi")]))
 
         call_kwargs = client.responses.create.call_args[1]
-        assert "reasoning" not in call_kwargs
+        assert call_kwargs["reasoning"] == {"effort": "none"}
 
     def test_reasoning_effort_passed_when_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(OpenAILLM, "_REASONING_EFFORT", "none")

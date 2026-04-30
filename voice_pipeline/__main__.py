@@ -33,11 +33,6 @@ from voice_pipeline.asr.asr import GoogleCloudASR
 from voice_pipeline.audio.audio_input import AudioInput
 from voice_pipeline.audio.wakeword import WakewordDetector
 from voice_pipeline.bridge.cpp_bridge import CppBridge
-from voice_pipeline.context.context_builder import ContextBuilder
-from voice_pipeline.context.formatters import (
-    format_raw_transcript_block,
-    format_session_summary_block,
-)
 from voice_pipeline.core.types import AudioFrame, CppEventType, LEDState, SystemMode
 from voice_pipeline.embedding.embedder import create_embedder
 from voice_pipeline.generation.speech_generator import SpeechGenerator
@@ -183,47 +178,25 @@ def main() -> None:
 
         session_id = str(uuid.uuid4())
 
-        profiles = memory_storage.get_all_profiles()
-        recent = storage.get_recent_sessions(ConversationHistory.PREVIOUS_SESSION_COUNT, exclude_session_id=session_id)
-        recent_session_ids = [s[0] for s in recent]
-        session_episodes = memory_storage.get_episodes_by_session_ids(recent_session_ids)
-        processed_ids = memory_storage.get_processed_session_ids(recent_session_ids)
-        session_summaries: list[str] = []
-        for sid, started_at, _ended_at in recent:
-            episodes = session_episodes.get(sid, [])
-            if episodes:
-                session_summaries.append(format_session_summary_block(started_at, episodes))
-            elif sid in processed_ids:
-                continue
-            else:
-                utterances = memory_storage.get_utterances(sid)
-                if utterances:
-                    session_summaries.append(format_raw_transcript_block(started_at, utterances))
-        exclude_session_ids = {session_id} | set(recent_session_ids)
-
         async_vap = AsyncVAP(vap)
         async_turngpt = AsyncTurnGPT(turngpt)
         prev_async.extend([async_vap, async_turngpt])
 
         history = ConversationHistory(storage, token_counter)
         retriever = MemoryRetriever(memory_storage, vector_index, embedder)
-        context_builder = ContextBuilder(
-            history,
-            DEFAULT_SYSTEM_PROMPT,
-            token_counter,
-            tools_token_cost=tools_token_cost,
-            profiles=profiles,
-            session_summaries=session_summaries,
-        )
         turn_detector = TurnDetector(async_vap, async_turngpt, embedder)
         generator = SpeechGenerator(
-            context_builder,
             llm,
             tts,
+            history,
+            token_counter,
+            DEFAULT_SYSTEM_PROMPT,
             executor,
+            tools_token_cost=tools_token_cost,
+            memory_storage=memory_storage,
+            storage=storage,
             retriever=retriever,
-            history=history,
-            exclude_session_ids=exclude_session_ids,
+            session_id=session_id,
         )
         truncator = TimestampTruncator()
         session_loop = SessionLoop(
