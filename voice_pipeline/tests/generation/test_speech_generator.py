@@ -90,7 +90,6 @@ def _make_history_mock() -> MagicMock:
     """Create a mock IConversationHistory with default behavior."""
     history = MagicMock(spec=IConversationHistory)
     history.get_turns.return_value = []
-    history.PREVIOUS_SESSION_COUNT = 3
     return history
 
 
@@ -899,7 +898,6 @@ class TestMemoryIntegration:
             HistoryTurn(items=({"role": "user", "content": "prev question"},), token_count=2),
             HistoryTurn(items=({"role": "assistant", "content": "prev answer"},), token_count=2),
         ]
-        history.PREVIOUS_SESSION_COUNT = 3
 
         gen = SpeechGenerator(
             llm=llm,

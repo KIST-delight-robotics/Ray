@@ -1,12 +1,10 @@
-"""Block formatters, citation parsing, and session context loading for LLM context assembly."""
+"""Block formatters and citation parsing for LLM context assembly."""
 
 from __future__ import annotations
 
 import logging
 import re
 from typing import TYPE_CHECKING
-
-from voice_pipeline.core.interfaces import IMemoryStorage
 
 if TYPE_CHECKING:
     from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
@@ -152,40 +150,3 @@ def parse_citation_tag(text: str) -> tuple[str, list[int]]:
         except ValueError:
             continue
     return (clean, cited)
-
-
-# ---------------------------------------------------------------------------
-# Session context loading
-# ---------------------------------------------------------------------------
-
-
-def load_session_context(
-    memory_storage: IMemoryStorage,
-    session_id: str,
-    recent_count: int,
-) -> tuple[list[Profile], list[str], set[str]]:
-    """Load previous session context for LLM injection.
-
-    Returns:
-        (profiles, session_summaries, exclude_session_ids)
-    """
-    profiles = memory_storage.get_all_profiles()
-    recent = memory_storage.get_recent_sessions(recent_count, exclude_session_id=session_id)
-    recent_session_ids = [s[0] for s in recent]
-    session_episodes = memory_storage.get_episodes_by_session_ids(recent_session_ids)
-    processed_ids = memory_storage.get_processed_session_ids(recent_session_ids)
-
-    session_summaries: list[str] = []
-    for sid, started_at in recent:
-        episodes = session_episodes.get(sid, [])
-        if episodes:
-            session_summaries.append(format_session_summary_block(started_at, episodes))
-        elif sid in processed_ids:
-            continue
-        else:
-            utterances = memory_storage.get_utterances(sid)
-            if utterances:
-                session_summaries.append(format_raw_transcript_block(started_at, utterances))
-
-    exclude_session_ids = {session_id} | set(recent_session_ids)
-    return profiles, session_summaries, exclude_session_ids

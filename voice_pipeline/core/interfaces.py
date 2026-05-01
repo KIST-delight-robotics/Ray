@@ -120,24 +120,6 @@ class IStorageBackend(ABC):
             session_id: Session to delete.
         """
 
-    @abstractmethod
-    def get_recent_sessions(
-        self,
-        limit: int,
-        exclude_session_id: str | None = None,
-    ) -> list[tuple[str, str, str | None]]:
-        """Return the most recent completed sessions.
-
-        Args:
-            limit: Maximum number of sessions to return.
-            exclude_session_id: Session ID to exclude (e.g. current session).
-
-        Returns:
-            List of ``(session_id, started_at, ended_at)`` tuples,
-            ordered by ``started_at`` descending. Only sessions with
-            ``ended_at IS NOT NULL`` are included.
-        """
-
 
 # ---------------------------------------------------------------------------
 # ConversationHistory

@@ -122,49 +122,6 @@ class _BackendTests:
         reloaded = b.load_session("s1")
         assert reloaded[0][2]["content"] == "hello"
 
-    # -- get_recent_sessions --
-
-    def test_recent_sessions_empty(self) -> None:
-        b = self.make_backend()
-        assert b.get_recent_sessions(5) == []
-
-    def test_recent_sessions_excludes_open(self) -> None:
-        b = self.make_backend()
-        b.create_session("s1", "2026-03-29 10:00:00")
-        # Not ended → should not appear
-        assert b.get_recent_sessions(5) == []
-
-    def test_recent_sessions_returns_ended(self) -> None:
-        b = self.make_backend()
-        b.create_session("s1", "2026-03-29 10:00:00")
-        b.end_session("s1", "2026-03-29 10:05:00")
-        result = b.get_recent_sessions(5)
-        assert len(result) == 1
-        assert result[0] == ("s1", "2026-03-29 10:00:00", "2026-03-29 10:05:00")
-
-    def test_recent_sessions_ordering_and_limit(self) -> None:
-        b = self.make_backend()
-        for i in range(5):
-            sid = f"s{i}"
-            b.create_session(sid, f"2026-03-{20 + i:02d} 10:00:00")
-            b.end_session(sid, f"2026-03-{20 + i:02d} 10:30:00")
-        result = b.get_recent_sessions(3)
-        assert len(result) == 3
-        # Most recent first
-        assert result[0][0] == "s4"
-        assert result[1][0] == "s3"
-        assert result[2][0] == "s2"
-
-    def test_recent_sessions_exclude_session(self) -> None:
-        b = self.make_backend()
-        b.create_session("s1", "2026-03-29 10:00:00")
-        b.end_session("s1", "2026-03-29 10:05:00")
-        b.create_session("s2", "2026-03-30 10:00:00")
-        b.end_session("s2", "2026-03-30 10:05:00")
-        result = b.get_recent_sessions(5, exclude_session_id="s2")
-        assert len(result) == 1
-        assert result[0][0] == "s1"
-
     def test_tool_call_turn(self) -> None:
         """Store a multi-message tool call turn with shared turn_id."""
         b = self.make_backend()

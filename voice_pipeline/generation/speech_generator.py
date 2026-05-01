@@ -99,7 +99,6 @@ class SpeechGenerator(ISpeechGenerator):
             tools_token_cost=tools_token_cost,
             memory_storage=memory_storage,
             session_id=session_id,
-            recent_count=history.PREVIOUS_SESSION_COUNT if hasattr(history, "PREVIOUS_SESSION_COUNT") else 3,
         )
         self._llm = llm
         self._tts = tts

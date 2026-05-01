@@ -18,7 +18,8 @@ from typing import TYPE_CHECKING, Any
 from voice_pipeline.context.formatters import (
     format_memory_block,
     format_profile_block,
-    load_session_context,
+    format_raw_transcript_block,
+    format_session_summary_block,
 )
 from voice_pipeline.core.interfaces import IContextBuilder, IConversationHistory, IMemoryStorage
 from voice_pipeline.core.types import TokenCounter
@@ -56,6 +57,7 @@ class ContextBuilder(IContextBuilder):
     _MAX_MEMORY_TOKENS = 512  # retrieved memory 블록 전용 예산 (초과 시 낮은 salience 순 drop)
     _MAX_PROFILE_TOKENS = 256  # profile 블록 전용 예산 (초과 시 블록 skip)
     _MAX_PREV_SESSION_TOKENS = 512  # previous session summary 블록 전용 예산 (초과 시 오래된 순 drop)
+    _PREVIOUS_SESSION_COUNT = 3  # 이전 세션 요약 최대 로딩 건수
 
     def __init__(
         self,
@@ -68,7 +70,6 @@ class ContextBuilder(IContextBuilder):
         *,
         memory_storage: IMemoryStorage | None = None,
         session_id: str | None = None,
-        recent_count: int = 0,
     ) -> None:
         self._history = history
         self._system_prompt = system_prompt
@@ -78,8 +79,8 @@ class ContextBuilder(IContextBuilder):
         # Load session context if storage is provided
         self.exclude_session_ids: set[str] = set()
         if memory_storage is not None and session_id is not None:
-            profiles, session_summaries, self.exclude_session_ids = load_session_context(
-                memory_storage, session_id, recent_count
+            profiles, session_summaries, self.exclude_session_ids = self._load_session_context(
+                memory_storage, session_id
             )
 
         # Pre-format and pre-count session-level blocks (immutable)
@@ -191,3 +192,29 @@ class ContextBuilder(IContextBuilder):
             messages.append({"role": "developer", "content": memory_text})
 
         return messages
+
+    def _load_session_context(
+        self,
+        memory_storage: IMemoryStorage,
+        session_id: str,
+    ) -> tuple[list[Profile], list[str], set[str]]:
+        profiles = memory_storage.get_all_profiles()
+        recent = memory_storage.get_recent_sessions(self._PREVIOUS_SESSION_COUNT, exclude_session_id=session_id)
+        recent_session_ids = [s[0] for s in recent]
+        session_episodes = memory_storage.get_episodes_by_session_ids(recent_session_ids)
+        processed_ids = memory_storage.get_processed_session_ids(recent_session_ids)
+
+        session_summaries: list[str] = []
+        for sid, started_at in recent:
+            episodes = session_episodes.get(sid, [])
+            if episodes:
+                session_summaries.append(format_session_summary_block(started_at, episodes))
+            elif sid in processed_ids:
+                continue
+            else:
+                utterances = memory_storage.get_utterances(sid)
+                if utterances:
+                    session_summaries.append(format_raw_transcript_block(started_at, utterances))
+
+        exclude_session_ids = {session_id} | set(recent_session_ids)
+        return profiles, session_summaries, exclude_session_ids
