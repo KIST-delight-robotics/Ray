@@ -31,7 +31,6 @@ from datetime import UTC, datetime
 
 from voice_pipeline.asr.asr import GoogleCloudASR
 from voice_pipeline.audio.audio_input import AudioInput
-from voice_pipeline.audio.wakeword import WakewordDetector
 from voice_pipeline.bridge.cpp_bridge import CppBridge
 from voice_pipeline.core.types import AudioFrame, CppEventType, LEDState, SystemMode
 from voice_pipeline.embedding.embedder import create_embedder
@@ -56,6 +55,7 @@ from voice_pipeline.turn_taking.async_vap import AsyncVAP
 from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
 from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
+from voice_pipeline.wakeword.wakeword import WakewordDetector
 
 logger = logging.getLogger("voice_pipeline")
 

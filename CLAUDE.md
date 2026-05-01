@@ -39,6 +39,9 @@ voice_pipeline/
 ├── audio/
 │   ├── audio_input.py         # Mic capture → audio_queue
 │   ├── constants.py           # Audio format constants (sample rate, frame size, etc.)
+│   └── exceptions.py
+│
+├── wakeword/
 │   ├── wakeword.py            # Wakeword detection (Silero VAD + Google STT)
 │   └── exceptions.py
 │
@@ -112,6 +115,7 @@ voice_pipeline/
     ├── test_session_loop.py   # SessionLoop unit tests
     ├── core/
     ├── audio/
+    ├── wakeword/
     ├── asr/
     ├── turn_taking/
     ├── llm/

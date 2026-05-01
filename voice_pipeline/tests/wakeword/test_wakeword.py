@@ -1,4 +1,4 @@
-"""Unit tests for voice_pipeline.audio.wakeword (WakewordDetector).
+"""Unit tests for voice_pipeline.wakeword.wakeword (WakewordDetector).
 
 All external dependencies (Silero VAD model, Google STT client) are mocked.
 """
@@ -13,8 +13,8 @@ import pytest
 import torch
 
 from voice_pipeline.audio.constants import FRAME_SIZE_SAMPLES
-from voice_pipeline.audio.exceptions import WakewordError
-from voice_pipeline.audio.wakeword import WakewordDetector, _State
+from voice_pipeline.wakeword.exceptions import WakewordError
+from voice_pipeline.wakeword.wakeword import WakewordDetector, _State
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -120,8 +120,8 @@ def mock_stt_client():
 def detector(mock_vad_model, mock_stt_client):
     """Create a WakewordDetector with mocked dependencies."""
     with (
-        patch("voice_pipeline.audio.wakeword.load_silero_vad", return_value=mock_vad_model),
-        patch("voice_pipeline.audio.wakeword.speech.SpeechClient", return_value=mock_stt_client),
+        patch("voice_pipeline.wakeword.wakeword.load_silero_vad", return_value=mock_vad_model),
+        patch("voice_pipeline.wakeword.wakeword.speech.SpeechClient", return_value=mock_stt_client),
     ):
         return _make_detector()
 
@@ -295,9 +295,9 @@ class TestKeywordMatching:
     def test_word_boundary_prevents_substring_match(self, mock_vad_model, mock_stt_client):
         """'array' should NOT match keyword 'ray' due to word boundary."""
         with (
-            patch("voice_pipeline.audio.wakeword.load_silero_vad", return_value=mock_vad_model),
+            patch("voice_pipeline.wakeword.wakeword.load_silero_vad", return_value=mock_vad_model),
             patch(
-                "voice_pipeline.audio.wakeword.speech.SpeechClient",
+                "voice_pipeline.wakeword.wakeword.speech.SpeechClient",
                 return_value=mock_stt_client,
             ),
         ):
@@ -309,9 +309,9 @@ class TestKeywordMatching:
         """Multiple keywords: match on any one."""
         keywords = ("ray", "hello")
         with (
-            patch("voice_pipeline.audio.wakeword.load_silero_vad", return_value=mock_vad_model),
+            patch("voice_pipeline.wakeword.wakeword.load_silero_vad", return_value=mock_vad_model),
             patch(
-                "voice_pipeline.audio.wakeword.speech.SpeechClient",
+                "voice_pipeline.wakeword.wakeword.speech.SpeechClient",
                 return_value=mock_stt_client,
             ),
         ):
@@ -326,9 +326,9 @@ class TestKeywordMatching:
         mock_stt_client.recognize.return_value = response
 
         with (
-            patch("voice_pipeline.audio.wakeword.load_silero_vad", return_value=mock_vad_model),
+            patch("voice_pipeline.wakeword.wakeword.load_silero_vad", return_value=mock_vad_model),
             patch(
-                "voice_pipeline.audio.wakeword.speech.SpeechClient",
+                "voice_pipeline.wakeword.wakeword.speech.SpeechClient",
                 return_value=mock_stt_client,
             ),
         ):
@@ -358,9 +358,9 @@ class TestKeywordMatching:
         mock_stt_client.recognize.return_value = response
 
         with (
-            patch("voice_pipeline.audio.wakeword.load_silero_vad", return_value=mock_vad_model),
+            patch("voice_pipeline.wakeword.wakeword.load_silero_vad", return_value=mock_vad_model),
             patch(
-                "voice_pipeline.audio.wakeword.speech.SpeechClient",
+                "voice_pipeline.wakeword.wakeword.speech.SpeechClient",
                 return_value=mock_stt_client,
             ),
         ):
@@ -481,9 +481,9 @@ class TestSafetyLimits:
         mock_stt_client.recognize.return_value = _make_empty_stt_response()
 
         with (
-            patch("voice_pipeline.audio.wakeword.load_silero_vad", return_value=mock_vad_model),
+            patch("voice_pipeline.wakeword.wakeword.load_silero_vad", return_value=mock_vad_model),
             patch(
-                "voice_pipeline.audio.wakeword.speech.SpeechClient",
+                "voice_pipeline.wakeword.wakeword.speech.SpeechClient",
                 return_value=mock_stt_client,
             ),
         ):
@@ -507,9 +507,9 @@ class TestSafetyLimits:
         mock_stt_client.recognize.return_value = _make_empty_stt_response()
 
         with (
-            patch("voice_pipeline.audio.wakeword.load_silero_vad", return_value=mock_vad_model),
+            patch("voice_pipeline.wakeword.wakeword.load_silero_vad", return_value=mock_vad_model),
             patch(
-                "voice_pipeline.audio.wakeword.speech.SpeechClient",
+                "voice_pipeline.wakeword.wakeword.speech.SpeechClient",
                 return_value=mock_stt_client,
             ),
         ):
@@ -545,7 +545,7 @@ class TestErrorHandling:
         """Failed VAD model load raises WakewordError."""
         with (
             patch(
-                "voice_pipeline.audio.wakeword.load_silero_vad",
+                "voice_pipeline.wakeword.wakeword.load_silero_vad",
                 side_effect=RuntimeError("model not found"),
             ),
             pytest.raises(WakewordError, match="Failed to load Silero VAD model"),
@@ -555,9 +555,9 @@ class TestErrorHandling:
     def test_stt_client_creation_failure_raises_wakeword_error(self, mock_vad_model):
         """Failed STT client creation raises WakewordError."""
         with (
-            patch("voice_pipeline.audio.wakeword.load_silero_vad", return_value=mock_vad_model),
+            patch("voice_pipeline.wakeword.wakeword.load_silero_vad", return_value=mock_vad_model),
             patch(
-                "voice_pipeline.audio.wakeword.speech.SpeechClient",
+                "voice_pipeline.wakeword.wakeword.speech.SpeechClient",
                 side_effect=RuntimeError("credentials not found"),
             ),
             pytest.raises(WakewordError, match="Failed to create Google STT client"),
@@ -580,7 +580,7 @@ class TestErrorHandling:
         mock_vad_model.side_effect = vad_side_effect
 
         detected = False
-        with caplog.at_level(logging.WARNING, logger="voice_pipeline.audio"):
+        with caplog.at_level(logging.WARNING, logger="voice_pipeline.wakeword"):
             for _ in range(25):
                 if detector.feed_audio(_tone_frame()):
                     detected = True
@@ -667,7 +667,7 @@ class TestVADFailClosed:
         """VAD inference error → log warning, reset, return False."""
         mock_vad_model.side_effect = RuntimeError("model error")
 
-        with caplog.at_level(logging.WARNING, logger="voice_pipeline.audio"):
+        with caplog.at_level(logging.WARNING, logger="voice_pipeline.wakeword"):
             result = detector.feed_audio(b"\x00" * _VAD_CHUNK_BYTES)
 
         assert not result
@@ -683,7 +683,7 @@ class TestVADFailClosed:
         detector.feed_audio(b"\x00" * _VAD_CHUNK_BYTES)
         assert detector._state is _State.SPEECH
 
-        with caplog.at_level(logging.WARNING, logger="voice_pipeline.audio"):
+        with caplog.at_level(logging.WARNING, logger="voice_pipeline.wakeword"):
             detector._reset()
 
         assert detector._state is _State.IDLE
@@ -722,9 +722,9 @@ class TestSpeechPadEdge:
         mock_stt_client.recognize.return_value = _make_stt_response(["ray"])
 
         with (
-            patch("voice_pipeline.audio.wakeword.load_silero_vad", return_value=mock_vad_model),
+            patch("voice_pipeline.wakeword.wakeword.load_silero_vad", return_value=mock_vad_model),
             patch(
-                "voice_pipeline.audio.wakeword.speech.SpeechClient",
+                "voice_pipeline.wakeword.wakeword.speech.SpeechClient",
                 return_value=mock_stt_client,
             ),
         ):
@@ -774,6 +774,6 @@ class TestClose:
     def test_close_suppresses_transport_error(self, detector, mock_stt_client, caplog):
         """close() suppresses transport.close() errors."""
         mock_stt_client.transport.close.side_effect = RuntimeError("close error")
-        with caplog.at_level(logging.DEBUG, logger="voice_pipeline.audio"):
+        with caplog.at_level(logging.DEBUG, logger="voice_pipeline.wakeword"):
             detector.close()
         assert detector._stt_client is None

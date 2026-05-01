@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from voice_pipeline.audio.wakeword import WakewordDetector
-from voice_pipeline.tests.audio.conftest import read_wav_frames
+from voice_pipeline.tests.wakeword.conftest import read_wav_frames
+from voice_pipeline.wakeword.wakeword import WakewordDetector
 
 pytestmark = [pytest.mark.requires_api, pytest.mark.requires_model]
 

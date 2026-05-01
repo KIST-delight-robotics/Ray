@@ -18,11 +18,11 @@ except ImportError:
     load_silero_vad = None  # type: ignore[assignment]
 
 from voice_pipeline.audio.constants import CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH
-from voice_pipeline.audio.exceptions import WakewordError
 from voice_pipeline.core.interfaces import IWakewordDetector
 from voice_pipeline.core.types import AudioFrame
+from voice_pipeline.wakeword.exceptions import WakewordError
 
-logger = logging.getLogger("voice_pipeline.audio")
+logger = logging.getLogger("voice_pipeline.wakeword")
 
 
 class _State(enum.Enum):

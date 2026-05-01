@@ -1,4 +1,4 @@
-"""Shared fixtures and helpers for audio module tests."""
+"""Shared fixtures and helpers for wakeword module tests."""
 
 from __future__ import annotations
 

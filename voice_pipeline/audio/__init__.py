@@ -1,6 +1,6 @@
-"""Audio capture and wakeword detection."""
+"""Audio capture module."""
 
-from voice_pipeline.audio.exceptions import WakewordError
-from voice_pipeline.audio.wakeword import WakewordDetector
+from voice_pipeline.audio.audio_input import AudioInput
+from voice_pipeline.audio.exceptions import AudioInputError
 
-__all__ = ["WakewordDetector", "WakewordError"]
+__all__ = ["AudioInput", "AudioInputError"]

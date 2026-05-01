@@ -366,7 +366,10 @@ voice_pipeline/
 │
 ├── audio/
 │   ├── audio_input.py           # Mic capture → audio_queue
-│   ├── wakeword.py              # Wakeword detection
+│   └── exceptions.py
+│
+├── wakeword/
+│   ├── wakeword.py              # Wakeword detection (Silero VAD + Google STT)
 │   └── exceptions.py
 │
 ├── asr/
@@ -435,7 +438,8 @@ Test structure and development conventions are documented in CLAUDE.md.
 ### Log namespaces
 
 ```
-voice_pipeline.audio        # AudioInput, WakewordDetector
+voice_pipeline.audio        # AudioInput
+voice_pipeline.wakeword     # WakewordDetector
 voice_pipeline.asr          # ASR streaming
 voice_pipeline.turn_taking  # TurnDetector, VAP, TurnGPT
 voice_pipeline.generation   # SpeechGenerator
