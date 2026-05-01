@@ -51,7 +51,6 @@ from voice_pipeline.session_loop import SessionComponents, SessionLoop
 from voice_pipeline.trace.trace_store import SQLiteTraceStore
 from voice_pipeline.tts.greeting_audio import ensure_greeting_audio
 from voice_pipeline.tts.tts import OpenAITTS
-from voice_pipeline.tts.utterance_truncator import TimestampTruncator
 from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT
 from voice_pipeline.turn_taking.async_vap import AsyncVAP
 from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
@@ -197,14 +196,12 @@ def main() -> None:
             retriever=retriever,
             session_id=session_id,
         )
-        truncator = TimestampTruncator()
         session_loop = SessionLoop(
             asr=asr,
             turn_detector=turn_detector,
             speech_generator=generator,
             cpp_bridge=bridge,
             history=history,
-            truncator=truncator,
             led=led,
             audio_queue=audio_queue,
             tts_sample_rate=tts.output_sample_rate,

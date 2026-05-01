@@ -56,7 +56,6 @@ def _make_session_loop(
         "generator": MagicMock(),
         "bridge": MagicMock(),
         "history": MagicMock(),
-        "truncator": MagicMock(),
         "led": MagicMock(),
     }
 
@@ -76,7 +75,6 @@ def _make_session_loop(
         speech_generator=mocks["generator"],
         cpp_bridge=mocks["bridge"],
         history=mocks["history"],
-        truncator=mocks["truncator"],
         led=mocks["led"],
         audio_queue=audio_queue if audio_queue is not None else queue.Queue(),
         tts_sample_rate=output_sample_rate,
@@ -320,12 +318,13 @@ class TestBargeIn:
             WordTimestamp("world", 0.4, 0.7),
         ]
         orch._current_response = ResponseData(text="hello world", audio=b"\x00" * 100, timestamps=timestamps)
-        mocks["truncator"].truncate.return_value = "hello"
+        orch._truncator = MagicMock()
+        orch._truncator.truncate.return_value = "hello"
 
         orch._on_playback_interrupted()
 
-        mocks["truncator"].truncate.assert_called_once()
-        call_args = mocks["truncator"].truncate.call_args[0]
+        orch._truncator.truncate.assert_called_once()
+        call_args = orch._truncator.truncate.call_args[0]
         assert call_args[0] == "hello world"
         # stop_pos ≈ stop_pending_time - playback_start_time ≈ 0.35
         assert 0.2 < call_args[1] < 0.5
@@ -390,11 +389,12 @@ class TestBargeIn:
 
         timestamps = [WordTimestamp("a", 0.0, 0.5)]
         orch._current_response = ResponseData(text="a", audio=b"\x00", timestamps=timestamps)
-        mocks["truncator"].truncate.return_value = "a"
+        orch._truncator = MagicMock()
+        orch._truncator.truncate.return_value = "a"
 
         orch._on_playback_interrupted()
 
-        mocks["truncator"].truncate.assert_called_once_with("a", 0.0, timestamps)
+        orch._truncator.truncate.assert_called_once_with("a", 0.0, timestamps)
 
 
 # ---------------------------------------------------------------------------
@@ -415,12 +415,13 @@ class TestDeferredTruncation:
         response_data = ResponseData(text="hi there", audio=b"\x00" * 100, timestamps=timestamps)
         mocks["generator"].stream_done = True
         mocks["generator"].get_response_data.return_value = response_data
-        mocks["truncator"].truncate.return_value = "hi"
+        orch._truncator = MagicMock()
+        orch._truncator.truncate.return_value = "hi"
 
         orch._pending_truncation = _PendingTruncation(msg_id=5, stop_position_sec=0.35)
         orch._check_deferred_truncation()
 
-        mocks["truncator"].truncate.assert_called_once_with("hi there", 0.35, timestamps)
+        orch._truncator.truncate.assert_called_once_with("hi there", 0.35, timestamps)
         mocks["history"].update_message.assert_called_once_with(5, "hi")
         assert orch._pending_truncation is None
 
@@ -1070,7 +1071,6 @@ def _make_session_loop_with_memory(
         speech_generator=mocks["generator"],
         cpp_bridge=mocks["bridge"],
         history=mocks["history"],
-        truncator=mocks["truncator"],
         led=mocks["led"],
         audio_queue=queue.Queue(),
         tts_sample_rate=OpenAITTS.OUTPUT_SAMPLE_RATE,
@@ -1124,7 +1124,8 @@ class TestUtteranceStorage:
             text="I am doing well today",
             audio=b"\x00" * 48000,  # 1 second at 24kHz 16-bit
         )
-        mocks["truncator"].truncate.return_value = "I am doing"
+        orch._truncator = MagicMock()
+        orch._truncator.truncate.return_value = "I am doing"
 
         orch._on_playback_interrupted()
 
@@ -1208,7 +1209,8 @@ class TestPipelineTraceTruncated:
         orch._playback_start_time = time.monotonic() - 1.0
         orch._stop_pending_time = time.monotonic() - 0.5
         orch._current_response = ResponseData(text="hello world", audio=b"\x00" * 4800)
-        mocks["truncator"].truncate.return_value = "hello"
+        orch._truncator = MagicMock()
+        orch._truncator.truncate.return_value = "hello"
 
         orch._on_playback_interrupted()
 
@@ -1221,7 +1223,8 @@ class TestPipelineTraceTruncated:
         orch._playback_state = PlaybackState.PLAYING
         orch._playback_start_time = time.monotonic() - 1.0
         orch._current_response = ResponseData(text="hello world", audio=b"\x00" * 4800)
-        mocks["truncator"].truncate.return_value = "hello"
+        orch._truncator = MagicMock()
+        orch._truncator.truncate.return_value = "hello"
 
         orch._handle_interrupt()
         assert orch._playback_state == PlaybackState.STOP_PENDING

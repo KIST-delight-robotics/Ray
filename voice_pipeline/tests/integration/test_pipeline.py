@@ -58,7 +58,6 @@ from voice_pipeline.memory.types import Episode
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.session_loop import SessionLoop
 from voice_pipeline.tts.tts import OpenAITTS
-from voice_pipeline.tts.utterance_truncator import TimestampTruncator
 from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
 
@@ -329,7 +328,6 @@ def _make_session_loop(
         _embedder,
     )
     generator = SpeechGenerator(_llm, _tts, history, _simple_token_counter, DEFAULT_SYSTEM_PROMPT, _executor)
-    truncator = TimestampTruncator()
 
     session_loop = SessionLoop(
         asr=asr,
@@ -337,7 +335,6 @@ def _make_session_loop(
         speech_generator=generator,
         cpp_bridge=bridge,
         history=history,
-        truncator=truncator,
         led=led,
         audio_queue=audio_queue,
         tts_sample_rate=TTS_SAMPLE_RATE,
@@ -860,15 +857,12 @@ def _make_memory_session_loop(
     _embedder = MagicMock(spec=IEmbedder)
     turn_detector = TurnDetector(vap, turngpt_adapter, _embedder)
 
-    truncator = TimestampTruncator()
-
     session_loop = SessionLoop(
         asr=asr,
         turn_detector=turn_detector,
         speech_generator=generator,
         cpp_bridge=bridge,
         history=history,
-        truncator=truncator,
         led=led,
         audio_queue=audio_queue,
         tts_sample_rate=TTS_SAMPLE_RATE,

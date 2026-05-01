@@ -19,7 +19,6 @@ from voice_pipeline.core.interfaces import (
     IMemoryStorage,
     ISpeechGenerator,
     ITurnDetector,
-    IUtteranceTruncator,
 )
 from voice_pipeline.core.types import (
     AudioFrame,
@@ -31,7 +30,7 @@ from voice_pipeline.core.types import (
     TokenCounter,
     TurnDecision,
 )
-from voice_pipeline.tts.utterance_truncator import DurationRatioTruncator
+from voice_pipeline.tts.utterance_truncator import DurationRatioTruncator, TimestampTruncator
 
 logger = logging.getLogger("voice_pipeline.session_loop")
 
@@ -76,7 +75,6 @@ class SessionLoop:
         speech_generator: ISpeechGenerator,
         cpp_bridge: ICppBridge,
         history: IConversationHistory,
-        truncator: IUtteranceTruncator,
         led: ILEDController,
         audio_queue: queue.Queue[AudioFrame],
         tts_sample_rate: int,
@@ -94,7 +92,6 @@ class SessionLoop:
             speech_generator: ContextBuilder→LLM→TTS 오케스트레이션.
             cpp_bridge: C++ 오디오 재생 프로세스와의 WebSocket 브릿지.
             history: 세션 대화 이력. 세션마다 새로 생성됨.
-            truncator: barge-in 시 utterance 절단 전략.
             led: LED 상태 컨트롤러.
             audio_queue: AudioInput이 push하는 프레임 공유 큐 (ACTIVE 모드
                 소비자).
@@ -116,7 +113,7 @@ class SessionLoop:
         self._generator = speech_generator
         self._bridge = cpp_bridge
         self._history = history
-        self._truncator = truncator
+        self._truncator = TimestampTruncator()
         self._led = led
         self._audio_queue = audio_queue
         self._tts_sample_rate = tts_sample_rate

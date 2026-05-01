@@ -105,7 +105,6 @@ from voice_pipeline.memory.types import Episode, Profile
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.session_loop import SessionLoop
 from voice_pipeline.tts.tts import OpenAITTS
-from voice_pipeline.tts.utterance_truncator import TimestampTruncator
 from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
 
@@ -663,7 +662,6 @@ def setup_sandbox(
         speech_generator=generator,
         cpp_bridge=_bridge,
         history=history,
-        truncator=TimestampTruncator(),
         led=NoOpLED(),
         audio_queue=_audio_queue,
         tts_sample_rate=OpenAITTS.OUTPUT_SAMPLE_RATE,
