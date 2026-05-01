@@ -74,6 +74,22 @@ class IStorageBackend(ABC):
         """
 
     @abstractmethod
+    def load_message(
+        self,
+        session_id: str,
+        msg_id: int,
+    ) -> tuple[int, int, dict[str, Any], int] | None:
+        """Load a single message by ID.
+
+        Args:
+            session_id: Session to query.
+            msg_id: Message ID to load.
+
+        Returns:
+            Tuple of (msg_id, turn_id, item, token_count), or None if not found.
+        """
+
+    @abstractmethod
     def append_message(
         self,
         session_id: str,
@@ -128,8 +144,8 @@ class IStorageBackend(ABC):
 class IConversationHistory(ABC):
     """Session-scoped conversation history store.
 
-    Write-through: every mutation is persisted immediately via the
-    storage backend. In-memory list is authoritative for reads.
+    Every mutation is persisted immediately via the storage backend,
+    which is the single source of truth for all reads.
 
     Thread-safe: writes from Orchestrator (main thread), reads from
     SpeechGenerator background thread (via ContextBuilder).

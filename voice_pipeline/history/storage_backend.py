@@ -48,6 +48,16 @@ class MemoryStorageBackend(IStorageBackend):
             return []
         return [(m["msg_id"], m["turn_id"], copy.deepcopy(m["item"]), m["token_count"]) for m in session["messages"]]
 
+    def load_message(self, session_id: str, msg_id: int) -> tuple[int, int, dict[str, Any], int] | None:
+        """Load a single message by ID."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            return None
+        for m in session["messages"]:
+            if m["msg_id"] == msg_id:
+                return (m["msg_id"], m["turn_id"], copy.deepcopy(m["item"]), m["token_count"])
+        return None
+
     def append_message(
         self,
         session_id: str,
@@ -204,6 +214,21 @@ class SQLiteStorageBackend(IStorageBackend):
             logger.warning("Failed to load session %s", session_id, exc_info=True)
             return []
 
+    def load_message(self, session_id: str, msg_id: int) -> tuple[int, int, dict[str, Any], int] | None:
+        """Load a single message by ID."""
+        try:
+            cursor = self._conn.execute(
+                "SELECT msg_id, turn_id, item_json, token_count FROM messages WHERE session_id = ? AND msg_id = ?",
+                (session_id, msg_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return (row[0], row[1], json.loads(row[2]), row[3])
+        except sqlite3.Error:
+            logger.warning("Failed to load message %d from session %s", msg_id, session_id, exc_info=True)
+            return None
+
     def append_message(
         self,
         session_id: str,
@@ -213,7 +238,7 @@ class SQLiteStorageBackend(IStorageBackend):
         token_count: int,
         metrics_json: str | None = None,
     ) -> None:
-        """Append a message (write-through). Graceful on failure."""
+        """Append a message. Graceful on failure."""
         try:
             self._conn.execute(
                 "INSERT INTO messages "

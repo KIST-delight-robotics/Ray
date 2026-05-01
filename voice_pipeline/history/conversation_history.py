@@ -1,12 +1,10 @@
-"""Session-scoped conversation history store with write-through persistence."""
+"""Session-scoped conversation history backed by a storage backend."""
 
 from __future__ import annotations
 
 import json
 import logging
 import threading
-from collections import defaultdict
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,21 +16,11 @@ from voice_pipeline.history.storage_backend import TIMESTAMP_FORMAT
 logger = logging.getLogger("voice_pipeline.history")
 
 
-@dataclass
-class _Message:
-    """Internal mutable message representation."""
-
-    msg_id: int
-    turn_id: int
-    item: dict[str, Any]
-    token_count: int
-
-
 class ConversationHistory(IConversationHistory):
-    """Entry-based conversation history with write-through persistence.
+    """Entry-based conversation history backed by a storage backend.
 
-    In-memory list is authoritative for reads. Every mutation writes
-    to the storage backend immediately for crash safety.
+    The storage backend is the single source of truth for all reads
+    and writes. Every mutation is persisted immediately for crash safety.
 
     Thread-safe via threading.Lock: writes from Orchestrator (main thread),
     reads from SpeechGenerator background thread (via ContextBuilder).
@@ -43,7 +31,6 @@ class ConversationHistory(IConversationHistory):
         self._token_counter = token_counter
         self._lock = threading.Lock()
         self._session_id: str | None = None
-        self._messages: list[_Message] = []
         self._next_msg_id: int = 0
         self._next_turn_id: int = 0
 
@@ -95,26 +82,29 @@ class ConversationHistory(IConversationHistory):
             }
         )
 
-    def _persist_message(
+    def _write_message(
         self,
         session_id: str,
-        msg: _Message,
+        msg_id: int,
+        turn_id: int,
+        item: dict[str, Any],
+        token_count: int,
         metrics: LLMMetrics | None = None,
     ) -> None:
-        """Write-through: persist message to backend. Graceful on failure."""
+        """Persist message to backend. Logs warning on failure."""
         try:
             self._backend.append_message(
                 session_id,
-                msg.msg_id,
-                msg.turn_id,
-                msg.item,
-                msg.token_count,
+                msg_id,
+                turn_id,
+                item,
+                token_count,
                 self._serialize_metrics(metrics),
             )
         except Exception:
             logger.warning(
-                "Failed to persist message %d — continuing in memory only",
-                msg.msg_id,
+                "Failed to persist message %d — message will be missing from history",
+                msg_id,
                 exc_info=True,
             )
 
@@ -123,10 +113,9 @@ class ConversationHistory(IConversationHistory):
     # ------------------------------------------------------------------
 
     def new_session(self, session_id: str) -> None:
-        """Start a new session, clearing any in-memory state."""
+        """Start a new session, clearing any previous state."""
         with self._lock:
             self._session_id = session_id
-            self._messages = []
             self._next_msg_id = 0
             self._next_turn_id = 0
             started_at = datetime.now(UTC).strftime(TIMESTAMP_FORMAT)
@@ -144,9 +133,7 @@ class ConversationHistory(IConversationHistory):
             turn_id = self._allocate_turn_id()
             token_count = self._safe_count(text)
             item: dict[str, Any] = {"role": "user", "content": text}
-            msg = _Message(msg_id, turn_id, item, token_count)
-            self._messages.append(msg)
-            self._persist_message(session_id, msg)
+            self._write_message(session_id, msg_id, turn_id, item, token_count)
             return msg_id
 
     def add_assistant_message(self, text: str, metrics: LLMMetrics | None = None) -> int:
@@ -157,9 +144,7 @@ class ConversationHistory(IConversationHistory):
             turn_id = self._allocate_turn_id()
             token_count = self._compute_token_count(text, metrics)
             item: dict[str, Any] = {"role": "assistant", "content": text}
-            msg = _Message(msg_id, turn_id, item, token_count)
-            self._messages.append(msg)
-            self._persist_message(session_id, msg, metrics)
+            self._write_message(session_id, msg_id, turn_id, item, token_count, metrics)
             return msg_id
 
     def add_message(
@@ -175,17 +160,13 @@ class ConversationHistory(IConversationHistory):
             if turn_id is None:
                 turn_id = self._allocate_turn_id()
 
-            # Compute token_count: use metrics if available, else count item text
             if metrics is not None:
                 token_count = metrics.usage.output_tokens
             else:
-                # Count text from content or output fields
                 text = item.get("content") or item.get("output") or item.get("arguments") or ""
                 token_count = self._safe_count(text) if text else 0
 
-            msg = _Message(msg_id, turn_id, item, token_count)
-            self._messages.append(msg)
-            self._persist_message(session_id, msg, metrics)
+            self._write_message(session_id, msg_id, turn_id, item, token_count, metrics)
             return msg_id, turn_id
 
     def begin_turn(self) -> int:
@@ -198,41 +179,47 @@ class ConversationHistory(IConversationHistory):
         """Update message text. Recomputes token_count internally."""
         with self._lock:
             session_id = self._require_session()
-            for msg in self._messages:
-                if msg.msg_id == msg_id:
-                    msg.item["content"] = text
-                    msg.token_count = self._safe_count(text)
-                    try:
-                        self._backend.update_message(session_id, msg_id, msg.item, msg.token_count)
-                    except Exception:
-                        logger.warning(
-                            "Failed to update message %d in backend",
-                            msg_id,
-                            exc_info=True,
-                        )
-                    return
-            raise HistoryError(f"No message with ID {msg_id}")
+            result = self._backend.load_message(session_id, msg_id)
+            if result is None:
+                raise HistoryError(f"No message with ID {msg_id}")
+            _, _, item, _ = result
+            item["content"] = text
+            token_count = self._safe_count(text)
+            try:
+                self._backend.update_message(session_id, msg_id, item, token_count)
+            except Exception:
+                logger.warning(
+                    "Failed to update message %d in backend",
+                    msg_id,
+                    exc_info=True,
+                )
 
     def get_messages(self) -> list[dict[str, Any]]:
         """Retrieve all messages as a flat list for LLM input."""
         with self._lock:
-            self._require_session()
-            return [dict(msg.item) for msg in self._messages]
+            session_id = self._require_session()
+            rows = self._backend.load_session(session_id)
+            return [row[2] for row in rows]
 
     def get_turns(self) -> list[HistoryTurn]:
         """Retrieve messages grouped by turn for context budgeting."""
         with self._lock:
-            self._require_session()
-            groups: dict[int, list[_Message]] = defaultdict(list)
-            for msg in self._messages:
-                groups[msg.turn_id].append(msg)
+            session_id = self._require_session()
+            rows = self._backend.load_session(session_id)
 
-            # Preserve turn order by first msg_id in each group
-            sorted_turn_ids = sorted(groups.keys(), key=lambda tid: groups[tid][0].msg_id)
+            groups: dict[int, list[tuple[dict[str, Any], int]]] = {}
+            first_msg_id: dict[int, int] = {}
+            for msg_id, turn_id, item, token_count in rows:
+                if turn_id not in groups:
+                    groups[turn_id] = []
+                    first_msg_id[turn_id] = msg_id
+                groups[turn_id].append((item, token_count))
+
+            sorted_turn_ids = sorted(groups.keys(), key=lambda tid: first_msg_id[tid])
             return [
                 HistoryTurn(
-                    items=tuple(dict(m.item) for m in groups[tid]),
-                    token_count=sum(m.token_count for m in groups[tid]),
+                    items=tuple(item for item, _ in groups[tid]),
+                    token_count=sum(tc for _, tc in groups[tid]),
                 )
                 for tid in sorted_turn_ids
             ]

@@ -122,6 +122,23 @@ class _BackendTests:
         reloaded = b.load_session("s1")
         assert reloaded[0][2]["content"] == "hello"
 
+    def test_load_message_existing(self) -> None:
+        b = self.make_backend()
+        b.create_session("s1", "2026-03-29 10:00:00")
+        b.append_message("s1", 0, 0, _user_item("hello"), 3)
+        result = b.load_message("s1", 0)
+        assert result is not None
+        assert result == (0, 0, _user_item("hello"), 3)
+
+    def test_load_message_nonexistent(self) -> None:
+        b = self.make_backend()
+        b.create_session("s1", "2026-03-29 10:00:00")
+        assert b.load_message("s1", 999) is None
+
+    def test_load_message_nonexistent_session(self) -> None:
+        b = self.make_backend()
+        assert b.load_message("nonexistent", 0) is None
+
     def test_tool_call_turn(self) -> None:
         """Store a multi-message tool call turn with shared turn_id."""
         b = self.make_backend()
