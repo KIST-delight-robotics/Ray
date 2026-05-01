@@ -248,38 +248,6 @@ class IConversationHistory(ABC):
 
 
 # ---------------------------------------------------------------------------
-# ContextBuilder
-# ---------------------------------------------------------------------------
-
-
-class IContextBuilder(ABC):
-    """Assembles LLM context from conversation history and current input.
-
-    Session-level data (profiles, previous session summaries) is injected
-    via the constructor and remains constant for the session.  Per-turn
-    data (memory search results) is passed to ``build()``.
-    """
-
-    @abstractmethod
-    def build(
-        self,
-        current_text: str,
-        memory_result: MemoryReadResult | None = None,
-    ) -> list[dict[str, Any]]:
-        """Build the message list for an LLM call.
-
-        Args:
-            current_text: Current ASR transcription (the user's in-progress
-                turn, not yet committed to history).
-            memory_result: Retrieved episodes for Block 4 injection.
-                None when memory is not configured.
-
-        Returns:
-            List of message dicts suitable for passing to ILLM.generate().
-        """
-
-
-# ---------------------------------------------------------------------------
 # ASR
 # ---------------------------------------------------------------------------
 

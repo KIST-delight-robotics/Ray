@@ -21,7 +21,7 @@ from voice_pipeline.context.formatters import (
     format_raw_transcript_block,
     format_session_summary_block,
 )
-from voice_pipeline.core.interfaces import IContextBuilder, IConversationHistory, IMemoryStorage
+from voice_pipeline.core.interfaces import IConversationHistory, IMemoryStorage
 from voice_pipeline.core.types import TokenCounter
 
 if TYPE_CHECKING:
@@ -36,7 +36,7 @@ _BASE_OVERHEAD_TOKENS = 5
 _PER_MESSAGE_OVERHEAD_TOKENS = 3
 
 
-class ContextBuilder(IContextBuilder):
+class ContextBuilder:
     """Assembles LLM context with 4-block priority-based token budgeting.
 
     Session-level data (profiles, previous session summaries) is injected
