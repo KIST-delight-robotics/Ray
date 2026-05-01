@@ -8,21 +8,20 @@ Usage:
     query_mode: short / long
 """
 
-import sys
-import time
-import random
-import tempfile
 import os
+import random
+import sys
+import tempfile
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-import numpy as np
 
 from voice_pipeline.embedding.embedder import SentenceTransformerEmbedder
-from voice_pipeline.memory.storage import SQLiteMemoryStorage
-from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.retriever import MemoryRetriever
+from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Episode
+from voice_pipeline.memory.vector_index import NumpyVectorIndex
 
 # --- Args ---
 n_episodes = int(sys.argv[1])
