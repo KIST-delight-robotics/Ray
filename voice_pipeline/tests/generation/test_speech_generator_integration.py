@@ -94,19 +94,16 @@ def speech_generator(openai_api_key: str, monkeypatch: pytest.MonkeyPatch) -> Sp
     token_counter = create_token_counter(llm.model)
     history = ConversationHistory(MemoryStorageBackend(), token_counter)
     history.new_session("integration-test")
-    context_builder = ContextBuilder(
-        history=history,
-        system_prompt=("You are Ray, a friendly voice assistant. Keep responses very short (1-2 sentences)."),
-        token_counter=token_counter,
-    )
     monkeypatch.setattr(OpenAITTS, "_MODEL", "tts-1")
     monkeypatch.setattr(OpenAITTS, "_VOICE", "alloy")
     tts = OpenAITTS()
 
     gen = SpeechGenerator(
-        context_builder=context_builder,
         llm=llm,
         tts=tts,
+        history=history,
+        token_counter=token_counter,
+        system_prompt="You are Ray, a friendly voice assistant. Keep responses very short (1-2 sentences).",
     )
     yield gen
     gen.shutdown()

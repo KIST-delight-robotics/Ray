@@ -2,7 +2,7 @@
 
 Tests the complete voice pipeline flow with mocked external boundaries:
   Real: SessionLoop, SpeechGenerator, ContextBuilder,
-        ConversationHistory, TurnDetector, TimestampTruncator, MemoryStorageBackend
+        ConversationHistory, TurnDetector, MemoryStorageBackend
   Mocked: ASR, LLM, TTS, CppBridge, VAP, TurnGPT, Wakeword, AudioInput, LED
 
 Scenarios:

@@ -2,9 +2,6 @@
 
 from voice_pipeline.tts.exceptions import TTSError
 from voice_pipeline.tts.tts import OpenAITTS
-from voice_pipeline.tts.utterance_truncator import (
-    DurationRatioTruncator,
-    TimestampTruncator,
-)
+from voice_pipeline.tts.utterance_truncator import truncate_by_ratio, truncate_by_timestamps
 
-__all__ = ["DurationRatioTruncator", "OpenAITTS", "TTSError", "TimestampTruncator"]
+__all__ = ["OpenAITTS", "TTSError", "truncate_by_ratio", "truncate_by_timestamps"]

@@ -29,7 +29,6 @@ from voice_pipeline.core.types import (
     TTSStream,
     TurnDecision,
     VAPResult,
-    WordTimestamp,
 )
 
 # ---------------------------------------------------------------------------
@@ -245,40 +244,6 @@ class IConversationHistory(ABC):
         """Finalize the current session (sets ended_at).
 
         With write-through, individual messages are already persisted.
-        """
-
-
-# ---------------------------------------------------------------------------
-# UtteranceTruncator
-# ---------------------------------------------------------------------------
-
-
-class IUtteranceTruncator(ABC):
-    """Truncates spoken text to match a barge-in stop position.
-
-    Strategy interface with two implementations:
-    - TimestampTruncator: uses word-level timestamps for precision.
-    - DurationRatioTruncator: estimates from total audio duration ratio.
-    """
-
-    @abstractmethod
-    def truncate(
-        self,
-        text: str,
-        stop_position_sec: float,
-        timestamps: list[WordTimestamp],
-    ) -> str:
-        """Return the portion of text spoken before the stop point.
-
-        Args:
-            text: Full response text that was being played.
-            stop_position_sec: Playback position in seconds when the
-                robot was interrupted.
-            timestamps: Word-level timestamps from TTS. May be empty
-                if the TTS implementation does not support them.
-
-        Returns:
-            Truncated text representing what was actually spoken.
         """
 
 

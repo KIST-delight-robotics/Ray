@@ -30,7 +30,7 @@ from voice_pipeline.core.types import (
     TokenCounter,
     TurnDecision,
 )
-from voice_pipeline.tts.utterance_truncator import DurationRatioTruncator, TimestampTruncator
+from voice_pipeline.tts.utterance_truncator import truncate_by_ratio, truncate_by_timestamps
 
 logger = logging.getLogger("voice_pipeline.session_loop")
 
@@ -113,7 +113,6 @@ class SessionLoop:
         self._generator = speech_generator
         self._bridge = cpp_bridge
         self._history = history
-        self._truncator = TimestampTruncator()
         self._led = led
         self._audio_queue = audio_queue
         self._tts_sample_rate = tts_sample_rate
@@ -593,14 +592,11 @@ class SessionLoop:
         if self._current_response is not None:
             # Case A or B: ResponseData available
             if self._current_response.has_timestamps:
-                # Case A: precise timestamps
-                truncated = self._truncator.truncate(text, stop_pos, self._current_response.timestamps)
+                truncated = truncate_by_timestamps(text, stop_pos, self._current_response.timestamps)
                 trunc_method = "timestamps"
             else:
-                # Case B: duration ratio
                 total_dur = len(self._current_response.audio) / (self._tts_sample_rate * 2)
-                ratio_truncator = DurationRatioTruncator(total_dur)
-                truncated = ratio_truncator.truncate(text, stop_pos, [])
+                truncated = truncate_by_ratio(text, stop_pos, total_dur)
                 trunc_method = "ratio"
 
             if truncated:
@@ -611,8 +607,7 @@ class SessionLoop:
         else:
             # Case C: stream not done — approximate now, correct later
             total_dur = len(self._sent_audio_buffer) / (self._tts_sample_rate * 2)
-            ratio_truncator = DurationRatioTruncator(total_dur)
-            truncated = ratio_truncator.truncate(text, stop_pos, [])
+            truncated = truncate_by_ratio(text, stop_pos, total_dur)
             trunc_method = "ratio-pending"
 
             if truncated:
@@ -656,15 +651,14 @@ class SessionLoop:
             return
 
         if response_data.has_timestamps:
-            corrected = self._truncator.truncate(
+            corrected = truncate_by_timestamps(
                 response_data.text,
                 pending.stop_position_sec,
                 response_data.timestamps,
             )
         else:
             total_dur = len(response_data.audio) / (self._tts_sample_rate * 2)
-            ratio_truncator = DurationRatioTruncator(total_dur)
-            corrected = ratio_truncator.truncate(response_data.text, pending.stop_position_sec, [])
+            corrected = truncate_by_ratio(response_data.text, pending.stop_position_sec, total_dur)
 
         if corrected:
             try:
