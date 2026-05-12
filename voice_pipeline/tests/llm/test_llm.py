@@ -269,19 +269,18 @@ class TestClientConfig:
         assert call_kwargs["max_output_tokens"] == 100
 
     def test_reasoning_effort_default(self) -> None:
-        """Default model (gpt-5.4) sends reasoning with effort=none."""
+        """Default reasoning_effort is None — no reasoning key sent."""
         client = create_mock_client(make_stream_events(["ok"]))
         llm = _build_llm(client)
 
         list(llm.generate([_user_msg("hi")]))
 
         call_kwargs = client.responses.create.call_args[1]
-        assert call_kwargs["reasoning"] == {"effort": "none"}
+        assert "reasoning" not in call_kwargs
 
-    def test_reasoning_effort_passed_when_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(OpenAILLM, "_REASONING_EFFORT", "none")
+    def test_reasoning_effort_passed_when_set(self) -> None:
         client = create_mock_client(make_stream_events(["ok"]))
-        llm = _build_llm(client, model="gpt-5.4")
+        llm = _build_llm(client, reasoning_effort="none")
 
         list(llm.generate([_user_msg("hi")]))
 

@@ -129,7 +129,7 @@ def main() -> None:
 
     # --- Process-level singletons ---
     asr = GoogleCloudASR(language_code=language_code)
-    llm = OpenAILLM(model="gpt-5.4", temperature=0.7, max_tokens=256, tools=["web_search"])
+    llm = OpenAILLM(model="gpt-5.4", temperature=0.7, reasoning_effort="none", max_tokens=256, tools=["web_search"])
     tts = OpenAITTS()
     vap = MaAIVAPWrapper(tts.output_sample_rate)
     turngpt = TurnGPTWrapper()
@@ -149,7 +149,7 @@ def main() -> None:
     ids, vectors = memory_storage.load_all_embeddings()
     if ids:
         vector_index.load(ids, vectors)
-    write_llm = OpenAILLM(model="gpt-4o-mini", temperature=0.0, max_tokens=4096, tools=[])
+    write_llm = OpenAILLM(model="gpt-4o-mini", temperature=0.0, reasoning_effort=None, max_tokens=4096, tools=[])
     memory_writer = MemoryWriter(memory_storage, vector_index, embedder, write_llm, token_counter)
     write_executor = ThreadPoolExecutor(max_workers=1)
 

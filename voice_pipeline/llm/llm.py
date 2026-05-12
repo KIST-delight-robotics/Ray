@@ -29,6 +29,7 @@ class OpenAILLM(ILLM):
     Args:
         model: OpenAI 모델 이름 (예: "gpt-4o", "gpt-4o-mini", "gpt-5.4").
         temperature: 샘플링 temperature (0.0~2.0).
+        reasoning_effort: reasoning 모델용 effort 레벨 (gpt-5 계열). None=미적용
         max_tokens: 응답 최대 토큰 수.
         tools: 활성화할 도구 이름 목록. None이면 기본 도구, ``[]``이면 명시적 비활성화.
     """
@@ -36,17 +37,18 @@ class OpenAILLM(ILLM):
     _MAX_RETRIES = 2  # 응답 실패 시 자동 재시도 횟수
     _TIMEOUT_SEC = 30.0  # 응답 대기 최대 시간 (초)
     _DEFAULT_TOOLS: tuple[str, ...] = ("web_search",)  # tools=None일 때 기본 도구
-    _REASONING_EFFORT: str | None = "none"  # reasoning 모델용 effort 레벨 (gpt-5 계열). None=미적용
 
     def __init__(
         self,
         model: str = "gpt-5.4",
         temperature: float = 0.7,
+        reasoning_effort: str | None = None,
         max_tokens: int = 256,
         tools: list[str] | None = None,
     ) -> None:
         self.model = model
         self.temperature = temperature
+        self.reasoning_effort = reasoning_effort
         self.max_tokens = max_tokens
         self.tools: list[str] = list(tools) if tools is not None else list(self._DEFAULT_TOOLS)
         self._resolved_tools = resolve_tools(self.tools) if self.tools else []
@@ -92,8 +94,8 @@ class OpenAILLM(ILLM):
             }
             if instructions is not None:
                 kwargs["instructions"] = instructions
-            if self._REASONING_EFFORT is not None:
-                kwargs["reasoning"] = {"effort": self._REASONING_EFFORT}
+            if self.reasoning_effort is not None:
+                kwargs["reasoning"] = {"effort": self.reasoning_effort}
             if resolved_tools:
                 kwargs["tools"] = resolved_tools
             if response_format is not None:
