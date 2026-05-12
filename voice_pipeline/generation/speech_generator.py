@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from voice_pipeline.context.context_builder import ContextBuilder
-from voice_pipeline.context.formatters import parse_citation_tag
+from voice_pipeline.context.formatters import parse_citation_tag, strip_urls
 from voice_pipeline.core.interfaces import (
     ILLM,
     ITTS,
@@ -369,8 +369,9 @@ class SpeechGenerator(ISpeechGenerator):
             except RuntimeError:
                 pass  # Stream was closed early, no result available
 
-            # 4. Strip citation tag
+            # 4. Strip citation tag + URLs
             clean_text, cited_indices = parse_citation_tag(full_text)
+            clean_text = strip_urls(clean_text)
 
             # 5. Guard: empty text (before updating citations)
             if not clean_text.strip():
@@ -561,6 +562,9 @@ class SpeechGenerator(ISpeechGenerator):
                     for sentence in detector.feed(chunk):
                         if cancel_event.is_set():
                             break
+                        sentence = strip_urls(sentence)
+                        if not sentence:
+                            continue
                         future = tts_executor.submit(self._tts.synthesize, sentence)
                         future_queue.put((sentence, future))
             except Exception:
@@ -593,9 +597,10 @@ class SpeechGenerator(ISpeechGenerator):
                 remainder = detector.flush()
                 if remainder:
                     clean_remainder, cited_indices = parse_citation_tag(remainder)
-                    if clean_remainder.strip():
-                        future = tts_executor.submit(self._tts.synthesize, clean_remainder.strip())
-                        future_queue.put((clean_remainder.strip(), future))
+                    clean_remainder = strip_urls(clean_remainder).strip()
+                    if clean_remainder:
+                        future = tts_executor.submit(self._tts.synthesize, clean_remainder)
+                        future_queue.put((clean_remainder, future))
                 else:
                     _, cited_indices = parse_citation_tag(full_text)
 

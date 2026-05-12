@@ -14,6 +14,10 @@ logger = logging.getLogger("voice_pipeline.context")
 # Match "[MEMORIES: M1, M2, ...]" at the end of text (with optional trailing whitespace)
 _CITATION_RE = re.compile(r"\[MEMORIES:\s*(M\d+(?:\s*,\s*M\d+)*)\s*\]\s*$")
 
+# Markdown link [text](url) — including optional wrapping parentheses
+_MD_LINK_WITH_PARENS_RE = re.compile(r"\(\[[^\]]*\]\([^)]*\)\)")
+_MD_LINK_RE = re.compile(r"\[[^\]]*\]\([^)]*\)")
+
 
 # ---------------------------------------------------------------------------
 # Block 2: Profile
@@ -123,6 +127,16 @@ def format_memory_block(memory_result: MemoryReadResult) -> str:
 # ---------------------------------------------------------------------------
 # Citation parsing
 # ---------------------------------------------------------------------------
+
+
+def strip_urls(text: str) -> str:
+    """Remove markdown links from text.
+
+    Handles both ``([text](url))`` and ``[text](url)`` forms.
+    """
+    text = _MD_LINK_WITH_PARENS_RE.sub("", text)
+    text = _MD_LINK_RE.sub("", text)
+    return re.sub(r"  +", " ", text).strip()
 
 
 def parse_citation_tag(text: str) -> tuple[str, list[int]]:
