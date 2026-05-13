@@ -139,8 +139,8 @@ class VAPWrapper(IVAP):
             step_ms = self._STEP_SEC * 1000
             if elapsed_ms > step_ms:
                 logger.warning("VAP inference slow: %.0fms (step %.0fms)", elapsed_ms, step_ms)
-            else:
-                logger.debug("VAP inference: %.0fms", elapsed_ms)
+            # else:
+            #     logger.debug("VAP inference: %.0fms", elapsed_ms)
             return VAPResult(p_now, p_fut, user_is_speaking)
         except Exception:
             logger.warning("VAP inference error, returning default result", exc_info=True)

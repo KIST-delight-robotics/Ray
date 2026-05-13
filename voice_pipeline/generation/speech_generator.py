@@ -170,7 +170,7 @@ class SpeechGenerator(ISpeechGenerator):
                 prepare_ts=time.monotonic(),
             )
 
-        logger.info("prepare(%r) → PREPARING [run=%d]", current_text[:60], run_id)
+        logger.debug("prepare(%r) → PREPARING [run=%d]", current_text[:60], run_id)
         self._executor.submit(self._run_pipeline, current_text, run_id, cancel_event, audio_queue)
 
     def cancel(self) -> None:
@@ -356,7 +356,7 @@ class SpeechGenerator(ISpeechGenerator):
             if trace is not None:
                 trace.llm_done_ts = t_llm
 
-            logger.info("LLM done (%.1fs) [run=%d]: %r", t_llm - t0, run_id, full_text)
+            logger.debug("LLM done (%.1fs) [run=%d]: %r", t_llm - t0, run_id, full_text)
 
             # 3a. Collect LLM metrics and build turn_items
             metrics_list: list[LLMMetrics] = []
@@ -435,7 +435,7 @@ class SpeechGenerator(ISpeechGenerator):
                 trace.tts_done_ts = t_tts
 
             audio_sec = len(total_audio) / (self._tts.output_sample_rate * 2)
-            logger.info(
+            logger.debug(
                 "TTS done (%.1fs): %.1fs audio → STREAMING [run=%d]",
                 t_tts - t_llm,
                 audio_sec,
@@ -578,7 +578,7 @@ class SpeechGenerator(ISpeechGenerator):
             if trace is not None:
                 trace.llm_done_ts = t_llm
 
-            logger.info("LLM done (%.1fs) [run=%d]: %r", t_llm - t0, run_id, full_text)
+            logger.debug("LLM done (%.1fs) [run=%d]: %r", t_llm - t0, run_id, full_text)
 
             # Collect LLM metrics
             metrics_list: list[LLMMetrics] = []
@@ -638,7 +638,7 @@ class SpeechGenerator(ISpeechGenerator):
                 trace.tts_done_ts = t_done
 
             audio_sec = len(total_audio) / (self._tts.output_sample_rate * 2)
-            logger.info(
+            logger.debug(
                 "Sentence pipeline done (%.1fs): %.1fs audio [run=%d]",
                 t_done - t0,
                 audio_sec,

@@ -132,13 +132,13 @@ class TurnDetector(ITurnDetector):
 
         # --- Turn-shift check (only when user NOT speaking and text exists) ---
         if not vap_result.user_is_speaking and asr_text and self._check_turn_shift(vap_result, elapsed):
-            logger.info(
-                "TURN_SHIFT: p_now=%.2f p_fut=%.2f turngpt=%.2f silence=%.2fs text=%r",
+            logger.info("TURN_SHIFT: %r", asr_text[:60])
+            logger.debug(
+                "TURN_SHIFT detail: p_now=%.2f p_fut=%.2f turngpt=%.2f silence=%.2fs",
                 vap_result.p_now,
                 vap_result.p_fut,
                 self._turngpt_prob,
                 self._silence_elapsed_sec,
-                asr_text[:60],
             )
             self._turn_state = _TurnState.ROBOT_TURN
             self._reset_per_frame_state()
@@ -153,7 +153,7 @@ class TurnDetector(ITurnDetector):
                 if prob > thresh
                 else f"timeout={self._last_asr_change_elapsed_sec:.2f}s"
             )
-            logger.info("PREPARE (%s): text=%r", reason, asr_text[:60])
+            logger.debug("PREPARE (%s): text=%r", reason, asr_text[:60])
             return TurnDecision(prepare=True)
 
         return TurnDecision.none()
@@ -231,8 +231,9 @@ class TurnDetector(ITurnDetector):
             and vap_result.p_now > self._INTERRUPT_USER_THRESHOLD
             and vap_result.p_fut > self._INTERRUPT_USER_THRESHOLD
         ):
-            logger.info(
-                "INTERRUPT (vap): p_now=%.2f p_fut=%.2f",
+            logger.info("INTERRUPT (vap)")
+            logger.debug(
+                "INTERRUPT detail: p_now=%.2f p_fut=%.2f",
                 vap_result.p_now,
                 vap_result.p_fut,
             )
@@ -257,7 +258,7 @@ class TurnDetector(ITurnDetector):
             vecs = self._embedder.embed_batch([self._last_prepare_text, asr_text])
             similarity = float(np.dot(vecs[0], vecs[1]) / (np.linalg.norm(vecs[0]) * np.linalg.norm(vecs[1]) + 1e-9))
             if similarity >= self._SIMILARITY_THRESHOLD:
-                logger.info(
+                logger.debug(
                     "PREPARE skipped (similarity=%.2f): %r → %r",
                     similarity,
                     self._last_prepare_text[:40],

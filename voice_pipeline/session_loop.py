@@ -294,6 +294,8 @@ class SessionLoop:
         if text_changed:
             self._last_asr_text = current_text
             self._last_text_change_time = time.monotonic()
+            if current_text:
+                logger.info("ASR: %s", current_text)
 
         # 5. Cancel awaiting if user continues speaking after turn_shift
         if (
@@ -301,7 +303,7 @@ class SessionLoop:
             and text_changed
             and time.monotonic() - self._turn_shift_time > self._AWAITING_CANCEL_GRACE_SEC
         ):
-            logger.info("User continued speaking during awaiting — cancelling generation")
+            logger.info("CANCELLED: user continued speaking")
             self._save_trace("cancelled")
             self._generator.cancel()
             self._turn_detector.reset()
@@ -407,6 +409,7 @@ class SessionLoop:
     def _handle_turn_shift(self, text: str) -> bool:
         """Handle turn_shift decision. Returns True if session should end."""
         if self._check_exit_keyword(text):
+            logger.info("Exit keyword detected: %r", text)
             return True
 
         self._turn_shift_time = time.monotonic()
@@ -432,7 +435,7 @@ class SessionLoop:
     def _handle_interrupt(self) -> None:
         """Handle interrupt signal from TurnDetector."""
         if self._playback_state == PlaybackState.PLAYING:
-            logger.info("Interrupt → send_stop (playback PLAYING)")
+            logger.info("INTERRUPT: stopped playback")
             try:
                 self._bridge.send_stop()
             except Exception:
@@ -445,7 +448,7 @@ class SessionLoop:
             if trace is not None:
                 trace.interrupt_ts = now
         elif self._awaiting_response:
-            logger.info("Interrupt → cancel generator (awaiting_response)")
+            logger.info("INTERRUPT: cancelled generation")
             self._save_trace("cancelled")
             self._generator.cancel()
             self._turn_detector.reset()
@@ -486,7 +489,7 @@ class SessionLoop:
         self._drain_audio_to_bridge()
         self._playback_state = PlaybackState.PLAYING
         buf_sec = len(self._sent_audio_buffer) / (self._tts_sample_rate * 2)
-        logger.info("begin_streaming: %.1fs audio buffered → PLAYING", buf_sec)
+        logger.debug("begin_streaming: %.1fs audio buffered → PLAYING", buf_sec)
 
         trace = self._generator.trace
         if trace is not None:
@@ -552,9 +555,10 @@ class SessionLoop:
 
     def _on_playback_complete(self) -> None:
         """Normal playback completion — save full response to history."""
-        logger.info("Playback complete (normal)")
+        logger.debug("Playback complete (normal)")
         text = self._get_response_text()
         if text:
+            logger.info("LLM: %s", text)
             # Pass LLM metrics from the last LLM call (if available)
             metrics = None
             if self._current_response and self._current_response.metrics_list:
@@ -582,7 +586,7 @@ class SessionLoop:
         else:
             stop_pos = 0.0
         text = self._get_response_text()
-        logger.info("Playback interrupted (barge-in): stop_pos=%.2fs full=%r", stop_pos, text)
+        logger.debug("Playback interrupted (barge-in): stop_pos=%.2fs full=%r", stop_pos, text)
 
         if not text:
             self._turn_detector.reset()
@@ -600,7 +604,8 @@ class SessionLoop:
                 trunc_method = "ratio"
 
             if truncated:
-                logger.info("Truncated (%s): %r", trunc_method, truncated)
+                logger.info("LLM (interrupted): %s", truncated)
+                logger.debug("Truncated (%s): full=%r", trunc_method, text)
                 self._assistant_msg_id = self._history.add_assistant_message(truncated)
                 self._save_utterance("assistant", truncated)
                 self._turn_detector.notify_turn_complete("robot", truncated)
@@ -611,7 +616,8 @@ class SessionLoop:
             trunc_method = "ratio-pending"
 
             if truncated:
-                logger.info("Truncated (%s): %r", trunc_method, truncated)
+                logger.info("LLM (interrupted): %s", truncated)
+                logger.debug("Truncated (%s): full=%r", trunc_method, text)
                 msg_id = self._history.add_assistant_message(truncated)
                 self._assistant_msg_id = msg_id
                 self._save_utterance("assistant", truncated)
@@ -776,7 +782,7 @@ class SessionLoop:
         try:
             self._trace_store.save(trace)
             if outcome != "cancelled":
-                logger.info("Pipeline trace: %s", trace.summary())
+                logger.debug("Pipeline trace: %s", trace.summary())
         except Exception:
             logger.warning("Failed to save pipeline trace", exc_info=True)
         self._speculative_attempts = 0

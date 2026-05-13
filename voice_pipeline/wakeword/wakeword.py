@@ -246,7 +246,7 @@ class WakewordDetector(IWakewordDetector):
                 logger.info("STT result: %r (confidence=%.2f)", transcript, alternative.confidence)
                 for pattern in self._keyword_patterns:
                     if pattern.search(transcript):
-                        logger.info(
+                        logger.debug(
                             "Wakeword detected in transcript: %r",
                             transcript,
                         )

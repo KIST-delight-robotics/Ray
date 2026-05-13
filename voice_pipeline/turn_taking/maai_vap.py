@@ -279,8 +279,8 @@ class MaAIVAPWrapper(IVAP):
         budget_ms = 1000.0 / self._frame_rate
         if elapsed_ms > budget_ms:
             logger.warning("VAP inference slow: %.0fms (budget %.0fms)", elapsed_ms, budget_ms)
-        else:
-            logger.debug("VAP inference: %.0fms", elapsed_ms)
+        # else:
+        #     logger.debug("VAP inference: %.0fms", elapsed_ms)
 
         # Buffer trimming
         self._buf_x1 = self._buf_x1[-self._FRAME_CTX_PADDING :].copy()

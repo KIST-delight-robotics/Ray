@@ -112,8 +112,8 @@ class AsyncTurnGPT:
                             elapsed_ms,
                             text[:60],
                         )
-                    else:
-                        logger.debug("TurnGPT inference: %.0fms", elapsed_ms)
+                    # else:
+                    #     logger.debug("TurnGPT inference: %.0fms", elapsed_ms)
                 else:
                     logger.debug(
                         "TurnGPT result discarded (cleared): %.0fms",

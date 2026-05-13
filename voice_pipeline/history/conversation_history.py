@@ -123,7 +123,7 @@ class ConversationHistory(IConversationHistory):
                 self._backend.create_session(session_id, started_at)
             except Exception:
                 logger.warning("Failed to create session in backend", exc_info=True)
-            logger.info("Started new session: %s", session_id)
+            logger.debug("Started new session: %s", session_id)
 
     def add_user_message(self, text: str) -> int:
         """Append a user message. Auto-assigns turn_id."""
