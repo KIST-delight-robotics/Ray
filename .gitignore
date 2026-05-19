@@ -72,3 +72,4 @@ docs/memory-research/
 
 # SQLite database
 data/
+!data/eval/questions.json

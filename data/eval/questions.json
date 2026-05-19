@@ -1,0 +1,229 @@
+{
+  "suites": [
+    {
+      "name": "asr_short",
+      "category": "asr",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "asr_001", "text": "Turn off the lights."},
+        {"id": "asr_002", "text": "What time is it?"},
+        {"id": "asr_003", "text": "Play some music."},
+        {"id": "asr_004", "text": "Set an alarm."},
+        {"id": "asr_005", "text": "Good morning Ray."},
+        {"id": "asr_006", "text": "Stop the timer."},
+        {"id": "asr_007", "text": "Tell me a joke."},
+        {"id": "asr_008", "text": "How are you today?"}
+      ]
+    },
+    {
+      "name": "asr_conversational",
+      "category": "asr",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "asr_009", "text": "What's the weather going to be like tomorrow?"},
+        {"id": "asr_010", "text": "Can you recommend a good book to read?"},
+        {"id": "asr_011", "text": "How long does it take to boil an egg?"},
+        {"id": "asr_012", "text": "What's the difference between a butterfly and a moth?"},
+        {"id": "asr_013", "text": "Do you know any fun facts about penguins?"},
+        {"id": "asr_014", "text": "What should I have for dinner tonight?"},
+        {"id": "asr_015", "text": "Tell me something interesting about the ocean."},
+        {"id": "asr_016", "text": "How do you make a paper airplane?"},
+        {"id": "asr_017", "text": "What's the tallest building in the world?"},
+        {"id": "asr_018", "text": "Why is the sky blue during the day?"}
+      ]
+    },
+    {
+      "name": "asr_long",
+      "category": "asr",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "asr_019", "text": "Can you explain how photosynthesis works in simple terms that a child could understand?"},
+        {"id": "asr_020", "text": "I've been thinking about learning to play the guitar but I'm not sure where to start."},
+        {"id": "asr_021", "text": "What are some good strategies for managing stress and staying healthy during busy periods?"},
+        {"id": "asr_022", "text": "Could you tell me about the history of space exploration from the very beginning?"},
+        {"id": "asr_023", "text": "I'd like to know what the most important inventions of the twentieth century were."},
+        {"id": "asr_024", "text": "What happens inside a volcano right before it erupts and how do scientists predict eruptions?"},
+        {"id": "asr_025", "text": "If you could travel anywhere in the world for a whole month where would you choose to go?"},
+        {"id": "asr_026", "text": "How does the internet actually work when I type a website address into my browser?"}
+      ]
+    },
+    {
+      "name": "asr_numbers",
+      "category": "asr",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "asr_027", "text": "Set a timer for three minutes and forty-five seconds."},
+        {"id": "asr_028", "text": "What is fifteen multiplied by twenty-three?"},
+        {"id": "asr_029", "text": "The meeting is scheduled for July fourteenth at two thirty."},
+        {"id": "asr_030", "text": "I need to wake up at six fifteen tomorrow morning."},
+        {"id": "asr_031", "text": "The temperature today is seventy-eight degrees Fahrenheit."},
+        {"id": "asr_032", "text": "My phone number is five five five, eight six seven, five three zero nine."},
+        {"id": "asr_033", "text": "The store is about three and a half miles from here."},
+        {"id": "asr_034", "text": "I was born on March twenty-first, nineteen ninety-five."}
+      ]
+    },
+    {
+      "name": "asr_proper_nouns",
+      "category": "asr",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "asr_035", "text": "Who wrote Romeo and Juliet?"},
+        {"id": "asr_036", "text": "What is the capital of Australia?"},
+        {"id": "asr_037", "text": "Tell me about Leonardo da Vinci."},
+        {"id": "asr_038", "text": "Have you heard of the Sagrada Familia in Barcelona?"},
+        {"id": "asr_039", "text": "What did Albert Einstein discover?"},
+        {"id": "asr_040", "text": "How far is it from New York to Los Angeles?"},
+        {"id": "asr_041", "text": "Can you tell me about the Amazon Rainforest?"},
+        {"id": "asr_042", "text": "Who painted the Mona Lisa at the Louvre Museum?"}
+      ]
+    },
+    {
+      "name": "asr_confusable",
+      "category": "asr",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "asr_043", "text": "I need to check whether the weather will be nice this weekend."},
+        {"id": "asr_044", "text": "Their car is parked over there by the tree."},
+        {"id": "asr_045", "text": "She would have accepted the offer except for the low salary."},
+        {"id": "asr_046", "text": "The effect of the new policy will affect everyone here."},
+        {"id": "asr_047", "text": "He led the group to the lead mine near the river."},
+        {"id": "asr_048", "text": "I read the red book that you read to me last night."},
+        {"id": "asr_049", "text": "The bass player caught a bass while fishing at the lake."},
+        {"id": "asr_050", "text": "It's right to write the answer on the right side of the page."}
+      ]
+    },
+    {
+      "name": "tt_ultra_short",
+      "category": "turn_taking",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "tt_001", "text": "Yes."},
+        {"id": "tt_002", "text": "No thanks."},
+        {"id": "tt_003", "text": "Okay."},
+        {"id": "tt_004", "text": "Thank you."},
+        {"id": "tt_005", "text": "Sure."},
+        {"id": "tt_006", "text": "Maybe later."},
+        {"id": "tt_007", "text": "That's fine."},
+        {"id": "tt_008", "text": "I don't know."}
+      ]
+    },
+    {
+      "name": "tt_short_statements",
+      "category": "turn_taking",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "tt_009", "text": "I like chocolate."},
+        {"id": "tt_010", "text": "It's pretty warm outside."},
+        {"id": "tt_011", "text": "I had pasta for lunch."},
+        {"id": "tt_012", "text": "My favorite season is autumn."},
+        {"id": "tt_013", "text": "I went to the park yesterday."},
+        {"id": "tt_014", "text": "The movie was really good."},
+        {"id": "tt_015", "text": "I usually wake up at seven."},
+        {"id": "tt_016", "text": "She plays the piano very well."}
+      ]
+    },
+    {
+      "name": "tt_long_statements",
+      "category": "turn_taking",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "tt_017", "text": "I've been thinking about learning to play the piano for a while now but I haven't found the time."},
+        {"id": "tt_018", "text": "Last summer we went on a road trip across the country and visited so many beautiful places along the way."},
+        {"id": "tt_019", "text": "The thing about cooking is that once you understand the basic techniques everything else becomes much easier."},
+        {"id": "tt_020", "text": "My grandmother used to tell me stories about growing up on a farm when she was a little girl."},
+        {"id": "tt_021", "text": "I really enjoy going for long walks in the evening especially when the weather is cool and the streets are quiet."},
+        {"id": "tt_022", "text": "One of the most interesting things I learned recently is how honey bees communicate with each other through dancing."},
+        {"id": "tt_023", "text": "If I had the chance to live anywhere in the world I think I would probably choose somewhere near the ocean."},
+        {"id": "tt_024", "text": "The best advice anyone ever gave me was to focus on the things I can control and let go of everything else."}
+      ]
+    },
+    {
+      "name": "tt_questions",
+      "category": "turn_taking",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "tt_025", "text": "What do you think about that?"},
+        {"id": "tt_026", "text": "Do you think it's going to rain this afternoon?"},
+        {"id": "tt_027", "text": "Have you ever been to a concert before?"},
+        {"id": "tt_028", "text": "What's the best way to learn a new language?"},
+        {"id": "tt_029", "text": "Can you help me with something?"},
+        {"id": "tt_030", "text": "Why do cats always land on their feet?"},
+        {"id": "tt_031", "text": "How long would it take to drive to the airport from here?"},
+        {"id": "tt_032", "text": "Is there anything interesting happening this weekend?"}
+      ]
+    },
+    {
+      "name": "tt_lists",
+      "category": "turn_taking",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "tt_033", "text": "I need eggs, milk, butter, and flour."},
+        {"id": "tt_034", "text": "My hobbies are reading, hiking, cooking, and photography."},
+        {"id": "tt_035", "text": "The primary colors are red, blue, and yellow."},
+        {"id": "tt_036", "text": "We visited France, Italy, Spain, and Portugal last year."},
+        {"id": "tt_037", "text": "For the recipe you'll need onions, garlic, tomatoes, and basil."},
+        {"id": "tt_038", "text": "The meeting is with Sarah, David, James, and the marketing team."},
+        {"id": "tt_039", "text": "I speak English, a little bit of Spanish, and some Japanese."},
+        {"id": "tt_040", "text": "The test covers math, science, history, and English literature."}
+      ]
+    },
+    {
+      "name": "tt_weak_endings",
+      "category": "turn_taking",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "tt_041", "text": "That would be really nice actually."},
+        {"id": "tt_042", "text": "I'm not really sure about that honestly."},
+        {"id": "tt_043", "text": "It depends on the situation I suppose."},
+        {"id": "tt_044", "text": "We could try that if you want to."},
+        {"id": "tt_045", "text": "I was just wondering about it is all."},
+        {"id": "tt_046", "text": "It might work but I'm not completely certain."},
+        {"id": "tt_047", "text": "That's something I haven't really thought about before."},
+        {"id": "tt_048", "text": "I guess we could do that maybe."},
+        {"id": "tt_049", "text": "It seemed like a good idea at the time though."},
+        {"id": "tt_050", "text": "I don't mind either way to be honest with you."}
+      ]
+    },
+    {
+      "name": "tt_incomplete",
+      "category": "turn_taking",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "tt_051", "text": "I was going to say"},
+        {"id": "tt_052", "text": "What if we just"},
+        {"id": "tt_053", "text": "The thing is"},
+        {"id": "tt_054", "text": "Well I mean"},
+        {"id": "tt_055", "text": "So basically what happened was"},
+        {"id": "tt_056", "text": "I thought maybe we could"},
+        {"id": "tt_057", "text": "It's kind of like when you"},
+        {"id": "tt_058", "text": "Actually never mind"},
+        {"id": "tt_059", "text": "Hmm let me think"},
+        {"id": "tt_060", "text": "Wait what was I saying"}
+      ]
+    },
+    {
+      "name": "tt_multi_turn",
+      "category": "turn_taking",
+      "memory": false,
+      "multi_turn": true,
+      "questions": [
+        {"id": "ttm_001", "text": "What's your favorite season?"},
+        {"id": "ttm_002", "text": "Why do you like it?"},
+        {"id": "ttm_003", "text": "What do you usually do during that time of year?"}
+      ]
+    }
+  ]
+}

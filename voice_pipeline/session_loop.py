@@ -7,6 +7,7 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -83,6 +84,9 @@ class SessionLoop:
         token_counter: TokenCounter | None = None,
         trace_store: object | None = None,
         shutdown_event: threading.Event | None = None,
+        on_turn_complete: Callable[[float], None] | None = None,
+        disable_exit_keywords: bool = False,
+        skip_generation: bool = False,
     ) -> None:
         """Initialize the SessionLoop.
 
@@ -107,6 +111,11 @@ class SessionLoop:
                 trace 저장 skip.
             shutdown_event: 프로세스 전역 종료 시그널. ``None``이면
                 ``request_stop()``으로만 중단 가능.
+            on_turn_complete: 턴 완료 시 호출되는 콜백. turn_shift
+                monotonic timestamp를 인자로 전달.
+            disable_exit_keywords: True이면 exit keyword 감지 비활성화.
+            skip_generation: True이면 turn_shift 감지 시 응답 생성 없이
+                ASR 텍스트만 캡처하고 세션 종료.
         """
         self._asr = asr
         self._turn_detector = turn_detector
@@ -121,6 +130,9 @@ class SessionLoop:
         self._token_counter = token_counter
         self._trace_store = trace_store
         self._shutdown_event = shutdown_event
+        self._on_turn_complete_cb = on_turn_complete
+        self._disable_exit_keywords = disable_exit_keywords
+        self._skip_generation = skip_generation
 
         # External stop signal
         self._stop_event = threading.Event()
@@ -408,11 +420,23 @@ class SessionLoop:
 
     def _handle_turn_shift(self, text: str) -> bool:
         """Handle turn_shift decision. Returns True if session should end."""
-        if self._check_exit_keyword(text):
+        if not self._disable_exit_keywords and self._check_exit_keyword(text):
             logger.info("Exit keyword detected: %r", text)
             return True
 
         self._turn_shift_time = time.monotonic()
+
+        if self._skip_generation:
+            if text:
+                self._history.add_user_message(text)
+                self._save_utterance("user", text)
+            if self._on_turn_complete_cb is not None:
+                try:
+                    self._on_turn_complete_cb(self._turn_shift_time)
+                except Exception:
+                    logger.warning("on_turn_complete callback error", exc_info=True)
+            return True
+
         if self._generator.state == GeneratorState.STREAMING:
             self._begin_streaming()
         else:
@@ -426,7 +450,7 @@ class SessionLoop:
 
     def _handle_prepare(self, text: str) -> None:
         """Start speculative generation with current text."""
-        if self._awaiting_response:
+        if self._awaiting_response or self._skip_generation:
             return
         self._speculative_attempts += 1
         self._pending_truncation = None
@@ -568,6 +592,11 @@ class SessionLoop:
             self._turn_detector.notify_turn_complete("robot", text)
 
         self._save_trace("completed")
+        if self._on_turn_complete_cb is not None:
+            try:
+                self._on_turn_complete_cb(self._turn_shift_time)
+            except Exception:
+                logger.warning("on_turn_complete callback error", exc_info=True)
         self._turn_detector.reset()
         self._reset_playback_state()
 
