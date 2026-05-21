@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import queue
+import random
 import signal
 import sys
 import threading
@@ -42,10 +43,13 @@ try:
 except Exception:
     _asound = None
 
+import torch
 from question_player import QuestionPlayer
+from silero_vad import load_silero_vad
 
 from voice_pipeline.asr.asr import GoogleCloudASR
 from voice_pipeline.audio.audio_input import AudioInput
+from voice_pipeline.audio.constants import SAMPLE_RATE
 from voice_pipeline.bridge.cpp_bridge import CppBridge
 from voice_pipeline.core.types import AudioFrame
 from voice_pipeline.embedding.embedder import create_embedder
@@ -126,9 +130,11 @@ def _run_single_turn(
     turn_event = threading.Event()
     play_end_time = [0.0]
     turn_shift_time = [0.0]
+    final_asr_text = [""]
 
-    def on_turn_done(ts_time: float) -> None:
+    def on_turn_done(ts_time: float, asr_text: str) -> None:
         turn_shift_time[0] = ts_time
+        final_asr_text[0] = asr_text
         turn_event.set()
         components.session_loop.request_stop()
 
@@ -138,6 +144,7 @@ def _run_single_turn(
         memory_enabled=suite.get("memory", False),
         skip_generation=skip,
     )
+    components.history.new_session(components.session_id)
 
     def play_with_delay() -> None:
         time.sleep(_STARTUP_DELAY_SEC)
@@ -160,23 +167,132 @@ def _run_single_turn(
     player_thread.join(timeout=5.0)
 
     success = turn_event.is_set()
+    early_turn_shift = success and play_end_time[0] == 0.0
     vap_delay = None
-    if play_end_time[0] > 0 and turn_shift_time[0] >= play_end_time[0]:
+    if not early_turn_shift and play_end_time[0] > 0 and turn_shift_time[0] >= play_end_time[0]:
         vap_delay = round((turn_shift_time[0] - play_end_time[0]) * 1000, 1)
+
+    error = None
+    if not success:
+        error = "no_response"
+    elif early_turn_shift:
+        error = "early_turn_shift"
+
     session_map.append(
         {
             "question_id": question["id"],
             "session_id": components.session_id,
             "suite_name": suite["name"],
             "input_text": question["text"],
-            "success": success,
-            "error": None if success else "no_response",
-            "vap_detection_delay_ms": vap_delay,
+            "asr_text": final_asr_text[0],
+            "success": success and not early_turn_shift,
+            "error": error,
+            "turn_detection_delay_ms": vap_delay,
         }
     )
 
     status = "OK" if success else "FAIL"
     logger.info("[%s] %s: %s", status, question["id"], question["text"][:60])
+
+
+# ---------------------------------------------------------------------------
+# Interruption execution
+# ---------------------------------------------------------------------------
+
+
+def _run_interruption(
+    suite: dict,
+    question: dict,
+    wav_path: str,
+    interrupt_wav_path: str,
+    interrupt_delay_sec: float,
+    player: QuestionPlayer,
+    session_map: list[dict],
+    create_session: Callable[..., SessionComponents],
+    audio_queue: queue.Queue[AudioFrame],
+    interrupt_audio: str = "",
+) -> None:
+    """Execute one interruption test: play question, wait for response, interrupt."""
+    _drain_audio_queue(audio_queue)
+
+    turn_event = threading.Event()
+    playback_started_event = threading.Event()
+    play_end_time = [0.0]
+    turn_shift_time = [0.0]
+    interrupted = [False]
+
+    def on_turn_done(ts_time: float, asr_text: str) -> None:
+        turn_shift_time[0] = ts_time
+        turn_event.set()
+        components.session_loop.request_stop()
+
+    def on_playback_started() -> None:
+        playback_started_event.set()
+
+    components = create_session(
+        on_turn_complete=on_turn_done,
+        on_playback_started=on_playback_started,
+        memory_enabled=suite.get("memory", False),
+    )
+    components.history.new_session(components.session_id)
+
+    def play_and_interrupt() -> None:
+        time.sleep(_STARTUP_DELAY_SEC)
+        try:
+            player.play(wav_path)
+            play_end_time[0] = time.monotonic()
+        except Exception:
+            logger.error("Failed to play %s", wav_path, exc_info=True)
+            return
+
+        if not playback_started_event.wait(timeout=_TURN_TIMEOUT_SEC):
+            logger.error("Playback never started for %s", question["id"])
+            return
+        time.sleep(interrupt_delay_sec)
+
+        try:
+            player.play(interrupt_wav_path)
+            interrupted[0] = True
+        except Exception:
+            logger.error("Failed to play interrupt %s", interrupt_wav_path, exc_info=True)
+
+    player_thread = threading.Thread(target=play_and_interrupt, daemon=True)
+    player_thread.start()
+
+    try:
+        components.session_loop.run()
+    except Exception:
+        logger.error("SessionLoop error", exc_info=True)
+    finally:
+        components.history.save()
+
+    player_thread.join(timeout=10.0)
+
+    success = turn_event.is_set()
+    session_map.append(
+        {
+            "question_id": question["id"],
+            "session_id": components.session_id,
+            "suite_name": suite["name"],
+            "input_text": question["text"],
+            "interrupt_audio": interrupt_audio,
+            "interrupt_delay_sec": interrupt_delay_sec,
+            "interrupted": interrupted[0],
+            "success": success,
+            "error": None if success else "no_response",
+            "turn_detection_delay_ms": None,
+        }
+    )
+
+    status = "OK" if success else "FAIL"
+    logger.info(
+        "[%s] %s: delay=%.1fs int=%s interrupted=%s",
+        status,
+        question["id"],
+        interrupt_delay_sec,
+        interrupt_audio,
+        interrupted[0],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -199,9 +315,11 @@ def _run_multi_turn_suite(
     turn_event = threading.Event()
     turn_index = [0]
     turn_shift_times: dict[int, float] = {}
+    turn_asr_texts: dict[int, str] = {}
 
-    def on_turn_done(ts_time: float) -> None:
+    def on_turn_done(ts_time: float, asr_text: str) -> None:
         turn_shift_times[turn_index[0]] = ts_time
+        turn_asr_texts[turn_index[0]] = asr_text
         turn_index[0] += 1
         if turn_index[0] >= len(questions):
             components.session_loop.request_stop()
@@ -262,9 +380,10 @@ def _run_multi_turn_suite(
                 "session_id": components.session_id,
                 "suite_name": suite["name"],
                 "input_text": q["text"],
+                "asr_text": turn_asr_texts.get(i, ""),
                 "success": i < completed_turns,
                 "error": None if i < completed_turns else "incomplete",
-                "vap_detection_delay_ms": vap_delay,
+                "turn_detection_delay_ms": vap_delay,
             }
         )
 
@@ -287,6 +406,7 @@ def main() -> None:
     parser.add_argument("--device", default="default", help="ALSA device for question playback")
     parser.add_argument("--output-dir", default="data/eval/results", help="Output directory")
     parser.add_argument("--wav-dir", default="data/eval/wav", help="Directory with question WAVs")
+    parser.add_argument("--quick", action="store_true", help="Quick mode: 1 question per suite")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -299,7 +419,8 @@ def main() -> None:
             name, level = entry.split("=", 1)
             logging.getLogger(name.strip()).setLevel(level.strip().upper())
 
-    output_dir = Path(args.output_dir)
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path(args.output_dir) / run_timestamp
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Load questions & WAV manifest ---
@@ -331,6 +452,25 @@ def main() -> None:
     tts = OpenAITTS()
     vap = MaAIVAPWrapper(tts.output_sample_rate)
     turngpt = TurnGPTWrapper()
+    silero_vad_model = load_silero_vad(onnx=True)
+    _vad_buf = bytearray()
+    _vad_last_score = [0.0]
+    _vad_call_count = [0]
+    _VAD_INFER_INTERVAL = 3  # 3프레임(90ms)마다 추론, 사이는 캐시 반환
+    _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
+
+    def vad_fn(frame: AudioFrame) -> float:
+        _vad_call_count[0] += 1
+        if _vad_call_count[0] % _VAD_INFER_INTERVAL != 0:
+            return _vad_last_score[0]
+        _vad_buf.extend(frame)
+        while len(_vad_buf) >= _SILERO_CHUNK_BYTES:
+            chunk = bytes(_vad_buf[:_SILERO_CHUNK_BYTES])
+            del _vad_buf[:_SILERO_CHUNK_BYTES]
+            samples = torch.frombuffer(bytearray(chunk), dtype=torch.int16).float() / 32768.0
+            _vad_last_score[0] = silero_vad_model(samples, SAMPLE_RATE).item()
+        return _vad_last_score[0]
+
     bridge = CppBridge()
     led = LEDController()
     storage = create_storage_backend("sqlite", db_path=eval_db)
@@ -342,6 +482,10 @@ def main() -> None:
     memory_storage = SQLiteMemoryStorage(eval_db)
     trace_store = SQLiteTraceStore(eval_db)
     vector_index = NumpyVectorIndex()
+
+    AudioInput._DEVICE_INDEX = 1
+    AudioInput._CAPTURE_CHANNELS = 6
+    AudioInput._EXTRACT_CHANNEL = 0
 
     audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=_AUDIO_QUEUE_SIZE)
     audio_input = AudioInput(audio_queue)
@@ -356,6 +500,7 @@ def main() -> None:
     def create_session(
         *,
         on_turn_complete: Callable[[float], None] | None = None,
+        on_playback_started: Callable[[], None] | None = None,
         memory_enabled: bool = True,
         skip_generation: bool = False,
     ) -> SessionComponents:
@@ -374,7 +519,7 @@ def main() -> None:
         ms = memory_storage if memory_enabled else None
         history = ConversationHistory(storage, token_counter)
         retriever = MemoryRetriever(memory_storage, vector_index, embedder) if memory_enabled else None
-        turn_detector = TurnDetector(async_vap, async_turngpt, embedder)
+        turn_detector = TurnDetector(async_vap, async_turngpt, embedder, vad_fn=vad_fn)
         generator = SpeechGenerator(
             llm,
             tts,
@@ -402,6 +547,7 @@ def main() -> None:
             trace_store=trace_store,
             shutdown_event=shutdown_event,
             on_turn_complete=on_turn_complete,
+            on_playback_started=on_playback_started,
             disable_exit_keywords=True,
             skip_generation=skip_generation,
         )
@@ -430,11 +576,49 @@ def main() -> None:
         for suite in questions_data["suites"]:
             if shutdown_event.is_set():
                 break
-            logger.info("Suite: %s (%d questions)", suite["name"], len(suite["questions"]))
 
-            if suite.get("multi_turn"):
+            category = suite.get("category", "")
+            if category.startswith("_"):
+                continue
+
+            questions = suite["questions"]
+            if args.quick and len(questions) > 1:
+                questions = random.sample(questions, 1)
+
+            logger.info("Suite: %s (%d/%d questions)", suite["name"], len(questions), len(suite["questions"]))
+
+            if suite.get("category") == "interruption":
+                delays = suite.get("interrupt_delays_sec", [2.0])
+                interrupt_audios = suite.get("interrupt_audios", [])
+                if not interrupt_audios:
+                    logger.error("Suite %s has no interrupt_audios", suite["name"])
+                    continue
+                for delay in delays:
+                    for int_id in interrupt_audios:
+                        interrupt_wav = wav_map.get(int_id, "")
+                        if not interrupt_wav:
+                            logger.error("No WAV for interrupt %s", int_id)
+                            continue
+                        for question in questions:
+                            if shutdown_event.is_set():
+                                break
+                            wav_path = wav_map[question["id"]]
+                            _run_interruption(
+                                suite,
+                                question,
+                                wav_path,
+                                interrupt_wav,
+                                delay,
+                                player,
+                                session_map,
+                                create_session,
+                                audio_queue,
+                                interrupt_audio=int_id,
+                            )
+            elif suite.get("multi_turn"):
+                sampled_suite = {**suite, "questions": questions}
                 _run_multi_turn_suite(
-                    suite,
+                    sampled_suite,
                     wav_map,
                     player,
                     session_map,
@@ -442,7 +626,7 @@ def main() -> None:
                     audio_queue,
                 )
             else:
-                for question in suite["questions"]:
+                for question in questions:
                     if shutdown_event.is_set():
                         break
                     wav_path = wav_map[question["id"]]
@@ -488,6 +672,26 @@ def main() -> None:
         len(session_map),
         sessions_path,
     )
+
+    # --- Report & Score & Dashboard ---
+    from dashboard import build_html
+    from report import build_report, print_summary
+    from score import print_scores, score_report
+
+    report = build_report(output_dir)
+    report_path = output_dir / "report.json"
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+
+    scored = score_report(report)
+    scored_path = output_dir / "scored.json"
+    scored_path.write_text(json.dumps(scored, indent=2, ensure_ascii=False))
+
+    dashboard_path = output_dir / "dashboard.html"
+    dashboard_path.write_text(build_html(scored))
+
+    print_summary(report)
+    print_scores(scored)
+    logger.info("Dashboard: %s", dashboard_path)
 
 
 if __name__ == "__main__":

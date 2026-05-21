@@ -53,7 +53,7 @@ class SpeechGenerator(ISpeechGenerator):
 
     MAX_WORKERS = 2  # 백그라운드 파이프라인 스레드 풀 크기 — 취소된 run이 API에 blocking되어도 새 prepare 즉시 시작
     _PIPELINE_MODE: Literal["full", "sentence"] = (
-        "full"  # TTS 파이프라인 모드 — full: LLM 완성 후 TTS, sentence: 문장별 스트리밍
+        "sentence"  # TTS 파이프라인 모드 — full: LLM 완성 후 TTS, sentence: 문장별 스트리밍
     )
     _QUERY_CONTEXT_TURNS = 3  # 메모리 검색 query에 포함할 최근 history turn 수
     _MIN_FLUSH_WORDS = 4  # sentence 모드에서 TTS flush 전 최소 단어 수 (짧은 감탄사를 다음 문장과 합침)

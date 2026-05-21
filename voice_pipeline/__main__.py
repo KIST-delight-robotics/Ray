@@ -29,8 +29,12 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
+import torch
+from silero_vad import load_silero_vad
+
 from voice_pipeline.asr.asr import GoogleCloudASR
 from voice_pipeline.audio.audio_input import AudioInput
+from voice_pipeline.audio.constants import SAMPLE_RATE
 from voice_pipeline.bridge.cpp_bridge import CppBridge
 from voice_pipeline.core.types import AudioFrame, CppEventType, LEDState, SystemMode
 from voice_pipeline.embedding.embedder import create_embedder
@@ -134,7 +138,26 @@ def main() -> None:
     vap = MaAIVAPWrapper(tts.output_sample_rate)
     turngpt = TurnGPTWrapper()
     bridge = CppBridge()
-    wakeword = WakewordDetector(language_code=language_code)
+    silero_vad_model = load_silero_vad(onnx=True)
+    _vad_buf = bytearray()
+    _vad_last_score = [0.0]
+    _vad_call_count = [0]
+    _VAD_INFER_INTERVAL = 3  # 3프레임(90ms)마다 추론, 사이는 캐시 반환
+    _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
+
+    def vad_fn(frame: AudioFrame) -> float:
+        _vad_call_count[0] += 1
+        if _vad_call_count[0] % _VAD_INFER_INTERVAL != 0:
+            return _vad_last_score[0]
+        _vad_buf.extend(frame)
+        while len(_vad_buf) >= _SILERO_CHUNK_BYTES:
+            chunk = bytes(_vad_buf[:_SILERO_CHUNK_BYTES])
+            del _vad_buf[:_SILERO_CHUNK_BYTES]
+            samples = torch.frombuffer(bytearray(chunk), dtype=torch.int16).float() / 32768.0
+            _vad_last_score[0] = silero_vad_model(samples, SAMPLE_RATE).item()
+        return _vad_last_score[0]
+
+    wakeword = WakewordDetector(language_code=language_code, vad_model=silero_vad_model)
     led = LEDController()
     storage = create_storage_backend()
     executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
@@ -183,7 +206,7 @@ def main() -> None:
 
         history = ConversationHistory(storage, token_counter)
         retriever = MemoryRetriever(memory_storage, vector_index, embedder)
-        turn_detector = TurnDetector(async_vap, async_turngpt, embedder)
+        turn_detector = TurnDetector(async_vap, async_turngpt, embedder, vad_fn=vad_fn)
         generator = SpeechGenerator(
             llm,
             tts,

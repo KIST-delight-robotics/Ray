@@ -28,8 +28,8 @@ class AudioInput(IAudioInput):
     """
 
     _THREAD_JOIN_TIMEOUT_SEC = 2.0  # 캡처 스레드 종료 대기 (초)
-    _DEVICE_INDEX: int | None = None  # PyAudio 입력 디바이스 인덱스. None은 시스템 기본 장치
-    _CAPTURE_CHANNELS: int | None = None  # 디바이스에서 캡처할 채널 수. None은 mono (ReSpeaker 6ch는 6)
+    _DEVICE_INDEX: int | None = 1  # PyAudio 입력 디바이스 인덱스. None은 시스템 기본 장치
+    _CAPTURE_CHANNELS: int | None = 6  # 디바이스에서 캡처할 채널 수. None은 mono (ReSpeaker 6ch는 6)
     _EXTRACT_CHANNEL = 0  # 다중 채널 캡처 시 mono 추출에 사용할 채널 인덱스 (0-based)
 
     def __init__(self, audio_queue: queue.Queue[AudioFrame]) -> None:

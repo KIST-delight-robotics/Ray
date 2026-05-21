@@ -75,19 +75,22 @@ class WakewordDetector(IWakewordDetector):
     def __init__(
         self,
         language_code: str = "en-US",
+        vad_model: object | None = None,
     ) -> None:
         self.language_code = language_code
 
-        if torch is None or load_silero_vad is None:
-            raise WakewordError(
-                "torch and silero-vad are required for wakeword detection. Install with: uv sync --extra models-pytorch"
-            )
-
-        # Load Silero VAD model
-        try:
-            self._vad_model = load_silero_vad(onnx=False)
-        except Exception as exc:
-            raise WakewordError(f"Failed to load Silero VAD model: {exc}") from exc
+        if vad_model is not None:
+            self._vad_model = vad_model
+        else:
+            if torch is None or load_silero_vad is None:
+                raise WakewordError(
+                    "torch and silero-vad are required for wakeword detection. "
+                    "Install with: uv sync --extra models-pytorch"
+                )
+            try:
+                self._vad_model = load_silero_vad(onnx=True)
+            except Exception as exc:
+                raise WakewordError(f"Failed to load Silero VAD model: {exc}") from exc
 
         # Create Google STT client
         try:

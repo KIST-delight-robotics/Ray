@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import enum
 import logging
+from collections.abc import Callable
 from typing import Literal
 
 import numpy as np
@@ -59,6 +60,9 @@ class TurnDetector(ITurnDetector):
     # ROBOT_TURN 중 interrupt 판정
     _INTERRUPT_USER_THRESHOLD = 0.5  # p_now/p_fut가 이 값 초과면 user 선호
 
+    # 외부 VAD 임계값 (vad_fn 사용 시)
+    _EXT_VAD_THRESHOLD = 0.5
+
     # speculative 생성 트리거 (prepare)
     _PREPARE_TURNGPT_THRESHOLD = 0.2  # TurnGPT 확률이 이 값 초과면 prepare
     _PREPARE_TIMEOUT_SEC = 0.2  # 마지막 ASR 변화 후 이 시간 경과면 prepare
@@ -69,10 +73,12 @@ class TurnDetector(ITurnDetector):
         vap: IVAP,
         turngpt: AsyncTurnGPT | SyncTurnGPTAdapter,
         embedder: IEmbedder,
+        vad_fn: Callable[[AudioFrame], float] | None = None,
     ) -> None:
         self._vap = vap
         self._turngpt = turngpt
         self._embedder = embedder
+        self._vad_fn = vad_fn
 
         self._frame_duration_sec = FRAME_DURATION_MS / 1000.0
 
@@ -103,8 +109,13 @@ class TurnDetector(ITurnDetector):
         """Process one pipeline frame and return a turn decision."""
         vap_result = self._vap.feed_audio(user_audio, robot_audio)
 
+        if self._vad_fn is not None:
+            user_is_speaking = self._vad_fn(user_audio) > self._EXT_VAD_THRESHOLD
+        else:
+            user_is_speaking = vap_result.user_is_speaking
+
         if self._turn_state is _TurnState.ROBOT_TURN:
-            return self._process_robot_turn(vap_result, robot_audio)
+            return self._process_robot_turn(vap_result, user_is_speaking, robot_audio)
 
         # --- USER_TURN ---
         elapsed = self._frame_duration_sec * frame_count
@@ -123,7 +134,7 @@ class TurnDetector(ITurnDetector):
         self._prev_asr_text = asr_text
 
         # Update timers (scaled by frame_count)
-        if not vap_result.user_is_speaking:
+        if not user_is_speaking:
             self._silence_elapsed_sec += elapsed
         else:
             self._silence_elapsed_sec = 0.0
@@ -131,7 +142,7 @@ class TurnDetector(ITurnDetector):
         self._last_asr_change_elapsed_sec += elapsed
 
         # --- Turn-shift check (only when user NOT speaking and text exists) ---
-        if not vap_result.user_is_speaking and asr_text and self._check_turn_shift(vap_result, elapsed):
+        if not user_is_speaking and asr_text and self._check_turn_shift(vap_result, elapsed):
             logger.info("TURN_SHIFT: %r", asr_text[:60])
             logger.debug(
                 "TURN_SHIFT detail: p_now=%.2f p_fut=%.2f turngpt=%.2f silence=%.2fs",
@@ -213,7 +224,9 @@ class TurnDetector(ITurnDetector):
         # Fallback: last entry should always match (prob >= 0.0)
         return self._TURNGPT_THRESHOLDS[-1][1]
 
-    def _process_robot_turn(self, vap_result: VAPResult, robot_audio: AudioFrame | None) -> TurnDecision:
+    def _process_robot_turn(
+        self, vap_result: VAPResult, user_is_speaking: bool, robot_audio: AudioFrame | None
+    ) -> TurnDecision:
         """Interrupt detection during ROBOT_TURN.
 
         Follows Skantze & Irfan (2025) pseudocode: user_is_speaking is a
@@ -222,7 +235,7 @@ class TurnDetector(ITurnDetector):
         vs backchannel. Without robot_audio, VAP lacks the robot channel
         to make this distinction, so no interrupt decision is made.
         """
-        if not vap_result.user_is_speaking:
+        if not user_is_speaking:
             return TurnDecision.none()
 
         # VAP needs both channels to distinguish interrupt vs backchannel
