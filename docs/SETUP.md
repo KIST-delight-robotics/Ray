@@ -10,7 +10,8 @@ sudo apt update && sudo apt install -y \
   build-essential cmake pkg-config \
   libsndfile1-dev \
   libasound2-dev portaudio19-dev \
-  libopenal-dev libvorbis-dev libflac-dev libogg-dev
+  libopenal-dev libvorbis-dev libflac-dev libogg-dev \
+  zlib1g-dev
 ```
 
 
@@ -101,7 +102,7 @@ cmake -DMOTOR_ENABLED=OFF ..
 
 ```bash
 wget -O models.zip "https://kist.gov-dooray.com/share/drive-files/m1olidaukdr7.5LnEpNTcR1OgoDBYEyMAQA"
-unzip models.zip -d models/
+unzip models.zip
 rm models.zip
 ```
 
@@ -126,7 +127,57 @@ source ~/.bashrc
 ```
 
 
-## 9. WiFi 절전 모드 해제 (권장)
+## 9. USB 전류 한도 해제 (GPIO/비PD 전원 공급 시)
+
+공식 27W USB-C PD 어댑터가 아닌 경로(GPIO 등)로 전원을 공급하면, RPi 5 펌웨어는 PD 협상이 없으므로 USB 전체 전류 한도를 600mA로 강제 제한한다. USB 마이크 + 다른 주변기기를 함께 쓰면 쉽게 over-current가 발생한다.
+
+`/boot/firmware/config.txt` 끝에 추가:
+
+```
+usb_max_current_enable=1
+```
+
+재부팅 후 적용. 공급 전원 용량이 충분하다는 전제하에만 사용한다.
+
+확인:
+
+```bash
+# under-voltage 알람 비트 (0=정상)
+cat /sys/class/hwmon/hwmon3/in0_lcrit_alarm
+
+# 과거 over-current 이벤트 조회
+journalctl -k --no-pager | grep -i over-current
+```
+
+
+## 10. FTDI USB-Serial latency 단축 (모터 통신 응답성)
+
+Dynamixel U2D2는 FTDI 기반 USB-Serial 어댑터를 사용하는데, Linux의 FTDI 드라이버는 기본적으로 수신 바이트를 **16ms 동안 버퍼링한 뒤** 유저스페이스로 전달한다. 이 때문에 status 응답을 기다리는 모든 SDK 호출(`readAllState`, `write*TxRx` 등)이 호출당 최대 16ms씩 늘어난다.
+
+증상:
+- 짧은 주기 로깅(예: `HighFreqLogger`의 5ms 목표)이 실제로는 ~16ms로 돔
+- `dxl_mutex_`가 사실상 포화되어 다른 모터 제어 스레드가 starve → 동작이 "끊기고 휙휙" 튀는 현상
+
+udev 규칙으로 latency timer를 1ms로 단축:
+
+```bash
+sudo tee /etc/udev/rules.d/99-ftdi-latency.rules << 'EOF'
+ACTION=="add", SUBSYSTEM=="usb-serial", ATTR{latency_timer}="1"
+EOF
+
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+재부팅 후 적용 확인:
+
+```bash
+cat /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
+# 출력: 1
+```
+
+
+## 11. WiFi 절전 모드 해제 (권장)
 
 RPi 5의 WiFi는 기본적으로 Power Management가 켜져 있어, 유휴 시 속도가 크게 떨어진다.
 
