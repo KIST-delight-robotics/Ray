@@ -84,7 +84,8 @@ class SessionLoop:
         token_counter: TokenCounter | None = None,
         trace_store: object | None = None,
         shutdown_event: threading.Event | None = None,
-        on_turn_complete: Callable[[float], None] | None = None,
+        on_turn_complete: Callable[[float, str], None] | None = None,
+        on_playback_started: Callable[[], None] | None = None,
         disable_exit_keywords: bool = False,
         skip_generation: bool = False,
     ) -> None:
@@ -111,8 +112,9 @@ class SessionLoop:
                 trace 저장 skip.
             shutdown_event: 프로세스 전역 종료 시그널. ``None``이면
                 ``request_stop()``으로만 중단 가능.
-            on_turn_complete: 턴 완료 시 호출되는 콜백. turn_shift
-                monotonic timestamp를 인자로 전달.
+            on_turn_complete: 턴 완료 시 호출되는 콜백.
+                (turn_shift_time, asr_text) 전달.
+            on_playback_started: 응답 재생 시작 시 호출되는 콜백.
             disable_exit_keywords: True이면 exit keyword 감지 비활성화.
             skip_generation: True이면 turn_shift 감지 시 응답 생성 없이
                 ASR 텍스트만 캡처하고 세션 종료.
@@ -131,6 +133,7 @@ class SessionLoop:
         self._trace_store = trace_store
         self._shutdown_event = shutdown_event
         self._on_turn_complete_cb = on_turn_complete
+        self._on_playback_started_cb = on_playback_started
         self._disable_exit_keywords = disable_exit_keywords
         self._skip_generation = skip_generation
 
@@ -254,6 +257,7 @@ class SessionLoop:
         self._user_msg_id = None
         self._assistant_msg_id = None
         self._turn_shift_time = 0.0
+        self._turn_shift_asr_text = ""
         self._begin_streaming_time = 0.0
         self._speculative_attempts = 0
 
@@ -426,13 +430,15 @@ class SessionLoop:
 
         self._turn_shift_time = time.monotonic()
 
+        self._turn_shift_asr_text = text
+
         if self._skip_generation:
             if text:
                 self._history.add_user_message(text)
                 self._save_utterance("user", text)
             if self._on_turn_complete_cb is not None:
                 try:
-                    self._on_turn_complete_cb(self._turn_shift_time)
+                    self._on_turn_complete_cb(self._turn_shift_time, text)
                 except Exception:
                     logger.warning("on_turn_complete callback error", exc_info=True)
             return True
@@ -565,6 +571,11 @@ class SessionLoop:
                         trace = self._generator.trace
                         if trace is not None:
                             trace.playback_started_ts = self._playback_start_time
+                        if self._on_playback_started_cb is not None:
+                            try:
+                                self._on_playback_started_cb()
+                            except Exception:
+                                logger.warning("on_playback_started callback error", exc_info=True)
 
                 elif event.event_type == CppEventType.PLAYBACK_COMPLETE:
                     if self._playback_state == PlaybackState.PLAYING:
@@ -594,7 +605,7 @@ class SessionLoop:
         self._save_trace("completed")
         if self._on_turn_complete_cb is not None:
             try:
-                self._on_turn_complete_cb(self._turn_shift_time)
+                self._on_turn_complete_cb(self._turn_shift_time, self._turn_shift_asr_text)
             except Exception:
                 logger.warning("on_turn_complete callback error", exc_info=True)
         self._turn_detector.reset()
@@ -618,6 +629,11 @@ class SessionLoop:
         logger.debug("Playback interrupted (barge-in): stop_pos=%.2fs full=%r", stop_pos, text)
 
         if not text:
+            if self._on_turn_complete_cb is not None:
+                try:
+                    self._on_turn_complete_cb(self._turn_shift_time, self._turn_shift_asr_text)
+                except Exception:
+                    logger.warning("on_turn_complete callback error", exc_info=True)
             self._turn_detector.reset()
             self._reset_playback_state()
             return
@@ -657,6 +673,11 @@ class SessionLoop:
                 )
 
         self._save_trace("truncated")
+        if self._on_turn_complete_cb is not None:
+            try:
+                self._on_turn_complete_cb(self._turn_shift_time, self._turn_shift_asr_text)
+            except Exception:
+                logger.warning("on_turn_complete callback error", exc_info=True)
         self._turn_detector.reset()
         self._reset_playback_state()
 
@@ -679,11 +700,7 @@ class SessionLoop:
             return
 
         # Stream done — get precise data
-        try:
-            response_data = self._generator.get_response_data()
-        except RuntimeError:
-            self._pending_truncation = None
-            return
+        response_data = self._generator.get_response_data()
 
         if response_data.has_timestamps:
             corrected = truncate_by_timestamps(
@@ -820,10 +837,7 @@ class SessionLoop:
         """Get the current response text from generator or current_response."""
         if self._current_response is not None:
             return self._current_response.text
-        try:
-            return self._generator.get_text()
-        except RuntimeError:
-            return ""
+        return self._generator.get_text()
 
     def _reset_playback_state(self) -> None:
         """Reset to IDLE after playback ends (complete or interrupted)."""

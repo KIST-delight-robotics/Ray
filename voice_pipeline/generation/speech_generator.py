@@ -360,14 +360,11 @@ class SpeechGenerator(ISpeechGenerator):
 
             # 3a. Collect LLM metrics and build turn_items
             metrics_list: list[LLMMetrics] = []
-            try:
-                llm_result = llm_stream.result
-                if llm_result.metrics is not None:
-                    metrics_list.append(llm_result.metrics)
-                    if trace is not None:
-                        trace.llm_ttft_ms = float(llm_result.metrics.ttft_ms)
-            except RuntimeError:
-                pass  # Stream was closed early, no result available
+            llm_result = llm_stream.result
+            if llm_result.metrics is not None:
+                metrics_list.append(llm_result.metrics)
+                if trace is not None:
+                    trace.llm_ttft_ms = float(llm_result.metrics.ttft_ms)
 
             # 4. Strip citation tag + URLs
             clean_text, cited_indices = parse_citation_tag(full_text)
@@ -554,14 +551,15 @@ class SpeechGenerator(ISpeechGenerator):
                 for chunk in llm_stream:
                     if cancel_event.is_set():
                         llm_stream.close()
-                        break
+                        return
                     if llm_first and trace is not None:
                         trace.llm_first_token_ts = time.monotonic()
                         llm_first = False
                     text_chunks.append(chunk)
                     for sentence in detector.feed(chunk):
                         if cancel_event.is_set():
-                            break
+                            llm_stream.close()
+                            return
                         sentence = strip_urls(sentence)
                         if not sentence:
                             continue
@@ -582,27 +580,23 @@ class SpeechGenerator(ISpeechGenerator):
 
             # Collect LLM metrics
             metrics_list: list[LLMMetrics] = []
-            try:
-                llm_result = llm_stream.result
-                if llm_result.metrics is not None:
-                    metrics_list.append(llm_result.metrics)
-                    if trace is not None:
-                        trace.llm_ttft_ms = float(llm_result.metrics.ttft_ms)
-            except RuntimeError:
-                pass
+            llm_result = llm_stream.result
+            if llm_result.metrics is not None:
+                metrics_list.append(llm_result.metrics)
+                if trace is not None:
+                    trace.llm_ttft_ms = float(llm_result.metrics.ttft_ms)
 
             # 4. Flush remaining buffer + parse citation tag
             cited_indices: list[int] = []
-            if not cancel_event.is_set():
-                remainder = detector.flush()
-                if remainder:
-                    clean_remainder, cited_indices = parse_citation_tag(remainder)
-                    clean_remainder = strip_urls(clean_remainder).strip()
-                    if clean_remainder:
-                        future = tts_executor.submit(self._tts.synthesize, clean_remainder)
-                        future_queue.put((clean_remainder, future))
-                else:
-                    _, cited_indices = parse_citation_tag(full_text)
+            remainder = detector.flush()
+            if remainder:
+                clean_remainder, cited_indices = parse_citation_tag(remainder)
+                clean_remainder = strip_urls(clean_remainder).strip()
+                if clean_remainder:
+                    future = tts_executor.submit(self._tts.synthesize, clean_remainder)
+                    future_queue.put((clean_remainder, future))
+            else:
+                _, cited_indices = parse_citation_tag(full_text)
 
             # 5. Signal consumer to finish, then wait
             future_queue.put(None)
@@ -754,18 +748,15 @@ class SpeechGenerator(ISpeechGenerator):
                     self._text = " ".join(accumulated_text)
 
                 # Collect timestamps with offset correction.
-                try:
-                    for wt in tts_stream.timestamps:
-                        offset_sec = audio_offset_bytes / (self._tts.output_sample_rate * 2)
-                        all_timestamps.append(
-                            WordTimestamp(
-                                word=wt.word,
-                                start_sec=wt.start_sec + offset_sec,
-                                end_sec=wt.end_sec + offset_sec,
-                            )
+                for wt in tts_stream.timestamps:
+                    offset_sec = audio_offset_bytes / (self._tts.output_sample_rate * 2)
+                    all_timestamps.append(
+                        WordTimestamp(
+                            word=wt.word,
+                            start_sec=wt.start_sec + offset_sec,
+                            end_sec=wt.end_sec + offset_sec,
                         )
-                except Exception:
-                    pass  # timestamps not available
+                    )
 
                 audio_offset_bytes += len(sentence_audio)
 
