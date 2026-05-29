@@ -18,6 +18,7 @@ dependencies = [
     "transformers>=4.0",
     "sentence-transformers>=3.0,<4.0",
     "optimum[onnxruntime]",
+    "rpi5-ws2812>=0.1.2 ; sys_platform == 'linux'",
 ]
 
 [tool.uv.sources]
@@ -37,7 +38,6 @@ models-pytorch = [
     "wandb>=0.25",
     "soundfile>=0.13",
 ]
-hardware = ["rpi5-ws2812>=0.1.2"]
 
 [dependency-groups]
 dev = [

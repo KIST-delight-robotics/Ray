@@ -2550,6 +2550,7 @@ dependencies = [
     { name = "openai" },
     { name = "optimum", extra = ["onnxruntime"] },
     { name = "pyaudio" },
+    { name = "rpi5-ws2812", marker = "sys_platform == 'linux'" },
     { name = "sentence-transformers" },
     { name = "silero-vad" },
     { name = "tiktoken" },
@@ -2558,9 +2559,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-hardware = [
-    { name = "rpi5-ws2812" },
-]
 models-pytorch = [
     { name = "einops" },
     { name = "maai" },
@@ -2591,7 +2589,7 @@ requires-dist = [
     { name = "optimum", extras = ["onnxruntime"] },
     { name = "pyaudio", specifier = ">=0.2.14" },
     { name = "pytorch-lightning", marker = "extra == 'models-pytorch'", specifier = ">=2.0" },
-    { name = "rpi5-ws2812", marker = "extra == 'hardware'", specifier = ">=0.1.2" },
+    { name = "rpi5-ws2812", marker = "sys_platform == 'linux'", specifier = ">=0.1.2" },
     { name = "sentence-transformers", specifier = ">=3.0,<4.0" },
     { name = "silero-vad", specifier = ">=5.0" },
     { name = "soundfile", marker = "extra == 'models-pytorch'", specifier = ">=0.13" },
@@ -2604,7 +2602,7 @@ requires-dist = [
     { name = "wandb", marker = "extra == 'models-pytorch'", specifier = ">=0.25" },
     { name = "websockets", specifier = ">=14.0,<17.0" },
 ]
-provides-extras = ["models-pytorch", "hardware"]
+provides-extras = ["models-pytorch"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2736,8 +2734,8 @@ name = "rpi5-ws2812"
 version = "0.1.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy" },
-    { name = "spidev" },
+    { name = "numpy", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "spidev", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/83/4b/fcd174ff64505b01f2d330408504c52380d32f16ee48e1b38a754159f0b3/rpi5_ws2812-0.1.2.tar.gz", hash = "sha256:b5eb0f7f709429f336be2617946bad7a45ddaafafd36e817a2c2df15f08e61e0", size = 4474, upload-time = "2024-08-18T10:53:20.513Z" }
 wheels = [

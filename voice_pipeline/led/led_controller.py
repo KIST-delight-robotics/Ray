@@ -37,7 +37,9 @@ class LEDController(ILEDController):
 
     Hardware:
         Uses ``rpi5_ws2812.WS2812SpiDriver`` when available. Falls back to
-        logging-only mode when the driver is not installed (development/CI).
+        logging-only (noop) mode when the driver is not installed
+        (development/CI) or when constructed with ``enabled=False`` (e.g. no
+        LED hardware connected).
 
     Threading:
         A daemon thread runs the animation loop. ``set_state()`` is thread-safe
@@ -58,7 +60,8 @@ class LEDController(ILEDController):
         LEDState.IDLE: StaticAnimation(bar_color=(233, 233, 50), ring_color=(233, 233, 50)),
     }
 
-    def __init__(self) -> None:
+    def __init__(self, enabled: bool = True) -> None:
+        self._enabled = enabled
         self._animations = dict(self._ANIMATIONS)
         self._brightness = self._BRIGHTNESS
 
@@ -85,6 +88,9 @@ class LEDController(ILEDController):
     # ------------------------------------------------------------------
 
     def _init_strip(self) -> None:
+        if not self._enabled:
+            logger.info("LED disabled (enabled=False) — LED controller running in noop mode")
+            return
         if _WS2812SpiDriver is None:
             logger.info("rpi5_ws2812 not available — LED controller running in noop mode")
             return

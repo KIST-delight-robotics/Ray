@@ -158,7 +158,10 @@ def main() -> None:
         return _vad_last_score[0]
 
     wakeword = WakewordDetector(language_code=language_code, vad_model=silero_vad_model)
-    led = LEDController()
+    # LED can be disabled at runtime (e.g. no LED hardware connected) via env var.
+    # cpp/config.toml is C++-only, so the Python side reads LED_ENABLED directly.
+    led_enabled = os.environ.get("LED_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+    led = LEDController(enabled=led_enabled)
     storage = create_storage_backend()
     executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
     token_counter = create_token_counter(llm.model)

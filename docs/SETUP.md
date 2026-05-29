@@ -43,10 +43,10 @@ git clone https://github.com/MaAI-Kyoto/MaAI.git external/MaAI
 ## 4. Python 의존성 설치
 
 ```bash
-uv sync --extra hardware
+uv sync
 ```
 
-> `--extra hardware`는 LED 드라이버(`rpi5-ws2812`) 등 하드웨어 의존성을 함께 설치한다. RPi가 아닌 환경에서는 `uv sync`만으로 충분하다.
+> LED 드라이버(`rpi5-ws2812`)는 기본 의존성이며 `sys_platform == 'linux'` 마커로 Linux에서만 설치된다. macOS/Windows에서는 자동 제외되고 LED 계층은 noop으로 폴백한다. 하드웨어가 연결돼 있어도 LED를 끄려면 `LED_ENABLED=0`으로 실행한다.
 
 테스트로 설치 확인:
 
