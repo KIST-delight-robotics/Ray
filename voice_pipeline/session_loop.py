@@ -629,14 +629,7 @@ class SessionLoop:
         logger.debug("Playback interrupted (barge-in): stop_pos=%.2fs full=%r", stop_pos, text)
 
         if not text:
-            if self._on_turn_complete_cb is not None:
-                try:
-                    self._on_turn_complete_cb(self._turn_shift_time, self._turn_shift_asr_text)
-                except Exception:
-                    logger.warning("on_turn_complete callback error", exc_info=True)
-            self._turn_detector.reset()
-            self._reset_playback_state()
-            return
+            logger.warning("Playback interrupted but response text is empty — possible bug")
 
         if self._current_response is not None:
             # Case A or B: ResponseData available

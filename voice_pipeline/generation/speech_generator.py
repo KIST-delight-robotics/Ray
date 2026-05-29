@@ -713,6 +713,12 @@ class SpeechGenerator(ISpeechGenerator):
                     consumer_error.append(exc)
                     return
 
+                accumulated_text.append(sentence_text)
+                with self._lock:
+                    if run_id != self._run_id:
+                        return
+                    self._text = " ".join(accumulated_text)
+
                 # Drain this sentence's TTS stream.
                 sentence_audio = bytearray()
                 try:
@@ -739,13 +745,6 @@ class SpeechGenerator(ISpeechGenerator):
                         tts_stream.close()
                     consumer_error.append(exc)
                     return
-
-                # Update accumulated text + self._text after this sentence.
-                accumulated_text.append(sentence_text)
-                with self._lock:
-                    if run_id != self._run_id:
-                        return
-                    self._text = " ".join(accumulated_text)
 
                 # Collect timestamps with offset correction.
                 for wt in tts_stream.timestamps:
