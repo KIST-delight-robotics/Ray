@@ -224,6 +224,30 @@
         {"id": "ttm_002", "text": "Why do you like it?"},
         {"id": "ttm_003", "text": "What do you usually do during that time of year?"}
       ]
+    },
+    {
+      "name": "int_during_playback",
+      "category": "interruption",
+      "memory": false,
+      "multi_turn": false,
+      "interrupt_delays_sec": [0.0, 1.0, 2.0, 3.0],
+      "interrupt_audios": ["int_i_001", "int_i_002", "int_i_003"],
+      "questions": [
+        {"id": "int_q_001", "text": "Tell me about the history of computers."},
+        {"id": "int_q_002", "text": "Can you explain how airplanes fly?"},
+        {"id": "int_q_003", "text": "What are the benefits of exercise?"}
+      ]
+    },
+    {
+      "name": "_int_audio",
+      "category": "_audio_only",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "int_i_001", "text": "Stop."},
+        {"id": "int_i_002", "text": "Hey, wait a second."},
+        {"id": "int_i_003", "text": "Wait, I have a question about something else actually."}
+      ]
     }
   ]
 }

@@ -219,7 +219,7 @@ def _run_interruption(
     playback_started_event = threading.Event()
     play_end_time = [0.0]
     turn_shift_time = [0.0]
-    interrupted = [False]
+    interrupt_played = [False]
 
     def on_turn_done(ts_time: float, asr_text: str) -> None:
         turn_shift_time[0] = ts_time
@@ -252,7 +252,7 @@ def _run_interruption(
 
         try:
             player.play(interrupt_wav_path)
-            interrupted[0] = True
+            interrupt_played[0] = True
         except Exception:
             logger.error("Failed to play interrupt %s", interrupt_wav_path, exc_info=True)
 
@@ -277,7 +277,7 @@ def _run_interruption(
             "input_text": question["text"],
             "interrupt_audio": interrupt_audio,
             "interrupt_delay_sec": interrupt_delay_sec,
-            "interrupted": interrupted[0],
+            "interrupt_played": interrupt_played[0],
             "success": success,
             "error": None if success else "no_response",
             "turn_detection_delay_ms": None,
@@ -286,12 +286,12 @@ def _run_interruption(
 
     status = "OK" if success else "FAIL"
     logger.info(
-        "[%s] %s: delay=%.1fs int=%s interrupted=%s",
+        "[%s] %s: delay=%.1fs int=%s played=%s",
         status,
         question["id"],
         interrupt_delay_sec,
         interrupt_audio,
-        interrupted[0],
+        interrupt_played[0],
     )
 
 
@@ -409,19 +409,23 @@ def main() -> None:
     parser.add_argument("--quick", action="store_true", help="Quick mode: 1 question per suite")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(name)-40s %(levelname)-7s %(message)s",
-    )
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path(args.output_dir) / run_timestamp
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    log_format = "%(asctime)s %(name)-40s %(levelname)-7s %(message)s"
+    logging.basicConfig(level=logging.INFO, format=log_format)
+    file_handler = logging.FileHandler(output_dir / "eval.log")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(log_format))
+    logging.getLogger("voice_pipeline").setLevel(logging.DEBUG)
+    logging.getLogger().addHandler(file_handler)
+
     for entry in os.environ.get("LOG_LEVEL", "").split(","):
         entry = entry.strip()
         if "=" in entry:
             name, level = entry.split("=", 1)
             logging.getLogger(name.strip()).setLevel(level.strip().upper())
-
-    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(args.output_dir) / run_timestamp
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Load questions & WAV manifest ---
     questions_data = json.loads(Path(args.questions).read_text())
@@ -460,10 +464,10 @@ def main() -> None:
     _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
 
     def vad_fn(frame: AudioFrame) -> float:
+        _vad_buf.extend(frame)
         _vad_call_count[0] += 1
         if _vad_call_count[0] % _VAD_INFER_INTERVAL != 0:
             return _vad_last_score[0]
-        _vad_buf.extend(frame)
         while len(_vad_buf) >= _SILERO_CHUNK_BYTES:
             chunk = bytes(_vad_buf[:_SILERO_CHUNK_BYTES])
             del _vad_buf[:_SILERO_CHUNK_BYTES]

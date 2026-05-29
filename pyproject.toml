@@ -18,6 +18,7 @@ dependencies = [
     "transformers>=4.0",
     "sentence-transformers>=3.0,<4.0",
     "optimum[onnxruntime]",
+    "num2words>=0.5.14",
     "rpi5-ws2812>=0.1.2 ; sys_platform == 'linux'",
 ]
 
@@ -77,6 +78,7 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 "voice_pipeline/__main__.py" = ["E402"]
 "scripts/eval/run.py" = ["E402"]
+"scripts/eval/dashboard.py" = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["voice_pipeline"]

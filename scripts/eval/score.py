@@ -13,18 +13,40 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
+
+from num2words import num2words
 
 # ---------------------------------------------------------------------------
 # ASR — Word Error Rate
 # ---------------------------------------------------------------------------
 
 
+def _digits_to_words(text: str) -> str:
+    """Convert digit sequences in text to word form for fair WER comparison."""
+
+    def _replace(m: re.Match[str]) -> str:
+        s = m.group(0)
+        if re.match(r"\d+(st|nd|rd|th)$", s):
+            n = int(re.match(r"\d+", s).group())  # type: ignore[union-attr]
+            return num2words(n, to="ordinal")
+        if ":" in s:
+            parts = s.split(":")
+            return num2words(int(parts[0])) + " " + num2words(int(parts[1]))
+        if "." in s:
+            return num2words(float(s))
+        return num2words(int(s))
+
+    return re.sub(r"\d+[:.]\d+|\d+(st|nd|rd|th)|\d+", _replace, text)
+
+
 def _normalize(text: str) -> list[str]:
-    """Lowercase, strip punctuation, split into words."""
+    """Lowercase, normalize digits to words, strip punctuation, split."""
+    text = _digits_to_words(text.lower())
     cleaned = ""
-    for ch in text.lower():
+    for ch in text:
         if ch.isalnum() or ch == " ":
             cleaned += ch
         else:
@@ -117,10 +139,21 @@ def compute_latency_stats(latencies: list[float]) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _asr_suite_summary(wers: list[float]) -> dict:
+    if not wers:
+        return {}
+    return {
+        "mean_wer": round(sum(wers) / len(wers), 4),
+        "perfect_count": sum(1 for w in wers if w == 0.0),
+        "total_scored": len(wers),
+    }
+
+
 def score_report(report: dict) -> dict:
     """Add evaluation scores to a report."""
-    asr_scores = []
-    vap_detection_delays: list[float] = []
+    asr_scores: list[float] = []
+    asr_by_suite: dict[str, list[float]] = {}
+    turn_detection_delays: list[float] = []
     latency_values: dict[str, list[float]] = {
         "turn_shift_to_playback_ms": [],
         "llm_ttft_ms": [],
@@ -129,16 +162,20 @@ def score_report(report: dict) -> dict:
     }
 
     for turn in report["turns"]:
-        # ASR scoring
-        if turn["success"] and turn["asr_text"]:
+        is_interruption = "interrupt_delay_sec" in turn
+
+        # ASR scoring (interruption 제외)
+        if not is_interruption and turn["success"] and turn["asr_text"]:
             wer = compute_wer(turn["input_text"], turn["asr_text"])
             turn["asr_score"] = wer
             asr_scores.append(wer["wer"])
+            suite = turn["suite_name"]
+            asr_by_suite.setdefault(suite, []).append(wer["wer"])
 
-        # VAP detection delay (pre-computed in run.py)
-        vap_delay = turn.get("vap_detection_delay_ms")
-        if vap_delay is not None and vap_delay > 0:
-            vap_detection_delays.append(vap_delay)
+        # Turn detection delay (pre-computed in run.py)
+        td_delay = turn.get("turn_detection_delay_ms")
+        if td_delay is not None and td_delay > 0:
+            turn_detection_delays.append(td_delay)
 
         # Pipeline latency collection
         latency = turn.get("latency", {})
@@ -151,15 +188,62 @@ def score_report(report: dict) -> dict:
     asr_summary = {}
     if asr_scores:
         asr_summary = {
-            "mean_wer": round(sum(asr_scores) / len(asr_scores), 4),
-            "perfect_count": sum(1 for w in asr_scores if w == 0.0),
-            "total_scored": len(asr_scores),
+            **_asr_suite_summary(asr_scores),
+            "by_suite": {suite: _asr_suite_summary(wers) for suite, wers in asr_by_suite.items()},
         }
 
     # Aggregate latency
     latency_summary = {key: compute_latency_stats(vals) for key, vals in latency_values.items() if vals}
-    if vap_detection_delays:
-        latency_summary["vap_detection_delay_ms"] = compute_latency_stats(vap_detection_delays)
+    if turn_detection_delays:
+        latency_summary["turn_detection_delay_ms"] = compute_latency_stats(turn_detection_delays)
+
+    # Interruption scoring
+    int_turns = [t for t in report["turns"] if "interrupt_delay_sec" in t]
+    int_summary = {}
+    if int_turns:
+        by_delay: dict[float, dict[str, int]] = {}
+        int_latencies: list[float] = []
+        for t in int_turns:
+            delay = t["interrupt_delay_sec"]
+            outcome = t.get("outcome", "unknown")
+            was_played = t.get("interrupt_played", False)
+
+            if delay not in by_delay:
+                by_delay[delay] = {"total": 0, "truncated": 0, "completed": 0, "cancelled": 0, "na": 0}
+            bucket = by_delay[delay]
+            bucket["total"] += 1
+
+            if not was_played:
+                bucket["na"] += 1
+            elif outcome == "truncated":
+                bucket["truncated"] += 1
+            elif outcome == "cancelled":
+                bucket["cancelled"] += 1
+            else:
+                bucket["completed"] += 1
+
+            lat = t.get("latency", {}).get("interrupt_latency_ms")
+            if lat and lat > 0 and outcome == "truncated":
+                int_latencies.append(lat)
+
+        testable = sum(b["total"] - b["na"] for b in by_delay.values())
+        detected = sum(b["truncated"] + b["cancelled"] for b in by_delay.values())
+        int_summary = {
+            "detection_rate": round(detected / testable, 4) if testable else 0.0,
+            "detected": detected,
+            "testable": testable,
+            "by_delay": {
+                str(d): {
+                    "detected": b["truncated"] + b["cancelled"],
+                    "testable": b["total"] - b["na"],
+                    "truncated": b["truncated"],
+                    "completed": b["completed"],
+                    "na": b["na"],
+                }
+                for d, b in sorted(by_delay.items())
+            },
+            "latency": compute_latency_stats(int_latencies),
+        }
 
     # Success rate
     total = len(report["turns"])
@@ -171,6 +255,7 @@ def score_report(report: dict) -> dict:
             "success_rate": round(successful / total, 4) if total else 0.0,
             "asr": asr_summary,
             "latency": latency_summary,
+            "interruption": int_summary,
         },
     }
 
@@ -202,6 +287,29 @@ def print_scores(scored: dict) -> None:
             label = key.removesuffix("_ms")
             print(f"  {label}:")
             print(f"    mean={stats['mean_ms']:.0f}ms  median={stats['median_ms']:.0f}ms  p95={stats['p95_ms']:.0f}ms")
+
+    interruption = scores.get("interruption", {})
+    if interruption:
+        print(
+            f"\nInterruption (detection rate: {interruption['detected']}/{interruption['testable']}"
+            f" = {interruption['detection_rate']:.0%}):"
+        )
+        for delay_str, b in interruption.get("by_delay", {}).items():
+            testable = b["testable"]
+            if testable == 0:
+                print(f"  {delay_str}s: n/a (response ended before interrupt)")
+            else:
+                rate = b["detected"] / testable
+                print(
+                    f"  {delay_str}s: {b['detected']}/{testable} ({rate:.0%})"
+                    f"  truncated={b['truncated']} completed={b['completed']}" + (f" na={b['na']}" if b["na"] else "")
+                )
+        int_lat = interruption.get("latency", {})
+        if int_lat:
+            print(
+                f"  Detection latency: mean={int_lat['mean_ms']:.0f}ms"
+                f"  median={int_lat['median_ms']:.0f}ms  p95={int_lat['p95_ms']:.0f}ms"
+            )
 
     # Per-question ASR details
     turns_with_asr = [t for t in scored["turns"] if "asr_score" in t]

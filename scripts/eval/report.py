@@ -75,27 +75,34 @@ def build_report(results_dir: Path) -> dict:
         ).fetchall()
 
         trace = conn.execute(
-            "SELECT * FROM pipeline_traces WHERE session_id = ? AND outcome = 'completed' ORDER BY id DESC LIMIT 1",
+            "SELECT * FROM pipeline_traces WHERE session_id = ? ORDER BY id DESC LIMIT 1",
             (sid,),
         ).fetchone()
 
-        asr_text = _extract_text(messages, "user")
+        system_text = _extract_text(messages, "user")
         response_text = _extract_text(messages, "assistant")
         latency = _extract_latency(trace)
+        outcome = trace["outcome"] if trace else None
+        asr_text = entry.get("asr_text") or system_text
 
-        turns.append(
-            {
-                "suite_name": entry["suite_name"],
-                "question_id": entry["question_id"],
-                "input_text": entry["input_text"],
-                "asr_text": asr_text,
-                "response_text": response_text,
-                "latency": latency,
-                "success": entry["success"],
-                "error": entry.get("error"),
-                "vap_detection_delay_ms": entry.get("vap_detection_delay_ms"),
-            }
-        )
+        turn_data = {
+            "suite_name": entry["suite_name"],
+            "question_id": entry["question_id"],
+            "input_text": entry["input_text"],
+            "asr_text": asr_text,
+            "system_text": system_text,
+            "response_text": response_text,
+            "latency": latency,
+            "outcome": outcome,
+            "success": entry["success"],
+            "error": entry.get("error"),
+            "turn_detection_delay_ms": entry.get("turn_detection_delay_ms"),
+        }
+        for key in ("interrupt_audio", "interrupt_delay_sec", "interrupt_played"):
+            if key in entry:
+                turn_data[key] = entry[key]
+
+        turns.append(turn_data)
 
     conn.close()
 
