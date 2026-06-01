@@ -14,8 +14,8 @@ from voice_pipeline.core.types import (
     CppEventType,
     GeneratorState,
     LEDState,
+    Phase,
     PipelineTrace,
-    PlaybackState,
     ResponseData,
     TurnDecision,
     WordTimestamp,
@@ -118,15 +118,14 @@ class TestLifecycle:
         """run() resets all internal state from a previous session."""
         orch, mocks = _make_session_loop(monkeypatch, session_timeout_sec=0.0)
         # Simulate dirty state from a previous session
-        orch._playback_state = PlaybackState.PLAYING
-        orch._awaiting_response = True
+        orch._phase = Phase.PLAYING
         orch._sent_audio_buffer = bytearray(b"\xff" * 100)
 
         orch.run()
 
         # After run(), state should have been reset at start
         # (end_session also resets some, but start must handle it)
-        assert orch._awaiting_response is False
+        assert orch._phase is Phase.LISTENING
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +153,7 @@ class TestTurnShift:
         # History records generator.input_text, not current ASR text
         mocks["history"].add_user_message.assert_called_once_with("hello")
         mocks["asr"].reset.assert_called_once()
-        assert orch._playback_state == PlaybackState.PLAYING
+        assert orch._phase is Phase.STREAMING
         mocks["bridge"].send_stream_start.assert_called_once()
 
     def test_turn_shift_not_ready_sets_awaiting(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,7 +168,7 @@ class TestTurnShift:
         orch._audio_queue = q
         orch._run_frame()
 
-        assert orch._awaiting_response is True
+        assert orch._phase is Phase.AWAITING
         mocks["generator"].prepare.assert_called_once_with("hello")
 
     def test_turn_shift_preparing_sets_awaiting_no_double_prepare(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,7 +183,7 @@ class TestTurnShift:
         orch._audio_queue = q
         orch._run_frame()
 
-        assert orch._awaiting_response is True
+        assert orch._phase is Phase.AWAITING
         mocks["generator"].prepare.assert_not_called()
 
 
@@ -198,7 +197,7 @@ class TestAwaitingResponse:
         """When awaiting and generator becomes STREAMING, history records input_text."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._awaiting_response = True
+        orch._phase = Phase.AWAITING
         mocks["generator"].state = GeneratorState.STREAMING
         mocks["generator"].input_text = "hello"
         mocks["generator"].poll_audio.return_value = None
@@ -208,8 +207,7 @@ class TestAwaitingResponse:
         orch._audio_queue = q
         orch._run_frame()
 
-        assert orch._awaiting_response is False
-        assert orch._playback_state == PlaybackState.PLAYING
+        assert orch._phase is Phase.STREAMING
         # Uses generator.input_text — matches what LLM actually saw
         mocks["history"].add_user_message.assert_called_once_with("hello")
 
@@ -226,34 +224,35 @@ class TestAwaitingResponse:
 
         mocks["history"].add_user_message.assert_called_once_with("earlier partial")
 
-    def test_awaiting_interrupt_cancels(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Interrupt during awaiting cancels generator and resets."""
+    def test_cancel_during_awaiting(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A cancel decision during AWAITING cancels generation → LISTENING."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._awaiting_response = True
+        orch._phase = Phase.AWAITING
         mocks["asr"].get_text.return_value = ""
-        mocks["turn_detector"].process_frame.return_value = TurnDecision(interrupt=True)
+        mocks["turn_detector"].process_frame.return_value = TurnDecision(cancel=True)
 
         q = _audio_queue_with(_frame())
         orch._audio_queue = q
         orch._run_frame()
 
         mocks["generator"].cancel.assert_called_once()
-        mocks["turn_detector"].reset.assert_called_once()
-        assert orch._awaiting_response is False
+        # Detector self-rewinds on cancel; SessionLoop must NOT reset it.
+        mocks["turn_detector"].reset.assert_not_called()
+        assert orch._phase is Phase.LISTENING
 
     def test_awaiting_generator_failed_skips_turn(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Generator FAILED during awaiting skips turn and resets turn_detector."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._awaiting_response = True
+        orch._phase = Phase.AWAITING
         mocks["generator"].state = GeneratorState.FAILED
 
         q = _audio_queue_with()
         orch._audio_queue = q
         orch._run_frame()
 
-        assert orch._awaiting_response is False
+        assert orch._phase is Phase.LISTENING
         mocks["turn_detector"].reset.assert_called_once()
 
 
@@ -287,7 +286,7 @@ class TestInterrupt:
         """Interrupt during PLAYING sends stop and enters STOP_PENDING."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         mocks["asr"].get_text.return_value = "wait"
         mocks["turn_detector"].process_frame.return_value = TurnDecision(interrupt=True)
 
@@ -296,7 +295,7 @@ class TestInterrupt:
         orch._run_frame()
 
         mocks["bridge"].send_stop.assert_called_once()
-        assert orch._playback_state == PlaybackState.STOP_PENDING
+        assert orch._phase == Phase.STOPPING
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +308,7 @@ class TestBargeIn:
         """Case A: ResponseData with timestamps → truncate_by_timestamps."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.STOP_PENDING
+        orch._phase = Phase.STOPPING
         orch._playback_start_time = time.monotonic() - 1.0
         orch._stop_pending_time = time.monotonic() - 0.65
 
@@ -334,7 +333,7 @@ class TestBargeIn:
         """Case B: ResponseData without timestamps → truncate_by_ratio."""
         orch, mocks = _make_session_loop(monkeypatch, output_sample_rate=24000)
         orch._start_session()
-        orch._playback_state = PlaybackState.STOP_PENDING
+        orch._phase = Phase.STOPPING
         orch._playback_start_time = time.monotonic() - 1.0
         orch._stop_pending_time = time.monotonic() - 0.75
 
@@ -352,7 +351,7 @@ class TestBargeIn:
         """Case C: no ResponseData → approximate truncation + deferred."""
         orch, mocks = _make_session_loop(monkeypatch, output_sample_rate=24000)
         orch._start_session()
-        orch._playback_state = PlaybackState.STOP_PENDING
+        orch._phase = Phase.STOPPING
         orch._current_response = None
         orch._playback_start_time = time.monotonic() - 1.0
         orch._stop_pending_time = time.monotonic() - 0.5
@@ -372,7 +371,7 @@ class TestBargeIn:
         """When playback_started was never received, stop_pos defaults to 0."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.STOP_PENDING
+        orch._phase = Phase.STOPPING
         orch._playback_start_time = 0.0
 
         timestamps = [WordTimestamp("a", 0.0, 0.5)]
@@ -450,7 +449,7 @@ class TestRobotAudioChunk:
     def test_correct_chunk_from_buffer(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """get_robot_audio_chunk extracts 30ms at playback position."""
         orch, _ = _make_session_loop(monkeypatch, output_sample_rate=24000)
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._playback_start_time = time.monotonic()
 
         # 30ms @ 24kHz 16-bit = 24000 * 0.03 * 2 = 1440 bytes
@@ -463,13 +462,13 @@ class TestRobotAudioChunk:
     def test_not_playing_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Returns None when not PLAYING."""
         orch, _ = _make_session_loop(monkeypatch)
-        orch._playback_state = PlaybackState.IDLE
+        orch._phase = Phase.LISTENING
         assert orch.get_robot_audio_chunk() is None
 
     def test_no_playback_start_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Returns None if playback_started event was never received."""
         orch, _ = _make_session_loop(monkeypatch, output_sample_rate=24000)
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._playback_start_time = 0.0
         orch._sent_audio_buffer = bytearray(b"\x00" * 2880)
 
@@ -478,7 +477,7 @@ class TestRobotAudioChunk:
     def test_insufficient_buffer_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Returns None if buffer doesn't have enough data."""
         orch, _ = _make_session_loop(monkeypatch, output_sample_rate=24000)
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._playback_start_time = time.monotonic()
         orch._sent_audio_buffer = bytearray(b"\x00" * 10)
 
@@ -496,7 +495,7 @@ class TestRobotAudioCombined:
     def test_combined_extracts_n_frames(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Combined extraction returns frame_count * frame_bytes of audio."""
         orch, _ = _make_session_loop(monkeypatch, output_sample_rate=24000)
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         # 30ms @ 24kHz 16-bit = 1440 bytes per frame
         frame_bytes = 1440
         frame_count = 3
@@ -514,13 +513,13 @@ class TestRobotAudioCombined:
     def test_not_playing_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Returns None when not in PLAYING state."""
         orch, _ = _make_session_loop(monkeypatch)
-        orch._playback_state = PlaybackState.IDLE
+        orch._phase = Phase.LISTENING
         assert orch._get_robot_audio_combined(3) is None
 
     def test_no_playback_start_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Returns None if playback_started event was never received."""
         orch, _ = _make_session_loop(monkeypatch, output_sample_rate=24000)
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._playback_start_time = 0.0
         orch._sent_audio_buffer = bytearray(b"\x00" * 10000)
         assert orch._get_robot_audio_combined(3) is None
@@ -528,7 +527,7 @@ class TestRobotAudioCombined:
     def test_batch_start_negative_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Returns None when playback just started and batch can't cover full range."""
         orch, _ = _make_session_loop(monkeypatch, output_sample_rate=24000)
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         frame_bytes = 1440
         # elapsed ≈ 10ms → only ~0.33 frames elapsed, batch of 3 needs 3 frames back
         orch._playback_start_time = time.monotonic() - 0.010
@@ -538,7 +537,7 @@ class TestRobotAudioCombined:
     def test_insufficient_buffer_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Returns None when buffer doesn't have enough data for batch_end."""
         orch, _ = _make_session_loop(monkeypatch, output_sample_rate=24000)
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         # elapsed far exceeds buffer
         orch._playback_start_time = time.monotonic() - 5.0
         orch._sent_audio_buffer = bytearray(b"\x00" * 100)
@@ -547,7 +546,7 @@ class TestRobotAudioCombined:
     def test_frame_count_one_matches_single_chunk_length(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """frame_count=1 returns same length as get_robot_audio_chunk."""
         orch, _ = _make_session_loop(monkeypatch, output_sample_rate=24000)
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         frame_bytes = 1440
         orch._sent_audio_buffer = bytearray(b"\x01" * frame_bytes * 5)
         orch._playback_start_time = time.monotonic() - 0.060  # ~2 frames in
@@ -619,7 +618,7 @@ class TestSessionTimeout:
         """Timeout is paused during PLAYING."""
         orch, mocks = _make_session_loop(monkeypatch, session_timeout_sec=0.0)
         orch._start_session()
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
 
         q = _audio_queue_with()
         orch._audio_queue = q
@@ -630,7 +629,7 @@ class TestSessionTimeout:
         """Timeout is paused during awaiting_response."""
         orch, mocks = _make_session_loop(monkeypatch, session_timeout_sec=0.0)
         orch._start_session()
-        orch._awaiting_response = True
+        orch._phase = Phase.AWAITING
 
         q = _audio_queue_with()
         orch._audio_queue = q
@@ -671,20 +670,20 @@ class TestStopPendingWatchdog:
         """STOP_PENDING watchdog timeout forces IDLE."""
         orch, mocks = _make_session_loop(monkeypatch, stop_pending_timeout_sec=0.0)
         orch._start_session()
-        orch._playback_state = PlaybackState.STOP_PENDING
+        orch._phase = Phase.STOPPING
         orch._stop_pending_time = time.monotonic() - 1.0
 
         q = _audio_queue_with()
         orch._audio_queue = q
         orch._run_frame()
 
-        assert orch._playback_state == PlaybackState.IDLE
+        assert orch._phase == Phase.LISTENING
 
     def test_stale_complete_ignored_after_watchdog(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """After watchdog forces IDLE, stale PLAYBACK_COMPLETE is ignored."""
         orch, mocks = _make_session_loop(monkeypatch, stop_pending_timeout_sec=0.0)
         orch._start_session()
-        orch._playback_state = PlaybackState.IDLE  # After watchdog
+        orch._phase = Phase.LISTENING  # After watchdog
 
         # Stale event arrives
         event = CppEvent(CppEventType.PLAYBACK_COMPLETE)
@@ -695,7 +694,7 @@ class TestStopPendingWatchdog:
         orch._run_frame()
 
         # Should remain IDLE, no history save for this
-        assert orch._playback_state == PlaybackState.IDLE
+        assert orch._phase == Phase.LISTENING
         mocks["history"].add_assistant_message.assert_not_called()
 
 
@@ -768,7 +767,7 @@ class TestCppEvents:
         """PLAYBACK_STARTED event records start time for position estimation."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.STREAMING
 
         event = CppEvent(CppEventType.PLAYBACK_STARTED)
         mocks["bridge"].poll_event.side_effect = [event, None]
@@ -785,7 +784,7 @@ class TestCppEvents:
         """PLAYBACK_COMPLETE saves full text and resets to IDLE."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._current_response = ResponseData(text="hi there", audio=b"\x00", timestamps=[])
 
         event = CppEvent(CppEventType.PLAYBACK_COMPLETE)
@@ -798,13 +797,13 @@ class TestCppEvents:
         mocks["history"].add_assistant_message.assert_called_once()
         assert mocks["history"].add_assistant_message.call_args[0][0] == "hi there"
         mocks["turn_detector"].notify_turn_complete.assert_called_once_with("robot", "hi there")
-        assert orch._playback_state == PlaybackState.IDLE
+        assert orch._phase == Phase.LISTENING
 
     def test_playback_complete_in_stop_pending_triggers_interrupted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """PLAYBACK_COMPLETE during STOP_PENDING triggers barge-in handling."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.STOP_PENDING
+        orch._phase = Phase.STOPPING
         orch._playback_start_time = time.monotonic() - 1.0
         orch._stop_pending_time = time.monotonic() - 0.5
         orch._current_response = ResponseData(text="hello world", audio=b"\x00" * 100, timestamps=[])
@@ -817,7 +816,7 @@ class TestCppEvents:
             orch._audio_queue = q
             orch._run_frame()
 
-        assert orch._playback_state == PlaybackState.IDLE
+        assert orch._phase == Phase.LISTENING
         mocks["history"].add_assistant_message.assert_called_once()
         assert mocks["history"].add_assistant_message.call_args[0][0] == "hello"
 
@@ -825,7 +824,7 @@ class TestCppEvents:
         """PLAYBACK_COMPLETE is ignored when in IDLE state."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.IDLE
+        orch._phase = Phase.LISTENING
 
         event = CppEvent(CppEventType.PLAYBACK_COMPLETE)
         mocks["bridge"].poll_event.side_effect = [event, None]
@@ -834,7 +833,7 @@ class TestCppEvents:
         orch._audio_queue = q
         orch._run_frame()
 
-        assert orch._playback_state == PlaybackState.IDLE
+        assert orch._phase == Phase.LISTENING
         mocks["history"].add_assistant_message.assert_not_called()
 
 
@@ -848,7 +847,7 @@ class TestDrainAudio:
         """Drain sends all available chunks to bridge."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
 
         chunks = [b"\x01" * 100, b"\x02" * 100]
         mocks["generator"].poll_audio.side_effect = chunks + [None]
@@ -863,7 +862,7 @@ class TestDrainAudio:
         """When stream_done after drain, get_response_data is called and audio_end sent."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
 
         response = ResponseData(text="hi", audio=b"\x00", timestamps=[])
         mocks["generator"].poll_audio.return_value = None
@@ -879,7 +878,7 @@ class TestDrainAudio:
         """audio_end is sent only once even if drain is called multiple times."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
 
         mocks["generator"].poll_audio.return_value = None
         mocks["generator"].stream_done = True
@@ -928,89 +927,58 @@ class TestAudioStarvation:
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
 
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._last_frame_time = time.monotonic() - (SessionLoop._AUDIO_STARVATION_TIMEOUT_SEC + 0.1)
 
         assert orch._run_frame() is True
 
 
 # ---------------------------------------------------------------------------
-# Awaiting cancel on ASR text change
+# Cancel (turn_shift was premature — user continued)
 # ---------------------------------------------------------------------------
 
 
-class TestAwaitingCancel:
-    def test_cancel_on_text_change_after_grace(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """ASR text change after grace period cancels generation."""
+class TestCancel:
+    def test_cancel_decision_cancels_generation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A cancel decision during AWAITING discards generation → LISTENING."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._awaiting_response = True
-        # Simulate turn_shift happened well before grace period
-        orch._turn_shift_time = time.monotonic() - 1.0
-        orch._last_asr_text = "hello"
-
-        mocks["asr"].get_text.return_value = "hello world"
+        orch._phase = Phase.AWAITING
+        mocks["turn_detector"].process_frame.return_value = TurnDecision(cancel=True)
 
         q = _audio_queue_with(_frame())
         orch._audio_queue = q
         orch._run_frame()
 
         mocks["generator"].cancel.assert_called_once()
-        mocks["turn_detector"].reset.assert_called_once()
-        assert orch._awaiting_response is False
+        assert orch._phase is Phase.LISTENING
 
-    def test_no_cancel_within_grace_period(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """ASR text change within grace period does NOT cancel."""
+    def test_cancel_does_not_reset_detector(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """SessionLoop does not reset the detector on cancel (it self-rewinds)."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._awaiting_response = True
-        # turn_shift just happened (within grace period)
-        orch._turn_shift_time = time.monotonic()
-        orch._last_asr_text = "hello"
-
-        mocks["asr"].get_text.return_value = "hello world"
+        orch._phase = Phase.AWAITING
+        mocks["turn_detector"].process_frame.return_value = TurnDecision(cancel=True)
 
         q = _audio_queue_with(_frame())
         orch._audio_queue = q
         orch._run_frame()
 
-        mocks["generator"].cancel.assert_not_called()
-        assert orch._awaiting_response is True
+        mocks["turn_detector"].reset.assert_not_called()
 
-    def test_cancel_resets_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """After awaiting cancel, state returns to normal for new turn."""
+    def test_cancel_preserves_asr(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Cancel keeps ASR (the same user turn continues — no asr.reset)."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._awaiting_response = True
-        orch._audio_end_sent = True
-        orch._turn_shift_time = time.monotonic() - 1.0
-        orch._last_asr_text = "hello"
-
-        mocks["asr"].get_text.return_value = "hello world"
+        orch._phase = Phase.AWAITING
+        mocks["asr"].get_text.return_value = "hello"
+        mocks["turn_detector"].process_frame.return_value = TurnDecision(cancel=True)
 
         q = _audio_queue_with(_frame())
         orch._audio_queue = q
         orch._run_frame()
 
-        assert orch._awaiting_response is False
-        assert orch._audio_end_sent is False
-        mocks["turn_detector"].reset.assert_called_once()
-
-    def test_no_cancel_when_not_awaiting(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Text change without awaiting_response does not trigger cancel."""
-        orch, mocks = _make_session_loop(monkeypatch)
-        orch._start_session()
-        orch._awaiting_response = False
-        orch._turn_shift_time = time.monotonic() - 1.0
-        orch._last_asr_text = "hello"
-
-        mocks["asr"].get_text.return_value = "hello world"
-
-        q = _audio_queue_with(_frame())
-        orch._audio_queue = q
-        orch._run_frame()
-
-        mocks["generator"].cancel.assert_not_called()
+        mocks["asr"].reset.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -1080,7 +1048,7 @@ class TestUtteranceStorage:
         """Assistant utterance is saved on normal playback completion."""
         orch, mocks = _make_session_loop_with_memory(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._current_response = ResponseData(text="I'm fine", audio=b"\x00" * 100)
 
         orch._on_playback_complete()
@@ -1094,7 +1062,7 @@ class TestUtteranceStorage:
         """Truncated assistant utterance is saved on barge-in."""
         orch, mocks = _make_session_loop_with_memory(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.STOP_PENDING
+        orch._phase = Phase.STOPPING
         orch._playback_start_time = time.monotonic() - 1.0
         orch._stop_pending_time = time.monotonic() - 0.5
         orch._current_response = ResponseData(
@@ -1113,7 +1081,7 @@ class TestUtteranceStorage:
         """Without memory_storage, no utterance saving occurs."""
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._current_response = ResponseData(text="hello", audio=b"\x00" * 100)
 
         orch._on_playback_complete()
@@ -1126,7 +1094,7 @@ class TestUtteranceStorage:
         orch, mocks = _make_session_loop_with_memory(monkeypatch)
         orch._start_session()
         mocks["memory_storage"].add_utterance.side_effect = RuntimeError("DB error")
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._current_response = ResponseData(text="hello", audio=b"\x00" * 100)
 
         orch._on_playback_complete()  # Should not raise
@@ -1155,7 +1123,7 @@ class TestPipelineTraceCompleted:
     def test_completed_on_playback_complete(self, monkeypatch: pytest.MonkeyPatch) -> None:
         orch, mocks, store = _make_session_loop_with_trace(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._current_response = ResponseData(text="hello", audio=b"\x00" * 100)
 
         orch._on_playback_complete()
@@ -1167,7 +1135,7 @@ class TestPipelineTraceCompleted:
         orch, mocks, store = _make_session_loop_with_trace(monkeypatch)
         orch._start_session()
         orch._speculative_attempts = 3
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._current_response = ResponseData(text="hi", audio=b"\x00" * 100)
 
         orch._on_playback_complete()
@@ -1180,7 +1148,7 @@ class TestPipelineTraceTruncated:
     def test_truncated_on_barge_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
         orch, mocks, store = _make_session_loop_with_trace(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.STOP_PENDING
+        orch._phase = Phase.STOPPING
         orch._playback_start_time = time.monotonic() - 1.0
         orch._stop_pending_time = time.monotonic() - 0.5
         orch._current_response = ResponseData(text="hello world", audio=b"\x00" * 4800)
@@ -1194,12 +1162,12 @@ class TestPipelineTraceTruncated:
     def test_interrupt_latency_recorded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         orch, mocks, store = _make_session_loop_with_trace(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._playback_start_time = time.monotonic() - 1.0
         orch._current_response = ResponseData(text="hello world", audio=b"\x00" * 4800)
 
         orch._handle_interrupt()
-        assert orch._playback_state == PlaybackState.STOP_PENDING
+        assert orch._phase is Phase.STOPPING
 
         trace = mocks["generator"].trace
         assert trace.interrupt_ts > 0
@@ -1213,12 +1181,12 @@ class TestPipelineTraceTruncated:
 
 
 class TestPipelineTraceCancelled:
-    def test_cancelled_on_interrupt_during_awaiting(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_cancelled_on_cancel_decision(self, monkeypatch: pytest.MonkeyPatch) -> None:
         orch, mocks, store = _make_session_loop_with_trace(monkeypatch)
         orch._start_session()
-        orch._awaiting_response = True
+        orch._phase = Phase.AWAITING
 
-        orch._handle_interrupt()
+        orch._handle_cancel()
 
         assert len(store.traces) == 1
         assert store.traces[0].outcome == "cancelled"
@@ -1226,11 +1194,9 @@ class TestPipelineTraceCancelled:
     def test_cancelled_on_user_continued_speaking(self, monkeypatch: pytest.MonkeyPatch) -> None:
         orch, mocks, store = _make_session_loop_with_trace(monkeypatch)
         orch._start_session()
-        orch._awaiting_response = True
-        orch._turn_shift_time = time.monotonic() - 10.0  # well past grace period
+        orch._phase = Phase.AWAITING
 
-        mocks["asr"].get_text.return_value = "new text"
-        mocks["turn_detector"].process_frame.return_value = TurnDecision.none()
+        mocks["turn_detector"].process_frame.return_value = TurnDecision(cancel=True)
 
         q = _audio_queue_with(_frame())
         orch._audio_queue = q
@@ -1242,7 +1208,7 @@ class TestPipelineTraceCancelled:
     def test_cancelled_on_generator_failed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         orch, mocks, store = _make_session_loop_with_trace(monkeypatch)
         orch._start_session()
-        orch._awaiting_response = True
+        orch._phase = Phase.AWAITING
         mocks["generator"].state = GeneratorState.FAILED
 
         orch._check_generator_completion()
@@ -1264,7 +1230,7 @@ class TestPipelineTraceSpeculative:
         mocks["generator"].state = GeneratorState.STREAMING
         mocks["generator"].input_text = "text B"
         orch._handle_turn_shift("text B")
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._current_response = ResponseData(text="response", audio=b"\x00" * 100)
 
         orch._on_playback_complete()
@@ -1289,7 +1255,7 @@ class TestPipelineTraceDisabled:
         orch, mocks = _make_session_loop(monkeypatch)
         orch._start_session()
         mocks["generator"].trace = PipelineTrace(run_id=1)
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._current_response = ResponseData(text="hello", audio=b"\x00" * 100)
 
         orch._on_playback_complete()  # should not raise
@@ -1298,7 +1264,7 @@ class TestPipelineTraceDisabled:
         orch, mocks, store = _make_session_loop_with_trace(monkeypatch)
         orch._start_session()
         mocks["generator"].trace = None
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.PLAYING
         orch._current_response = ResponseData(text="hello", audio=b"\x00" * 100)
 
         orch._on_playback_complete()  # should not raise
@@ -1323,7 +1289,7 @@ class TestPipelineTraceTimestamps:
     def test_playback_started_sets_trace_timestamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
         orch, mocks, store = _make_session_loop_with_trace(monkeypatch)
         orch._start_session()
-        orch._playback_state = PlaybackState.PLAYING
+        orch._phase = Phase.STREAMING
         mocks["bridge"].poll_event.side_effect = [
             CppEvent(CppEventType.PLAYBACK_STARTED),
             None,

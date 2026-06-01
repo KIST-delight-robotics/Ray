@@ -26,7 +26,7 @@ from voice_pipeline.core.types import (
     CppEventType,
     GeneratorState,
     LEDState,
-    PlaybackState,
+    Phase,
     ResponseData,
     TokenCounter,
     TurnDecision,
@@ -66,7 +66,6 @@ class SessionLoop:
     _FRAME_TIMEOUT_SEC = 0.1  # 프레임 대기 timeout (초). ACTIVE 모드 audio_queue.get
     _STOP_PENDING_TIMEOUT_SEC = 5.0  # barge-in stop 후 재생 완료 ack 최대 대기 (초)
     _AUDIO_STARVATION_TIMEOUT_SEC = 5.0  # 오디오 프레임 단절 감지 timeout — 세션 종료 (초)
-    _AWAITING_CANCEL_GRACE_SEC = 0.5  # turn_shift 직후 ASR finalization noise 무시 grace (초)
     _MAX_BATCH_FRAMES = 10  # 한 iteration 최대 drain 프레임 수. timer spike 방지
 
     def __init__(
@@ -141,8 +140,7 @@ class SessionLoop:
         self._stop_event = threading.Event()
 
         # Internal state
-        self._playback_state = PlaybackState.IDLE
-        self._awaiting_response = False
+        self._phase = Phase.LISTENING
         self._current_response: ResponseData | None = None
         self._sent_audio_buffer = bytearray()
         self._last_asr_text = ""
@@ -183,7 +181,7 @@ class SessionLoop:
         Uses time-based position estimation from playback_started event.
         Returns None if not enough data at the current position.
         """
-        if self._playback_state != PlaybackState.PLAYING:
+        if self._phase is not Phase.PLAYING:
             return None
         if self._playback_start_time == 0.0:
             return None
@@ -212,7 +210,7 @@ class SessionLoop:
 
         Returns None if not playing, not enough buffer, or batch_start < 0.
         """
-        if self._playback_state != PlaybackState.PLAYING:
+        if self._phase is not Phase.PLAYING:
             return None
         if self._playback_start_time == 0.0:
             return None
@@ -245,8 +243,7 @@ class SessionLoop:
 
     def _start_session(self) -> None:
         # Reset internal state from any previous session
-        self._playback_state = PlaybackState.IDLE
-        self._awaiting_response = False
+        self._phase = Phase.LISTENING
         self._current_response = None
         self._sent_audio_buffer = bytearray()
         self._last_asr_text = ""
@@ -313,21 +310,8 @@ class SessionLoop:
             if current_text:
                 logger.info("ASR: %s", current_text)
 
-        # 5. Cancel awaiting if user continues speaking after turn_shift
-        if (
-            self._awaiting_response
-            and text_changed
-            and time.monotonic() - self._turn_shift_time > self._AWAITING_CANCEL_GRACE_SEC
-        ):
-            logger.info("CANCELLED: user continued speaking")
-            self._save_trace("cancelled")
-            self._generator.cancel()
-            self._turn_detector.reset()
-            self._awaiting_response = False
-            self._audio_end_sent = False
-            self._pending_truncation = None
-
-        # 6. Turn detection (only when we have frames)
+        # 5. Turn detection (only when we have frames). turn_shift / cancel /
+        #    interrupt / prepare are all decided by the TurnDetector.
         if frames:
             frame_count = len(frames)
             if frame_count > 1:
@@ -342,36 +326,38 @@ class SessionLoop:
                 if decision.turn_shift:
                     if self._handle_turn_shift(current_text):
                         return True
+                elif decision.cancel:
+                    self._handle_cancel()
                 elif decision.interrupt:
                     self._handle_interrupt()
                 elif decision.prepare:
                     self._handle_prepare(current_text)
 
-        # 7. Poll C++ events
+        # 6. Poll C++ events
         if self._poll_cpp_events():
             return True  # Bridge error → terminate
 
-        # 8. Drain audio to bridge if PLAYING
-        if self._playback_state == PlaybackState.PLAYING:
+        # 7. Drain audio to bridge while streaming (STREAMING or PLAYING)
+        if self._phase in (Phase.STREAMING, Phase.PLAYING):
             self._drain_audio_to_bridge()
 
-        # 9. Check generator completion if awaiting
-        if self._awaiting_response:
+        # 8. Check generator completion while AWAITING
+        if self._phase is Phase.AWAITING:
             self._check_generator_completion()
 
-        # 10. Check deferred truncation
+        # 9. Check deferred truncation
         if self._pending_truncation is not None:
             self._check_deferred_truncation()
 
-        # 11. STOP_PENDING watchdog
-        if self._playback_state == PlaybackState.STOP_PENDING:
+        # 10. STOPPING watchdog
+        if self._phase is Phase.STOPPING:
             self._check_stop_pending_watchdog()
 
-        # 12. Audio starvation check
+        # 11. Audio starvation check
         if self._check_audio_starvation():
             return True
 
-        # 13. Session timeout
+        # 12. Session timeout
         return self._check_session_timeout()
 
     def _get_frame(self) -> AudioFrame | None:
@@ -446,8 +432,8 @@ class SessionLoop:
         if self._generator.state == GeneratorState.STREAMING:
             self._begin_streaming()
         else:
-            # Not ready yet — set awaiting
-            self._awaiting_response = True
+            # Not ready yet — wait for the generator (detector stays PENDING)
+            self._phase = Phase.AWAITING
             # Start generation if not already preparing
             if self._generator.state == GeneratorState.IDLE:
                 self._speculative_attempts += 1
@@ -456,58 +442,73 @@ class SessionLoop:
 
     def _handle_prepare(self, text: str) -> None:
         """Start speculative generation with current text."""
-        if self._awaiting_response or self._skip_generation:
+        if self._phase is not Phase.LISTENING or self._skip_generation:
             return
         self._speculative_attempts += 1
         self._pending_truncation = None
         self._generator.prepare(text)
 
+    def _handle_cancel(self) -> None:
+        """Handle cancel: turn_shift was premature, the user is continuing.
+
+        Only reachable during AWAITING (before begin_streaming), so nothing
+        was sent to the bridge — discard the speculative generation and
+        return to LISTENING. The detector has already rewound to USER_TURN
+        with state preserved; ASR text is kept so the same user turn resumes.
+        """
+        logger.info("CANCEL: user continued speaking")
+        self._save_trace("cancelled")
+        self._generator.cancel()
+        self._phase = Phase.LISTENING
+
     def _handle_interrupt(self) -> None:
-        """Handle interrupt signal from TurnDetector."""
-        if self._playback_state == PlaybackState.PLAYING:
-            logger.info("INTERRUPT: stopped playback")
-            try:
-                self._bridge.send_stop()
-            except Exception:
-                logger.warning("Bridge send_stop error", exc_info=True)
-                # Treat as bridge failure — will be caught by poll
-            self._playback_state = PlaybackState.STOP_PENDING
-            now = time.monotonic()
-            self._stop_pending_time = now
-            trace = self._generator.trace
-            if trace is not None:
-                trace.interrupt_ts = now
-        elif self._awaiting_response:
-            logger.info("INTERRUPT: cancelled generation")
-            self._save_trace("cancelled")
-            self._generator.cancel()
-            self._turn_detector.reset()
-            self._awaiting_response = False
-            self._audio_end_sent = False
-        else:
-            logger.debug("Interrupt ignored (state=%s)", self._playback_state.value)
+        """Handle interrupt signal from TurnDetector.
+
+        Only reachable from STREAMING/PLAYING — the detector emits cancel
+        (not interrupt) before begin_streaming. Both stop playback.
+        """
+        if self._phase not in (Phase.STREAMING, Phase.PLAYING):
+            logger.debug("Interrupt ignored (phase=%s)", self._phase.value)
+            return
+        logger.info("INTERRUPT: stopping playback")
+        try:
+            self._bridge.send_stop()
+        except Exception:
+            logger.warning("Bridge send_stop error", exc_info=True)
+            # Treat as bridge failure — will be caught by poll
+        self._phase = Phase.STOPPING
+        now = time.monotonic()
+        self._stop_pending_time = now
+        trace = self._generator.trace
+        if trace is not None:
+            trace.interrupt_ts = now
 
     # ------------------------------------------------------------------
     # Streaming / playback
     # ------------------------------------------------------------------
 
     def _begin_streaming(self) -> None:
-        """Start sending audio to bridge. Save user message to history."""
+        """Commit the turn and start sending audio to the bridge.
+
+        This is the cancel/interrupt boundary: from here on the robot turn
+        is committed (cancel no longer possible) and the user message is
+        recorded.
+        """
         user_text = self._generator.input_text
         if not user_text:
             logger.warning("_begin_streaming called with empty input_text — skipping")
             self._generator.reset()
-            self._awaiting_response = False
+            self._turn_detector.reset()
+            self._phase = Phase.LISTENING
             return
 
         self._user_msg_id = self._history.add_user_message(user_text)
         self._save_utterance("user", user_text)
-        self._turn_detector.notify_turn_complete("user", user_text)
+        self._turn_detector.commit(user_text)
 
         self._asr.reset()
         self._last_asr_text = ""
 
-        self._awaiting_response = False
         self._current_response = None
         self._sent_audio_buffer = bytearray()
         self._playback_start_time = 0.0
@@ -517,9 +518,9 @@ class SessionLoop:
         self._begin_streaming_time = time.monotonic()
         self._bridge.send_stream_start()
         self._drain_audio_to_bridge()
-        self._playback_state = PlaybackState.PLAYING
+        self._phase = Phase.STREAMING
         buf_sec = len(self._sent_audio_buffer) / (self._tts_sample_rate * 2)
-        logger.debug("begin_streaming: %.1fs audio buffered → PLAYING", buf_sec)
+        logger.debug("begin_streaming: %.1fs audio buffered → STREAMING", buf_sec)
 
         trace = self._generator.trace
         if trace is not None:
@@ -566,7 +567,10 @@ class SessionLoop:
                     break
 
                 if event.event_type == CppEventType.PLAYBACK_STARTED:
-                    if self._playback_state == PlaybackState.PLAYING:
+                    if self._phase is Phase.STREAMING:
+                        # Playback confirmed: clock starts and robot_audio
+                        # becomes available → full VAP interrupt from here.
+                        self._phase = Phase.PLAYING
                         self._playback_start_time = time.monotonic()
                         trace = self._generator.trace
                         if trace is not None:
@@ -578,9 +582,9 @@ class SessionLoop:
                                 logger.warning("on_playback_started callback error", exc_info=True)
 
                 elif event.event_type == CppEventType.PLAYBACK_COMPLETE:
-                    if self._playback_state == PlaybackState.PLAYING:
+                    if self._phase in (Phase.PLAYING, Phase.STREAMING):
                         self._on_playback_complete()
-                    elif self._playback_state == PlaybackState.STOP_PENDING:
+                    elif self._phase is Phase.STOPPING:
                         self._on_playback_interrupted()
 
         except Exception:
@@ -718,7 +722,7 @@ class SessionLoop:
     # ------------------------------------------------------------------
 
     def _check_generator_completion(self) -> None:
-        """Check if the generator is ready while awaiting_response."""
+        """Check if the generator is ready while AWAITING."""
         state = self._generator.state
         if state == GeneratorState.STREAMING:
             self._begin_streaming()
@@ -726,8 +730,8 @@ class SessionLoop:
             logger.warning("Generator failed while awaiting — skipping turn")
             self._save_trace("cancelled")
             self._generator.reset()
-            self._awaiting_response = False
             self._turn_detector.reset()
+            self._phase = Phase.LISTENING
 
     # ------------------------------------------------------------------
     # STOP_PENDING watchdog
@@ -736,7 +740,7 @@ class SessionLoop:
     def _check_stop_pending_watchdog(self) -> None:
         elapsed = time.monotonic() - self._stop_pending_time
         if elapsed >= self._STOP_PENDING_TIMEOUT_SEC:
-            logger.warning("STOP_PENDING watchdog timeout — forcing IDLE")
+            logger.warning("STOPPING watchdog timeout — forcing LISTENING")
             self._turn_detector.reset()
             self._reset_playback_state()
 
@@ -760,8 +764,8 @@ class SessionLoop:
     # ------------------------------------------------------------------
 
     def _check_session_timeout(self) -> bool:
-        """Check for session timeout. Paused during PLAYING or awaiting."""
-        if self._playback_state == PlaybackState.PLAYING or self._awaiting_response:
+        """Check for session timeout. Paused whenever not LISTENING."""
+        if self._phase is not Phase.LISTENING:
             self._last_text_change_time = time.monotonic()
             return False
 
@@ -833,8 +837,8 @@ class SessionLoop:
         return self._generator.get_text()
 
     def _reset_playback_state(self) -> None:
-        """Reset to IDLE after playback ends (complete or interrupted)."""
-        self._playback_state = PlaybackState.IDLE
+        """Reset to a fresh LISTENING turn after the robot turn ends."""
+        self._phase = Phase.LISTENING
         self._current_response = None
         self._sent_audio_buffer = bytearray()
         self._playback_start_time = 0.0

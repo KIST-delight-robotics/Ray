@@ -103,6 +103,7 @@ class TestNoOpFrame:
         assert not decision.turn_shift
         assert not decision.interrupt
         assert not decision.prepare
+        assert not decision.cancel
 
 
 # ---------------------------------------------------------------------------
@@ -203,37 +204,142 @@ class TestTurnGPTTimeout:
 
 
 # ---------------------------------------------------------------------------
-# Test 6: Turn-shift transitions to ROBOT_TURN
+# Test 6: turn_shift enters PENDING (tentative), not ROBOT_TURN
 # ---------------------------------------------------------------------------
 
 
-class TestRobotTurnTransition:
-    def test_after_turn_shift_no_interrupt_without_robot_audio(self):
-        """After turn_shift, user speech without robot_audio produces no interrupt.
-
-        Without robot audio, VAP cannot distinguish interrupt from backchannel.
-        The orchestrator handles this case via awaiting cancel on ASR text change.
-        """
+class TestTurnShiftEntersPending:
+    def test_turn_shift_enters_pending_preserving_state(self):
+        """After turn_shift the detector is PENDING and per-frame state is
+        preserved (so a cancel can resume the same turn)."""
         n_shift = 20
-        vap_shift = _silent_robot_favoring(n_shift)
-        detector, mock_vap, _ = _make_detector(vap_results=vap_shift)
-
-        # Drive to turn_shift
+        detector, _, _ = _make_detector(vap_results=_silent_robot_favoring(n_shift))
         detector.process_frame(FRAME, "hello")
         for _ in range(n_shift - 1):
-            d = detector.process_frame(FRAME, "hello")
-            if d.turn_shift:
+            if detector.process_frame(FRAME, "hello").turn_shift:
                 break
+        assert detector._turn_state is _TurnState.PENDING
+        assert detector._last_prepare_text == "hello"  # prepare baseline preserved for cancel
+        assert detector._prev_asr_text == "hello"  # NOT wiped at turn_shift
 
-        assert detector._turn_state is _TurnState.ROBOT_TURN
 
-        # Switch mock to user-speaking for the interrupt frame
-        mock_vap.feed_audio.side_effect = None
+# ---------------------------------------------------------------------------
+# Test 6a2: turn_shift defers to prepare on a pending dissimilar change
+# ---------------------------------------------------------------------------
+
+
+class TestTurnShiftPrepareDefer:
+    def test_defers_to_prepare_on_pending_change(self):
+        """A meaningful unprepared ASR change at turn_shift -> prepare, not shift."""
+        detector, mock_vap, _ = _make_detector(embedder=_make_embedder_mock(similarity=0.3))
+        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, False)  # robot-favor, silent
+        detector._silence_elapsed_sec = 3.0  # turn_shift_ready via low-prob timeout
+        detector._prev_asr_text = "completely different text"  # avoid resetting timers this frame
+        detector._last_prepare_text = "old text"
+        detector._asr_has_changed = True
+        detector._last_asr_change_elapsed_sec = 0.5  # prepare condition met
+
+        decision = detector.process_frame(FRAME, "completely different text")
+        assert decision.prepare
+        assert detector._turn_state is _TurnState.USER_TURN  # did NOT shift
+
+    def test_shifts_when_no_pending_change(self):
+        """Text settled (no pending change) at turn_shift -> turn_shift fires."""
+        detector, mock_vap, _ = _make_detector()
+        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, False)
+        detector._silence_elapsed_sec = 3.0
+        detector._prev_asr_text = "hello"
+        detector._last_prepare_text = "hello"
+        detector._asr_has_changed = False  # nothing pending → prepare won't fire
+
+        decision = detector.process_frame(FRAME, "hello")
+        assert decision.turn_shift
+        assert detector._turn_state is _TurnState.PENDING
+
+
+# ---------------------------------------------------------------------------
+# Test 6b: PENDING cancel detection
+# ---------------------------------------------------------------------------
+
+
+class TestPendingCancel:
+    def test_vap_user_favor_cancels_and_rewinds(self):
+        """In PENDING, p_now/p_fut favoring the user -> cancel + rewind."""
+        detector, mock_vap, _ = _make_detector()
+        detector._turn_state = _TurnState.PENDING
+        detector._last_prepare_text = "hello"
         mock_vap.feed_audio.return_value = VAPResult(0.8, 0.8, True)
 
-        # In ROBOT_TURN without robot_audio -> no interrupt (deferred to orchestrator)
-        decision = detector.process_frame(FRAME, "", None)
+        decision = detector.process_frame(FRAME, "hello")
+        assert decision.cancel
+        assert detector._turn_state is _TurnState.USER_TURN
+
+    def test_dissimilar_asr_cancels(self):
+        """In PENDING, dissimilar new ASR text -> cancel (user continued)."""
+        detector, mock_vap, _ = _make_detector(embedder=_make_embedder_mock(similarity=0.3))
+        detector._turn_state = _TurnState.PENDING
+        detector._last_prepare_text = "hello"
+        # speaking, but VAP probs don't cross the user-favor threshold → ASR path
+        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, True)
+
+        decision = detector.process_frame(FRAME, "hello tell me more about it")
+        assert decision.cancel
+        assert detector._turn_state is _TurnState.USER_TURN
+
+    def test_similar_asr_no_cancel(self):
+        """In PENDING, a finalization (high similarity) does NOT cancel."""
+        detector, mock_vap, _ = _make_detector(embedder=_make_embedder_mock(similarity=0.95))
+        detector._turn_state = _TurnState.PENDING
+        detector._last_prepare_text = "hello"
+        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, True)
+
+        decision = detector.process_frame(FRAME, "hello.")
+        assert not decision.cancel
+        assert detector._turn_state is _TurnState.PENDING
+
+    def test_no_signal_stays_pending(self):
+        """In PENDING with robot-favor VAP and unchanged text -> no cancel."""
+        detector, mock_vap, _ = _make_detector()
+        detector._turn_state = _TurnState.PENDING
+        detector._last_prepare_text = "hello"
+        detector._prev_asr_text = "hello"
+        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, False)
+
+        decision = detector.process_frame(FRAME, "hello")
         assert decision == TurnDecision.none()
+        assert detector._turn_state is _TurnState.PENDING
+
+    def test_not_speaking_no_cancel_even_user_favor(self):
+        """Gate: user-favor VAP but user NOT speaking -> no cancel (thrash guard)."""
+        detector, mock_vap, _ = _make_detector()
+        detector._turn_state = _TurnState.PENDING
+        detector._last_prepare_text = "hello"
+        detector._prev_asr_text = "hello"
+        mock_vap.feed_audio.return_value = VAPResult(0.8, 0.8, False)
+
+        decision = detector.process_frame(FRAME, "hello")
+        assert not decision.cancel
+        assert detector._turn_state is _TurnState.PENDING
+
+
+# ---------------------------------------------------------------------------
+# Test 6c: commit() enters ROBOT_TURN
+# ---------------------------------------------------------------------------
+
+
+class TestCommit:
+    def test_commit_enters_robot_turn_and_records_dialog(self):
+        detector, _, _ = _make_detector()
+        detector._turn_state = _TurnState.PENDING
+        detector._prev_asr_text = "hello"
+        detector._last_prepare_text = "hello"
+
+        detector.commit("hello")
+
+        assert detector._turn_state is _TurnState.ROBOT_TURN
+        assert detector._dialog_parts == ["hello"]
+        assert detector._prev_asr_text == ""  # wiped
+        assert detector._last_prepare_text == ""  # wiped
 
 
 # ---------------------------------------------------------------------------

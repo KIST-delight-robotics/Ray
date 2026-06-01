@@ -572,6 +572,13 @@ class ITurnDetector(ABC):
 
     Fuses VAP, TurnGPT, and timing heuristics into a single
     per-frame TurnDecision.
+
+    Turn-state lifecycle: USER_TURN → (turn_shift) → PENDING →
+    (commit) → ROBOT_TURN → (reset) → USER_TURN.  While PENDING the
+    turn-shift is tentative: if the user resumes, the detector emits
+    ``cancel`` and rewinds to USER_TURN with state preserved.  The
+    SessionLoop drives the commit (at begin_streaming) and reset (at
+    robot-turn end); the cancel rewind is internal.
     """
 
     @abstractmethod
@@ -614,11 +621,28 @@ class ITurnDetector(ABC):
         """
 
     @abstractmethod
+    def commit(self, text: str) -> None:
+        """Commit a pending turn-shift: the robot has taken the turn.
+
+        Called by the SessionLoop at begin_streaming (the cancel/interrupt
+        boundary). Transitions the detector from its tentative PENDING state
+        to ROBOT_TURN, clears per-frame tracking, and appends *text* to the
+        ``<ts>``-delimited dialog context as the completed user turn. After
+        commit, cancel is no longer possible; subsequent user speech is
+        detected as an interrupt (once robot_audio is available).
+
+        Args:
+            text: Final user-turn text the robot is responding to.
+        """
+
+    @abstractmethod
     def reset(self) -> None:
-        """Reset per-frame tracking state for a new turn.
+        """Reset to a fresh USER_TURN for a new turn.
 
         Clears frame counters, text-stability timers, and prepare flags.
         Does **not** clear the accumulated dialog context used by TurnGPT.
+        Called at robot-turn end (completion/interrupt); distinct from the
+        internal cancel rewind, which preserves per-frame state.
         """
 
 

@@ -58,17 +58,29 @@ class GeneratorState(enum.Enum):
     FAILED = "failed"
 
 
-class PlaybackState(enum.Enum):
-    """Audio playback state tracked by Orchestrator.
+class Phase(enum.Enum):
+    """SessionLoop conversation phase (single source of truth).
 
-    IDLE         — no audio being played or pending.
-    PLAYING      — C++ is actively playing TTS audio.
-    STOP_PENDING — interrupt sent to C++, awaiting stop confirmation.
+    Replaces the former ``PlaybackState`` + ``awaiting_response`` pair so
+    that mutually-exclusive states cannot drift.
+
+    LISTENING — user turn; receiving input (detector USER_TURN).
+    AWAITING  — turn_shift fired, response not yet sent to the bridge;
+                cancel still possible (detector PENDING). No bridge audio.
+    STREAMING — audio sent to the bridge (begin_streaming committed),
+                playback not yet confirmed; no robot_audio/clock yet
+                (detector ROBOT_TURN). interrupt/cancel boundary is here:
+                everything from STREAMING on is interrupt territory.
+    PLAYING   — playback_started received, clock running; robot_audio
+                available for full VAP interrupt (detector ROBOT_TURN).
+    STOPPING  — interrupt sent to C++, awaiting stop confirmation.
     """
 
-    IDLE = "idle"
+    LISTENING = "listening"
+    AWAITING = "awaiting"
+    STREAMING = "streaming"
     PLAYING = "playing"
-    STOP_PENDING = "stop_pending"
+    STOPPING = "stopping"
 
 
 class LEDState(enum.Enum):
@@ -97,13 +109,14 @@ class TurnDecision:
     turn_shift: bool = False
     interrupt: bool = False
     prepare: bool = False
+    cancel: bool = False
 
     def __post_init__(self) -> None:
-        if sum([self.turn_shift, self.interrupt, self.prepare]) > 1:
+        if sum([self.turn_shift, self.interrupt, self.prepare, self.cancel]) > 1:
             raise ValueError(
                 "TurnDecision: at most one signal may be True. "
                 f"Got turn_shift={self.turn_shift}, interrupt={self.interrupt}, "
-                f"prepare={self.prepare}"
+                f"prepare={self.prepare}, cancel={self.cancel}"
             )
 
     @classmethod

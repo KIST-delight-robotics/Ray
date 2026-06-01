@@ -26,6 +26,7 @@ logger = logging.getLogger("voice_pipeline.turn_taking")
 
 class _TurnState(enum.Enum):
     USER_TURN = "user_turn"
+    PENDING = "pending"  # turn_shift fired, awaiting commit (begin_streaming) or rewind (cancel)
     ROBOT_TURN = "robot_turn"
 
 
@@ -38,6 +39,11 @@ class TurnDetector(ITurnDetector):
 
     Interrupt detection during ROBOT_TURN uses VAP to distinguish
     genuine interrupts from backchannels.
+
+    After turn_shift the detector is PENDING (tentative). If the user
+    resumes — VAP favoring the user, or dissimilar new ASR text — it emits
+    ``cancel`` and rewinds to USER_TURN with state preserved. Otherwise the
+    SessionLoop calls ``commit()`` (at begin_streaming) to enter ROBOT_TURN.
 
     Args:
         vap: 오디오 기반 voice activity projection 모델 (``IVAP``).
@@ -117,7 +123,7 @@ class TurnDetector(ITurnDetector):
         if self._turn_state is _TurnState.ROBOT_TURN:
             return self._process_robot_turn(vap_result, user_is_speaking, robot_audio)
 
-        # --- USER_TURN ---
+        # --- USER_TURN / PENDING: shared per-frame update ---
         elapsed = self._frame_duration_sec * frame_count
 
         # Poll latest TurnGPT result (non-blocking)
@@ -141,21 +147,19 @@ class TurnDetector(ITurnDetector):
             self._vap_favor_robot_elapsed_sec = 0.0
         self._last_asr_change_elapsed_sec += elapsed
 
-        # --- Turn-shift check (only when user NOT speaking and text exists) ---
-        if not user_is_speaking and asr_text and self._check_turn_shift(vap_result, elapsed):
-            logger.info("TURN_SHIFT: %r", asr_text[:60])
-            logger.debug(
-                "TURN_SHIFT detail: p_now=%.2f p_fut=%.2f turngpt=%.2f silence=%.2fs",
-                vap_result.p_now,
-                vap_result.p_fut,
-                self._turngpt_prob,
-                self._silence_elapsed_sec,
-            )
-            self._turn_state = _TurnState.ROBOT_TURN
-            self._reset_per_frame_state()
-            return TurnDecision(turn_shift=True)
+        # PENDING: turn-shift already fired but uncommitted. Same per-frame
+        # tracking (so a rewind continues seamlessly), but only watch for the
+        # user resuming → cancel. No turn_shift/prepare re-fire.
+        if self._turn_state is _TurnState.PENDING:
+            return self._process_pending(vap_result, user_is_speaking, asr_text, text_changed)
 
-        # --- Prepare check ---
+        # --- USER_TURN ---
+        # Evaluate turn-shift first so its VAP-sustain timer keeps advancing even
+        # on frames where prepare preempts the shift below (see _check_turn_shift's
+        # side effect). The decision itself is acted on after the prepare check.
+        turn_shift_ready = not user_is_speaking and asr_text and self._check_turn_shift(vap_result, elapsed)
+
+        # Prepare preempts turn-shift on a fresh dissimilar change (→ regenerate).
         if self._check_prepare(asr_text):
             prob = self._turngpt_prob
             thresh = self._PREPARE_TURNGPT_THRESHOLD
@@ -167,6 +171,21 @@ class TurnDetector(ITurnDetector):
             logger.debug("PREPARE (%s): text=%r", reason, asr_text[:60])
             return TurnDecision(prepare=True)
 
+        # --- Turn-shift (text has settled / still matches the last prepare) ---
+        if turn_shift_ready:
+            logger.info("TURN_SHIFT: %r", asr_text[:60])
+            logger.debug(
+                "TURN_SHIFT detail: p_now=%.2f p_fut=%.2f turngpt=%.2f silence=%.2fs",
+                vap_result.p_now,
+                vap_result.p_fut,
+                self._turngpt_prob,
+                self._silence_elapsed_sec,
+            )
+            # Tentative: enter PENDING (commit/rewind decides). Do NOT wipe
+            # per-frame state — a cancel must be able to resume this turn.
+            self._turn_state = _TurnState.PENDING
+            return TurnDecision(turn_shift=True)
+
         return TurnDecision.none()
 
     def notify_turn_complete(self, role: Literal["user", "robot"], text: str) -> None:
@@ -175,8 +194,20 @@ class TurnDetector(ITurnDetector):
             return
         self._dialog_parts.append(text)
 
+    def commit(self, text: str) -> None:
+        """Commit the pending turn-shift (PENDING → ROBOT_TURN).
+
+        Appends *text* as the completed user turn to TurnGPT dialog context,
+        then wipes per-frame tracking. After commit, cancel is no longer
+        possible. Called by SessionLoop at begin_streaming.
+        """
+        if text:
+            self._dialog_parts.append(text)
+        self._turn_state = _TurnState.ROBOT_TURN
+        self._reset_per_frame_state()
+
     def reset(self) -> None:
-        """Reset per-frame tracking state for a new turn.
+        """Reset to a fresh USER_TURN for a new turn.
 
         Does NOT clear dialog_parts (TurnGPT context persists across turns).
         """
@@ -254,6 +285,48 @@ class TurnDetector(ITurnDetector):
 
         return TurnDecision.none()
 
+    def _process_pending(
+        self, vap_result: VAPResult, user_is_speaking: bool, asr_text: str, text_changed: bool
+    ) -> TurnDecision:
+        """Cancel detection during the tentative PENDING window.
+
+        The user reclaiming the floor means the turn_shift was premature →
+        cancel. ``user_is_speaking`` is a prerequisite (mirrors interrupt) —
+        the user must actually be speaking — then one of two signals confirms
+        the reclaim:
+        - VAP: p_now/p_fut both favor the user (immediate; each VAP result
+          already integrates ~100ms, so no sustain is needed).
+        - ASR: new text dissimilar to the last prepared text — the basis of
+          the (speculative) response (a finalization stays similar, ignored).
+        On cancel, rewind to USER_TURN with per-frame state preserved.
+        """
+        if not user_is_speaking:
+            return TurnDecision.none()
+
+        if vap_result.p_now > self._INTERRUPT_USER_THRESHOLD and vap_result.p_fut > self._INTERRUPT_USER_THRESHOLD:
+            logger.info("CANCEL (vap): p_now=%.2f p_fut=%.2f", vap_result.p_now, vap_result.p_fut)
+            self._turn_state = _TurnState.USER_TURN
+            return TurnDecision(cancel=True)
+
+        if text_changed and asr_text and self._last_prepare_text:
+            similarity = self._text_similarity(self._last_prepare_text, asr_text)
+            if similarity < self._SIMILARITY_THRESHOLD:
+                logger.info(
+                    "CANCEL (asr): similarity=%.2f %r → %r",
+                    similarity,
+                    self._last_prepare_text[:40],
+                    asr_text[:40],
+                )
+                self._turn_state = _TurnState.USER_TURN
+                return TurnDecision(cancel=True)
+
+        return TurnDecision.none()
+
+    def _text_similarity(self, a: str, b: str) -> float:
+        """Cosine similarity between two texts via the embedder."""
+        vecs = self._embedder.embed_batch([a, b])
+        return float(np.dot(vecs[0], vecs[1]) / (np.linalg.norm(vecs[0]) * np.linalg.norm(vecs[1]) + 1e-9))
+
     def _check_prepare(self, asr_text: str) -> bool:
         """Check if speculative generation should be triggered."""
         if not self._asr_has_changed or not asr_text:
@@ -268,8 +341,7 @@ class TurnDetector(ITurnDetector):
 
         # Similarity gate: skip if text is too similar to last prepare
         if self._last_prepare_text:
-            vecs = self._embedder.embed_batch([self._last_prepare_text, asr_text])
-            similarity = float(np.dot(vecs[0], vecs[1]) / (np.linalg.norm(vecs[0]) * np.linalg.norm(vecs[1]) + 1e-9))
+            similarity = self._text_similarity(self._last_prepare_text, asr_text)
             if similarity >= self._SIMILARITY_THRESHOLD:
                 logger.debug(
                     "PREPARE skipped (similarity=%.2f): %r → %r",

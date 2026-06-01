@@ -18,6 +18,12 @@ class TestTurnDecision:
         assert decision.turn_shift is False
         assert decision.interrupt is False
         assert decision.prepare is False
+        assert decision.cancel is False
+
+    def test_single_signal_cancel(self) -> None:
+        decision = TurnDecision(cancel=True)
+        assert decision.cancel is True
+        assert decision.turn_shift is False
 
     def test_single_signal_turn_shift(self) -> None:
         decision = TurnDecision(turn_shift=True)
