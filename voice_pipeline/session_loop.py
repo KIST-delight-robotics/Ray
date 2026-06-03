@@ -464,11 +464,12 @@ class SessionLoop:
     def _handle_interrupt(self) -> None:
         """Handle interrupt signal from TurnDetector.
 
-        Only reachable from STREAMING/PLAYING — the detector emits cancel
-        (not interrupt) before begin_streaming. Both stop playback.
+        Only reachable from PLAYING — the detector requires robot_audio
+        (available only after playback_started) to distinguish interrupt
+        from backchannel.
         """
-        if self._phase not in (Phase.STREAMING, Phase.PLAYING):
-            logger.debug("Interrupt ignored (phase=%s)", self._phase.value)
+        if self._phase is not Phase.PLAYING:
+            logger.warning("Interrupt in unexpected phase=%s", self._phase.value)
             return
         logger.info("INTERRUPT: stopping playback")
         try:
