@@ -337,27 +337,24 @@ class SessionLoop:
         if self._poll_cpp_events():
             return True  # Bridge error → terminate
 
-        # 7. Drain audio to bridge while streaming (STREAMING or PLAYING)
-        if self._phase in (Phase.STREAMING, Phase.PLAYING):
-            self._drain_audio_to_bridge()
+        # 7. Phase-specific actions
+        match self._phase:
+            case Phase.STREAMING | Phase.PLAYING:
+                self._drain_audio_to_bridge()
+            case Phase.AWAITING:
+                self._check_generator_completion()
+            case Phase.STOPPING:
+                self._check_stop_pending_watchdog()
 
-        # 8. Check generator completion while AWAITING
-        if self._phase is Phase.AWAITING:
-            self._check_generator_completion()
-
-        # 9. Check deferred truncation
+        # 8. Check deferred truncation
         if self._pending_truncation is not None:
             self._check_deferred_truncation()
 
-        # 10. STOPPING watchdog
-        if self._phase is Phase.STOPPING:
-            self._check_stop_pending_watchdog()
-
-        # 11. Audio starvation check
+        # 9. Audio starvation check
         if self._check_audio_starvation():
             return True
 
-        # 12. Session timeout
+        # 10. Session timeout
         return self._check_session_timeout()
 
     def _get_frame(self) -> AudioFrame | None:
