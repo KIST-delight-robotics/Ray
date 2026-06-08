@@ -13,11 +13,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
+import sqlite3
 import sys
 from pathlib import Path
 
 from num2words import num2words
+
+logger = logging.getLogger("eval.score")
 
 # ---------------------------------------------------------------------------
 # ASR — Word Error Rate
@@ -135,6 +139,511 @@ def compute_latency_stats(latencies: list[float]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# LLM Response Quality — Judge evaluation
+# ---------------------------------------------------------------------------
+
+_JUDGE_MODEL = "gpt-5.5"
+
+_QUALITY_SUITES: dict[str, dict[str, str]] = {
+    "lq_factual": {
+        "criterion": "correctness",
+        "rubric": (
+            "1: Completely incorrect\n"
+            "2: Major factual errors\n"
+            "3: Partially correct with notable inaccuracies\n"
+            "4: Mostly correct with minor imprecision\n"
+            "5: Completely accurate"
+        ),
+    },
+    "lq_advice": {
+        "criterion": "helpfulness",
+        "rubric": (
+            "1: Useless or harmful\n"
+            "2: Vague, generic, little practical value\n"
+            "3: Somewhat helpful but lacking specificity\n"
+            "4: Practical and actionable\n"
+            "5: Excellent — specific, actionable, well-prioritized"
+        ),
+    },
+    "lq_casual": {
+        "criterion": "engagement",
+        "rubric": (
+            "1: Kills the conversation or non-sequitur\n"
+            "2: Minimal, disinterested response\n"
+            "3: Adequate but doesn't advance the conversation\n"
+            "4: Engages naturally, shows genuine interest\n"
+            "5: Warmly responds and naturally continues dialogue"
+        ),
+    },
+    "lq_empathy": {
+        "criterion": "empathy",
+        "rubric": (
+            "1: Dismissive or tone-deaf\n"
+            "2: Acknowledges situation but lacks warmth\n"
+            "3: Basic empathy, somewhat formulaic\n"
+            "4: Warm and emotionally attuned\n"
+            "5: Deeply empathetic — validates feelings with genuine care"
+        ),
+    },
+    "lq_voice_adaptation": {
+        "criterion": "format_adaptation",
+        "rubric": (
+            "1: Uses lists, bullet points, code blocks, or markdown\n"
+            "2: Partially text-formatted (numbered steps, markdown)\n"
+            "3: Mixed — some voice-friendly restructuring with text remnants\n"
+            "4: Mostly voice-friendly, conveys structured info conversationally\n"
+            "5: Perfectly adapted — all information in natural spoken form"
+        ),
+    },
+    "lq_multi_turn": {
+        "criterion": "context_coherence",
+        "rubric": (
+            "1: Completely ignores prior conversation\n"
+            "2: Minimal reference to prior turns\n"
+            "3: Some context usage but misses key details\n"
+            "4: Good context integration, references prior discussion naturally\n"
+            "5: Seamless — builds on prior context as a human would"
+        ),
+    },
+    "lq_wrong_premise": {
+        "criterion": "correction_quality",
+        "rubric": (
+            "1: Accepts and reinforces the false premise\n"
+            "2: Vaguely hints something might be wrong\n"
+            "3: Corrects but awkwardly or condescendingly\n"
+            "4: Tactfully corrects with accurate information\n"
+            "5: Gracefully corrects — informative, respectful, accurate"
+        ),
+    },
+    "lq_impossible": {
+        "criterion": "boundary_communication",
+        "rubric": (
+            "1: Pretends to fulfill the request\n"
+            "2: Confusing or unclear refusal\n"
+            "3: Refuses but offers no help or alternatives\n"
+            "4: Honestly communicates limitation with helpful context\n"
+            "5: Transparent about limitation, suggests practical alternatives"
+        ),
+    },
+}
+
+_COMMON_RUBRIC = """\
+relevance (1-5):
+  1: Completely ignores or misunderstands the input
+  2: Partially related but misses the core intent
+  3: Addresses the topic but misses key nuances
+  4: Directly addresses the input with appropriate detail
+  5: Perfectly addresses the input
+
+voice_appropriateness (1-5):
+  1: Completely unsuitable — very long, uses markdown/lists/code/URLs
+  2: Mostly unsuitable — too long or contains visual formatting
+  3: Acceptable but could be more concise or spoken-friendly
+  4: Well-suited for voice — appropriate length, natural structure
+  5: Perfectly concise and structured for spoken delivery
+
+naturalness (1-5):
+  1: Robotic, overly formal, or template-generated
+  2: Somewhat stiff or unnatural phrasing
+  3: Acceptable but noticeably AI-like
+  4: Natural conversational tone with minor stiffness
+  5: Completely natural, indistinguishable from human conversation"""
+
+
+def _build_judge_messages(suite_name: str, turns: list[dict], *, multi_turn: bool = False) -> list[dict]:
+    cfg = _QUALITY_SUITES[suite_name]
+    criterion = cfg["criterion"]
+
+    if multi_turn:
+        system = (
+            "You are evaluating a multi-turn conversation from a voice conversation robot.\n"
+            "The robot speaks to users through a physical speaker — "
+            "responses must be suitable for listening, not reading.\n\n"
+            "Evaluate the ENTIRE conversation as a whole on these criteria:\n\n"
+            f"{_COMMON_RUBRIC}\n\n"
+            f"{criterion} (1-5):\n{cfg['rubric']}\n\n"
+            "Return a JSON object with: relevance, voice_appropriateness, "
+            f"naturalness, {criterion}, reasoning (one sentence in Korean)."
+        )
+        parts = [
+            f"User: {t['input_text']}\nResponse: {t['response_text']}"
+            for t in turns
+        ]
+        user = "Evaluate this multi-turn conversation as a whole:\n\n" + "\n\n".join(parts)
+    else:
+        system = (
+            "You are evaluating responses from a voice conversation robot.\n"
+            "The robot speaks to users through a physical speaker — "
+            "responses must be suitable for listening, not reading.\n\n"
+            f"Score each response on these criteria:\n\n"
+            f"{_COMMON_RUBRIC}\n\n"
+            f"{criterion} (1-5):\n{cfg['rubric']}\n\n"
+            'Return a JSON object with an "evaluations" array. '
+            "Each element must have: question_id, relevance, voice_appropriateness, "
+            f"naturalness, {criterion}, reasoning (one sentence in Korean)."
+        )
+        parts = [f"[{t['question_id']}]\nUser: {t['input_text']}\nResponse: {t['response_text']}" for t in turns]
+        user = "Evaluate these responses:\n\n" + "\n\n".join(parts)
+
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _call_judge(messages: list[dict]) -> dict | None:
+    try:
+        from openai import OpenAI
+
+        client = OpenAI()
+        response = client.chat.completions.create(
+            model=_JUDGE_MODEL,
+            messages=messages,
+            response_format={"type": "json_object"},
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception:
+        logger.error("Judge API call failed", exc_info=True)
+        return None
+
+
+def _apply_judge_result(
+    suite_name: str,
+    turns: list[dict],
+    result: dict,
+    criterion_agg: dict[str, list[float]],
+) -> None:
+    criterion = _QUALITY_SUITES[suite_name]["criterion"]
+    eval_by_id = {e["question_id"]: e for e in result["evaluations"]}
+    score_keys = ["relevance", "voice_appropriateness", "naturalness", criterion]
+
+    for turn in turns:
+        ev = eval_by_id.get(turn["question_id"])
+        if not ev:
+            continue
+        scores = {}
+        for key in score_keys:
+            val = ev.get(key)
+            if isinstance(val, (int, float)) and 1 <= val <= 5:
+                scores[key] = val
+                criterion_agg.setdefault(key, []).append(val)
+        turn["quality_scores"] = scores
+        turn["quality_reasoning"] = ev.get("reasoning", "")
+
+
+def _score_quality(turns: list[dict]) -> dict:
+    """Score response quality for quality-suite turns. Mutates turns. Returns summary."""
+    by_suite: dict[str, list[dict]] = {}
+    for turn in turns:
+        suite = turn["suite_name"]
+        if suite in _QUALITY_SUITES and turn.get("response_text"):
+            by_suite.setdefault(suite, []).append(turn)
+
+    if not by_suite:
+        return {}
+
+    criterion_agg: dict[str, list[float]] = {}
+    suite_summaries: dict[str, dict] = {}
+
+    for suite_name, suite_turns in by_suite.items():
+        if suite_name == "lq_multi_turn":
+            criterion = _QUALITY_SUITES[suite_name]["criterion"]
+            score_keys = ["relevance", "voice_appropriateness", "naturalness", criterion]
+            by_session: dict[str, list[dict]] = {}
+            for t in suite_turns:
+                by_session.setdefault(t.get("session_id", ""), []).append(t)
+            for session_turns in by_session.values():
+                messages = _build_judge_messages(suite_name, session_turns, multi_turn=True)
+                result = _call_judge(messages)
+                if not result:
+                    logger.error("No valid judge result for %s", suite_name)
+                    continue
+                scores: dict[str, float] = {}
+                for key in score_keys:
+                    val = result.get(key)
+                    if isinstance(val, (int, float)) and 1 <= val <= 5:
+                        scores[key] = val
+                        criterion_agg.setdefault(key, []).append(val)
+                reasoning = result.get("reasoning", "")
+                for turn in session_turns:
+                    turn["quality_scores"] = scores
+                    turn["quality_reasoning"] = reasoning
+        else:
+            messages = _build_judge_messages(suite_name, suite_turns)
+            result = _call_judge(messages)
+            if result and "evaluations" in result:
+                _apply_judge_result(suite_name, suite_turns, result, criterion_agg)
+            else:
+                logger.error("No valid judge result for %s", suite_name)
+
+        scored = [t for t in suite_turns if "quality_scores" in t]
+        if scored:
+            vals = [v for t in scored for v in t["quality_scores"].values()]
+            suite_summaries[suite_name] = {
+                "mean_score": round(sum(vals) / len(vals), 2),
+                "turn_count": len(scored),
+            }
+
+    all_vals = [v for vals in criterion_agg.values() for v in vals]
+    if not all_vals:
+        return {}
+
+    return {
+        "mean_score": round(sum(all_vals) / len(all_vals), 2),
+        "by_criterion": {name: round(sum(vals) / len(vals), 2) for name, vals in criterion_agg.items()},
+        "by_suite": suite_summaries,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Memory — Writer, Retriever Recall, Memory Quality
+# ---------------------------------------------------------------------------
+
+
+def _score_writer(report: dict) -> dict:
+    """Score memory writer quality by judging extracted episodes against seed sessions."""
+    seed_file = report.get("seed_file")
+    seed_session_map = report.get("seed_session_map")
+    eval_db = report.get("eval_db")
+
+    if not seed_file or not seed_session_map:
+        return {}
+
+    seed_path = Path(seed_file)
+    if not seed_path.exists():
+        logger.error("Seed file not found: %s", seed_file)
+        return {}
+
+    seed_data = json.loads(seed_path.read_text())
+    seed_sessions = seed_data.get("sessions", [])
+
+    db_path = Path(eval_db) if eval_db else None
+    if not db_path or not db_path.exists():
+        logger.error("Eval DB not found: %s", eval_db)
+        return {}
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+
+    by_session: list[dict] = []
+    all_scores: list[float] = []
+
+    for idx_str, session_id in seed_session_map.items():
+        session_index = int(idx_str)
+        if session_index >= len(seed_sessions):
+            continue
+
+        seed_session = seed_sessions[session_index]
+        utterances = seed_session.get("utterances", [])
+
+        rows = conn.execute(
+            "SELECT id, text, importance FROM episodes WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+
+        episodes_text = (
+            "\n".join(f"- [importance={r['importance']}] {r['text']}" for r in rows)
+            if rows
+            else "(no episodes extracted)"
+        )
+
+        utterances_text = "\n".join(f"- {u['role']}: {u['text']}" for u in utterances)
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are evaluating a memory extraction system. Given a conversation session "
+                    "and the episodes extracted from it, evaluate:\n"
+                    "- completeness (1-5): Are all important facts and events captured?\n"
+                    "- accuracy (1-5): Are the extracted episodes factually faithful to the conversation?\n"
+                    "- granularity (1-5): Is the level of detail appropriate? "
+                    "(1=too coarse or too fine, 5=well-balanced)\n\n"
+                    "Return JSON with: completeness, accuracy, granularity, reasoning (one sentence in Korean)."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (f"Session utterances:\n{utterances_text}\n\nExtracted episodes:\n{episodes_text}"),
+            },
+        ]
+
+        result = _call_judge(messages)
+        if not result:
+            continue
+
+        entry: dict = {
+            "session_index": session_index,
+            "episode_count": len(rows),
+            "completeness": result.get("completeness", 0),
+            "accuracy": result.get("accuracy", 0),
+            "granularity": result.get("granularity", 0),
+            "reasoning": result.get("reasoning", ""),
+            "utterances": [{"role": u["role"], "text": u["text"]} for u in utterances],
+            "episodes": [{"id": r["id"], "text": r["text"], "importance": r["importance"]} for r in rows],
+        }
+        by_session.append(entry)
+
+        scores = [entry["completeness"], entry["accuracy"], entry["granularity"]]
+        valid = [s for s in scores if isinstance(s, (int, float)) and 1 <= s <= 5]
+        all_scores.extend(valid)
+
+    conn.close()
+
+    if not all_scores:
+        return {}
+
+    return {
+        "mean_score": round(sum(all_scores) / len(all_scores), 2),
+        "by_session": by_session,
+    }
+
+
+def _compute_retriever_recall(turns: list[dict]) -> dict:
+    """Compute recall for turns that have target_episode_ids. No LLM needed."""
+    per_probe: list[dict] = []
+
+    for turn in turns:
+        target_ids = turn.get("target_episode_ids")
+        if not target_ids:
+            continue
+
+        retrieved = turn.get("retrieved_episodes", [])
+        retrieved_ids = set()
+        for ep in retrieved:
+            if isinstance(ep, dict):
+                ep_id = ep.get("id") or ep.get("episode_id")
+                if ep_id is not None:
+                    retrieved_ids.add(ep_id)
+            else:
+                retrieved_ids.add(ep)
+
+        found = sum(1 for tid in target_ids if tid in retrieved_ids)
+        recall = found / len(target_ids) if target_ids else 0.0
+        recall = round(recall, 4)
+
+        turn["retriever_recall"] = recall
+
+        per_probe.append(
+            {
+                "question_id": turn.get("question_id", ""),
+                "recall": recall,
+                "found": found,
+                "total_targets": len(target_ids),
+            }
+        )
+
+    if not per_probe:
+        return {}
+
+    mean_recall = round(sum(p["recall"] for p in per_probe) / len(per_probe), 4)
+
+    return {
+        "mean_recall": mean_recall,
+        "per_probe": per_probe,
+    }
+
+
+def _score_memory_quality(turns: list[dict]) -> dict:
+    """Score memory-augmented response quality for mem_* suite turns."""
+    all_scores: dict[str, list[float]] = {}
+    precision_values: list[float] = []
+    scored_count = 0
+
+    criteria = [
+        "response_relevance",
+        "memory_appropriateness",
+        "factual_accuracy",
+        "naturalness",
+    ]
+
+    for turn in turns:
+        suite = turn.get("suite_name", "")
+        if not suite.startswith("mem_") or not turn.get("response_text"):
+            continue
+
+        retrieved = turn.get("retrieved_episodes", [])
+        if retrieved:
+            ep_lines = []
+            for i, ep in enumerate(retrieved, 1):
+                if isinstance(ep, dict):
+                    ep_text = ep.get("text", str(ep))
+                    ep_id = ep.get("id") or ep.get("episode_id", "?")
+                    ep_lines.append(f"{i}. [id={ep_id}] {ep_text}")
+                else:
+                    ep_lines.append(f"{i}. {ep}")
+            episodes_formatted = "\n".join(ep_lines)
+        else:
+            episodes_formatted = "(no episodes retrieved)"
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are evaluating a memory-augmented conversational AI. "
+                    "Given the user's question, retrieved memory episodes, and the AI's response, evaluate:\n"
+                    "(1) episode_relevance — for each retrieved episode, is it relevant to the question? "
+                    "Return an array of booleans, one per episode, in order.\n"
+                    "(2) response_relevance (1-5): Does the response address the user's question?\n"
+                    "(3) memory_appropriateness (1-5): Does the response use memory naturally "
+                    "without over-sharing or ignoring relevant memories?\n"
+                    "(4) factual_accuracy (1-5): Is the response factually consistent with the episodes?\n"
+                    "(5) naturalness (1-5): Does the response sound natural and conversational?\n\n"
+                    "Return JSON with keys: episode_relevance (array of booleans), "
+                    "response_relevance (int), memory_appropriateness (int), "
+                    "factual_accuracy (int), naturalness (int), reasoning (one sentence in Korean)."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"User question: {turn['input_text']}\n\n"
+                    f"Retrieved episodes:\n{episodes_formatted}\n\n"
+                    f"AI response: {turn['response_text']}"
+                ),
+            },
+        ]
+
+        result = _call_judge(messages)
+        if not result:
+            continue
+
+        # Store scores on turn
+        turn_scores: dict[str, int | float] = {}
+        for c in criteria:
+            val = result.get(c)
+            if isinstance(val, (int, float)) and 1 <= val <= 5:
+                turn_scores[c] = val
+                all_scores.setdefault(c, []).append(val)
+
+        turn["memory_scores"] = turn_scores
+        turn["memory_reasoning"] = result.get("reasoning", "")
+
+        # Compute precision from episode_relevance
+        ep_relevance = result.get("episode_relevance", [])
+        if ep_relevance and retrieved:
+            relevant_count = sum(1 for r in ep_relevance if r)
+            precision = relevant_count / len(retrieved)
+            turn["retriever_precision"] = round(precision, 4)
+            precision_values.append(turn["retriever_precision"])
+        elif not retrieved:
+            turn["retriever_precision"] = None
+        else:
+            turn["retriever_precision"] = None
+
+        scored_count += 1
+
+    if not all_scores:
+        return {}
+
+    flat = [v for vals in all_scores.values() for v in vals]
+    by_criterion = {name: round(sum(vals) / len(vals), 2) for name, vals in all_scores.items()}
+
+    return {
+        "mean_score": round(sum(flat) / len(flat), 2),
+        "by_criterion": by_criterion,
+        "mean_precision": round(sum(precision_values) / len(precision_values), 4) if precision_values else None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
 
@@ -162,27 +671,30 @@ def score_report(report: dict) -> dict:
     }
 
     for turn in report["turns"]:
+        is_text_mode = turn.get("text_mode", False)
         is_interruption = "interrupt_delay_sec" in turn
 
-        # ASR scoring (interruption 제외)
-        if not is_interruption and turn["success"] and turn["asr_text"]:
+        # ASR scoring (text mode, interruption 제외)
+        if not is_text_mode and not is_interruption and turn["success"] and turn["asr_text"]:
             wer = compute_wer(turn["input_text"], turn["asr_text"])
             turn["asr_score"] = wer
             asr_scores.append(wer["wer"])
             suite = turn["suite_name"]
             asr_by_suite.setdefault(suite, []).append(wer["wer"])
 
-        # Turn detection delay (pre-computed in run.py)
-        td_delay = turn.get("turn_detection_delay_ms")
-        if td_delay is not None and td_delay > 0:
-            turn_detection_delays.append(td_delay)
+        # Turn detection delay (text mode 제외)
+        if not is_text_mode:
+            td_delay = turn.get("turn_detection_delay_ms")
+            if td_delay is not None and td_delay > 0:
+                turn_detection_delays.append(td_delay)
 
-        # Pipeline latency collection
-        latency = turn.get("latency", {})
-        for key in latency_values:
-            val = latency.get(key)
-            if val and val > 0:
-                latency_values[key].append(val)
+        # Pipeline latency collection (text mode 제외)
+        if not is_text_mode:
+            latency = turn.get("latency", {})
+            for key in latency_values:
+                val = latency.get(key)
+                if val and val > 0:
+                    latency_values[key].append(val)
 
     # Aggregate ASR
     asr_summary = {}
@@ -245,6 +757,22 @@ def score_report(report: dict) -> dict:
             "latency": compute_latency_stats(int_latencies),
         }
 
+    # Quality scoring
+    quality_summary = _score_quality(report["turns"])
+
+    # Memory scoring
+    memory_summary = {}
+    memory_turns = [t for t in report["turns"] if t.get("suite_name", "").startswith("mem_")]
+    if memory_turns:
+        writer_summary = _score_writer(report)
+        recall_summary = _compute_retriever_recall(memory_turns)
+        quality_summary_mem = _score_memory_quality(report["turns"])
+        memory_summary = {
+            "writer": writer_summary,
+            "retriever_recall": recall_summary,
+            "quality": quality_summary_mem,
+        }
+
     # Success rate
     total = len(report["turns"])
     successful = sum(1 for t in report["turns"] if t["success"])
@@ -256,6 +784,8 @@ def score_report(report: dict) -> dict:
             "asr": asr_summary,
             "latency": latency_summary,
             "interruption": int_summary,
+            "quality": quality_summary,
+            "memory": memory_summary,
         },
     }
 
@@ -310,6 +840,74 @@ def print_scores(scored: dict) -> None:
                 f"  Detection latency: mean={int_lat['mean_ms']:.0f}ms"
                 f"  median={int_lat['median_ms']:.0f}ms  p95={int_lat['p95_ms']:.0f}ms"
             )
+
+    quality = scores.get("quality", {})
+    if quality:
+        print(f"\nLLM Response Quality (mean: {quality['mean_score']:.1f}/5):")
+        for name, val in quality.get("by_criterion", {}).items():
+            print(f"  {name}: {val:.1f}")
+        by_suite = quality.get("by_suite", {})
+        if by_suite:
+            print()
+            for suite, stats in by_suite.items():
+                print(f"  {suite}: {stats['mean_score']:.1f}/5 ({stats['turn_count']} turns)")
+
+    quality_turns = [t for t in scored["turns"] if "quality_scores" in t]
+    if quality_turns:
+        print("\nPer-question Quality:")
+        for turn in quality_turns:
+            qs = turn["quality_scores"]
+            avg = sum(qs.values()) / len(qs) if qs else 0
+            scores_str = " ".join(f"{k}={v}" for k, v in qs.items())
+            print(f"  [{avg:.1f}] {turn['question_id']}: {scores_str}")
+            if turn.get("quality_reasoning"):
+                print(f"        {turn['quality_reasoning'][:80]}")
+
+    # Memory evaluation
+    memory = scores.get("memory", {})
+    if memory:
+        writer = memory.get("writer", {})
+        if writer:
+            print(f"\nMemory Writer Quality (mean: {writer['mean_score']:.1f}/5):")
+            for s in writer.get("by_session", []):
+                print(
+                    f"  session {s['session_index']}: "
+                    f"completeness={s['completeness']} accuracy={s['accuracy']} "
+                    f"granularity={s['granularity']} ({s['episode_count']} episodes)"
+                )
+                if s.get("reasoning"):
+                    print(f"        {s['reasoning'][:80]}")
+
+        recall = memory.get("retriever_recall", {})
+        if recall:
+            print(f"\nRetriever Recall (mean: {recall['mean_recall']:.2%}):")
+            for p in recall.get("per_probe", []):
+                print(f"  {p['question_id']}: {p['recall']:.0%} ({p['found']}/{p['total_targets']})")
+
+        mem_quality = memory.get("quality", {})
+        if mem_quality:
+            print(f"\nMemory Usage Quality (mean: {mem_quality['mean_score']:.1f}/5):")
+            if mem_quality.get("mean_precision") is not None:
+                print(f"  Retriever precision: {mem_quality['mean_precision']:.2%}")
+            for name, val in mem_quality.get("by_criterion", {}).items():
+                print(f"  {name}: {val:.1f}")
+
+        mem_turns = [t for t in scored["turns"] if "memory_scores" in t]
+        if mem_turns:
+            print("\nPer-question Memory:")
+            for turn in mem_turns:
+                ms = turn["memory_scores"]
+                avg = sum(ms.values()) / len(ms) if ms else 0
+                parts = [f"{k}={v}" for k, v in ms.items()]
+                recall_str = ""
+                if "retriever_recall" in turn:
+                    recall_str = f" recall={turn['retriever_recall']:.0%}"
+                prec_str = ""
+                if turn.get("retriever_precision") is not None:
+                    prec_str = f" precision={turn['retriever_precision']:.0%}"
+                print(f"  [{avg:.1f}] {turn.get('question_id', '?')}: {' '.join(parts)}{recall_str}{prec_str}")
+                if turn.get("memory_reasoning"):
+                    print(f"        {turn['memory_reasoning'][:80]}")
 
     # Per-question ASR details
     turns_with_asr = [t for t in scored["turns"] if "asr_score" in t]

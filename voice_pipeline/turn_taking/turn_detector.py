@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import time
 from collections.abc import Callable
 from typing import Literal
 
@@ -100,6 +101,7 @@ class TurnDetector(ITurnDetector):
         self._asr_has_changed: bool = False
         self._last_prepare_text: str = ""
         self._turngpt_prob: float = 0.0
+        self._debug_vad_counter: int = 0
 
     # ------------------------------------------------------------------
     # ITurnDetector interface
@@ -116,7 +118,11 @@ class TurnDetector(ITurnDetector):
         vap_result = self._vap.feed_audio(user_audio, robot_audio)
 
         if self._vad_fn is not None:
-            user_is_speaking = self._vad_fn(user_audio) > self._EXT_VAD_THRESHOLD
+            vad_score = self._vad_fn(user_audio)
+            user_is_speaking = vad_score > self._EXT_VAD_THRESHOLD
+            if self._debug_vad_counter % 33 == 0:
+                logger.debug("VAD score=%.3f speaking=%s silence=%.2fs", vad_score, user_is_speaking, self._silence_elapsed_sec)
+            self._debug_vad_counter += 1
         else:
             user_is_speaking = vap_result.user_is_speaking
 
@@ -143,6 +149,8 @@ class TurnDetector(ITurnDetector):
         if not user_is_speaking:
             self._silence_elapsed_sec += elapsed
         else:
+            if self._silence_elapsed_sec > 0.5:
+                logger.debug("Silence reset at %.2fs (was speaking)", self._silence_elapsed_sec)
             self._silence_elapsed_sec = 0.0
             self._vap_favor_robot_elapsed_sec = 0.0
         self._last_asr_change_elapsed_sec += elapsed
@@ -322,9 +330,15 @@ class TurnDetector(ITurnDetector):
 
         return TurnDecision.none()
 
+    _SIMILARITY_SLOW_MS = 100
+
     def _text_similarity(self, a: str, b: str) -> float:
         """Cosine similarity between two texts via the embedder."""
+        t0 = time.monotonic()
         vecs = self._embedder.embed_batch([a, b])
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        if elapsed_ms > self._SIMILARITY_SLOW_MS:
+            logger.warning("Similarity slow: %.0fms (budget %dms)", elapsed_ms, self._SIMILARITY_SLOW_MS)
         return float(np.dot(vecs[0], vecs[1]) / (np.linalg.norm(vecs[0]) * np.linalg.norm(vecs[1]) + 1e-9))
 
     def _check_prepare(self, asr_text: str) -> bool:

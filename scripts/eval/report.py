@@ -27,17 +27,8 @@ _LATENCY_COLUMNS = (
     "turn_shift_to_playback_ms",
     "speculative_ms",
     "bridge_ms",
+    "interrupt_latency_ms",
 )
-
-
-def _extract_text(messages: list[tuple[str]], role: str) -> str:
-    """Extract text for a given role from message item_json rows."""
-    texts = []
-    for (item_json,) in messages:
-        item = json.loads(item_json)
-        if item.get("role") == role:
-            texts.append(item.get("content", ""))
-    return " ".join(texts)
 
 
 def _extract_latency(row: sqlite3.Row | None) -> dict[str, float]:
@@ -65,28 +56,62 @@ def build_report(results_dir: Path) -> dict:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
 
-    turns = []
-    for entry in entries:
-        sid = entry["session_id"]
-
-        messages = conn.execute(
+    # Pre-fetch messages and traces per session
+    session_ids = list({e["session_id"] for e in entries})
+    msg_cache: dict[str, list[dict]] = {}
+    trace_cache: dict[str, list] = {}
+    for sid in session_ids:
+        rows = conn.execute(
             "SELECT item_json FROM messages WHERE session_id = ? ORDER BY msg_id",
             (sid,),
         ).fetchall()
+        msg_pairs: list[dict] = []
+        i = 0
+        items = [json.loads(r[0]) for r in rows]
+        while i < len(items):
+            pair: dict = {"user": "", "assistant": ""}
+            if i < len(items) and items[i].get("role") == "user":
+                pair["user"] = items[i].get("content", "")
+                i += 1
+            if i < len(items) and items[i].get("role") == "assistant":
+                pair["assistant"] = items[i].get("content", "")
+                i += 1
+            msg_pairs.append(pair)
+        msg_cache[sid] = msg_pairs
 
-        trace = conn.execute(
-            "SELECT * FROM pipeline_traces WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+        traces = conn.execute(
+            "SELECT * FROM pipeline_traces WHERE session_id = ? ORDER BY id",
             (sid,),
-        ).fetchone()
+        ).fetchall()
+        trace_cache[sid] = traces
 
-        system_text = _extract_text(messages, "user")
-        response_text = _extract_text(messages, "assistant")
+    # Track turn index within each session for multi-turn
+    session_turn_idx: dict[str, int] = {}
+
+    turns = []
+    for entry in entries:
+        sid = entry["session_id"]
+        idx = session_turn_idx.get(sid, 0)
+        session_turn_idx[sid] = idx + 1
+
+        msg_pairs = msg_cache.get(sid, [])
+        traces = trace_cache.get(sid, [])
+
+        if idx < len(msg_pairs):
+            system_text = msg_pairs[idx]["user"]
+            response_text = msg_pairs[idx]["assistant"]
+        else:
+            system_text = ""
+            response_text = ""
+
+        trace = traces[idx] if idx < len(traces) else None
         latency = _extract_latency(trace)
         outcome = trace["outcome"] if trace else None
         asr_text = entry.get("asr_text") or system_text
 
         turn_data = {
             "suite_name": entry["suite_name"],
+            "session_id": sid,
             "question_id": entry["question_id"],
             "input_text": entry["input_text"],
             "asr_text": asr_text,
@@ -98,7 +123,16 @@ def build_report(results_dir: Path) -> dict:
             "error": entry.get("error"),
             "turn_detection_delay_ms": entry.get("turn_detection_delay_ms"),
         }
-        for key in ("interrupt_audio", "interrupt_delay_sec", "interrupt_played"):
+        for key in (
+            "scenario_id",
+            "interrupt_audio",
+            "interrupt_delay_sec",
+            "interrupt_played",
+            "text_mode",
+            "retrieved_episodes",
+            "target_sessions",
+            "target_episode_ids",
+        ):
             if key in entry:
                 turn_data[key] = entry[key]
 
@@ -107,14 +141,20 @@ def build_report(results_dir: Path) -> dict:
     conn.close()
 
     successful = sum(1 for t in turns if t["success"])
-    return {
+    report: dict = {
         "started_at": session_data.get("started_at", ""),
         "finished_at": session_data.get("finished_at", ""),
         "total": len(turns),
         "successful": successful,
         "failed": len(turns) - successful,
+        "eval_db": str(db_path),
+        "seed_session_map": session_data.get("seed_session_map"),
+        "seed_file": session_data.get("seed_file"),
         "turns": turns,
     }
+    if session_data.get("config"):
+        report["config"] = session_data["config"]
+    return report
 
 
 def print_summary(report: dict) -> None:

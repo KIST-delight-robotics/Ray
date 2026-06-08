@@ -171,6 +171,8 @@ class SQLiteMemoryStorage(IMemoryStorage):
         migrations = [
             "ALTER TABLE episodes ADD COLUMN citation_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE utterances ADD COLUMN token_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE processed_sessions ADD COLUMN duration_ms REAL",
+            "ALTER TABLE processed_sessions ADD COLUMN episode_count INTEGER",
         ]
         for sql in migrations:
             try:
@@ -423,7 +425,13 @@ class SQLiteMemoryStorage(IMemoryStorage):
 
     # --- Session processing status ---
 
-    def mark_session_processed(self, session_id: str) -> None:
+    def mark_session_processed(
+        self,
+        session_id: str,
+        *,
+        duration_ms: float | None = None,
+        episode_count: int | None = None,
+    ) -> None:
         """Record that memory extraction has been attempted for a session."""
         with self._lock:
             try:
@@ -431,8 +439,9 @@ class SQLiteMemoryStorage(IMemoryStorage):
 
                 now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO processed_sessions (session_id, processed_at) VALUES (?, ?)",
-                    (session_id, now),
+                    "INSERT OR IGNORE INTO processed_sessions "
+                    "(session_id, processed_at, duration_ms, episode_count) VALUES (?, ?, ?, ?)",
+                    (session_id, now, duration_ms, episode_count),
                 )
                 self._conn.commit()
             except sqlite3.Error:
@@ -710,7 +719,13 @@ class InMemoryMemoryStorage(IMemoryStorage):
 
     # --- Session processing status ---
 
-    def mark_session_processed(self, session_id: str) -> None:
+    def mark_session_processed(
+        self,
+        session_id: str,
+        *,
+        duration_ms: float | None = None,
+        episode_count: int | None = None,
+    ) -> None:
         """Record that memory extraction has been attempted."""
         self._processed.add(session_id)
 

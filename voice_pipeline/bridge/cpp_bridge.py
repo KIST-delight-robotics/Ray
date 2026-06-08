@@ -210,7 +210,7 @@ class CppBridge(ICppBridge):
             self._receiver_stop = None
         if self._conn is not None:
             try:
-                self._conn.close(timeout=self._CLOSE_TIMEOUT_SEC)
+                self._conn.close()
             except Exception:
                 logger.debug("Error closing WebSocket (suppressed)", exc_info=True)
             self._conn = None

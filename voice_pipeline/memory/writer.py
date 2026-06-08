@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 import numpy as np
@@ -79,6 +80,8 @@ class MemoryWriter:
             return []
 
     def _process(self, session_id: str, session_timestamp: str) -> list[Episode]:
+        t0 = time.monotonic()
+
         utterances = self._storage.get_utterances(session_id)
         if len(utterances) < self._MIN_UTTERANCES:
             logger.debug(
@@ -92,13 +95,23 @@ class MemoryWriter:
         episodes = self._extract_episodes(utterances, session_id, session_timestamp)
         if not episodes:
             logger.info("No episodes extracted from session %s", session_id)
-            self._storage.mark_session_processed(session_id)
+            duration_ms = (time.monotonic() - t0) * 1000
+            self._storage.mark_session_processed(
+                session_id,
+                duration_ms=duration_ms,
+                episode_count=0,
+            )
             return []
 
         # 2. Store episodes + embeddings
         stored = self._store_episodes(episodes)
         if not stored:
-            self._storage.mark_session_processed(session_id)
+            duration_ms = (time.monotonic() - t0) * 1000
+            self._storage.mark_session_processed(
+                session_id,
+                duration_ms=duration_ms,
+                episode_count=0,
+            )
             return []
 
         # 3. Profile extraction from episodes
@@ -108,7 +121,18 @@ class MemoryWriter:
         if facts:
             self._merge_profiles(facts, session_timestamp)
 
-        self._storage.mark_session_processed(session_id)
+        duration_ms = (time.monotonic() - t0) * 1000
+        self._storage.mark_session_processed(
+            session_id,
+            duration_ms=duration_ms,
+            episode_count=len(stored),
+        )
+        logger.info(
+            "Session %s processed: %d episodes in %.0fms",
+            session_id,
+            len(stored),
+            duration_ms,
+        )
         return stored
 
     # ------------------------------------------------------------------

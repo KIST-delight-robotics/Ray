@@ -38,14 +38,21 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    def _iter_questions(suite: dict):
+        if suite.get("multi_turn"):
+            for scenario in suite.get("scenarios", []):
+                yield from scenario["questions"]
+        else:
+            yield from suite.get("questions", [])
+
     manifest: dict[str, str] = {}
-    total = sum(len(s["questions"]) for s in data["suites"])
+    total = sum(1 for s in data["suites"] for _ in _iter_questions(s))
     generated = 0
 
     print(f"Preparing {total} question WAVs → {output_dir}")
 
     for suite in data["suites"]:
-        for q in suite["questions"]:
+        for q in _iter_questions(suite):
             wav_path = output_dir / f"{q['id']}.wav"
             manifest[q["id"]] = str(wav_path)
 

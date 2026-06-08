@@ -1,7 +1,9 @@
 {
+  "seed_file": "seeds.json",
   "suites": [
     {
       "name": "asr_short",
+      "description": "짧은 명령문",
       "category": "asr",
       "memory": false,
       "multi_turn": false,
@@ -18,6 +20,7 @@
     },
     {
       "name": "asr_conversational",
+      "description": "일상 대화 질문",
       "category": "asr",
       "memory": false,
       "multi_turn": false,
@@ -36,6 +39,7 @@
     },
     {
       "name": "asr_long",
+      "description": "긴 문장",
       "category": "asr",
       "memory": false,
       "multi_turn": false,
@@ -52,6 +56,7 @@
     },
     {
       "name": "asr_numbers",
+      "description": "숫자 표현",
       "category": "asr",
       "memory": false,
       "multi_turn": false,
@@ -68,6 +73,7 @@
     },
     {
       "name": "asr_proper_nouns",
+      "description": "고유명사",
       "category": "asr",
       "memory": false,
       "multi_turn": false,
@@ -84,6 +90,7 @@
     },
     {
       "name": "asr_confusable",
+      "description": "혼동 가능 표현",
       "category": "asr",
       "memory": false,
       "multi_turn": false,
@@ -100,6 +107,7 @@
     },
     {
       "name": "tt_ultra_short",
+      "description": "극짧은 응답",
       "category": "turn_taking",
       "memory": false,
       "multi_turn": false,
@@ -116,6 +124,7 @@
     },
     {
       "name": "tt_short_statements",
+      "description": "짧은 서술문",
       "category": "turn_taking",
       "memory": false,
       "multi_turn": false,
@@ -132,6 +141,7 @@
     },
     {
       "name": "tt_long_statements",
+      "description": "긴 서술문",
       "category": "turn_taking",
       "memory": false,
       "multi_turn": false,
@@ -148,6 +158,7 @@
     },
     {
       "name": "tt_questions",
+      "description": "질문형 발화",
       "category": "turn_taking",
       "memory": false,
       "multi_turn": false,
@@ -164,6 +175,7 @@
     },
     {
       "name": "tt_lists",
+      "description": "나열형 발화",
       "category": "turn_taking",
       "memory": false,
       "multi_turn": false,
@@ -180,6 +192,7 @@
     },
     {
       "name": "tt_weak_endings",
+      "description": "약한 종결 표현",
       "category": "turn_taking",
       "memory": false,
       "multi_turn": false,
@@ -198,6 +211,7 @@
     },
     {
       "name": "tt_incomplete",
+      "description": "미완성 발화",
       "category": "turn_taking",
       "memory": false,
       "multi_turn": false,
@@ -216,17 +230,24 @@
     },
     {
       "name": "tt_multi_turn",
+      "description": "다중 턴 대화",
       "category": "turn_taking",
       "memory": false,
       "multi_turn": true,
-      "questions": [
-        {"id": "ttm_001", "text": "What's your favorite season?"},
-        {"id": "ttm_002", "text": "Why do you like it?"},
-        {"id": "ttm_003", "text": "What do you usually do during that time of year?"}
+      "scenarios": [
+        {
+          "id": "ttm_s01",
+          "questions": [
+            {"id": "ttm_001", "text": "What's your favorite season?"},
+            {"id": "ttm_002", "text": "Why do you like it?"},
+            {"id": "ttm_003", "text": "What do you usually do during that time of year?"}
+          ]
+        }
       ]
     },
     {
       "name": "int_during_playback",
+      "description": "재생 중 끼어들기",
       "category": "interruption",
       "memory": false,
       "multi_turn": false,
@@ -239,7 +260,109 @@
       ]
     },
     {
+      "name": "lq_factual",
+      "description": "사실 정확성",
+      "category": "quality",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "lq_001", "text": "What is the speed of light?"},
+        {"id": "lq_002", "text": "What's the largest ocean on Earth?"},
+        {"id": "lq_003", "text": "Who invented the telephone?"}
+      ]
+    },
+    {
+      "name": "lq_advice",
+      "description": "조언/설명",
+      "category": "quality",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "lq_004", "text": "How can I get better at public speaking?"},
+        {"id": "lq_005", "text": "What's a good way to start exercising regularly?"},
+        {"id": "lq_006", "text": "How do I improve my sleep quality?"}
+      ]
+    },
+    {
+      "name": "lq_casual",
+      "description": "일상 대화",
+      "category": "quality",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "lq_007", "text": "I just got back from a really nice hike this morning."},
+        {"id": "lq_008", "text": "I tried making homemade pizza for the first time yesterday."},
+        {"id": "lq_009", "text": "The weather has been so nice lately."}
+      ]
+    },
+    {
+      "name": "lq_empathy",
+      "description": "감정 대응",
+      "category": "quality",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "lq_010", "text": "I'm really nervous about my job interview tomorrow."},
+        {"id": "lq_011", "text": "I just found out I got accepted into my dream school!"},
+        {"id": "lq_012", "text": "I've been feeling pretty lonely since I moved to a new city."}
+      ]
+    },
+    {
+      "name": "lq_voice_adaptation",
+      "description": "음성 적합성",
+      "category": "quality",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "lq_013", "text": "Can you list the planets in our solar system in order?"},
+        {"id": "lq_014", "text": "What are the steps to make scrambled eggs?"},
+        {"id": "lq_015", "text": "How do I write a for loop in Python?"}
+      ]
+    },
+    {
+      "name": "lq_multi_turn",
+      "description": "맥락 유지",
+      "category": "quality",
+      "memory": false,
+      "multi_turn": true,
+      "scenarios": [
+        {
+          "id": "lq_s01",
+          "questions": [
+            {"id": "lq_016", "text": "I'm thinking about adopting a cat."},
+            {"id": "lq_017", "text": "What should I prepare before bringing one home?"},
+            {"id": "lq_018", "text": "Any breed recommendations for a small apartment?"}
+          ]
+        }
+      ]
+    },
+    {
+      "name": "lq_wrong_premise",
+      "description": "잘못된 전제",
+      "category": "quality",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "lq_019", "text": "Why is the Great Wall of China visible from space?"},
+        {"id": "lq_020", "text": "Why do we only use ten percent of our brains?"},
+        {"id": "lq_021", "text": "How did Einstein fail math in school?"}
+      ]
+    },
+    {
+      "name": "lq_impossible",
+      "description": "불가능한 요청",
+      "category": "quality",
+      "memory": false,
+      "multi_turn": false,
+      "questions": [
+        {"id": "lq_022", "text": "Turn off the living room lights."},
+        {"id": "lq_023", "text": "Send a text message to Mom saying I'll be late."},
+        {"id": "lq_024", "text": "Set an alarm for seven AM tomorrow."}
+      ]
+    },
+    {
       "name": "_int_audio",
+      "description": "인터럽션 오디오 소스",
       "category": "_audio_only",
       "memory": false,
       "multi_turn": false,
@@ -247,6 +370,79 @@
         {"id": "int_i_001", "text": "Stop."},
         {"id": "int_i_002", "text": "Hey, wait a second."},
         {"id": "int_i_003", "text": "Wait, I have a question about something else actually."}
+      ]
+    },
+    {
+      "name": "mem_recall",
+      "description": "기본 회상",
+      "category": "memory",
+      "memory": true,
+      "multi_turn": false,
+      "questions": [
+        {"id": "mem_001", "text": "What's my dog's name?", "target_sessions": [0]},
+        {"id": "mem_002", "text": "Where do I work?", "target_sessions": [1]},
+        {"id": "mem_003", "text": "What book am I reading lately?", "target_sessions": [4]},
+        {"id": "mem_004", "text": "Where am I planning to travel next?", "target_sessions": [3]}
+      ]
+    },
+    {
+      "name": "mem_profile",
+      "description": "프로필 종합",
+      "category": "memory",
+      "memory": true,
+      "multi_turn": false,
+      "questions": [
+        {"id": "mem_005", "text": "What kind of pets do I have?", "target_sessions": [0, 2]},
+        {"id": "mem_006", "text": "What do you know about my daily routine?", "target_sessions": [0, 1, 4]},
+        {"id": "mem_007", "text": "Tell me what you remember about my hobbies and interests.", "target_sessions": [1, 4, 5]}
+      ]
+    },
+    {
+      "name": "mem_update",
+      "description": "정보 갱신",
+      "category": "memory",
+      "memory": true,
+      "multi_turn": false,
+      "questions": [
+        {"id": "mem_008", "text": "What tricks can my dog do now?", "target_sessions": [2]},
+        {"id": "mem_009", "text": "How's my dog's training going? What's changed since I first got her?", "target_sessions": [0, 2]},
+        {"id": "mem_010", "text": "What's happening with my work lately?", "target_sessions": [1, 6]}
+      ]
+    },
+    {
+      "name": "mem_no_hallucination",
+      "description": "환각 방지",
+      "category": "memory",
+      "memory": true,
+      "multi_turn": false,
+      "questions": [
+        {"id": "mem_011", "text": "What's my cat's name?", "target_sessions": []},
+        {"id": "mem_012", "text": "When did I visit Paris last year?", "target_sessions": []},
+        {"id": "mem_013", "text": "What instrument do I play?", "target_sessions": []}
+      ]
+    },
+    {
+      "name": "mem_relevance",
+      "description": "맥락 활용",
+      "category": "memory",
+      "memory": true,
+      "multi_turn": false,
+      "questions": [
+        {"id": "mem_014", "text": "I'm feeling stressed about work. Any advice?", "target_sessions": [1, 6]},
+        {"id": "mem_015", "text": "What should I pack for my upcoming trip?", "target_sessions": [3]},
+        {"id": "mem_016", "text": "Can you recommend a book similar to what I've been reading?", "target_sessions": [4]}
+      ]
+    },
+    {
+      "name": "mem_multi_session",
+      "description": "다중 세션",
+      "category": "memory",
+      "memory": true,
+      "multi_turn": false,
+      "questions": [
+        {"id": "mem_017", "text": "Catch me up on everything we've talked about recently.", "target_sessions": [0, 1, 2, 3, 4, 5, 6]},
+        {"id": "mem_018", "text": "Has anything changed with Luna since we first talked about her?", "target_sessions": [0, 2]},
+        {"id": "mem_019", "text": "What's new in my life since last month?", "target_sessions": [3, 4, 5, 6]}
       ]
     }
   ]

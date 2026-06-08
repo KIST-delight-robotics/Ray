@@ -84,6 +84,7 @@ class SessionLoop:
         trace_store: object | None = None,
         shutdown_event: threading.Event | None = None,
         on_turn_complete: Callable[[float, str], None] | None = None,
+        on_turn_shift: Callable[[float, str], None] | None = None,
         on_playback_started: Callable[[], None] | None = None,
         disable_exit_keywords: bool = False,
         skip_generation: bool = False,
@@ -113,6 +114,8 @@ class SessionLoop:
                 ``request_stop()``으로만 중단 가능.
             on_turn_complete: 턴 완료 시 호출되는 콜백.
                 (turn_shift_time, asr_text) 전달.
+            on_turn_shift: 턴 감지 시 호출되는 콜백.
+                (turn_shift_time, asr_text) 전달.
             on_playback_started: 응답 재생 시작 시 호출되는 콜백.
             disable_exit_keywords: True이면 exit keyword 감지 비활성화.
             skip_generation: True이면 turn_shift 감지 시 응답 생성 없이
@@ -132,6 +135,7 @@ class SessionLoop:
         self._trace_store = trace_store
         self._shutdown_event = shutdown_event
         self._on_turn_complete_cb = on_turn_complete
+        self._on_turn_shift_cb = on_turn_shift
         self._on_playback_started_cb = on_playback_started
         self._disable_exit_keywords = disable_exit_keywords
         self._skip_generation = skip_generation
@@ -155,6 +159,14 @@ class SessionLoop:
         self._turn_shift_time = 0.0
         self._begin_streaming_time = 0.0
         self._speculative_attempts = 0
+        self._saved_memory_results = None
+
+    @property
+    def memory_results(self):
+        """Return accumulated MemoryReadResults (preserved across session end)."""
+        if self._saved_memory_results is not None:
+            return self._saved_memory_results
+        return self._generator.memory_results
 
     # ------------------------------------------------------------------
     # Public API
@@ -267,6 +279,7 @@ class SessionLoop:
 
     def _end_session(self) -> None:
         self._asr.stop()
+        self._saved_memory_results = list(self._generator.memory_results)
         self._generator.reset()
         self._set_led(LEDState.OFF)
         self._pending_truncation = None
@@ -412,8 +425,13 @@ class SessionLoop:
             return True
 
         self._turn_shift_time = time.monotonic()
-
         self._turn_shift_asr_text = text
+
+        if self._on_turn_shift_cb is not None:
+            try:
+                self._on_turn_shift_cb(self._turn_shift_time, text)
+            except Exception:
+                logger.warning("on_turn_shift callback error", exc_info=True)
 
         if self._skip_generation:
             if text:

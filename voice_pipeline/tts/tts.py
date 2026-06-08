@@ -36,7 +36,7 @@ class OpenAITTS(ITTS):
     _SUPPORTS_INSTRUCTIONS: frozenset[str] = frozenset({"gpt-4o-mini-tts"})
 
     _MAX_RETRIES = 2  # 합성 실패 시 자동 재시도 횟수
-    _TIMEOUT_SEC = 30.0  # 합성 응답 대기 최대 시간 (초)
+    _TIMEOUT_SEC = 5.0  # 합성 응답 대기 최대 시간 (초)
     _CHUNK_SIZE = 4096  # 스트리밍 오디오 버퍼 크기 (바이트)
 
     def __init__(self) -> None:
@@ -82,8 +82,11 @@ class OpenAITTS(ITTS):
                     logger.warning("instructions ignored for model %s", self._MODEL)
 
             response_cm = self._client.audio.speech.with_streaming_response.create(**kwargs)
+        except openai.APITimeoutError as exc:
+            logger.error("OpenAI TTS timeout after %.0fs: %s", self._TIMEOUT_SEC, exc)
+            raise TTSError(f"TTS timeout ({self._TIMEOUT_SEC}s): {exc}") from exc
         except openai.OpenAIError as exc:
-            logger.warning("OpenAI TTS API error: %s", exc)
+            logger.error("OpenAI TTS API error: %s", exc)
             raise TTSError(str(exc)) from exc
 
         # Enter CM eagerly so close_fn can always exit it safely.

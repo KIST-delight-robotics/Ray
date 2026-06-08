@@ -756,6 +756,15 @@ class ISpeechGenerator(ABC):
         """
         return None
 
+    @property
+    def memory_results(self) -> list:
+        """Accumulated MemoryReadResults from pipeline runs within this session.
+
+        Returns empty list by default.  Concrete implementations override
+        to expose retrieval results for evaluation.
+        """
+        return []
+
     @abstractmethod
     def shutdown(self) -> None:
         """Permanently shut down the background executor.
@@ -1004,7 +1013,13 @@ class IMemoryStorage(ABC):
     # --- Session processing status ---
 
     @abstractmethod
-    def mark_session_processed(self, session_id: str) -> None:
+    def mark_session_processed(
+        self,
+        session_id: str,
+        *,
+        duration_ms: float | None = None,
+        episode_count: int | None = None,
+    ) -> None:
         """Record that memory extraction has been attempted for a session.
 
         Called after process_session completes (even if 0 episodes
@@ -1013,6 +1028,8 @@ class IMemoryStorage(ABC):
 
         Args:
             session_id: Session that was processed.
+            duration_ms: Total writer processing time in milliseconds.
+            episode_count: Number of episodes extracted.
         """
 
     @abstractmethod

@@ -120,6 +120,7 @@ class SpeechGenerator(ISpeechGenerator):
         self._response_data: ResponseData | None = None
         self._stream_done = False
         self._trace: PipelineTrace | None = None
+        self._memory_results: list[MemoryReadResult | None] = []
 
     # -- Properties ----------------------------------------------------------
 
@@ -132,6 +133,11 @@ class SpeechGenerator(ISpeechGenerator):
     def stream_done(self) -> bool:
         with self._lock:
             return self._stream_done
+
+    @property
+    def memory_results(self) -> list[MemoryReadResult | None]:
+        """Accumulated MemoryReadResults from pipeline runs within this session."""
+        return self._memory_results
 
     @property
     def input_text(self) -> str:
@@ -223,6 +229,7 @@ class SpeechGenerator(ISpeechGenerator):
             self._response_data = None
             self._stream_done = False
             self._trace = None
+            self._memory_results = []
 
     def shutdown(self) -> None:
         """Permanently shut down the executor. Call only at program exit.
@@ -314,6 +321,7 @@ class SpeechGenerator(ISpeechGenerator):
             if cancel_event.is_set():
                 return
             memory_result = self._retrieve_memories(current_text)
+            self._memory_results.append(memory_result)
 
             if trace is not None:
                 trace.memory_done_ts = time.monotonic()
@@ -497,6 +505,7 @@ class SpeechGenerator(ISpeechGenerator):
             if cancel_event.is_set():
                 return
             memory_result = self._retrieve_memories(current_text)
+            self._memory_results.append(memory_result)
 
             if trace is not None:
                 trace.memory_done_ts = time.monotonic()

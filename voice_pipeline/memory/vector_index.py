@@ -113,6 +113,8 @@ class NumpyVectorIndex(IVectorIndex):
             if len(self._ids) == 0:
                 self._matrix = None
 
+    _MIN_COSINE_SIMILARITY = 0.2
+
     def search(self, query: np.ndarray, top_k: int) -> list[tuple[int, float]]:
         """Cosine similarity search."""
         with self._lock:
@@ -123,7 +125,11 @@ class NumpyVectorIndex(IVectorIndex):
             k = min(top_k, len(self._ids))
             top_indices = np.argpartition(scores, -k)[-k:]
             top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
-            return [(self._ids[i], float(scores[i])) for i in top_indices]
+            return [
+                (self._ids[i], float(scores[i]))
+                for i in top_indices
+                if scores[i] >= self._MIN_COSINE_SIMILARITY
+            ]
 
     def load(self, ids: list[int], vectors: np.ndarray) -> None:
         """Bulk-load vectors from DB."""
