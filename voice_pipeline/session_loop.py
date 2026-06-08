@@ -88,6 +88,7 @@ class SessionLoop:
         on_playback_started: Callable[[], None] | None = None,
         disable_exit_keywords: bool = False,
         skip_generation: bool = False,
+        record_path: str | None = None,
     ) -> None:
         """Initialize the SessionLoop.
 
@@ -160,6 +161,8 @@ class SessionLoop:
         self._begin_streaming_time = 0.0
         self._speculative_attempts = 0
         self._saved_memory_results = None
+        self._record_path = record_path
+        self._record_buf: bytearray | None = bytearray() if record_path else None
 
     @property
     def memory_results(self):
@@ -283,7 +286,23 @@ class SessionLoop:
         self._generator.reset()
         self._set_led(LEDState.OFF)
         self._pending_truncation = None
+        self._save_recording()
         logger.info("SessionLoop ended")
+
+    def _save_recording(self) -> None:
+        if not self._record_path or not self._record_buf:
+            return
+        import wave
+        from voice_pipeline.audio.constants import SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH
+        try:
+            with wave.open(self._record_path, "wb") as wf:
+                wf.setnchannels(CHANNELS)
+                wf.setsampwidth(SAMPLE_WIDTH)
+                wf.setframerate(SAMPLE_RATE)
+                wf.writeframes(bytes(self._record_buf))
+            logger.info("Recording saved: %s (%.1fs)", self._record_path, len(self._record_buf) / (SAMPLE_RATE * SAMPLE_WIDTH))
+        except Exception:
+            logger.warning("Failed to save recording", exc_info=True)
 
     # ------------------------------------------------------------------
     # Frame loop
@@ -305,6 +324,9 @@ class SessionLoop:
             frames = [frame]
             self._drain_available_frames(frames)
             self._last_frame_time = time.monotonic()
+            if self._record_buf is not None:
+                for f in frames:
+                    self._record_buf.extend(f)
         else:
             frames = []
 

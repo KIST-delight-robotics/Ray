@@ -78,7 +78,7 @@ logger = logging.getLogger("eval")
 _AUDIO_QUEUE_SIZE = 300
 _STARTUP_DELAY_SEC = 1.5
 _TURN_TIMEOUT_SEC = 60.0
-_TURN_DETECT_TIMEOUT_SEC = 5.0
+_TURN_DETECT_TIMEOUT_SEC = 10.0
 _TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -363,6 +363,7 @@ def _run_single_turn(
     audio_queue: queue.Queue[AudioFrame],
     seed_session_map: dict[int, str] | None = None,
     seed_episode_map: dict[str, list[int]] | None = None,
+    record_dir: str | None = None,
 ) -> None:
     """Execute one single-turn eval: play question, capture response."""
     _drain_audio_queue(audio_queue)
@@ -382,12 +383,14 @@ def _run_single_turn(
     def on_turn_shift(ts_time: float, asr_text: str) -> None:
         turn_shift_event.set()
 
+    rec_path = str(Path(record_dir) / f"{question['id']}.wav") if record_dir else None
     skip = suite.get("category") == "asr"
     components = create_session(
         on_turn_complete=on_turn_done,
         on_turn_shift=on_turn_shift,
         memory_enabled=suite.get("memory", False),
         skip_generation=skip,
+        record_path=rec_path,
     )
     components.history.new_session(components.session_id)
 
@@ -486,6 +489,7 @@ def _run_interruption(
     interrupt_audio: str = "",
     seed_session_map: dict[int, str] | None = None,
     seed_episode_map: dict[str, list[int]] | None = None,
+    record_dir: str | None = None,
 ) -> None:
     """Execute one interruption test: play question, wait for response, interrupt."""
     _drain_audio_queue(audio_queue)
@@ -508,11 +512,13 @@ def _run_interruption(
     def on_playback_started() -> None:
         playback_started_event.set()
 
+    rec_path = str(Path(record_dir) / f"{question['id']}_{interrupt_audio}_{interrupt_delay_sec:.0f}s.wav") if record_dir else None
     components = create_session(
         on_turn_complete=on_turn_done,
         on_turn_shift=on_turn_shift,
         on_playback_started=on_playback_started,
         memory_enabled=suite.get("memory", False),
+        record_path=rec_path,
     )
     components.history.new_session(components.session_id)
 
@@ -624,6 +630,7 @@ def _run_multi_turn_suite(
     audio_queue: queue.Queue[AudioFrame],
     seed_session_map: dict[int, str] | None = None,
     seed_episode_map: dict[str, list[int]] | None = None,
+    record_dir: str | None = None,
 ) -> None:
     """Execute a single multi-turn scenario: all questions in one session."""
     _drain_audio_queue(audio_queue)
@@ -646,12 +653,14 @@ def _run_multi_turn_suite(
     def on_turn_shift(ts_time: float, asr_text: str) -> None:
         turn_shift_event.set()
 
+    rec_path = str(Path(record_dir) / f"{scenario['id']}.wav") if record_dir else None
     skip = suite.get("category") == "asr"
     components = create_session(
         on_turn_complete=on_turn_done,
         on_turn_shift=on_turn_shift,
         memory_enabled=suite.get("memory", False),
         skip_generation=skip,
+        record_path=rec_path,
     )
     components.history.new_session(components.session_id)
 
@@ -935,6 +944,7 @@ def main() -> None:
         on_playback_started: Callable[[], None] | None = None,
         memory_enabled: bool = True,
         skip_generation: bool = False,
+        record_path: str | None = None,
     ) -> SessionComponents:
         for wrapper in prev_async:
             wrapper.stop()
@@ -983,6 +993,7 @@ def main() -> None:
             on_playback_started=on_playback_started,
             disable_exit_keywords=True,
             skip_generation=skip_generation,
+            record_path=record_path,
         )
         return SessionComponents(
             session_loop=session_loop,
@@ -1043,6 +1054,9 @@ def main() -> None:
 
     # --- Run audio suites ---
     if audio_suites and needs_audio:
+        record_dir = str(output_dir / "recordings")
+        Path(record_dir).mkdir(exist_ok=True)
+
         player = QuestionPlayer(args.device)
         bridge.connect()
         audio_input.start()
@@ -1075,6 +1089,7 @@ def main() -> None:
                             audio_queue,
                             seed_session_map=seed_session_map,
                             seed_episode_map=seed_episode_map,
+                            record_dir=record_dir,
                         )
                     continue
 
@@ -1116,6 +1131,7 @@ def main() -> None:
                                     interrupt_audio=int_id,
                                     seed_session_map=seed_session_map,
                                     seed_episode_map=seed_episode_map,
+                                    record_dir=record_dir,
                                 )
                 else:
                     for question in questions:
@@ -1132,6 +1148,7 @@ def main() -> None:
                             audio_queue,
                             seed_session_map=seed_session_map,
                             seed_episode_map=seed_episode_map,
+                            record_dir=record_dir,
                         )
         finally:
             audio_input.stop()
