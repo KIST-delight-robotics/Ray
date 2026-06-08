@@ -146,10 +146,10 @@ def main() -> None:
     _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
 
     def vad_fn(frame: AudioFrame) -> float:
+        _vad_buf.extend(frame)
         _vad_call_count[0] += 1
         if _vad_call_count[0] % _VAD_INFER_INTERVAL != 0:
             return _vad_last_score[0]
-        _vad_buf.extend(frame)
         while len(_vad_buf) >= _SILERO_CHUNK_BYTES:
             chunk = bytes(_vad_buf[:_SILERO_CHUNK_BYTES])
             del _vad_buf[:_SILERO_CHUNK_BYTES]
