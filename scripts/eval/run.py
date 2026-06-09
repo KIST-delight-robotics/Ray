@@ -79,6 +79,7 @@ _AUDIO_QUEUE_SIZE = 300
 _STARTUP_DELAY_SEC = 1.5
 _TURN_TIMEOUT_SEC = 60.0
 _TURN_DETECT_TIMEOUT_SEC = 10.0
+_BEEP_SETTLE_SEC = 0.2  # 비프음이 마이크 큐에 다 들어온 뒤 drain하기 위한 대기
 _TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -93,6 +94,56 @@ def _drain_audio_queue(audio_queue: queue.Queue[AudioFrame]) -> None:
             audio_queue.get_nowait()
         except queue.Empty:
             break
+
+
+def _begin_session_audio(player: QuestionPlayer, audio_queue: queue.Queue[AudioFrame]) -> None:
+    """Sound the session-start beep, then clear the audio queue.
+
+    ``audio_input`` runs continuously across the whole eval, so the beep —
+    played through the same external speaker as the questions — is picked up
+    by the mic. Draining after it (once the beep has settled into the queue)
+    keeps it out of the ASR stream and the session recording, and also clears
+    any frames left over from the previous session.
+    """
+    if player.beep():
+        time.sleep(_BEEP_SETTLE_SEC)
+    _drain_audio_queue(audio_queue)
+
+
+def _make_beep_wav(
+    path: str,
+    *,
+    freq_hz: float = 1000.0,
+    duration_sec: float = 0.15,
+    sample_rate: int = 16000,
+    volume: float = 0.5,
+) -> None:
+    """Write a short sine-wave beep (mono 16-bit) used to mark session starts.
+
+    Played through the question speaker just before each session's mic
+    capture begins, so a human watching the run can hear when a new
+    question/scenario starts. Endpoints are faded to avoid click artifacts.
+    """
+    import math
+    import struct
+    import wave
+
+    n = int(sample_rate * duration_sec)
+    fade = max(1, int(sample_rate * 0.01))
+    frames = bytearray()
+    for i in range(n):
+        amp = volume
+        if i < fade:
+            amp *= i / fade
+        elif i >= n - fade:
+            amp *= (n - i) / fade
+        sample = int(amp * 32767 * math.sin(2 * math.pi * freq_hz * i / sample_rate))
+        frames += struct.pack("<h", sample)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(bytes(frames))
 
 
 def _iter_questions(suite: dict):
@@ -381,7 +432,7 @@ def _run_single_turn(
     voice: str = "",
 ) -> None:
     """Execute one single-turn eval: play question, capture response."""
-    _drain_audio_queue(audio_queue)
+    _begin_session_audio(player, audio_queue)
 
     turn_event = threading.Event()
     turn_shift_event = threading.Event()
@@ -509,7 +560,7 @@ def _run_interruption(
     voice: str = "",
 ) -> None:
     """Execute one interruption test: play question, wait for response, interrupt."""
-    _drain_audio_queue(audio_queue)
+    _begin_session_audio(player, audio_queue)
 
     turn_event = threading.Event()
     turn_shift_event = threading.Event()
@@ -655,7 +706,7 @@ def _run_multi_turn_suite(
     record_dir: str | None = None,
 ) -> None:
     """Execute a single multi-turn scenario: all questions in one session."""
-    _drain_audio_queue(audio_queue)
+    _begin_session_audio(player, audio_queue)
 
     questions = scenario["questions"]
     turn_event = threading.Event()
@@ -796,6 +847,7 @@ def main() -> None:
     parser.add_argument("--quick", action="store_true", help="Quick mode: 1 question per suite")
     parser.add_argument("--category", default=None, help="Only run suites of these categories (comma-separated)")
     parser.add_argument("--text", action="store_true", help="Run quality/memory suites in text mode")
+    parser.add_argument("--no-beep", action="store_true", help="Disable the session-start identification beep")
     args = parser.parse_args()
 
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1084,7 +1136,12 @@ def main() -> None:
         record_dir = str(output_dir / "recordings")
         Path(record_dir).mkdir(exist_ok=True)
 
-        player = QuestionPlayer(args.device)
+        beep_wav = None
+        if not args.no_beep:
+            beep_wav = str(output_dir / "beep.wav")
+            _make_beep_wav(beep_wav)
+            logger.info("Session-start beep enabled: %s", beep_wav)
+        player = QuestionPlayer(args.device, beep_wav=beep_wav)
         bridge.connect()
         audio_input.start()
 
