@@ -67,6 +67,7 @@ class SessionLoop:
     _STOP_PENDING_TIMEOUT_SEC = 5.0  # barge-in stop 후 재생 완료 ack 최대 대기 (초)
     _AUDIO_STARVATION_TIMEOUT_SEC = 5.0  # 오디오 프레임 단절 감지 timeout — 세션 종료 (초)
     _MAX_BATCH_FRAMES = 10  # 한 iteration 최대 drain 프레임 수. timer spike 방지
+    _MAX_BRIDGE_CHUNKS_PER_FRAME = 3  # 프레임당 브릿지 전송 청크 상한. 나머지는 다음 프레임에서 전송
 
     def __init__(
         self,
@@ -86,6 +87,7 @@ class SessionLoop:
         on_turn_complete: Callable[[float, str], None] | None = None,
         on_turn_shift: Callable[[float, str], None] | None = None,
         on_playback_started: Callable[[], None] | None = None,
+        on_generation_failed: Callable[[], None] | None = None,
         disable_exit_keywords: bool = False,
         skip_generation: bool = False,
         record_path: str | None = None,
@@ -138,6 +140,7 @@ class SessionLoop:
         self._on_turn_complete_cb = on_turn_complete
         self._on_turn_shift_cb = on_turn_shift
         self._on_playback_started_cb = on_playback_started
+        self._on_generation_failed_cb = on_generation_failed
         self._disable_exit_keywords = disable_exit_keywords
         self._skip_generation = skip_generation
 
@@ -575,10 +578,17 @@ class SessionLoop:
             trace.begin_streaming_ts = self._begin_streaming_time
 
     def _drain_audio_to_bridge(self) -> None:
-        """Poll audio chunks from generator and send to bridge."""
-        while True:
+        """Poll audio chunks from generator and send to bridge.
+
+        Sends at most ``_MAX_BRIDGE_CHUNKS_PER_FRAME`` chunks per call to
+        avoid blocking the main frame loop during initial buffer bursts.
+        Remaining chunks are picked up on subsequent frames.
+        """
+        drained = False
+        for _ in range(self._MAX_BRIDGE_CHUNKS_PER_FRAME):
             chunk = self._generator.poll_audio()
             if chunk is None:
+                drained = True
                 break
             try:
                 self._bridge.send_audio(chunk)
@@ -587,8 +597,8 @@ class SessionLoop:
                 return
             self._sent_audio_buffer.extend(chunk)
 
-        # Check if stream is done
-        if self._generator.stream_done and self._current_response is None:
+        # Only finalize when queue is fully drained
+        if drained and self._generator.stream_done and self._current_response is None:
             try:
                 self._current_response = self._generator.get_response_data()
             except RuntimeError:
@@ -778,6 +788,11 @@ class SessionLoop:
             self._generator.reset()
             self._turn_detector.reset()
             self._phase = Phase.LISTENING
+            if self._on_generation_failed_cb is not None:
+                try:
+                    self._on_generation_failed_cb()
+                except Exception:
+                    logger.warning("on_generation_failed callback error", exc_info=True)
 
     # ------------------------------------------------------------------
     # STOP_PENDING watchdog
