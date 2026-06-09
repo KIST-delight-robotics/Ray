@@ -643,3 +643,17 @@ class PipelineTrace:
         if self.speculative_attempts > 1:
             parts.append(f"attempts={self.speculative_attempts}")
         return " | ".join(parts)
+
+
+@dataclass
+class CallRecord:
+    """Single module call record — latency, status, and optional metadata."""
+
+    session_id: str
+    timestamp: str
+    module: str
+    operation: str
+    model: str
+    elapsed_ms: float
+    status: str = "ok"
+    metadata: str | None = None

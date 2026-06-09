@@ -66,6 +66,10 @@ class _FakeEmbedder(IEmbedder):
     def dimension(self) -> int:
         return _DIM
 
+    @property
+    def model_name(self) -> str:
+        return "fake"
+
 
 _RETRIEVER_CLASS_VAR_MAP = {
     "max_memories": "_MAX_MEMORIES",
@@ -833,6 +837,10 @@ class TestEdgeCases:
             def dimension(self) -> int:
                 return _DIM
 
+            @property
+            def model_name(self) -> str:
+                return "failing"
+
         storage = InMemoryMemoryStorage(dimension=_DIM)
         index = NumpyVectorIndex()
         retriever = MemoryRetriever(storage, index, _FailingEmbedder())
@@ -869,6 +877,10 @@ class TestEdgeCases:
             @property
             def dimension(self) -> int:
                 return _DIM
+
+            @property
+            def model_name(self) -> str:
+                return "failing"
 
         retriever._embedder = _FailingEmbedder()
 

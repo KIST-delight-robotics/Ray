@@ -51,7 +51,10 @@ from voice_pipeline.memory.storage import _DEFAULT_DB_PATH, _DEFAULT_DIMENSION, 
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.writer import MemoryWriter
 from voice_pipeline.session_loop import SessionComponents, SessionLoop
-from voice_pipeline.trace.trace_store import SQLiteTraceStore
+from voice_pipeline.trace.openai_retry_handler import OpenAIRetryHandler
+from voice_pipeline.trace.trace_store import SQLiteCallStore, SQLiteTraceStore
+from voice_pipeline.trace.tracked_embedder import TrackedEmbedder
+from voice_pipeline.trace.tracked_tts import TrackedTTS
 from voice_pipeline.tts.greeting_audio import ensure_greeting_audio
 from voice_pipeline.tts.tts import OpenAITTS
 from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT
@@ -171,6 +174,11 @@ def main() -> None:
     embedder = create_embedder(expected_dimension=_DEFAULT_DIMENSION)
     memory_storage = SQLiteMemoryStorage(_DEFAULT_DB_PATH)
     trace_store = SQLiteTraceStore(_DEFAULT_DB_PATH)
+    call_store = SQLiteCallStore(_DEFAULT_DB_PATH)
+    retry_handler = OpenAIRetryHandler(call_store)
+    logging.getLogger("openai._base_client").addHandler(retry_handler)
+    tts = TrackedTTS(tts, call_store)
+    embedder = TrackedEmbedder(embedder, call_store)
     vector_index = NumpyVectorIndex()
     ids, vectors = memory_storage.load_all_embeddings()
     if ids:
@@ -202,6 +210,9 @@ def main() -> None:
         turngpt.reset()
 
         session_id = str(uuid.uuid4())
+        embedder.session_id = session_id
+        tts.session_id = session_id
+        retry_handler.session_id = session_id
 
         async_vap = AsyncVAP(vap)
         async_turngpt = AsyncTurnGPT(turngpt)
@@ -374,6 +385,8 @@ def main() -> None:
         led.close()
         memory_storage.close()
         trace_store.close()
+        logging.getLogger("openai._base_client").removeHandler(retry_handler)
+        call_store.close()
         logger.info("Pipeline stopped")
 
 

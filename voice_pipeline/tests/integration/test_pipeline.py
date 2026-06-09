@@ -168,6 +168,7 @@ class FakeTTS(ITTS):
 
     output_sample_rate: int = TTS_SAMPLE_RATE
     voice_id: str = "fake|test"
+    model_name: str = "fake-tts"
 
     def __init__(self, chunk_size: int = 4800) -> None:
         # 100ms of 24kHz 16-bit mono audio = 4800 bytes
@@ -563,6 +564,7 @@ class TestBargeIn:
         class SlowTTS(ITTS):
             output_sample_rate: int = TTS_SAMPLE_RATE
             voice_id: str = "fake|slow"
+            model_name: str = "fake-slow-tts"
 
             def synthesize(self, text: str) -> TTSStream:
                 chunk = b"\x00" * 4800
@@ -788,6 +790,10 @@ class _DeterministicEmbedder(IEmbedder):
     @property
     def dimension(self) -> int:
         return _DIM
+
+    @property
+    def model_name(self) -> str:
+        return "deterministic-test"
 
 
 def _make_memory_session_loop(
@@ -1182,6 +1188,7 @@ class TestMemoryBargeIn:
         class SlowTTS(ITTS):
             output_sample_rate: int = TTS_SAMPLE_RATE
             voice_id: str = "fake|slow"
+            model_name: str = "fake-slow-tts"
 
             def synthesize(self, text: str) -> TTSStream:
                 chunk = b"\x00" * 4800

@@ -63,6 +63,10 @@ class FakeEmbedder(IEmbedder):
     def dimension(self) -> int:
         return _DIM
 
+    @property
+    def model_name(self) -> str:
+        return "fake"
+
 
 class ConstantEmbedder(IEmbedder):
     """Embedder returning identical vectors — cosine similarity always 1.0."""
@@ -76,6 +80,10 @@ class ConstantEmbedder(IEmbedder):
     @property
     def dimension(self) -> int:
         return _DIM
+
+    @property
+    def model_name(self) -> str:
+        return "constant"
 
 
 _WRITER_CLASS_VAR_MAP = {

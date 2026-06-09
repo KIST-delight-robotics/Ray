@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from voice_pipeline.core.types import PipelineTrace
+from voice_pipeline.core.types import CallRecord, PipelineTrace
 
 logger = logging.getLogger("voice_pipeline.trace")
 
@@ -114,6 +114,88 @@ class InMemoryTraceStore:
     def save(self, trace: PipelineTrace) -> None:
         """Append trace to in-memory list."""
         self.traces.append(trace)
+
+    def close(self) -> None:
+        """No-op."""
+
+
+# ---------------------------------------------------------------------------
+# Call recording
+# ---------------------------------------------------------------------------
+
+_CALL_COLUMNS = (
+    "session_id",
+    "timestamp",
+    "module",
+    "operation",
+    "model",
+    "elapsed_ms",
+    "status",
+    "metadata",
+)
+
+
+class SQLiteCallStore:
+    """Persists per-call execution records to a SQLite database.
+
+    Opens its own connection to the shared DB file (WAL mode).
+    Thread-safe: a lock serializes all connection access.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        self._lock = threading.Lock()
+        path = Path(db_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._create_tables()
+
+    def _create_tables(self) -> None:
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS call_records (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id  TEXT NOT NULL,
+                timestamp   TEXT NOT NULL,
+                module      TEXT NOT NULL,
+                operation   TEXT NOT NULL,
+                model       TEXT NOT NULL,
+                elapsed_ms  REAL NOT NULL,
+                status      TEXT NOT NULL DEFAULT 'ok',
+                metadata    TEXT
+            )
+        """)
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_call_session ON call_records(session_id)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_call_module ON call_records(module)")
+        self._conn.commit()
+
+    def record(self, record: CallRecord) -> None:
+        """Persist a single call record."""
+        values = tuple(getattr(record, col) for col in _CALL_COLUMNS)
+        placeholders = ", ".join("?" for _ in _CALL_COLUMNS)
+        col_names = ", ".join(_CALL_COLUMNS)
+        with self._lock:
+            self._conn.execute(
+                f"INSERT INTO call_records ({col_names}) VALUES ({placeholders})",
+                values,
+            )
+            self._conn.commit()
+
+    def close(self) -> None:
+        """Close the database connection."""
+        with self._lock:
+            self._conn.close()
+
+
+class InMemoryCallStore:
+    """In-memory call store for unit tests."""
+
+    def __init__(self) -> None:
+        self.records: list[CallRecord] = []
+
+    def record(self, record: CallRecord) -> None:
+        """Append record to in-memory list."""
+        self.records.append(record)
 
     def close(self) -> None:
         """No-op."""

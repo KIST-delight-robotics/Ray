@@ -53,6 +53,10 @@ class OpenAITTS(ITTS):
     def voice_id(self) -> str:
         return f"openai|{self._VOICE}|{self._MODEL}|{self._SPEED}|{self._INSTRUCTIONS or ''}"
 
+    @property
+    def model_name(self) -> str:
+        return self._MODEL
+
     def synthesize(self, text: str) -> TTSStream:
         """Stream PCM audio from OpenAI TTS API.
 

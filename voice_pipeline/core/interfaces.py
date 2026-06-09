@@ -21,6 +21,7 @@ from voice_pipeline.core.types import (
     CppEvent,
     GeneratorState,
     HistoryTurn,
+    CallRecord,
     LEDState,
     LLMMetrics,
     LLMStream,
@@ -368,6 +369,11 @@ class ITTS(ABC):
 
         cache 무효화 등 "같은 음성인지" 비교에 사용.
         """
+
+    @property
+    @abstractmethod
+    def model_name(self) -> str:
+        """Model identifier for logging and tracing."""
 
     @abstractmethod
     def synthesize(self, text: str) -> TTSStream:
@@ -848,6 +854,32 @@ class IEmbedder(ABC):
     @abstractmethod
     def dimension(self) -> int:
         """Embedding vector dimension."""
+
+    @property
+    @abstractmethod
+    def model_name(self) -> str:
+        """Model identifier for logging and tracing."""
+
+
+# ---------------------------------------------------------------------------
+# CallStore
+# ---------------------------------------------------------------------------
+
+
+class ICallStore(ABC):
+    """Records per-call execution data for pipeline modules."""
+
+    @abstractmethod
+    def record(self, record: CallRecord) -> None:
+        """Persist a single call record.
+
+        Args:
+            record: Call record to store.
+        """
+
+    @abstractmethod
+    def close(self) -> None:
+        """Release resources."""
 
 
 # ---------------------------------------------------------------------------

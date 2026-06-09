@@ -55,6 +55,7 @@ class SentenceTransformerEmbedder(IEmbedder):
                 f"Embedding model dimension ({actual_dim}) does not match expected_dimension ({expected_dimension})"
             )
         self._dimension = actual_dim
+        self._model_name = model
         logger.info(
             "Loaded embedding model: %s (backend=%s, dim=%d)",
             model,
@@ -73,6 +74,10 @@ class SentenceTransformerEmbedder(IEmbedder):
     @property
     def dimension(self) -> int:
         return self._dimension
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
 
 
 class OpenAIEmbedder(IEmbedder):
@@ -124,6 +129,10 @@ class OpenAIEmbedder(IEmbedder):
         if self._dimension is None:
             raise RuntimeError("Dimension unknown — call embed() first or provide dimension at construction")
         return self._dimension
+
+    @property
+    def model_name(self) -> str:
+        return self._model
 
 
 def create_embedder(
