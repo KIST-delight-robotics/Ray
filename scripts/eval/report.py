@@ -125,6 +125,7 @@ def build_report(results_dir: Path) -> dict:
         }
         for key in (
             "scenario_id",
+            "voice",
             "interrupt_audio",
             "interrupt_delay_sec",
             "interrupt_played",

@@ -577,6 +577,34 @@ def _build_asr(scored: dict) -> str:
 
     p.append("</div>")
 
+    # --- Voice summary ---
+    by_voice = scored.get("scores", {}).get("asr", {}).get("by_voice", {})
+    if by_voice:
+        p.append('<div class="panel">')
+        p.append('<div class="section-title">Voice별 요약</div>')
+        p.append(
+            '<div style="display:flex;align-items:center;gap:16px;padding:3px 0;font-size:11px;color:#86868b;border-bottom:1px solid #e5e7eb;margin-bottom:4px">'
+            '<span style="min-width:100px">Voice</span>'
+            '<span style="min-width:80px">평균 WER</span>'
+            '<span>완벽 인식</span>'
+            '</div>'
+        )
+        for voice, stats in by_voice.items():
+            v_wer = stats.get("mean_wer", 0)
+            v_cls = _score_cls_lower_better(v_wer, 0.05, 0.2)
+            v_perfect = stats.get("perfect_count", 0)
+            v_total = stats.get("total_scored", 0)
+            all_ok = v_perfect == v_total
+            tag_cls = "tag-ok" if all_ok else "tag-warn"
+            p.append(
+                f'<div style="display:flex;align-items:center;gap:16px;padding:3px 0;font-size:14px">'
+                f'<span style="font-weight:500;min-width:100px">{_esc(voice)}</span>'
+                f'<span class="{v_cls}" style="min-width:80px">{v_wer:.1%}</span>'
+                f'<span class="tag {tag_cls}">{v_perfect}/{v_total}</span>'
+                f'</div>'
+            )
+        p.append("</div>")
+
     # --- Per-question results: category > suite ---
     all_sorted = sorted(asr_turns, key=lambda t: (
         _CATEGORY_ORDER.index(_turn_category(t["suite_name"]))
@@ -611,10 +639,14 @@ def _build_asr(scored: dict) -> str:
         sys_text = t.get("system_text") or ""
         has_diff = sys_text and sys_text != asr_text
 
+        voice = t.get("voice", "")
+        voice_tag = f'<span class="tag" style="font-size:10px;margin-left:4px">{_esc(voice)}</span>' if voice else ""
+
         p.append('<div class="item">')
         p.append(
             f'<div class="item-header">'
             f'<span class="item-id">{t["question_id"]}</span>'
+            f'{voice_tag}'
             f'{_wer_tag(wer)}'
             f'</div>'
         )

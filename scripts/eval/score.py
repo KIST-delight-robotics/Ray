@@ -662,6 +662,7 @@ def score_report(report: dict) -> dict:
     """Add evaluation scores to a report."""
     asr_scores: list[float] = []
     asr_by_suite: dict[str, list[float]] = {}
+    asr_by_voice: dict[str, list[float]] = {}
     turn_detection_delays: list[float] = []
     latency_values: dict[str, list[float]] = {
         "turn_shift_to_playback_ms": [],
@@ -681,6 +682,9 @@ def score_report(report: dict) -> dict:
             asr_scores.append(wer["wer"])
             suite = turn["suite_name"]
             asr_by_suite.setdefault(suite, []).append(wer["wer"])
+            voice = turn.get("voice", "")
+            if voice:
+                asr_by_voice.setdefault(voice, []).append(wer["wer"])
 
         # Turn detection delay (text mode 제외)
         if not is_text_mode:
@@ -702,6 +706,7 @@ def score_report(report: dict) -> dict:
         asr_summary = {
             **_asr_suite_summary(asr_scores),
             "by_suite": {suite: _asr_suite_summary(wers) for suite, wers in asr_by_suite.items()},
+            "by_voice": {voice: _asr_suite_summary(wers) for voice, wers in sorted(asr_by_voice.items())},
         }
 
     # Aggregate latency
@@ -809,6 +814,12 @@ def print_scores(scored: dict) -> None:
         print("\nASR (Word Error Rate):")
         print(f"  Mean WER:     {asr['mean_wer']:.2%}")
         print(f"  Perfect:      {asr['perfect_count']}/{asr['total_scored']}")
+        by_voice = asr.get("by_voice", {})
+        if by_voice:
+            print("  By voice:")
+            for voice, stats in by_voice.items():
+                perfect = f"{stats['perfect_count']}/{stats['total_scored']}"
+                print(f"    {voice:>10}: WER={stats['mean_wer']:.2%} ({perfect} perfect)")
 
     latency = scores.get("latency", {})
     if latency:

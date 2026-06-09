@@ -104,19 +104,33 @@ def _iter_questions(suite: dict):
         yield from suite.get("questions", [])
 
 
-def _load_manifest(questions_path: str, wav_dir: str) -> dict[str, str]:
-    """Load WAV manifest. Falls back to <wav_dir>/<id>.wav convention."""
+def _load_manifest(questions_path: str, wav_dir: str) -> dict[str, dict[str, str]]:
+    """Load WAV manifest. Returns ``{id: {"path": ..., "voice": ...}}``.
+
+    Supports both the new format (``{id: {"path", "voice"}}``) and the legacy
+    format (``{id: path_str}``).  Falls back to ``<wav_dir>/<id>.wav`` when no
+    manifest file exists.
+    """
     manifest_path = Path(wav_dir) / "manifest.json"
     if manifest_path.exists():
-        return json.loads(manifest_path.read_text())
-    # Fallback: derive from question IDs
+        raw = json.loads(manifest_path.read_text())
+        first = next(iter(raw.values()), None) if raw else None
+        if isinstance(first, str):
+            return {qid: {"path": p, "voice": ""} for qid, p in raw.items()}
+        return raw
     data = json.loads(Path(questions_path).read_text())
-    manifest = {}
+    manifest: dict[str, dict[str, str]] = {}
+    wav_dir_path = Path(wav_dir)
     for suite in data["suites"]:
         for q in _iter_questions(suite):
-            wav_path = Path(wav_dir) / f"{q['id']}.wav"
-            if wav_path.exists():
-                manifest[q["id"]] = str(wav_path)
+            legacy = wav_dir_path / f"{q['id']}.wav"
+            if legacy.exists():
+                manifest[q["id"]] = {"path": str(legacy), "voice": ""}
+                continue
+            matches = sorted(wav_dir_path.glob(f"{q['id']}_*.wav"))
+            if matches:
+                voice = matches[0].stem.removeprefix(f"{q['id']}_")
+                manifest[q["id"]] = {"path": str(matches[0]), "voice": voice}
     return manifest
 
 
@@ -364,6 +378,7 @@ def _run_single_turn(
     seed_session_map: dict[int, str] | None = None,
     seed_episode_map: dict[str, list[int]] | None = None,
     record_dir: str | None = None,
+    voice: str = "",
 ) -> None:
     """Execute one single-turn eval: play question, capture response."""
     _drain_audio_queue(audio_queue)
@@ -456,6 +471,7 @@ def _run_single_turn(
         "suite_name": suite["name"],
         "input_text": question["text"],
         "asr_text": final_asr_text[0],
+        "voice": voice,
         "success": success and not early_turn_shift,
         "error": error,
         "turn_detection_delay_ms": vap_delay,
@@ -490,6 +506,7 @@ def _run_interruption(
     seed_session_map: dict[int, str] | None = None,
     seed_episode_map: dict[str, list[int]] | None = None,
     record_dir: str | None = None,
+    voice: str = "",
 ) -> None:
     """Execute one interruption test: play question, wait for response, interrupt."""
     _drain_audio_queue(audio_queue)
@@ -512,7 +529,11 @@ def _run_interruption(
     def on_playback_started() -> None:
         playback_started_event.set()
 
-    rec_path = str(Path(record_dir) / f"{question['id']}_{interrupt_audio}_{interrupt_delay_sec:.0f}s.wav") if record_dir else None
+    rec_path = (
+        str(Path(record_dir) / f"{question['id']}_{interrupt_audio}_{interrupt_delay_sec:.0f}s.wav")
+        if record_dir
+        else None
+    )
     components = create_session(
         on_turn_complete=on_turn_done,
         on_turn_shift=on_turn_shift,
@@ -590,6 +611,7 @@ def _run_interruption(
         "session_id": components.session_id,
         "suite_name": suite["name"],
         "input_text": question["text"],
+        "voice": voice,
         "interrupt_audio": interrupt_audio,
         "interrupt_delay_sec": interrupt_delay_sec,
         "interrupt_played": interrupt_played[0],
@@ -623,7 +645,7 @@ def _run_interruption(
 def _run_multi_turn_suite(
     suite: dict,
     scenario: dict,
-    wav_map: dict[str, str],
+    wav_map: dict[str, dict[str, str]],
     player: QuestionPlayer,
     session_map: list[dict],
     create_session: Callable[..., SessionComponents],
@@ -669,7 +691,8 @@ def _run_multi_turn_suite(
     def play_sequence() -> None:
         time.sleep(_STARTUP_DELAY_SEC)
         for i, q in enumerate(questions):
-            wav_path = wav_map.get(q["id"])
+            wav_entry = wav_map.get(q["id"])
+            wav_path = wav_entry["path"] if wav_entry else None
             if wav_path is None:
                 logger.error("No WAV for question %s", q["id"])
                 break
@@ -704,6 +727,7 @@ def _run_multi_turn_suite(
     player_thread.join(timeout=5.0)
 
     completed_turns = turn_index[0]
+    scenario_voice = wav_map.get(questions[0]["id"], {}).get("voice", "") if questions else ""
     mem_results = components.session_loop.memory_results
     for i, q in enumerate(questions):
         vap_delay = None
@@ -737,6 +761,7 @@ def _run_multi_turn_suite(
             "suite_name": suite["name"],
             "input_text": q["text"],
             "asr_text": turn_asr_texts.get(i, ""),
+            "voice": scenario_voice,
             "success": i < completed_turns,
             "error": None if i < completed_turns else ("no_turn_shift" if turn_asr_texts.get(i) else "no_recognition"),
             "turn_detection_delay_ms": vap_delay,
@@ -813,7 +838,9 @@ def main() -> None:
         available = {s.get("category") for s in all_suites}
         unknown = selected - available
         if unknown:
-            logger.error("Unknown categories: %s (available: %s)", ", ".join(sorted(unknown)), ", ".join(sorted(available)))
+            logger.error(
+                "Unknown categories: %s (available: %s)", ", ".join(sorted(unknown)), ", ".join(sorted(available))
+            )
             sys.exit(1)
         all_suites = [s for s in all_suites if s.get("category") in selected]
         if not all_suites:
@@ -1110,18 +1137,19 @@ def main() -> None:
                         interrupt_audios = random.sample(interrupt_audios, 1)
                     for delay in delays:
                         for int_id in interrupt_audios:
-                            interrupt_wav = wav_map.get(int_id, "")
+                            int_entry = wav_map.get(int_id, {})
+                            interrupt_wav = int_entry.get("path", "")
                             if not interrupt_wav:
                                 logger.error("No WAV for interrupt %s", int_id)
                                 continue
                             for question in questions:
                                 if shutdown_event.is_set():
                                     break
-                                wav_path = wav_map[question["id"]]
+                                q_entry = wav_map[question["id"]]
                                 _run_interruption(
                                     suite,
                                     question,
-                                    wav_path,
+                                    q_entry["path"],
                                     interrupt_wav,
                                     delay,
                                     player,
@@ -1132,16 +1160,17 @@ def main() -> None:
                                     seed_session_map=seed_session_map,
                                     seed_episode_map=seed_episode_map,
                                     record_dir=record_dir,
+                                    voice=q_entry.get("voice", ""),
                                 )
                 else:
                     for question in questions:
                         if shutdown_event.is_set():
                             break
-                        wav_path = wav_map[question["id"]]
+                        q_entry = wav_map[question["id"]]
                         _run_single_turn(
                             suite,
                             question,
-                            wav_path,
+                            q_entry["path"],
                             player,
                             session_map,
                             create_session,
@@ -1149,6 +1178,7 @@ def main() -> None:
                             seed_session_map=seed_session_map,
                             seed_episode_map=seed_episode_map,
                             record_dir=record_dir,
+                            voice=q_entry.get("voice", ""),
                         )
         finally:
             audio_input.stop()
@@ -1185,9 +1215,7 @@ def main() -> None:
         "text": args.text,
         "category": args.category,
         "suites": [s["name"] for s in all_suites],
-        "question_count": sum(
-            len(list(_iter_questions(s))) for s in all_suites
-        ),
+        "question_count": sum(len(list(_iter_questions(s))) for s in all_suites),
     }
 
     result = {
@@ -1200,11 +1228,7 @@ def main() -> None:
             "pipeline": pipeline_config,
             "runner": runner_config,
             "suite_descriptions": {s["name"]: s.get("description", "") for s in all_suites},
-            "question_texts": {
-                q["id"]: q["text"]
-                for s in questions_data["suites"]
-                for q in _iter_questions(s)
-            },
+            "question_texts": {q["id"]: q["text"] for s in questions_data["suites"] for q in _iter_questions(s)},
         },
         "eval_db": eval_db,
         "seed_session_map": {str(k): v for k, v in seed_session_map.items()},
