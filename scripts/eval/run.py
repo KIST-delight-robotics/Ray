@@ -65,7 +65,10 @@ from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.session_loop import SessionComponents, SessionLoop
-from voice_pipeline.trace.trace_store import SQLiteTraceStore
+from voice_pipeline.trace.openai_retry_handler import OpenAIRetryHandler
+from voice_pipeline.trace.trace_store import SQLiteCallStore, SQLiteTraceStore
+from voice_pipeline.trace.tracked_embedder import TrackedEmbedder
+from voice_pipeline.trace.tracked_tts import TrackedTTS
 from voice_pipeline.tts.tts import OpenAITTS
 from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT
 from voice_pipeline.turn_taking.async_vap import AsyncVAP
@@ -486,6 +489,7 @@ def _run_single_turn(
 
     turn_event = threading.Event()
     turn_shift_event = threading.Event()
+    gen_failed_event = threading.Event()
     play_end_time = [0.0]
     turn_shift_time = [0.0]
     final_asr_text = [""]
@@ -499,11 +503,16 @@ def _run_single_turn(
     def on_turn_shift(ts_time: float, asr_text: str) -> None:
         turn_shift_event.set()
 
+    def on_gen_failed() -> None:
+        gen_failed_event.set()
+        components.session_loop.request_stop()
+
     rec_path = str(Path(record_dir) / f"{question['id']}.wav") if record_dir else None
     skip = suite.get("category") == "asr"
     components = create_session(
         on_turn_complete=on_turn_done,
         on_turn_shift=on_turn_shift,
+        on_generation_failed=on_gen_failed,
         memory_enabled=suite.get("memory", False),
         skip_generation=skip,
         record_path=rec_path,
@@ -535,6 +544,7 @@ def _run_single_turn(
     player_thread.join(timeout=5.0)
 
     success = turn_event.is_set()
+    gen_failed = gen_failed_event.is_set()
     early_turn_shift = success and play_end_time[0] == 0.0
     ts_reason = components.session_loop.turn_shift_reason
     late_turn_shift = success and not early_turn_shift and ts_reason == "turngpt_3.0"
@@ -543,7 +553,9 @@ def _run_single_turn(
         vap_delay = round((turn_shift_time[0] - play_end_time[0]) * 1000, 1)
 
     error = None
-    if not success:
+    if gen_failed:
+        error = "generation_failed"
+    elif not success:
         error = "no_turn_shift" if final_asr_text[0] else "no_recognition"
     elif early_turn_shift:
         error = "early_turn_shift"
@@ -577,7 +589,7 @@ def _run_single_turn(
         "input_text": question["text"],
         "asr_text": final_asr_text[0],
         "voice": voice,
-        "success": success and not early_turn_shift and not late_turn_shift,
+        "success": success and not early_turn_shift and not late_turn_shift and not gen_failed,
         "error": error,
         "turn_shift_reason": ts_reason,
         "turn_detection_delay_ms": vap_delay,
@@ -619,6 +631,7 @@ def _run_interruption(
 
     turn_event = threading.Event()
     turn_shift_event = threading.Event()
+    gen_failed_event = threading.Event()
     playback_started_event = threading.Event()
     play_end_time = [0.0]
     turn_shift_time = [0.0]
@@ -632,6 +645,10 @@ def _run_interruption(
     def on_turn_shift(ts_time: float, asr_text: str) -> None:
         turn_shift_event.set()
 
+    def on_gen_failed() -> None:
+        gen_failed_event.set()
+        components.session_loop.request_stop()
+
     def on_playback_started() -> None:
         playback_started_event.set()
 
@@ -644,6 +661,7 @@ def _run_interruption(
         on_turn_complete=on_turn_done,
         on_turn_shift=on_turn_shift,
         on_playback_started=on_playback_started,
+        on_generation_failed=on_gen_failed,
         memory_enabled=suite.get("memory", False),
         record_path=rec_path,
     )
@@ -688,6 +706,7 @@ def _run_interruption(
     player_thread.join(timeout=10.0)
 
     success = turn_event.is_set()
+    gen_failed = gen_failed_event.is_set()
     ts_reason = components.session_loop.turn_shift_reason
     vap_delay = None
     if play_end_time[0] > 0 and turn_shift_time[0] >= play_end_time[0]:
@@ -722,8 +741,8 @@ def _run_interruption(
         "interrupt_audio": interrupt_audio,
         "interrupt_delay_sec": interrupt_delay_sec,
         "interrupt_played": interrupt_played[0],
-        "success": success,
-        "error": None if success else "no_turn_shift",
+        "success": success and not gen_failed,
+        "error": "generation_failed" if gen_failed else (None if success else "no_turn_shift"),
         "turn_shift_reason": ts_reason,
         "turn_detection_delay_ms": vap_delay,
     }
@@ -768,6 +787,7 @@ def _run_multi_turn_suite(
     questions = scenario["questions"]
     turn_event = threading.Event()
     turn_shift_event = threading.Event()
+    gen_failed_event = threading.Event()
     turn_index = [0]
     turn_shift_times: dict[int, float] = {}
     turn_asr_texts: dict[int, str] = {}
@@ -785,11 +805,16 @@ def _run_multi_turn_suite(
     def on_turn_shift(ts_time: float, asr_text: str) -> None:
         turn_shift_event.set()
 
+    def on_gen_failed() -> None:
+        gen_failed_event.set()
+        components.session_loop.request_stop()
+
     rec_path = str(Path(record_dir) / f"{scenario['id']}.wav") if record_dir else None
     skip = suite.get("category") == "asr"
     components = create_session(
         on_turn_complete=on_turn_done,
         on_turn_shift=on_turn_shift,
+        on_generation_failed=on_gen_failed,
         memory_enabled=suite.get("memory", False),
         skip_generation=skip,
         record_path=rec_path,
@@ -867,8 +892,11 @@ def _run_multi_turn_suite(
         ts_reason = turn_shift_reasons.get(i)
         is_completed = i < completed_turns
         is_late = is_completed and ts_reason == "turngpt_3.0"
+        is_gen_failed = not is_completed and gen_failed_event.is_set() and i == completed_turns
 
-        if not is_completed:
+        if is_gen_failed:
+            error = "generation_failed"
+        elif not is_completed:
             error = "no_turn_shift" if turn_asr_texts.get(i) else "no_recognition"
         elif is_late:
             error = "late_turn_shift"
@@ -1005,6 +1033,10 @@ def main() -> None:
     embedder = create_embedder(expected_dimension=_DEFAULT_DIMENSION)
     memory_storage = SQLiteMemoryStorage(eval_db)
     trace_store = SQLiteTraceStore(eval_db)
+    call_store = SQLiteCallStore(eval_db)
+    embedder = TrackedEmbedder(embedder, call_store)
+    retry_handler = OpenAIRetryHandler(call_store)
+    logging.getLogger("openai._base_client").addHandler(retry_handler)
     vector_index = NumpyVectorIndex()
 
     # --- Text session factory ---
@@ -1040,6 +1072,7 @@ def main() -> None:
 
     # --- Audio module initialization (only if needed) ---
     asr = None
+    raw_tts = None
     tts = None
     vap = None
     turngpt = None
@@ -1052,8 +1085,9 @@ def main() -> None:
 
     if needs_audio:
         asr = GoogleCloudASR(language_code=language_code)
-        tts = OpenAITTS()
-        vap = MaAIVAPWrapper(tts.output_sample_rate)
+        raw_tts = OpenAITTS()
+        tts = TrackedTTS(raw_tts, call_store)
+        vap = MaAIVAPWrapper(raw_tts.output_sample_rate)
         turngpt = TurnGPTWrapper()
         silero_vad_model = load_silero_vad(onnx=True)
         _vad_buf = bytearray()
@@ -1092,6 +1126,7 @@ def main() -> None:
         on_turn_complete: Callable[[float], None] | None = None,
         on_turn_shift: Callable[[float, str], None] | None = None,
         on_playback_started: Callable[[], None] | None = None,
+        on_generation_failed: Callable[[], None] | None = None,
         memory_enabled: bool = True,
         skip_generation: bool = False,
         record_path: str | None = None,
@@ -1104,8 +1139,11 @@ def main() -> None:
         turngpt.reset()
 
         session_id = str(uuid.uuid4())
-        async_vap = AsyncVAP(vap)
-        async_turngpt = AsyncTurnGPT(turngpt)
+        tts.session_id = session_id
+        retry_handler.session_id = session_id
+        embedder.session_id = session_id
+        async_vap = AsyncVAP(vap, call_store=call_store, session_id=session_id)
+        async_turngpt = AsyncTurnGPT(turngpt, call_store=call_store, session_id=session_id)
         prev_async.extend([async_vap, async_turngpt])
 
         ms = memory_storage if memory_enabled else None
@@ -1141,6 +1179,7 @@ def main() -> None:
             on_turn_complete=on_turn_complete,
             on_turn_shift=on_turn_shift,
             on_playback_started=on_playback_started,
+            on_generation_failed=on_generation_failed,
             disable_exit_keywords=True,
             skip_generation=skip_generation,
             record_path=record_path,
@@ -1324,6 +1363,7 @@ def main() -> None:
     # --- Shared cleanup ---
     memory_storage.close()
     trace_store.close()
+    call_store.close()
 
     # --- Save session mapping ---
     finished_at = datetime.now().strftime(_TIMESTAMP_FORMAT)
@@ -1333,8 +1373,8 @@ def main() -> None:
         "llm_model": llm.model,
         "llm_temperature": llm.temperature,
         "writer_llm_model": "gpt-4o-mini",
-        "tts_model": tts._MODEL if tts else None,
-        "tts_voice": tts._VOICE if tts else None,
+        "tts_model": raw_tts._MODEL if raw_tts else None,
+        "tts_voice": raw_tts._VOICE if raw_tts else None,
         "asr_model": asr._MODEL if asr else None,
         "asr_language": language_code,
         "vap_model": type(vap).__name__ if vap else None,

@@ -9,8 +9,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import UTC, datetime
 
-from voice_pipeline.core.interfaces import ITurnGPT
+from voice_pipeline.core.interfaces import ICallStore, ITurnGPT
+from voice_pipeline.core.types import CallRecord
 
 logger = logging.getLogger("voice_pipeline.turn_taking")
 
@@ -26,9 +28,17 @@ class AsyncTurnGPT:
 
     Args:
         turngpt: The underlying (synchronous) ITurnGPT implementation.
+        call_store: Optional call store for latency recording. Records are
+            buffered in memory and flushed on ``stop()``.
+        session_id: Session identifier for call records.
     """
 
-    def __init__(self, turngpt: ITurnGPT) -> None:
+    def __init__(
+        self,
+        turngpt: ITurnGPT,
+        call_store: ICallStore | None = None,
+        session_id: str = "",
+    ) -> None:
         self._turngpt = turngpt
         self._pending_text: str | None = None
         self._latest_prob: float | None = None
@@ -36,6 +46,9 @@ class AsyncTurnGPT:
         self._work_event = threading.Event()
         self._stop_event = threading.Event()
         self._pending_reset = False
+        self._call_store = call_store
+        self._session_id = session_id
+        self._call_records: list[CallRecord] = []
         self._thread = threading.Thread(target=self._run, daemon=True, name="async-turngpt")
         self._thread.start()
 
@@ -71,10 +84,11 @@ class AsyncTurnGPT:
         self._work_event.set()
 
     def stop(self) -> None:
-        """Signal the background thread to exit and wait for it."""
+        """Signal the background thread to exit, wait, and flush call records."""
         self._stop_event.set()
         self._work_event.set()
         self._thread.join(timeout=2.0)
+        self._flush_call_records()
 
     # ------------------------------------------------------------------
     # Background thread
@@ -112,13 +126,37 @@ class AsyncTurnGPT:
                             elapsed_ms,
                             text[:60],
                         )
-                    # else:
-                    #     logger.debug("TurnGPT inference: %.0fms", elapsed_ms)
                 else:
                     logger.debug(
                         "TurnGPT result discarded (cleared): %.0fms",
                         elapsed_ms,
                     )
+
+            if self._call_store is not None:
+                status = "ok" if elapsed_ms <= 100 else "slow"
+                self._call_records.append(CallRecord(
+                    session_id=self._session_id,
+                    timestamp=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+                    module="turngpt",
+                    operation="predict",
+                    model="turngpt",
+                    elapsed_ms=elapsed_ms,
+                    status=status,
+                ))
+
+    # ------------------------------------------------------------------
+    # Call record flush
+    # ------------------------------------------------------------------
+
+    def _flush_call_records(self) -> None:
+        if not self._call_store or not self._call_records:
+            return
+        try:
+            for record in self._call_records:
+                self._call_store.record(record)
+        except Exception:
+            logger.warning("Failed to flush TurnGPT call records", exc_info=True)
+        self._call_records.clear()
 
 
 class SyncTurnGPTAdapter:

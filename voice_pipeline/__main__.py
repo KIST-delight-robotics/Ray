@@ -214,8 +214,8 @@ def main() -> None:
         tts.session_id = session_id
         retry_handler.session_id = session_id
 
-        async_vap = AsyncVAP(vap)
-        async_turngpt = AsyncTurnGPT(turngpt)
+        async_vap = AsyncVAP(vap, call_store=call_store, session_id=session_id)
+        async_turngpt = AsyncTurnGPT(turngpt, call_store=call_store, session_id=session_id)
         prev_async.extend([async_vap, async_turngpt])
 
         history = ConversationHistory(storage, token_counter)
