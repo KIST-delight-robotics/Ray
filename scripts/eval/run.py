@@ -232,6 +232,56 @@ def _resolve_target_episodes(target_sessions, seed_session_map, seed_episode_map
     return ids
 
 
+class _PauseController:
+    """Listens for Enter key on stdin to toggle pause/resume between sessions."""
+
+    def __init__(self, shutdown_event: threading.Event) -> None:
+        self._shutdown = shutdown_event
+        self._pause_requested = threading.Event()
+        self._resume = threading.Event()
+        self._paused = threading.Event()
+
+    def start(self) -> None:
+        if not sys.stdin.isatty():
+            return
+        thread = threading.Thread(target=self._listen, daemon=True)
+        thread.start()
+        logger.info("Press Enter to pause/resume evaluation between sessions")
+
+    def _listen(self) -> None:
+        while not self._shutdown.is_set():
+            try:
+                line = sys.stdin.readline()
+                if not line:
+                    break
+            except (OSError, ValueError):
+                break
+            if self._paused.is_set():
+                self._resume.set()
+            else:
+                self._pause_requested.set()
+                logger.info("Pause requested — will pause after current session completes")
+
+    def wait_if_paused(self) -> bool:
+        """Call at session boundaries. Returns True if eval should stop."""
+        if self._shutdown.is_set():
+            return True
+        if not self._pause_requested.is_set():
+            return False
+        self._pause_requested.clear()
+        self._paused.set()
+        logger.info("Paused. Press Enter to resume...")
+        while not self._resume.is_set():
+            if self._shutdown.is_set():
+                self._paused.clear()
+                return True
+            self._resume.wait(timeout=0.5)
+        self._resume.clear()
+        self._paused.clear()
+        logger.info("Resumed")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Text-mode execution
 # ---------------------------------------------------------------------------
@@ -1080,11 +1130,14 @@ def main() -> None:
             session_id=session_id,
         )
 
-    # --- Signal handling ---
+    # --- Signal handling & pause control ---
     def _handle_signal(*_: object) -> None:
         shutdown_event.set()
 
     signal.signal(signal.SIGINT, _handle_signal)
+
+    pause_ctrl = _PauseController(shutdown_event)
+    pause_ctrl.start()
 
     # --- Run eval ---
     session_map: list[dict] = []
@@ -1095,7 +1148,7 @@ def main() -> None:
 
     # --- Run text suites ---
     for suite in text_suites:
-        if shutdown_event.is_set():
+        if pause_ctrl.wait_if_paused():
             break
 
         if suite.get("multi_turn"):
@@ -1109,7 +1162,7 @@ def main() -> None:
                 len(suite.get("scenarios", [])),
             )
             for scenario in scenarios:
-                if shutdown_event.is_set():
+                if pause_ctrl.wait_if_paused():
                     break
                 _run_text_multi_turn(
                     suite, scenario, session_map, create_text_session, seed_episode_map, seed_session_map
@@ -1125,7 +1178,7 @@ def main() -> None:
                 len(suite.get("questions", [])),
             )
             for question in questions:
-                if shutdown_event.is_set():
+                if pause_ctrl.wait_if_paused():
                     break
                 _run_text_single_turn(
                     suite, question, session_map, create_text_session, seed_episode_map, seed_session_map
@@ -1147,7 +1200,7 @@ def main() -> None:
 
         try:
             for suite in audio_suites:
-                if shutdown_event.is_set():
+                if pause_ctrl.wait_if_paused():
                     break
 
                 if suite.get("multi_turn"):
@@ -1161,7 +1214,7 @@ def main() -> None:
                         len(suite["scenarios"]),
                     )
                     for scenario in scenarios:
-                        if shutdown_event.is_set():
+                        if pause_ctrl.wait_if_paused():
                             break
                         _run_multi_turn_suite(
                             suite,
@@ -1200,7 +1253,7 @@ def main() -> None:
                                 logger.error("No WAV for interrupt %s", int_id)
                                 continue
                             for question in questions:
-                                if shutdown_event.is_set():
+                                if pause_ctrl.wait_if_paused():
                                     break
                                 q_entry = wav_map[question["id"]]
                                 _run_interruption(
@@ -1221,7 +1274,7 @@ def main() -> None:
                                 )
                 else:
                     for question in questions:
-                        if shutdown_event.is_set():
+                        if pause_ctrl.wait_if_paused():
                             break
                         q_entry = wav_map[question["id"]]
                         _run_single_turn(
