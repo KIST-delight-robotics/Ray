@@ -158,6 +158,7 @@ class SessionLoop:
         self._assistant_msg_id: int | None = None
         self._last_frame_time = 0.0
         self._turn_shift_time = 0.0
+        self._turn_shift_reason: str | None = None
         self._begin_streaming_time = 0.0
         self._speculative_attempts = 0
         self._saved_memory_results = None
@@ -170,6 +171,11 @@ class SessionLoop:
         if self._saved_memory_results is not None:
             return self._saved_memory_results
         return self._generator.memory_results
+
+    @property
+    def turn_shift_reason(self) -> str | None:
+        """Return the reason for the most recent turn-shift decision."""
+        return self._turn_shift_reason
 
     # ------------------------------------------------------------------
     # Public API
@@ -270,6 +276,7 @@ class SessionLoop:
         self._assistant_msg_id = None
         self._turn_shift_time = 0.0
         self._turn_shift_asr_text = ""
+        self._turn_shift_reason = None
         self._begin_streaming_time = 0.0
         self._speculative_attempts = 0
 
@@ -359,7 +366,7 @@ class SessionLoop:
             decision = self._process_turn_detector(combined_audio, current_text, robot_audio, frame_count)
             if decision is not None:
                 if decision.turn_shift:
-                    if self._handle_turn_shift(current_text):
+                    if self._handle_turn_shift(current_text, decision.turn_shift_reason):
                         return True
                 elif decision.cancel:
                     self._handle_cancel()
@@ -440,7 +447,7 @@ class SessionLoop:
             logger.warning("TurnDetector error", exc_info=True)
             return None
 
-    def _handle_turn_shift(self, text: str) -> bool:
+    def _handle_turn_shift(self, text: str, reason: str | None = None) -> bool:
         """Handle turn_shift decision. Returns True if session should end."""
         if not self._disable_exit_keywords and self._check_exit_keyword(text):
             logger.info("Exit keyword detected: %r", text)
@@ -448,6 +455,7 @@ class SessionLoop:
 
         self._turn_shift_time = time.monotonic()
         self._turn_shift_asr_text = text
+        self._turn_shift_reason = reason
 
         if self._on_turn_shift_cb is not None:
             try:
@@ -855,6 +863,7 @@ class SessionLoop:
         if trace is None:
             return
         trace.outcome = outcome
+        trace.turn_shift_reason = self._turn_shift_reason or ""
         trace.speculative_attempts = self._speculative_attempts
         if self._user_msg_id is not None:
             trace.user_msg_id = self._user_msg_id

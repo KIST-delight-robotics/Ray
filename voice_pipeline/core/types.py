@@ -110,6 +110,7 @@ class TurnDecision:
     interrupt: bool = False
     prepare: bool = False
     cancel: bool = False
+    turn_shift_reason: str | None = None
 
     def __post_init__(self) -> None:
         if sum([self.turn_shift, self.interrupt, self.prepare, self.cancel]) > 1:
@@ -558,6 +559,9 @@ class PipelineTrace:
     begin_streaming_ts: float = 0.0
     playback_started_ts: float = 0.0
 
+    # -- Turn-shift metadata --
+    turn_shift_reason: str = ""
+
     # -- Interrupt monotonic timestamps --
     interrupt_ts: float = 0.0
     interrupt_ack_ts: float = 0.0
@@ -609,6 +613,7 @@ class PipelineTrace:
             "speculative_ms": speculative_ms,
             "bridge_ms": self._delta_ms(self.begin_streaming_ts, self.playback_started_ts),
             "interrupt_latency_ms": self._delta_ms(self.interrupt_ts, self.interrupt_ack_ts),
+            "turn_shift_reason": self.turn_shift_reason,
         }
 
     def summary(self) -> str:

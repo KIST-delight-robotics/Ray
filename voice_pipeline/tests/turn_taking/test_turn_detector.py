@@ -127,7 +127,9 @@ class TestVAPTurnShift:
         for _i in range(1, n_frames):
             decisions.append(detector.process_frame(FRAME, "hello"))
 
-        assert any(d.turn_shift for d in decisions)
+        shifted = [d for d in decisions if d.turn_shift]
+        assert shifted
+        assert shifted[0].turn_shift_reason == "vap"
 
     def test_vap_timer_resets_when_favor_stops(self):
         """VAP favors robot then stops before 500ms -> no turn_shift."""
@@ -185,7 +187,9 @@ class TestTurnGPTTimeout:
 
         # Remaining: silence with text present
         decisions = [detector.process_frame(FRAME, "hello") for _ in range(n_frames - 1)]
-        assert any(d.turn_shift for d in decisions)
+        shifted = [d for d in decisions if d.turn_shift]
+        assert shifted
+        assert shifted[0].turn_shift_reason == "turngpt_0.5"
 
     def test_low_prob_long_timeout(self):
         """prob=0.05 -> needs 3000ms (100 frames) of silence."""
@@ -201,6 +205,7 @@ class TestTurnGPTTimeout:
         assert len(shift_indices) > 0
         # First turn_shift should be around 3s mark
         assert shift_indices[0] >= 95  # ~2850ms minimum
+        assert decisions[shift_indices[0]].turn_shift_reason == "turngpt_3.0"
 
 
 # ---------------------------------------------------------------------------

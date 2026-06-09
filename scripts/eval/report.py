@@ -130,6 +130,7 @@ def build_report(results_dir: Path) -> dict:
             "interrupt_delay_sec",
             "interrupt_played",
             "text_mode",
+            "turn_shift_reason",
             "retrieved_episodes",
             "target_sessions",
             "target_episode_ids",

@@ -30,6 +30,7 @@ _COLUMNS = (
     "speculative_ms",
     "bridge_ms",
     "interrupt_latency_ms",
+    "turn_shift_reason",
 )
 
 
@@ -70,11 +71,20 @@ class SQLiteTraceStore:
                 turn_shift_to_playback_ms REAL  NOT NULL DEFAULT 0,
                 speculative_ms          REAL    NOT NULL DEFAULT 0,
                 bridge_ms               REAL    NOT NULL DEFAULT 0,
-                interrupt_latency_ms    REAL    NOT NULL DEFAULT 0
+                interrupt_latency_ms    REAL    NOT NULL DEFAULT 0,
+                turn_shift_reason       TEXT    NOT NULL DEFAULT ''
             )
         """)
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_traces_session ON pipeline_traces(session_id)")
+        self._migrate(self._conn)
         self._conn.commit()
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(pipeline_traces)")}
+        if "turn_shift_reason" not in existing:
+            conn.execute("ALTER TABLE pipeline_traces ADD COLUMN turn_shift_reason TEXT NOT NULL DEFAULT ''")
+
 
     def save(self, trace: PipelineTrace) -> None:
         """Persist a trace record."""

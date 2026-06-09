@@ -536,6 +536,8 @@ def _run_single_turn(
 
     success = turn_event.is_set()
     early_turn_shift = success and play_end_time[0] == 0.0
+    ts_reason = components.session_loop.turn_shift_reason
+    late_turn_shift = success and not early_turn_shift and ts_reason == "turngpt_3.0"
     vap_delay = None
     if not early_turn_shift and play_end_time[0] > 0 and turn_shift_time[0] >= play_end_time[0]:
         vap_delay = round((turn_shift_time[0] - play_end_time[0]) * 1000, 1)
@@ -545,6 +547,8 @@ def _run_single_turn(
         error = "no_turn_shift" if final_asr_text[0] else "no_recognition"
     elif early_turn_shift:
         error = "early_turn_shift"
+    elif late_turn_shift:
+        error = "late_turn_shift"
 
     # Extract retrieved episodes from memory results
     retrieved_episodes = []
@@ -573,8 +577,9 @@ def _run_single_turn(
         "input_text": question["text"],
         "asr_text": final_asr_text[0],
         "voice": voice,
-        "success": success and not early_turn_shift,
+        "success": success and not early_turn_shift and not late_turn_shift,
         "error": error,
+        "turn_shift_reason": ts_reason,
         "turn_detection_delay_ms": vap_delay,
     }
     if retrieved_episodes:
@@ -683,6 +688,7 @@ def _run_interruption(
     player_thread.join(timeout=10.0)
 
     success = turn_event.is_set()
+    ts_reason = components.session_loop.turn_shift_reason
     vap_delay = None
     if play_end_time[0] > 0 and turn_shift_time[0] >= play_end_time[0]:
         vap_delay = round((turn_shift_time[0] - play_end_time[0]) * 1000, 1)
@@ -718,6 +724,7 @@ def _run_interruption(
         "interrupt_played": interrupt_played[0],
         "success": success,
         "error": None if success else "no_turn_shift",
+        "turn_shift_reason": ts_reason,
         "turn_detection_delay_ms": vap_delay,
     }
     if retrieved_episodes:
@@ -764,10 +771,12 @@ def _run_multi_turn_suite(
     turn_index = [0]
     turn_shift_times: dict[int, float] = {}
     turn_asr_texts: dict[int, str] = {}
+    turn_shift_reasons: dict[int, str | None] = {}
 
     def on_turn_done(ts_time: float, asr_text: str) -> None:
         turn_shift_times[turn_index[0]] = ts_time
         turn_asr_texts[turn_index[0]] = asr_text
+        turn_shift_reasons[turn_index[0]] = components.session_loop.turn_shift_reason
         turn_index[0] += 1
         if turn_index[0] >= len(questions):
             components.session_loop.request_stop()
@@ -855,6 +864,17 @@ def _run_multi_turn_suite(
             q.get("target_sessions", []), seed_session_map or {}, seed_episode_map or {}
         )
 
+        ts_reason = turn_shift_reasons.get(i)
+        is_completed = i < completed_turns
+        is_late = is_completed and ts_reason == "turngpt_3.0"
+
+        if not is_completed:
+            error = "no_turn_shift" if turn_asr_texts.get(i) else "no_recognition"
+        elif is_late:
+            error = "late_turn_shift"
+        else:
+            error = None
+
         entry = {
             "question_id": q["id"],
             "scenario_id": scenario["id"],
@@ -863,8 +883,9 @@ def _run_multi_turn_suite(
             "input_text": q["text"],
             "asr_text": turn_asr_texts.get(i, ""),
             "voice": scenario_voice,
-            "success": i < completed_turns,
-            "error": None if i < completed_turns else ("no_turn_shift" if turn_asr_texts.get(i) else "no_recognition"),
+            "success": is_completed and not is_late,
+            "error": error,
+            "turn_shift_reason": ts_reason,
             "turn_detection_delay_ms": vap_delay,
         }
         if retrieved_episodes:

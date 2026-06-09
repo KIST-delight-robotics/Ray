@@ -165,23 +165,27 @@ class TurnDetector(ITurnDetector):
         # Evaluate turn-shift first so its VAP-sustain timer keeps advancing even
         # on frames where prepare preempts the shift below (see _check_turn_shift's
         # side effect). The decision itself is acted on after the prepare check.
-        turn_shift_ready = not user_is_speaking and asr_text and self._check_turn_shift(vap_result, elapsed)
+        turn_shift_reason = (
+            self._check_turn_shift(vap_result, elapsed)
+            if not user_is_speaking and asr_text
+            else None
+        )
 
         # Prepare preempts turn-shift on a fresh dissimilar change (→ regenerate).
         if self._check_prepare(asr_text):
             prob = self._turngpt_prob
             thresh = self._PREPARE_TURNGPT_THRESHOLD
-            reason = (
+            prepare_reason = (
                 f"turngpt={prob:.2f}>{thresh:.2f}"
                 if prob > thresh
                 else f"timeout={self._last_asr_change_elapsed_sec:.2f}s"
             )
-            logger.debug("PREPARE (%s): text=%r", reason, asr_text[:60])
+            logger.debug("PREPARE (%s): text=%r", prepare_reason, asr_text[:60])
             return TurnDecision(prepare=True)
 
         # --- Turn-shift (text has settled / still matches the last prepare) ---
-        if turn_shift_ready:
-            logger.info("TURN_SHIFT: %r", asr_text[:60])
+        if turn_shift_reason:
+            logger.info("TURN_SHIFT (%s): %r", turn_shift_reason, asr_text[:60])
             logger.debug(
                 "TURN_SHIFT detail: p_now=%.2f p_fut=%.2f turngpt=%.2f silence=%.2fs",
                 vap_result.p_now,
@@ -192,7 +196,7 @@ class TurnDetector(ITurnDetector):
             # Tentative: enter PENDING (commit/rewind decides). Do NOT wipe
             # per-frame state — a cancel must be able to resume this turn.
             self._turn_state = _TurnState.PENDING
-            return TurnDecision(turn_shift=True)
+            return TurnDecision(turn_shift=True, turn_shift_reason=turn_shift_reason)
 
         return TurnDecision.none()
 
@@ -237,23 +241,27 @@ class TurnDetector(ITurnDetector):
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _check_turn_shift(self, vap_result: VAPResult, elapsed: float) -> bool:
+    def _check_turn_shift(self, vap_result: VAPResult, elapsed: float) -> str | None:
         """Check two OR paths for turn-shift.
 
-        Path 1: VAP sustained robot-favor.
-        Path 2: TurnGPT graduated silence timeout.
+        Returns the trigger reason string, or None if not triggered.
+
+        Path 1: VAP sustained robot-favor → ``"vap"``.
+        Path 2: TurnGPT graduated silence timeout → ``"turngpt_{timeout}"``.
         """
         # Path 1 — VAP: both p_now and p_fut favor robot (below user threshold)
         if vap_result.p_now < self._VAP_USER_THRESHOLD and vap_result.p_fut < self._VAP_USER_THRESHOLD:
             self._vap_favor_robot_elapsed_sec += elapsed
             if self._vap_favor_robot_elapsed_sec >= self._MIN_GAP_TIME_SEC:
-                return True
+                return "vap"
         else:
             self._vap_favor_robot_elapsed_sec = 0.0
 
         # Path 2 — TurnGPT graduated timeout
         timeout = self._get_turngpt_timeout()
-        return self._silence_elapsed_sec >= timeout
+        if self._silence_elapsed_sec >= timeout:
+            return f"turngpt_{timeout}"
+        return None
 
     def _get_turngpt_timeout(self) -> float:
         """Look up the silence timeout from graduated TurnGPT thresholds."""
@@ -317,13 +325,14 @@ class TurnDetector(ITurnDetector):
             return TurnDecision(cancel=True)
 
         if text_changed and asr_text and self._last_prepare_text:
-            similarity = self._text_similarity(self._last_prepare_text, asr_text)
+            similarity, sim_ms = self._text_similarity(self._last_prepare_text, asr_text)
             if similarity < self._SIMILARITY_THRESHOLD:
                 logger.info(
-                    "CANCEL (asr): similarity=%.2f %r → %r",
+                    "CANCEL (asr): similarity=%.2f (%.0fms) %r → %r",
                     similarity,
-                    self._last_prepare_text[:40],
-                    asr_text[:40],
+                    sim_ms,
+                    self._last_prepare_text[:60],
+                    asr_text[:60],
                 )
                 self._turn_state = _TurnState.USER_TURN
                 return TurnDecision(cancel=True)
@@ -332,14 +341,19 @@ class TurnDetector(ITurnDetector):
 
     _SIMILARITY_SLOW_MS = 100
 
-    def _text_similarity(self, a: str, b: str) -> float:
-        """Cosine similarity between two texts via the embedder."""
+    def _text_similarity(self, a: str, b: str) -> tuple[float, float]:
+        """Cosine similarity between two texts via the embedder.
+
+        Returns:
+            (similarity, elapsed_ms) tuple.
+        """
         t0 = time.monotonic()
         vecs = self._embedder.embed_batch([a, b])
         elapsed_ms = (time.monotonic() - t0) * 1000
         if elapsed_ms > self._SIMILARITY_SLOW_MS:
             logger.warning("Similarity slow: %.0fms (budget %dms)", elapsed_ms, self._SIMILARITY_SLOW_MS)
-        return float(np.dot(vecs[0], vecs[1]) / (np.linalg.norm(vecs[0]) * np.linalg.norm(vecs[1]) + 1e-9))
+        sim = float(np.dot(vecs[0], vecs[1]) / (np.linalg.norm(vecs[0]) * np.linalg.norm(vecs[1]) + 1e-9))
+        return sim, elapsed_ms
 
     def _check_prepare(self, asr_text: str) -> bool:
         """Check if speculative generation should be triggered."""
@@ -355,13 +369,14 @@ class TurnDetector(ITurnDetector):
 
         # Similarity gate: skip if text is too similar to last prepare
         if self._last_prepare_text:
-            similarity = self._text_similarity(self._last_prepare_text, asr_text)
+            similarity, sim_ms = self._text_similarity(self._last_prepare_text, asr_text)
             if similarity >= self._SIMILARITY_THRESHOLD:
                 logger.debug(
-                    "PREPARE skipped (similarity=%.2f): %r → %r",
+                    "PREPARE skipped (similarity=%.2f, %.0fms): %r → %r",
                     similarity,
-                    self._last_prepare_text[:40],
-                    asr_text[:40],
+                    sim_ms,
+                    self._last_prepare_text[:60],
+                    asr_text[:60],
                 )
                 self._asr_has_changed = False
                 return False

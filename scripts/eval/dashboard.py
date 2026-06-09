@@ -283,6 +283,7 @@ def _error_tag(error: str | None) -> str:
         "no_recognition": "인식 실패",
         "no_turn_shift": "턴 감지 실패",
         "early_turn_shift": "조기 턴 전환",
+        "late_turn_shift": "지연 턴 전환",
         "incomplete": "미완료",
     }
     label = labels.get(error, error)
@@ -345,10 +346,7 @@ def _build_overview(scored: dict) -> str:
     p.append('<div class="kv-group-title">실행</div>')
     p.append('<div class="kv-grid lg">')
     p.append(f'<span class="kv-key">시각</span><span class="kv-val">{_esc(started)} — {_esc(finished)}{duration_str}</span>')
-    if failed == 0:
-        p.append(f'<span class="kv-key">결과</span><span class="kv-val">{total}턴 실행 완료</span>')
-    else:
-        p.append(f'<span class="kv-key">결과</span><span class="kv-val">{total}턴 실행 · <span class="tag tag-fail">{failed}건 실패</span></span>')
+    p.append(f'<span class="kv-key">결과</span><span class="kv-val">{total}턴 실행</span>')
 
     suites = runner.get("suites", [])
     if suites:
@@ -753,9 +751,12 @@ def _build_turn_taking(scored: dict) -> str:
     turns = scored.get("turns", [])
 
     tt_turns = [t for t in turns if t.get("latency", {}).get("turn_shift_to_playback_ms") or t.get("turn_detection_delay_ms") is not None]
-    failed_turns = [t for t in turns if t.get("error") in ("no_response", "no_recognition", "no_turn_shift", "early_turn_shift")]
+    failed_turns = [t for t in turns if t.get("error") in ("no_response", "no_recognition", "no_turn_shift", "early_turn_shift", "late_turn_shift")]
+    tt_ids = {id(t) for t in tt_turns}
+    failed_only = [t for t in failed_turns if id(t) not in tt_ids]
+    all_tt_turns = tt_turns + failed_only
 
-    if not tt_turns and not failed_turns and not latency:
+    if not all_tt_turns and not latency:
         return '<div class="empty">턴테이킹 데이터 없음 (text mode에서는 수집되지 않음)</div>'
 
     from itertools import groupby
@@ -771,7 +772,7 @@ def _build_turn_taking(scored: dict) -> str:
     )
 
     # --- Success/Fail cards ---
-    total_tt = len(tt_turns) + len(failed_turns)
+    total_tt = len(all_tt_turns)
     if total_tt:
         fail_count = len(failed_turns)
         p.append('<div class="cards">')
@@ -782,11 +783,14 @@ def _build_turn_taking(scored: dict) -> str:
         )
         if fail_count:
             early = sum(1 for t in failed_turns if t.get("error") == "early_turn_shift")
+            late = sum(1 for t in failed_turns if t.get("error") == "late_turn_shift")
             no_recog = sum(1 for t in failed_turns if t.get("error") == "no_recognition")
             no_ts = sum(1 for t in failed_turns if t.get("error") == "no_turn_shift")
             parts = []
             if early:
                 parts.append(f"조기 전환 {early}")
+            if late:
+                parts.append(f"지연 전환 {late}")
             if no_recog:
                 parts.append(f"인식 실패 {no_recog}")
             if no_ts:
@@ -810,7 +814,6 @@ def _build_turn_taking(scored: dict) -> str:
         p.append("</div>")
 
     # --- Suite summary + Latency side by side ---
-    all_tt_turns = tt_turns + failed_turns
     suite_sorted = sorted(all_tt_turns, key=lambda t: t.get("suite_name", ""))
     suite_groups = []
     for suite_name, group in groupby(suite_sorted, key=lambda t: t.get("suite_name", "")):
