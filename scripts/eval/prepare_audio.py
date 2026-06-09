@@ -40,8 +40,9 @@ VOICES = [
 
 def _get_tts(voice: str, cache: dict[str, OpenAITTS]) -> OpenAITTS:
     if voice not in cache:
-        OpenAITTS._VOICE = voice
-        cache[voice] = OpenAITTS()
+        tts = OpenAITTS()
+        tts._VOICE = voice
+        cache[voice] = tts
     return cache[voice]
 
 
