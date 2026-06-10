@@ -194,6 +194,13 @@ use-after-free 경합 회피) — 토크만 끄고 즉시 종료, 나머지는 O
 - **SLEEP 진입 리셋은 wakeword 모듈 책임으로**: wakeword는 인식 사이클 종료마다 자체 `_reset()`(모델 리셋 포함)을 호출해 SLEEP *중* 오염은 자가 회복되지만, ACTIVE→SLEEP 잔류 오염은 "발화가 threshold를 넘어야 리셋이 발동"하는 구조라 조용한 호출에는 회복 기회 자체가 없음(미감지→리셋 불발 순환). `WakewordDetector.reset()` 공개 메서드를 추가해 `__main__`의 SLEEP 전환 3곳에서 호출 — 세션 쪽 `reset_vad()`로 처리하지 않은 건 wakeword의 `_pre_buffer`/`_vad_buffer`에 직전 SLEEP 기간 오디오가 잔류하는 부수 문제(STT에 묵은 청크 전송)까지 모듈 내부에서 함께 정리하기 위함.
 
 
+## 만성 batch-drained는 루프 비용이 아니라 시스템 부하 신호
+
+- **증상/진단**: eval 런 하나에서 "Batch-drained 2 frames"가 1110회(96%가 정확히 2, 발생 간격 중앙값 ~170ms, user/robot 턴 무관) 발생. 간격이 케이던스를 알려줌 — 루프가 프레임당 예산(30ms)을 δ만큼 초과하면 30/δ 프레임마다 한 번 2프레임 drain이 발생하며, 170ms 간격은 δ≈5ms를 의미. 프레임 루프에 단계별 누적 타이머를 임시 삽입해 측정한 결과 루프 고유 비용(busy)은 **2~3ms/it**에 불과(turn_detector(Silero VAD)가 ~75%, ASR gRPC feed는 0.03ms/it로 무혐의)했고, 동일 코드·오디오의 다음 런에서는 batch-drained가 17회로 소멸.
+- **결론**: 만성 2프레임 batch는 파이프라인 단계 비용이 아니라 **머신 전체가 느려진 상태**(외부 CPU 경쟁·발열 스로틀링)의 신호. 판별 기준: 프레임 루프와 무관한 백그라운드 스레드인 **VAP cycle overrun이 동반 증가**(49건→7건)하면 시스템 부하. 반대로 가끔의 5~10프레임 drain은 LLM HTTP 응답 처리+VAP 추론 슬로우가 겹치는 일시 스파이크로 `_MAX_BATCH_FRAMES=10` 설계 범위 내.
+- 계측 코드는 진단 후 제거함 — 재발 시 같은 방식(단계별 마킹 + 세션 종료 debug 요약)을 다시 삽입하면 busy/it 부풀음(시스템 부하) vs 특정 스테이지 스파이크(코드 문제)를 한 줄로 구분 가능.
+
+
 ## 차후 고려
 
 - **SimilarityConfig/MemoryConfig 임베딩 필드 중복**: 양쪽 config에 model, use_onnx 등이 중복 존재. 공유 EmbeddingConfig 추출 여부는 실제 사용 패턴 보고 판단.
