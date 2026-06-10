@@ -284,10 +284,24 @@ def _error_tag(error: str | None) -> str:
         "no_turn_shift": "턴 감지 실패",
         "early_turn_shift": "조기 턴 전환",
         "late_turn_shift": "지연 턴 전환",
+        "generation_failed": "생성 실패",
         "incomplete": "미완료",
     }
     label = labels.get(error, error)
     return f'<span class="tag tag-fail">{label}</span>'
+
+
+def _call_issues_tag(issues: dict) -> str:
+    parts = []
+    retry = issues.get("retry_count", 0)
+    error = issues.get("error_count", 0)
+    if retry:
+        parts.append(f"재시도 {retry}")
+    if error:
+        parts.append(f"API 오류 {error}")
+    label = " · ".join(parts)
+    cls = "tag-fail" if error else "tag-warn"
+    return f'<span class="tag {cls}">{label}</span>'
 
 
 def _suite_label(name: str) -> str:
@@ -751,7 +765,7 @@ def _build_turn_taking(scored: dict) -> str:
     turns = scored.get("turns", [])
 
     tt_turns = [t for t in turns if t.get("latency", {}).get("turn_shift_to_playback_ms") or t.get("turn_detection_delay_ms") is not None]
-    failed_turns = [t for t in turns if t.get("error") in ("no_response", "no_recognition", "no_turn_shift", "early_turn_shift", "late_turn_shift")]
+    failed_turns = [t for t in turns if t.get("error") in ("no_response", "no_recognition", "no_turn_shift", "early_turn_shift", "late_turn_shift", "generation_failed")]
     tt_ids = {id(t) for t in tt_turns}
     failed_only = [t for t in failed_turns if id(t) not in tt_ids]
     all_tt_turns = tt_turns + failed_only
@@ -795,6 +809,9 @@ def _build_turn_taking(scored: dict) -> str:
                 parts.append(f"인식 실패 {no_recog}")
             if no_ts:
                 parts.append(f"턴 감지 실패 {no_ts}")
+            gen_fail = sum(1 for t in failed_turns if t.get("error") == "generation_failed")
+            if gen_fail:
+                parts.append(f"생성 실패 {gen_fail}")
             p.append(
                 f'<div class="card"><div class="card-label">실패</div>'
                 f'<div class="card-value bad">{fail_count}</div>'
@@ -1019,6 +1036,12 @@ def _build_turn_taking(scored: dict) -> str:
             p.append(f'<div style="margin-top:2px"><span class="mute" style="font-size:11px">{t["question_id"]}</span>')
             if error:
                 p.append(f' <span class="mute" style="font-size:11px">|</span> {_error_tag(error)}')
+            ts_reason = t.get("turn_shift_reason")
+            if ts_reason:
+                p.append(f' <span class="tag tag-mute">{_esc(ts_reason)}</span>')
+            call_issues = t.get("call_issues")
+            if call_issues:
+                p.append(f' <span class="mute" style="font-size:11px">|</span> {_call_issues_tag(call_issues)}')
             if lat_str:
                 p.append(f' <span class="mute" style="font-size:11px">|</span> {lat_str}')
             p.append('</div></div>')

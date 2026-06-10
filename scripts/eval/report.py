@@ -56,10 +56,18 @@ def build_report(results_dir: Path) -> dict:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
 
+    # Check if call_records table exists
+    has_call_records = bool(
+        conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='call_records'"
+        ).fetchone()
+    )
+
     # Pre-fetch messages and traces per session
     session_ids = list({e["session_id"] for e in entries})
     msg_cache: dict[str, list[dict]] = {}
     trace_cache: dict[str, list] = {}
+    call_cache: dict[str, dict] = {}
     for sid in session_ids:
         rows = conn.execute(
             "SELECT item_json FROM messages WHERE session_id = ? ORDER BY msg_id",
@@ -85,6 +93,16 @@ def build_report(results_dir: Path) -> dict:
         ).fetchall()
         trace_cache[sid] = traces
 
+        if has_call_records:
+            rows = conn.execute(
+                "SELECT module, status FROM call_records WHERE session_id = ? AND status != 'ok'",
+                (sid,),
+            ).fetchall()
+            retry_count = sum(1 for r in rows if r["status"] == "retry")
+            error_count = sum(1 for r in rows if r["status"] in ("error", "timeout"))
+            if retry_count or error_count:
+                call_cache[sid] = {"retry_count": retry_count, "error_count": error_count}
+
     # Track turn index within each session for multi-turn
     session_turn_idx: dict[str, int] = {}
 
@@ -109,6 +127,8 @@ def build_report(results_dir: Path) -> dict:
         outcome = trace["outcome"] if trace else None
         asr_text = entry.get("asr_text") or system_text
 
+        call_issues = call_cache.get(sid)
+
         turn_data = {
             "suite_name": entry["suite_name"],
             "session_id": sid,
@@ -123,6 +143,8 @@ def build_report(results_dir: Path) -> dict:
             "error": entry.get("error"),
             "turn_detection_delay_ms": entry.get("turn_detection_delay_ms"),
         }
+        if call_issues:
+            turn_data["call_issues"] = call_issues
         for key in (
             "scenario_id",
             "voice",
