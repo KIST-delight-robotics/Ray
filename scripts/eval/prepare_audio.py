@@ -3,6 +3,10 @@
 Assigns voices via round-robin from VOICES. Multi-turn scenarios use
 one voice per scenario (all questions in the same scenario share a voice).
 
+After generation, every WAV in the output directory is RMS-normalized —
+OpenAI TTS has no volume parameter and voices differ by up to ~19 dB
+(sage/coral are far quieter than nova/alloy), which skews ASR/VAD results.
+
 Usage:
     uv run python scripts/eval/prepare_audio.py data/eval/questions.json
     uv run python scripts/eval/prepare_audio.py data/eval/questions.json --output-dir data/eval/wav
@@ -14,7 +18,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import wave
 from pathlib import Path
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -46,6 +53,39 @@ def _get_tts(voice: str, cache: dict[str, OpenAITTS]) -> OpenAITTS:
     return cache[voice]
 
 
+_PEAK_CEILING = 0.95  # 정규화 후 샘플 절대값 상한 — 클리핑 방지
+_GAIN_TOLERANCE = 0.02  # 이 비율 이내의 게인 변화는 재기록 생략 (재실행 멱등성)
+
+
+def normalize_wav(path: Path, target_rms: float) -> str:
+    """Scale a 16-bit WAV to *target_rms*, peak-limited. Returns action description."""
+    with wave.open(str(path)) as w:
+        params = w.getparams()
+        pcm = w.readframes(w.getnframes())
+    if params.sampwidth != 2:
+        return "skip (not 16-bit)"
+
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+    if len(samples) == 0:
+        return "skip (empty)"
+    rms = float(np.sqrt(np.mean(samples**2)))
+    if rms < 1e-4:
+        return "skip (silence)"
+
+    gain = target_rms / rms
+    peak = float(np.abs(samples).max())
+    if peak * gain > _PEAK_CEILING:
+        gain = _PEAK_CEILING / peak
+    if abs(gain - 1.0) < _GAIN_TOLERANCE:
+        return "ok"
+
+    scaled = np.clip(samples * gain, -1.0, 1.0)
+    with wave.open(str(path), "wb") as w:
+        w.setparams(params)
+        w.writeframes((scaled * 32767.0).astype(np.int16).tobytes())
+    return f"{20 * np.log10(gain):+.1f} dB"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate eval question WAV files")
     parser.add_argument("questions", help="Path to questions JSON")
@@ -53,6 +93,13 @@ def main() -> None:
     parser.add_argument("--model", default="gpt-4o-mini-tts")
     parser.add_argument("--speed", type=float, default=1.2)
     parser.add_argument("--force", action="store_true", help="Regenerate existing files")
+    parser.add_argument(
+        "--target-rms",
+        type=float,
+        default=0.1,
+        help="Normalization target RMS in linear scale (0.1 ≈ -20 dBFS)",
+    )
+    parser.add_argument("--no-normalize", action="store_true", help="Skip RMS normalization pass")
     args = parser.parse_args()
 
     OpenAITTS._MODEL = args.model
@@ -111,6 +158,20 @@ def main() -> None:
 
     print(f"\nDone: {generated} generated, {total - generated} skipped")
     print(f"Manifest: {manifest_path}")
+
+    # --- RMS normalization pass (생성 경로와 무관하게 디렉토리 전체) ---
+    if not args.no_normalize:
+        print(f"\nNormalizing → target RMS {args.target_rms} (peak ≤ {_PEAK_CEILING})")
+        adjusted = 0
+        wav_files = sorted(output_dir.glob("*.wav"))
+        for wav_path in wav_files:
+            action = normalize_wav(wav_path, args.target_rms)
+            if action not in ("ok",) and not action.startswith("skip"):
+                adjusted += 1
+                print(f"  {wav_path.name}: {action}")
+            elif action.startswith("skip"):
+                print(f"  {wav_path.name}: {action}")
+        print(f"Normalized: {adjusted}/{len(wav_files)} adjusted")
 
 
 if __name__ == "__main__":

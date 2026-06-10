@@ -279,3 +279,5 @@ uv run python scripts/eval/dashboard.py data/eval/results/<timestamp>/scored.jso
 | `--model` | TTS 모델 (기본: `gpt-4o-mini-tts`) |
 | `--speed` | 재생 속도 (기본: `1.0`) |
 | `--force` | 기존 파일이 있어도 재생성 |
+| `--target-rms` | 음량 정규화 타깃 RMS (기본: `0.1` ≈ -20dBFS). OpenAI TTS는 음량 파라미터가 없고 보이스 간 편차가 ~19dB에 달해, 생성 후 디렉토리 전체 WAV를 RMS 정규화한다 (클리핑 방지 peak 상한 0.95) |
+| `--no-normalize` | 정규화 패스 생략 |
