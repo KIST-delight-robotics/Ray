@@ -773,12 +773,19 @@ _DIM = 8  # Small dimension for fast deterministic tests
 
 
 class _DeterministicEmbedder(IEmbedder):
-    """Embedder returning deterministic vectors seeded by text hash."""
+    """Embedder returning deterministic vectors seeded by text hash.
+
+    Seeded via hashlib — builtin ``hash()`` is salted per process, which
+    made vectors (and thus retrieval results) vary between pytest runs.
+    """
 
     def embed(self, text: str) -> np.ndarray:
+        import hashlib
+
         import numpy as np
 
-        rng = np.random.default_rng(hash(text) % (2**31))
+        seed = int.from_bytes(hashlib.md5(text.encode()).digest()[:4], "little")
+        rng = np.random.default_rng(seed)
         vec = rng.standard_normal(_DIM).astype(np.float32)
         return vec / (np.linalg.norm(vec) + 1e-9)
 
@@ -830,6 +837,9 @@ def _make_memory_session_loop(
     # Memory infra
     memory_storage = InMemoryMemoryStorage(dimension=_DIM)
     vector_index = NumpyVectorIndex()
+    # Fake embedder의 텍스트 간 유사도는 의미 없는 난수라 relevance floor를 끔(-1 = 전부 통과) —
+    # 시드된 에피소드가 항상 검색되게 함. floor 동작 자체는 vector_index 유닛 테스트가 검증.
+    vector_index._MIN_COSINE_SIMILARITY = -1.0
     embedder = _DeterministicEmbedder()
 
     # Seed pre-existing episodes

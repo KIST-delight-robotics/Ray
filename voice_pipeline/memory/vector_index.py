@@ -50,6 +50,9 @@ class IVectorIndex(ABC):
         Returns:
             List of (id, similarity) tuples, sorted by similarity
             descending. Similarity is cosine similarity in [−1, 1].
+            Implementations may omit results below a relevance floor,
+            so fewer than ``top_k`` results can be returned even when
+            the index holds more vectors.
         """
 
     @abstractmethod
@@ -79,6 +82,8 @@ class NumpyVectorIndex(IVectorIndex):
     concurrent ``search()`` (retriever thread) and ``add()``
     (write-executor thread) do not corrupt shared state.
     """
+
+    _MIN_COSINE_SIMILARITY = 0.2  # 검색 결과 관련성 하한 — 이 값 미만은 top_k에 들어도 제외
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -113,10 +118,8 @@ class NumpyVectorIndex(IVectorIndex):
             if len(self._ids) == 0:
                 self._matrix = None
 
-    _MIN_COSINE_SIMILARITY = 0.2
-
     def search(self, query: np.ndarray, top_k: int) -> list[tuple[int, float]]:
-        """Cosine similarity search."""
+        """Cosine similarity search. Results below ``_MIN_COSINE_SIMILARITY`` are dropped."""
         with self._lock:
             if self._matrix is None or len(self._ids) == 0:
                 return []

@@ -28,7 +28,7 @@ class TestNumpyVectorIndex:
     def test_add_and_search(self) -> None:
         idx = self._make_index()
         v1 = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        v2 = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+        v2 = np.array([0.5, 1.0, 0.0, 0.0], dtype=np.float32)  # query와의 유사도 ~0.54 (relevance floor 위)
         idx.add(1, v1)
         idx.add(2, v2)
         assert len(idx) == 2
@@ -90,7 +90,7 @@ class TestNumpyVectorIndex:
         idx.add(1, self._random_vec(seed=1))
         idx.load([10], np.eye(1, 4, dtype=np.float32))
         assert len(idx) == 1
-        results = idx.search(self._random_vec(), top_k=5)
+        results = idx.search(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), top_k=5)
         assert results[0][0] == 10
 
     def test_load_empty(self) -> None:
@@ -123,9 +123,35 @@ class TestNumpyVectorIndex:
         # Same vector → similarity 1.0
         results = idx.search(v, top_k=1)
         assert results[0][1] == pytest.approx(1.0, abs=1e-5)
-        # Orthogonal → similarity 0.0
-        orth = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
-        idx.add(2, orth)
+        # 45° → similarity ~0.7071
+        diag = np.array([1.0, 1.0, 0.0, 0.0], dtype=np.float32)
+        idx.add(2, diag)
         results = idx.search(v, top_k=2)
         id_to_score = dict(results)
-        assert id_to_score[2] == pytest.approx(0.0, abs=1e-5)
+        assert id_to_score[2] == pytest.approx(0.7071, abs=1e-4)
+
+    # --- Relevance floor ---
+
+    def test_below_floor_results_filtered(self) -> None:
+        """Results with similarity below _MIN_COSINE_SIMILARITY are dropped from top_k."""
+        idx = self._make_index()
+        v = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        orth = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)  # similarity 0.0 < floor
+        idx.add(1, v)
+        idx.add(2, orth)
+
+        results = idx.search(v, top_k=5)
+        assert [r[0] for r in results] == [1]
+
+    def test_at_floor_boundary_included(self) -> None:
+        """A result exactly at the floor is kept (>= comparison)."""
+        idx = self._make_index()
+        floor = NumpyVectorIndex._MIN_COSINE_SIMILARITY
+        v = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        # cos(angle) == floor against the query axis
+        at_floor = np.array([floor, np.sqrt(1 - floor**2), 0.0, 0.0], dtype=np.float32)
+        idx.add(1, at_floor)
+
+        results = idx.search(v, top_k=1)
+        assert len(results) == 1
+        assert results[0][1] == pytest.approx(floor, abs=1e-5)
