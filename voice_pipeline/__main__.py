@@ -160,6 +160,14 @@ def main() -> None:
             _vad_last_score[0] = silero_vad_model(samples, SAMPLE_RATE).item()
         return _vad_last_score[0]
 
+    def reset_vad() -> None:
+        # Silero LSTM 상태는 이전 오디오 이력을 유지하며 자연 회복되지 않음 —
+        # 큰 발화 이력이 남으면 조용한 음성을 통째로 놓침. 세션 시작마다 초기화.
+        silero_vad_model.reset_states()
+        _vad_buf.clear()
+        _vad_last_score[0] = 0.0
+        _vad_call_count[0] = 0
+
     wakeword = WakewordDetector(language_code=language_code, vad_model=silero_vad_model)
     # LED can be disabled at runtime (e.g. no LED hardware connected) via env var.
     # cpp/config.toml is C++-only, so the Python side reads LED_ENABLED directly.
@@ -208,6 +216,7 @@ def main() -> None:
 
         vap.reset()
         turngpt.reset()
+        reset_vad()
 
         session_id = str(uuid.uuid4())
         embedder.session_id = session_id
@@ -220,7 +229,15 @@ def main() -> None:
 
         history = ConversationHistory(storage, token_counter)
         retriever = MemoryRetriever(memory_storage, vector_index, embedder)
-        turn_detector = TurnDetector(async_vap, async_turngpt, embedder, vad_fn=vad_fn)
+        turn_detector = TurnDetector(
+            async_vap,
+            async_turngpt,
+            embedder,
+            vad_fn=vad_fn,
+            vad_reset_fn=reset_vad,
+            call_store=call_store,
+            session_id=session_id,
+        )
         generator = SpeechGenerator(
             llm,
             tts,
@@ -291,6 +308,7 @@ def main() -> None:
                     bridge.connect()
                 except Exception:
                     logger.error("Bridge connect failed — returning to SLEEP", exc_info=True)
+                    wakeword.reset()
                     mode = SystemMode.SLEEP
                     continue
 
@@ -312,6 +330,7 @@ def main() -> None:
                     components = session_factory()
                 except Exception:
                     logger.error("Session factory failed", exc_info=True)
+                    wakeword.reset()
                     mode = SystemMode.SLEEP
                     continue
 
@@ -358,6 +377,7 @@ def main() -> None:
                 current_history = None
                 current_session_id = None
                 session_started_at = None
+                wakeword.reset()
                 mode = SystemMode.SLEEP
                 logger.info("Session ended — returning to SLEEP")
 

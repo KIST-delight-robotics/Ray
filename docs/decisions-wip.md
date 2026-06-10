@@ -176,6 +176,24 @@ mutex/`cout`/`new`·`delete`는 async-signal-safe가 아님.)
 use-after-free 경합 회피) — 토크만 끄고 즉시 종료, 나머지는 OS가 회수.
 
 
+## Prepare 유사도 게이트 threshold 평가 (eval)
+
+- **judge 판정을 이진(meaning_changed / response_appropriate)으로**: 목적이 "threshold가 적절한가"라는 예/아니오 질문이라 5점 척도보다 harmful skip *비율*이 바로 해석됨. 응답까지 judge에 보여주는 이유는 의미가 달라져도(meaning_changed) 응답이 우연히 여전히 적절한 경우(짧은 부가어 등)와 실제 피해(harmful)를 구분하기 위함 — threshold 문제의 심각도를 과대평가하지 않게 함.
+- **similarity 값을 CallRecord로 기록하는 이유**: judge 판정만으로는 "현 threshold에서 bad skip이 N건"까지만 알 수 있고 *얼마로 올려야 하는지*를 모름. 게이트의 4종 결정(skip/keep/regenerate/cancel)마다 similarity를 기록하면 harmful skip의 유사도 구간(예: 0.85–0.91)이 보여 조정 폭이 정량화되고, regenerate 기록으로 "threshold를 낮추면 skip으로 바뀌었을 건수"도 역산 가능. 단, 이 평가는 counterfactual 시뮬레이션이 아니라서 *현재* threshold에서 실제 발생한 결정만 판정함.
+- **턴 매칭은 metadata의 turn_index로**: `call_records` 스키마에는 턴/응답 식별자가 없음(세션 단위 설계). 스키마 변경 대신 TurnDetector가 턴 카운터를 metadata JSON에 넣음 — report.py가 messages/pipeline_traces를 세션 내 인덱스로 join하는 기존 방식과 정합. 카운터는 `commit()`에서만 증가 — cancel rewind는 같은 턴의 연속이므로 reset/cancel에서 올리면 안 됨.
+- **asr_text ≠ system_text가 곧 게이트 skip의 흔적**: eval에서 `system_text`(messages의 user 메시지)는 `_begin_streaming`이 기록한 generator의 prepare 입력이고, `asr_text`는 turn shift 시점의 최종 ASR 텍스트. 두 값이 (정규화 후) 다른 경로는 유사도 게이트의 skip/keep뿐이라, 별도 계측 없이 이 차이만으로 judge 후보를 선별할 수 있음.
+
+
+## Silero VAD 상태 누적 — 세션 시작마다 reset_states() 필수
+
+- **증상**: eval에서 tt_032(coral, 이번 런 최저 음량 peak 0.107)가 VAD에 전혀 안 잡힘(score 0.00~0.04) → 침묵 타이머가 세션 시작부터 누적 → 발화 도중 turngpt_3.0 turn_shift. 같은 녹음을 오프라인에서 단독으로 돌리면 max 1.000으로 완벽 감지.
+- **원인**: Silero LSTM 상태가 세션 간 유지됨. 직전 세션 *하나*(tt_017, 23s)만 선행해도 tt_032 감지율 38.9%→0%로 붕괴. 손상된 상태는 이후 오디오(무음 포함)로 자연 회복되지 않음. 큰 발화 이력 뒤의 조용한 음성이 배경음으로 분류되는 패턴 — 음량이 낮을수록 취약. ONNX/PyTorch 무관.
+- **reset 비용**: `reset_states()` ~11µs (청크 추론 0.66ms의 1/60) — 비용 없음. **워밍업 공백(~250ms)은 발화 *도중* 리셋에만 발생** — 리셋 후 발화가 *시작*되는 경우는 mic floor 0ms 직후라도 즉시 감지(+1청크). 디지털 무음도 워밍업으로 충분.
+- **세션 내부 오염은 commit() 시점 리셋으로 해결**: 멀티턴 세션(ttm_s01)에서 시작 1회 리셋만으로는 턴2부터 감지율 5~12배 붕괴(67.9%→5.7%) — 오염원은 로봇 응답(마이크에 거의 안 잡힘, rms 0.003~0.007)이 아니라 **사용자 자신의 직전 발화**. 리셋 시점은 begin_streaming(=TurnDetector.commit, vad_reset_fn 주입) 채택: STREAMING 구간은 인터럽트 판정에 robot_audio가 필요해 VAD 결과가 어디에도 안 쓰이는 유일한 공백이고, 사용자가 갭에서 말을 시작해도 리셋 *후* onset이라 즉시 감지 → PLAYING 진입 시 user_is_speaking 준비됨. playback_started 리셋은 갭 발화를 한가운데서 잘라 250ms 공백을 만들고, playback complete 리셋은 빠른 재발화와 겹칠 위험이 있어 기각.
+- **추가 파급**: user_is_speaking=False가 PENDING의 cancel 두 경로(VAP user-favor, ASR 비유사)를 모두 전제 단계에서 차단 → VAP p_now=0.89·ASR 대폭 변화에도 cancel 불가, "is" 기반 응답이 커밋됨. VAD 단일 실패가 안전장치 전체를 무력화하는 구조라, ASR 텍스트 갱신을 발화 증거로 쓰는 보강은 별도 검토 과제.
+- **SLEEP 진입 리셋은 wakeword 모듈 책임으로**: wakeword는 인식 사이클 종료마다 자체 `_reset()`(모델 리셋 포함)을 호출해 SLEEP *중* 오염은 자가 회복되지만, ACTIVE→SLEEP 잔류 오염은 "발화가 threshold를 넘어야 리셋이 발동"하는 구조라 조용한 호출에는 회복 기회 자체가 없음(미감지→리셋 불발 순환). `WakewordDetector.reset()` 공개 메서드를 추가해 `__main__`의 SLEEP 전환 3곳에서 호출 — 세션 쪽 `reset_vad()`로 처리하지 않은 건 wakeword의 `_pre_buffer`/`_vad_buffer`에 직전 SLEEP 기간 오디오가 잔류하는 부수 문제(STT에 묵은 청크 전송)까지 모듈 내부에서 함께 정리하기 위함.
+
+
 ## 차후 고려
 
 - **SimilarityConfig/MemoryConfig 임베딩 필드 중복**: 양쪽 config에 model, use_onnx 등이 중복 존재. 공유 EmbeddingConfig 추출 여부는 실제 사용 패턴 보고 판단.

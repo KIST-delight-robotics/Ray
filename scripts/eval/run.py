@@ -1108,6 +1108,14 @@ def main() -> None:
                 _vad_last_score[0] = silero_vad_model(samples, SAMPLE_RATE).item()
             return _vad_last_score[0]
 
+        def reset_vad() -> None:
+            # Silero LSTM 상태는 이전 오디오 이력을 유지하며 자연 회복되지 않음 —
+            # 큰 발화 이력이 남으면 조용한 음성을 통째로 놓침. 세션 시작마다 초기화.
+            silero_vad_model.reset_states()
+            _vad_buf.clear()
+            _vad_last_score[0] = 0.0
+            _vad_call_count[0] = 0
+
         bridge = CppBridge()
         led = LEDController(enabled=False)
         executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
@@ -1137,6 +1145,7 @@ def main() -> None:
 
         vap.reset()
         turngpt.reset()
+        reset_vad()
 
         session_id = str(uuid.uuid4())
         tts.session_id = session_id
@@ -1149,7 +1158,15 @@ def main() -> None:
         ms = memory_storage if memory_enabled else None
         history = ConversationHistory(storage, token_counter)
         retriever = MemoryRetriever(memory_storage, vector_index, embedder) if memory_enabled else None
-        turn_detector = TurnDetector(async_vap, async_turngpt, embedder, vad_fn=vad_fn)
+        turn_detector = TurnDetector(
+            async_vap,
+            async_turngpt,
+            embedder,
+            vad_fn=vad_fn,
+            vad_reset_fn=reset_vad,
+            call_store=call_store,
+            session_id=session_id,
+        )
         generator = SpeechGenerator(
             llm,
             tts,

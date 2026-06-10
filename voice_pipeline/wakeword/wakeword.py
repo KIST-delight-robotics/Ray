@@ -131,6 +131,18 @@ class WakewordDetector(IWakewordDetector):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def reset(self) -> None:
+        """Reset detection state for a new SLEEP period.
+
+        Clears the rechunking buffer and speech state, and resets the
+        (possibly shared) VAD model. Without this, audio history left by
+        the preceding ACTIVE session suppresses quiet wakeword speech —
+        and the per-cycle ``_reset()`` never fires because the suppressed
+        speech never reaches a recognition cycle.
+        """
+        self._vad_buffer.clear()
+        self._reset()
+
     def close(self) -> None:
         """Release resources (STT client transport).
 

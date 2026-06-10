@@ -18,10 +18,10 @@ if TYPE_CHECKING:
 
 from voice_pipeline.core.types import (
     AudioFrame,
+    CallRecord,
     CppEvent,
     GeneratorState,
     HistoryTurn,
-    CallRecord,
     LEDState,
     LLMMetrics,
     LLMStream,
@@ -460,7 +460,7 @@ class ICppBridge(ABC):
 class IWakewordDetector(ABC):
     """Wakeword detection interface.
 
-    Minimal — no start/stop/reset; the SLEEP loop controls when to feed frames.
+    Minimal — no start/stop; the SLEEP loop controls when to feed frames.
     """
 
     @abstractmethod
@@ -472,6 +472,16 @@ class IWakewordDetector(ABC):
 
         Returns:
             True if the wakeword was detected in this frame.
+        """
+
+    @abstractmethod
+    def reset(self) -> None:
+        """Reset detection state for a new SLEEP period.
+
+        Clears buffered audio and any internal VAD state accumulated
+        before this point (e.g. the preceding ACTIVE session's audio in
+        a shared VAD model, which would otherwise suppress detection of
+        quiet wakeword speech). Call on every transition into SLEEP.
         """
 
     @abstractmethod

@@ -777,3 +777,51 @@ class TestClose:
         with caplog.at_level(logging.DEBUG, logger="voice_pipeline.wakeword"):
             detector.close()
         assert detector._stt_client is None
+
+
+# ---------------------------------------------------------------------------
+# TestReset
+# ---------------------------------------------------------------------------
+
+
+class TestReset:
+    """Public reset() — called on every transition into SLEEP."""
+
+    def test_reset_clears_state_and_vad_model(self, detector, mock_vad_model):
+        """reset() clears speech state, buffers, and the VAD model state."""
+        # Build up state: speech in progress + residual rechunk bytes
+        mock_vad_model.return_value = torch.tensor(0.9)
+        detector.feed_audio(_tone_frame())
+        detector.feed_audio(_tone_frame())  # 1920B → 1 chunk processed, 896B residual
+        assert detector._state is _State.SPEECH
+        assert len(detector._vad_buffer) > 0
+
+        mock_vad_model.reset_states.reset_mock()
+        detector.reset()
+
+        assert detector._state is _State.IDLE
+        assert len(detector._vad_buffer) == 0
+        assert len(detector._speech_buffer) == 0
+        assert len(detector._pre_buffer) == 0
+        mock_vad_model.reset_states.assert_called_once()
+
+    def test_reset_suppresses_vad_model_error(self, detector, mock_vad_model):
+        """reset() does not raise when the VAD model reset fails."""
+        mock_vad_model.reset_states.side_effect = RuntimeError("boom")
+        detector.reset()
+        assert detector._state is _State.IDLE
+
+    def test_detection_works_after_reset(self, detector, mock_vad_model, mock_stt_client, monkeypatch):
+        """A full detect cycle still works after reset()."""
+        monkeypatch.setattr(WakewordDetector, "_MIN_SPEECH_DURATION_MS", 0)
+        monkeypatch.setattr(WakewordDetector, "_SPEECH_PAD_MS", 0)
+        detector.reset()
+
+        mock_stt_client.recognize.return_value = _make_stt_response(["hey ray"])
+        mock_vad_model.return_value = torch.tensor(0.9)
+        for _ in range(4):
+            if detector.feed_audio(_tone_frame()):
+                break
+        mock_vad_model.return_value = torch.tensor(0.1)
+        detected = any(detector.feed_audio(_silence_frame()) for _ in range(4))
+        assert detected

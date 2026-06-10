@@ -10,16 +10,18 @@ Models to Conversational Human-Robot Interaction".
 from __future__ import annotations
 
 import enum
+import json
 import logging
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Literal
 
 import numpy as np
 
 from voice_pipeline.audio.constants import FRAME_DURATION_MS
-from voice_pipeline.core.interfaces import IVAP, IEmbedder, ITurnDetector
-from voice_pipeline.core.types import AudioFrame, TurnDecision, VAPResult
+from voice_pipeline.core.interfaces import IVAP, ICallStore, IEmbedder, ITurnDetector
+from voice_pipeline.core.types import AudioFrame, CallRecord, TurnDecision, VAPResult
 from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT, SyncTurnGPTAdapter
 
 logger = logging.getLogger("voice_pipeline.turn_taking")
@@ -50,6 +52,13 @@ class TurnDetector(ITurnDetector):
         vap: 오디오 기반 voice activity projection 모델 (``IVAP``).
         turngpt: 텍스트 기반 turn-shift 예측 어댑터.
         embedder: prepare 유사도 게이트용 임베딩 공급자 (``IEmbedder``).
+        vad_fn: 외부 VAD 점수 콜러블. ``None``이면 VAP의 user_is_speaking 사용.
+        vad_reset_fn: 외부 VAD 상태 리셋 콜러블. ``commit()``(begin_streaming)
+            시점에 호출 — 직전 사용자 발화가 남긴 VAD 내부 상태가 다음 턴의
+            조용한 발화 감지를 막는 것을 방지. STREAMING 구간은 VAD 결과를
+            쓰지 않으므로 리셋 워밍업 비용이 없는 시점.
+        call_store: 유사도 게이트 판정 기록용 call store. ``None``이면 기록 안 함.
+        session_id: call record에 기록할 세션 ID.
     """
 
     # VAP turn-shift 판정 (Path 1)
@@ -81,17 +90,24 @@ class TurnDetector(ITurnDetector):
         turngpt: AsyncTurnGPT | SyncTurnGPTAdapter,
         embedder: IEmbedder,
         vad_fn: Callable[[AudioFrame], float] | None = None,
+        vad_reset_fn: Callable[[], None] | None = None,
+        call_store: ICallStore | None = None,
+        session_id: str = "",
     ) -> None:
         self._vap = vap
         self._turngpt = turngpt
         self._embedder = embedder
         self._vad_fn = vad_fn
+        self._vad_reset_fn = vad_reset_fn
+        self._call_store = call_store
+        self._session_id = session_id
 
         self._frame_duration_sec = FRAME_DURATION_MS / 1000.0
 
         # Internal state
         self._turn_state = _TurnState.USER_TURN
         self._dialog_parts: list[str] = []
+        self._turn_index = 0
 
         # Per-frame tracking (reset between turns)
         self._prev_asr_text: str = ""
@@ -121,7 +137,9 @@ class TurnDetector(ITurnDetector):
             vad_score = self._vad_fn(user_audio)
             user_is_speaking = vad_score > self._EXT_VAD_THRESHOLD
             if self._debug_vad_counter % 33 == 0:
-                logger.debug("VAD score=%.3f speaking=%s silence=%.2fs", vad_score, user_is_speaking, self._silence_elapsed_sec)
+                logger.debug(
+                    "VAD score=%.3f speaking=%s silence=%.2fs", vad_score, user_is_speaking, self._silence_elapsed_sec
+                )
             self._debug_vad_counter += 1
         else:
             user_is_speaking = vap_result.user_is_speaking
@@ -212,10 +230,20 @@ class TurnDetector(ITurnDetector):
         Appends *text* as the completed user turn to TurnGPT dialog context,
         then wipes per-frame tracking. After commit, cancel is no longer
         possible. Called by SessionLoop at begin_streaming.
+
+        Also resets external VAD state (``vad_reset_fn``) — the just-ended
+        user speech otherwise lingers in the VAD model and suppresses
+        detection of quieter speech in following turns.
         """
         if text:
             self._dialog_parts.append(text)
         self._turn_state = _TurnState.ROBOT_TURN
+        self._turn_index += 1
+        if self._vad_reset_fn is not None:
+            try:
+                self._vad_reset_fn()
+            except Exception:
+                logger.warning("VAD reset failed", exc_info=True)
         self._reset_per_frame_state()
 
     def reset(self) -> None:
@@ -334,12 +362,52 @@ class TurnDetector(ITurnDetector):
                     self._last_prepare_text[:60],
                     asr_text[:60],
                 )
+                self._record_gate("cancel_gate", similarity, sim_ms, "cancel", self._last_prepare_text, asr_text)
                 self._turn_state = _TurnState.USER_TURN
                 return TurnDecision(cancel=True)
+            self._record_gate("cancel_gate", similarity, sim_ms, "keep", self._last_prepare_text, asr_text)
 
         return TurnDecision.none()
 
     _SIMILARITY_SLOW_MS = 100
+
+    def _record_gate(
+        self,
+        operation: Literal["prepare_gate", "cancel_gate"],
+        similarity: float,
+        elapsed_ms: float,
+        decision: Literal["skip", "regenerate", "cancel", "keep"],
+        prev_text: str,
+        new_text: str,
+    ) -> None:
+        """Record a similarity-gate decision to the call store (if configured)."""
+        if self._call_store is None:
+            return
+        metadata = json.dumps(
+            {
+                "similarity": round(similarity, 4),
+                "threshold": self._SIMILARITY_THRESHOLD,
+                "decision": decision,
+                "turn_index": self._turn_index,
+                "prev_text": prev_text,
+                "new_text": new_text,
+            },
+            ensure_ascii=False,
+        )
+        try:
+            self._call_store.record(
+                CallRecord(
+                    session_id=self._session_id,
+                    timestamp=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+                    module="similarity_gate",
+                    operation=operation,
+                    model="embedder",
+                    elapsed_ms=elapsed_ms,
+                    metadata=metadata,
+                )
+            )
+        except Exception:
+            logger.warning("Similarity gate record failed", exc_info=True)
 
     def _text_similarity(self, a: str, b: str) -> tuple[float, float]:
         """Cosine similarity between two texts via the embedder.
@@ -378,8 +446,10 @@ class TurnDetector(ITurnDetector):
                     self._last_prepare_text[:60],
                     asr_text[:60],
                 )
+                self._record_gate("prepare_gate", similarity, sim_ms, "skip", self._last_prepare_text, asr_text)
                 self._asr_has_changed = False
                 return False
+            self._record_gate("prepare_gate", similarity, sim_ms, "regenerate", self._last_prepare_text, asr_text)
 
         self._last_prepare_text = asr_text
         self._asr_has_changed = False

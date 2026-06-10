@@ -5,12 +5,14 @@ All external dependencies (IVAP, ITurnGPT) are mocked.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 import numpy as np
 
 from voice_pipeline.core.interfaces import IVAP, IEmbedder, ITurnGPT
 from voice_pipeline.core.types import TurnDecision, VAPResult
+from voice_pipeline.trace.trace_store import InMemoryCallStore
 from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector, _TurnState
 
@@ -499,6 +501,183 @@ class TestPrepareSimilarityGate:
         # Frame 3: different text, prepare fires (similarity low)
         d2 = detector.process_frame(FRAME, "completely different sentence here")
         assert d2.prepare
+
+
+# ---------------------------------------------------------------------------
+# Test 12a: VAD reset on commit
+# ---------------------------------------------------------------------------
+
+
+class TestVADResetOnCommit:
+    def _make_detector_with_reset(self, reset_fn) -> TurnDetector:
+        mock_vap = MagicMock(spec=IVAP)
+        mock_vap.feed_audio.return_value = VAPResult(0.5, 0.5, False)
+        mock_turngpt = MagicMock(spec=ITurnGPT)
+        mock_turngpt.predict.return_value = 0.0
+        return TurnDetector(
+            mock_vap,
+            SyncTurnGPTAdapter(mock_turngpt),
+            _make_embedder_mock(),
+            vad_reset_fn=reset_fn,
+        )
+
+    def test_commit_calls_vad_reset(self):
+        reset_fn = MagicMock()
+        detector = self._make_detector_with_reset(reset_fn)
+        detector._turn_state = _TurnState.PENDING
+
+        detector.commit("hello")
+        reset_fn.assert_called_once()
+
+    def test_reset_does_not_call_vad_reset(self):
+        """reset() (new turn, playback just ended) must NOT reset VAD —
+        the user may already be speaking at that point."""
+        reset_fn = MagicMock()
+        detector = self._make_detector_with_reset(reset_fn)
+
+        detector.reset()
+        reset_fn.assert_not_called()
+
+    def test_vad_reset_failure_does_not_break_commit(self):
+        reset_fn = MagicMock(side_effect=RuntimeError("boom"))
+        detector = self._make_detector_with_reset(reset_fn)
+        detector._turn_state = _TurnState.PENDING
+
+        detector.commit("hello")
+        assert detector._turn_state is _TurnState.ROBOT_TURN
+
+    def test_no_vad_reset_fn_commit_ok(self):
+        detector, _, _ = _make_detector()
+        detector._turn_state = _TurnState.PENDING
+        detector.commit("hello")
+        assert detector._turn_state is _TurnState.ROBOT_TURN
+
+
+# ---------------------------------------------------------------------------
+# Test 12b: similarity gate call recording
+# ---------------------------------------------------------------------------
+
+
+class TestSimilarityGateRecording:
+    def _make_recording_detector(
+        self,
+        similarity: float,
+        vap_result: VAPResult,
+        turngpt_prob: float = 0.5,
+    ) -> tuple[TurnDetector, InMemoryCallStore]:
+        store = InMemoryCallStore()
+        mock_vap = MagicMock(spec=IVAP)
+        mock_vap.feed_audio.return_value = vap_result
+        mock_turngpt = MagicMock(spec=ITurnGPT)
+        mock_turngpt.predict.return_value = turngpt_prob
+        detector = TurnDetector(
+            mock_vap,
+            SyncTurnGPTAdapter(mock_turngpt),
+            _make_embedder_mock(similarity=similarity),
+            call_store=store,
+            session_id="sess-1",
+        )
+        return detector, store
+
+    def test_prepare_skip_recorded(self):
+        """Skipped prepare -> prepare_gate record with decision=skip and metadata."""
+        detector, store = self._make_recording_detector(0.9, VAPResult(0.5, 0.5, True))
+
+        detector.process_frame(FRAME, "hello world")
+        d1 = detector.process_frame(FRAME, "hello world")
+        assert d1.prepare
+        # First prepare computes no similarity — nothing recorded yet
+        assert store.records == []
+
+        detector.process_frame(FRAME, "hello worlds")
+        d2 = detector.process_frame(FRAME, "hello worlds")
+        assert not d2.prepare
+
+        assert len(store.records) == 1
+        rec = store.records[0]
+        assert rec.module == "similarity_gate"
+        assert rec.operation == "prepare_gate"
+        assert rec.session_id == "sess-1"
+        meta = json.loads(rec.metadata)
+        assert meta["decision"] == "skip"
+        assert abs(meta["similarity"] - 0.9) < 0.01
+        assert meta["threshold"] == TurnDetector._SIMILARITY_THRESHOLD
+        assert meta["turn_index"] == 0
+        assert meta["prev_text"] == "hello world"
+        assert meta["new_text"] == "hello worlds"
+
+    def test_prepare_regenerate_recorded(self):
+        """Dissimilar prepare -> prepare_gate record with decision=regenerate."""
+        detector, store = self._make_recording_detector(0.3, VAPResult(0.5, 0.5, True))
+
+        detector.process_frame(FRAME, "hello world")
+        d1 = detector.process_frame(FRAME, "hello world")
+        assert d1.prepare
+        d2 = detector.process_frame(FRAME, "completely different sentence")
+        assert d2.prepare
+
+        recs = [r for r in store.records if r.operation == "prepare_gate"]
+        assert len(recs) == 1
+        meta = json.loads(recs[0].metadata)
+        assert meta["decision"] == "regenerate"
+
+    def test_pending_cancel_recorded(self):
+        """PENDING dissimilar text -> cancel_gate record with decision=cancel."""
+        detector, store = self._make_recording_detector(0.3, VAPResult(0.2, 0.2, True))
+        detector._turn_state = _TurnState.PENDING
+        detector._last_prepare_text = "hello"
+
+        decision = detector.process_frame(FRAME, "hello tell me more")
+        assert decision.cancel
+
+        recs = [r for r in store.records if r.operation == "cancel_gate"]
+        assert len(recs) == 1
+        meta = json.loads(recs[0].metadata)
+        assert meta["decision"] == "cancel"
+        assert meta["prev_text"] == "hello"
+
+    def test_pending_keep_recorded(self):
+        """PENDING similar finalization -> cancel_gate record with decision=keep."""
+        detector, store = self._make_recording_detector(0.95, VAPResult(0.2, 0.2, True))
+        detector._turn_state = _TurnState.PENDING
+        detector._last_prepare_text = "hello"
+
+        decision = detector.process_frame(FRAME, "hello.")
+        assert not decision.cancel
+
+        recs = [r for r in store.records if r.operation == "cancel_gate"]
+        assert len(recs) == 1
+        meta = json.loads(recs[0].metadata)
+        assert meta["decision"] == "keep"
+
+    def test_turn_index_increments_on_commit(self):
+        """Records after commit() carry the next turn_index."""
+        detector, store = self._make_recording_detector(0.95, VAPResult(0.2, 0.2, True))
+        detector._turn_state = _TurnState.PENDING
+        detector._last_prepare_text = "hello"
+        detector.process_frame(FRAME, "hello.")
+
+        detector.commit("hello.")
+        detector.reset()
+
+        detector._turn_state = _TurnState.PENDING
+        detector._last_prepare_text = "next turn"
+        detector.process_frame(FRAME, "next turn text")
+
+        metas = [json.loads(r.metadata) for r in store.records if r.operation == "cancel_gate"]
+        assert [m["turn_index"] for m in metas] == [0, 1]
+
+    def test_no_call_store_no_records(self):
+        """Without a call_store the gate works and records nothing."""
+        detector, _, _ = _make_detector(
+            vap_results=[VAPResult(0.5, 0.5, True)] * 4,
+            turngpt_prob=0.5,
+            embedder=_make_embedder_mock(similarity=0.9),
+        )
+        detector.process_frame(FRAME, "hello world")
+        assert detector.process_frame(FRAME, "hello world").prepare
+        detector.process_frame(FRAME, "hello worlds")
+        assert not detector.process_frame(FRAME, "hello worlds").prepare
 
 
 # ---------------------------------------------------------------------------
