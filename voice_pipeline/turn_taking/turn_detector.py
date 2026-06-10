@@ -73,7 +73,7 @@ class TurnDetector(ITurnDetector):
     # speculative 생성 트리거 (prepare)
     _PREPARE_TURNGPT_THRESHOLD = 0.2  # TurnGPT 확률이 이 값 초과면 prepare
     _PREPARE_TIMEOUT_SEC = 0.2  # 마지막 ASR 변화 후 이 시간 경과면 prepare
-    _SIMILARITY_THRESHOLD = 0.8  # 직전 prepare 텍스트와의 유사도 이 값 이상이면 skip
+    _SIMILARITY_THRESHOLD = 0.85  # 직전 prepare 텍스트와의 유사도 이 값 이상이면 skip
 
     def __init__(
         self,
