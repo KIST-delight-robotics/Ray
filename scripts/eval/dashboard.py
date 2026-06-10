@@ -284,6 +284,7 @@ def _error_tag(error: str | None) -> str:
         "no_turn_shift": "턴 감지 실패",
         "early_turn_shift": "조기 턴 전환",
         "late_turn_shift": "지연 턴 전환",
+        "premature_turn_shift": "섣부른 턴 전환 (대기 필요)",
         "generation_failed": "생성 실패",
         "incomplete": "미완료",
     }
@@ -765,7 +766,7 @@ def _build_turn_taking(scored: dict) -> str:
     turns = scored.get("turns", [])
 
     tt_turns = [t for t in turns if t.get("latency", {}).get("turn_shift_to_playback_ms") or t.get("turn_detection_delay_ms") is not None]
-    failed_turns = [t for t in turns if t.get("error") in ("no_response", "no_recognition", "no_turn_shift", "early_turn_shift", "late_turn_shift", "generation_failed")]
+    failed_turns = [t for t in turns if t.get("error") in ("no_response", "no_recognition", "no_turn_shift", "early_turn_shift", "late_turn_shift", "premature_turn_shift", "generation_failed")]
     tt_ids = {id(t) for t in tt_turns}
     failed_only = [t for t in failed_turns if id(t) not in tt_ids]
     all_tt_turns = tt_turns + failed_only
@@ -816,6 +817,7 @@ def _build_turn_taking(scored: dict) -> str:
         if fail_count:
             early = sum(1 for t in failed_turns if t.get("error") == "early_turn_shift")
             late = sum(1 for t in failed_turns if t.get("error") == "late_turn_shift")
+            premature = sum(1 for t in failed_turns if t.get("error") == "premature_turn_shift")
             no_recog = sum(1 for t in failed_turns if t.get("error") == "no_recognition")
             no_ts = sum(1 for t in failed_turns if t.get("error") == "no_turn_shift")
             parts = []
@@ -823,6 +825,8 @@ def _build_turn_taking(scored: dict) -> str:
                 parts.append(f"조기 전환 {early}")
             if late:
                 parts.append(f"지연 전환 {late}")
+            if premature:
+                parts.append(f"섣부른 전환 {premature}")
             if no_recog:
                 parts.append(f"인식 실패 {no_recog}")
             if no_ts:
@@ -931,6 +935,9 @@ def _build_turn_taking(scored: dict) -> str:
             values = []
             for t in tt_turns:
                 if key == "turn_detection_delay_ms":
+                    # expect_wait 스위트의 대기는 감지 속도가 아니라 timeout 설정값
+                    if t.get("expect_wait"):
+                        continue
                     v = t.get("turn_detection_delay_ms")
                 else:
                     v = t.get("latency", {}).get(key)

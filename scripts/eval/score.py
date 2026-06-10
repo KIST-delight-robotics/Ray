@@ -818,8 +818,9 @@ def score_report(report: dict) -> dict:
             if voice:
                 asr_by_voice.setdefault(voice, []).append(wer["wer"])
 
-        # Turn detection delay (text mode 제외)
-        if not is_text_mode:
+        # Turn detection delay (text mode 제외; expect_wait 스위트는 의도된 대기라
+        # 감지 속도가 아닌 timeout 설정값이므로 제외)
+        if not is_text_mode and not turn.get("expect_wait"):
             td_delay = turn.get("turn_detection_delay_ms")
             if td_delay is not None and td_delay > 0:
                 turn_detection_delays.append(td_delay)

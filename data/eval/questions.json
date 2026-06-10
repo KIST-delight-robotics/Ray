@@ -213,6 +213,7 @@
       "name": "tt_incomplete",
       "description": "미완성 발화",
       "category": "turn_taking",
+      "expect_wait": true,
       "memory": false,
       "multi_turn": false,
       "questions": [

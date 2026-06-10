@@ -547,7 +547,16 @@ def _run_single_turn(
     gen_failed = gen_failed_event.is_set()
     early_turn_shift = success and play_end_time[0] == 0.0
     ts_reason = components.session_loop.turn_shift_reason
-    late_turn_shift = success and not early_turn_shift and ts_reason == "turngpt_3.0"
+    # expect_wait 스위트(미완성 발화)는 최대 timeout까지 대기한 전환만 정답 —
+    # 그보다 빠른 전환은 미완성 발화를 완결로 오판한 것(premature).
+    expect_wait = suite.get("expect_wait", False)
+    completed_normally = success and not early_turn_shift
+    if expect_wait:
+        late_turn_shift = False
+        premature_turn_shift = completed_normally and ts_reason != "turngpt_3.0"
+    else:
+        late_turn_shift = completed_normally and ts_reason == "turngpt_3.0"
+        premature_turn_shift = False
     vap_delay = None
     if not early_turn_shift and play_end_time[0] > 0 and turn_shift_time[0] >= play_end_time[0]:
         vap_delay = round((turn_shift_time[0] - play_end_time[0]) * 1000, 1)
@@ -561,6 +570,8 @@ def _run_single_turn(
         error = "early_turn_shift"
     elif late_turn_shift:
         error = "late_turn_shift"
+    elif premature_turn_shift:
+        error = "premature_turn_shift"
 
     # Extract retrieved episodes from memory results
     retrieved_episodes = []
@@ -589,11 +600,17 @@ def _run_single_turn(
         "input_text": question["text"],
         "asr_text": final_asr_text[0],
         "voice": voice,
-        "success": success and not early_turn_shift and not late_turn_shift and not gen_failed,
+        "success": success
+        and not early_turn_shift
+        and not late_turn_shift
+        and not premature_turn_shift
+        and not gen_failed,
         "error": error,
         "turn_shift_reason": ts_reason,
         "turn_detection_delay_ms": vap_delay,
     }
+    if expect_wait:
+        entry["expect_wait"] = True
     if retrieved_episodes:
         entry["retrieved_episodes"] = retrieved_episodes
     if target_episode_ids:
@@ -891,7 +908,13 @@ def _run_multi_turn_suite(
 
         ts_reason = turn_shift_reasons.get(i)
         is_completed = i < completed_turns
-        is_late = is_completed and ts_reason == "turngpt_3.0"
+        expect_wait = suite.get("expect_wait", False)
+        if expect_wait:
+            is_late = False
+            is_premature = is_completed and ts_reason != "turngpt_3.0"
+        else:
+            is_late = is_completed and ts_reason == "turngpt_3.0"
+            is_premature = False
         is_gen_failed = not is_completed and gen_failed_event.is_set() and i == completed_turns
 
         if is_gen_failed:
@@ -900,6 +923,8 @@ def _run_multi_turn_suite(
             error = "no_turn_shift" if turn_asr_texts.get(i) else "no_recognition"
         elif is_late:
             error = "late_turn_shift"
+        elif is_premature:
+            error = "premature_turn_shift"
         else:
             error = None
 
@@ -911,11 +936,13 @@ def _run_multi_turn_suite(
             "input_text": q["text"],
             "asr_text": turn_asr_texts.get(i, ""),
             "voice": scenario_voice,
-            "success": is_completed and not is_late,
+            "success": is_completed and not is_late and not is_premature,
             "error": error,
             "turn_shift_reason": ts_reason,
             "turn_detection_delay_ms": vap_delay,
         }
+        if expect_wait:
+            entry["expect_wait"] = True
         if retrieved_episodes:
             entry["retrieved_episodes"] = retrieved_episodes
         if target_episode_ids:
