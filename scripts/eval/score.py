@@ -644,6 +644,138 @@ def _score_memory_quality(turns: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Prepare similarity gate — skip validity judge + threshold analysis
+# ---------------------------------------------------------------------------
+
+_GATE_DECISIONS = ("skip", "keep", "regenerate", "cancel")
+
+
+def _build_gate_judge_messages(turns: list[dict]) -> list[dict]:
+    system = (
+        "You are evaluating the similarity gate of a voice conversation robot.\n"
+        "While the user speaks, the robot pre-generates a response from a partial "
+        "ASR transcript (system_text). When the transcript later updates, the gate "
+        "compares the new text to system_text and, if similar enough, SKIPS "
+        "regeneration — the response generated from system_text is played even "
+        "though the final transcript (asr_text) differs.\n\n"
+        "For each item, judge whether that skip was acceptable:\n"
+        "- meaning_changed (boolean): Does asr_text differ from system_text in "
+        "meaning or intent in a way that calls for a different response? "
+        "Ignore fillers, punctuation, casing, and minor rephrasing.\n"
+        "- response_appropriate (boolean): Is the response still an appropriate "
+        "reply to asr_text — what the user actually said?\n\n"
+        'Return a JSON object with an "evaluations" array. Each element must have: '
+        "question_id, meaning_changed, response_appropriate, reasoning "
+        "(one sentence in Korean)."
+    )
+    parts = [
+        f"[{t['question_id']}]\n"
+        f"system_text (basis of the response): {t['system_text']}\n"
+        f"asr_text (final transcript): {t['asr_text']}\n"
+        f"Response: {t['response_text']}"
+        for t in turns
+    ]
+    user = "Evaluate these skip decisions:\n\n" + "\n\n".join(parts)
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _score_prepare_gate(turns: list[dict]) -> dict:
+    """Judge skipped regenerations (asr_text ≠ system_text) and aggregate gate stats.
+
+    Mutates judged turns (adds ``gate_judge``). Returns summary for
+    ``scores.prepare_gate``, or {} when no voice turn has gate data.
+    """
+    voice_turns = [t for t in turns if not t.get("text_mode") and "interrupt_delay_sec" not in t]
+
+    # 1. Judge candidates: final ASR text semantically differs from what the LLM saw.
+    #    success는 조건이 아님 — late/early_turn_shift 턴도 응답이 생성됐으면 게이트 판정 대상.
+    candidates = []
+    for turn in voice_turns:
+        asr_text = turn.get("asr_text") or ""
+        system_text = turn.get("system_text") or ""
+        if not turn.get("response_text"):
+            continue
+        if not asr_text or not system_text:
+            continue
+        if _normalize(asr_text) == _normalize(system_text):
+            continue
+        candidates.append(turn)
+
+    judged_count = 0
+    meaning_changed_count = 0
+    harmful_count = 0
+    if candidates:
+        result = _call_judge(_build_gate_judge_messages(candidates))
+        if result and "evaluations" in result:
+            eval_by_id = {e.get("question_id"): e for e in result["evaluations"]}
+            for turn in candidates:
+                ev = eval_by_id.get(turn["question_id"])
+                if not ev:
+                    continue
+                meaning_changed = bool(ev.get("meaning_changed"))
+                response_appropriate = bool(ev.get("response_appropriate"))
+                turn["gate_judge"] = {
+                    "meaning_changed": meaning_changed,
+                    "response_appropriate": response_appropriate,
+                    "harmful": meaning_changed and not response_appropriate,
+                    "reasoning": ev.get("reasoning", ""),
+                }
+                judged_count += 1
+                meaning_changed_count += meaning_changed
+                harmful_count += meaning_changed and not response_appropriate
+        else:
+            logger.error("No valid judge result for prepare gate")
+
+    # 2. Similarity distributions per gate decision (+ harmful-turn skip sims)
+    sims_by_decision: dict[str, list[float]] = {d: [] for d in _GATE_DECISIONS}
+    harmful_similarities: list[float] = []
+    for turn in voice_turns:
+        is_harmful = turn.get("gate_judge", {}).get("harmful", False)
+        for event in turn.get("similarity_events", []):
+            sim = event.get("similarity")
+            decision = event.get("decision")
+            if sim is None or decision not in sims_by_decision:
+                continue
+            sims_by_decision[decision].append(sim)
+            if is_harmful and decision in ("skip", "keep"):
+                harmful_similarities.append(sim)
+
+    # 3. Regeneration cost: speculative prepare attempts per turn
+    attempts = [
+        t["speculative_attempts"]
+        for t in voice_turns
+        if isinstance(t.get("speculative_attempts"), int) and t["speculative_attempts"] > 0
+    ]
+    attempts_summary = {}
+    if attempts:
+        dist: dict[str, int] = {}
+        for a in attempts:
+            dist[str(a)] = dist.get(str(a), 0) + 1
+        attempts_summary = {
+            "mean": round(sum(attempts) / len(attempts), 2),
+            "max": max(attempts),
+            "turn_count": len(attempts),
+            "distribution": dict(sorted(dist.items(), key=lambda kv: int(kv[0]))),
+        }
+
+    has_events = any(sims_by_decision.values())
+    if not candidates and not has_events and not attempts:
+        return {}
+
+    return {
+        "voice_turn_count": len(voice_turns),
+        "diff_turn_count": len(candidates),
+        "judged_count": judged_count,
+        "meaning_changed_count": meaning_changed_count,
+        "harmful_count": harmful_count,
+        "harmful_rate": round(harmful_count / judged_count, 4) if judged_count else None,
+        "similarities_by_decision": {d: sorted(v) for d, v in sims_by_decision.items() if v},
+        "harmful_similarities": sorted(harmful_similarities),
+        "speculative_attempts": attempts_summary,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
 
@@ -765,6 +897,9 @@ def score_report(report: dict) -> dict:
     # Quality scoring
     quality_summary = _score_quality(report["turns"])
 
+    # Prepare similarity gate scoring
+    prepare_gate_summary = _score_prepare_gate(report["turns"])
+
     # Memory scoring
     memory_summary = {}
     memory_turns = [t for t in report["turns"] if t.get("suite_name", "").startswith("mem_")]
@@ -790,6 +925,7 @@ def score_report(report: dict) -> dict:
             "latency": latency_summary,
             "interruption": int_summary,
             "quality": quality_summary,
+            "prepare_gate": prepare_gate_summary,
             "memory": memory_summary,
         },
     }
@@ -873,6 +1009,35 @@ def print_scores(scored: dict) -> None:
             print(f"  [{avg:.1f}] {turn['question_id']}: {scores_str}")
             if turn.get("quality_reasoning"):
                 print(f"        {turn['quality_reasoning'][:80]}")
+
+    # Prepare similarity gate
+    gate = scores.get("prepare_gate", {})
+    if gate:
+        print("\nPrepare similarity gate:")
+        print(
+            f"  Text mismatch: {gate['diff_turn_count']}/{gate['voice_turn_count']} voice turns"
+            f"  (judged: {gate['judged_count']})"
+        )
+        if gate["judged_count"]:
+            print(
+                f"  Meaning changed: {gate['meaning_changed_count']}"
+                f"  Harmful skips: {gate['harmful_count']} ({gate['harmful_rate']:.0%})"
+            )
+        if gate.get("harmful_similarities"):
+            sims = gate["harmful_similarities"]
+            print(f"  Harmful skip similarity range: {min(sims):.3f}–{max(sims):.3f}")
+        for decision, sims in gate.get("similarities_by_decision", {}).items():
+            print(f"  {decision}: n={len(sims)} sim {min(sims):.3f}–{max(sims):.3f}")
+        sa = gate.get("speculative_attempts", {})
+        if sa:
+            print(f"  Speculative attempts: mean={sa['mean']} max={sa['max']} ({sa['turn_count']} turns)")
+        gate_turns = [t for t in scored["turns"] if "gate_judge" in t]
+        for turn in gate_turns:
+            gj = turn["gate_judge"]
+            verdict = "HARMFUL" if gj["harmful"] else ("changed" if gj["meaning_changed"] else "ok")
+            print(f"  [{verdict:>7}] {turn['question_id']}: {turn['system_text'][:40]!r} → {turn['asr_text'][:40]!r}")
+            if gj.get("reasoning"):
+                print(f"           {gj['reasoning'][:80]}")
 
     # Memory evaluation
     memory = scores.get("memory", {})

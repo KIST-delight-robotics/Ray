@@ -384,7 +384,7 @@ def _build_overview(scored: dict) -> str:
         p.append(f'<span class="kv-key">범위</span><span class="kv-val">{" · ".join(cat_parts)}</span>')
 
     if runner.get("quick"):
-        p.append(f'<span class="kv-key">모드</span><span class="kv-val">Quick (샘플링)</span>')
+        p.append('<span class="kv-key">모드</span><span class="kv-val">Quick (샘플링)</span>')
 
     p.append('</div></div>')
 
@@ -777,6 +777,24 @@ def _build_turn_taking(scored: dict) -> str:
 
     p = []
 
+    # --- Sub-tabs ---
+    sub_tab_style = (
+        "padding:8px 16px;font-size:12px;font-weight:500;color:#86868b;"
+        "cursor:pointer;border-bottom:2px solid transparent"
+    )
+    p.append(
+        '<div class="tabs" style="position:static;background:transparent;'
+        'border-bottom:1px solid #d2d2d7;padding:0;margin-bottom:16px">'
+    )
+    p.append(f'<div class="sub-tab active" data-subtarget="tt-latency" style="{sub_tab_style}">레이턴시 — 턴 감지·응답 속도</div>')
+    p.append(f'<div class="sub-tab" data-subtarget="tt-gate" style="{sub_tab_style}">Prepare 게이트 — 유사도 skip 판정</div>')
+    p.append('</div>')
+
+    # ============================================================
+    # Sub-tab: Latency
+    # ============================================================
+    p.append('<div id="tt-latency" class="sub-pane active">')
+
     # --- Description ---
     p.append(
         '<div class="panel mute" style="font-size:12px">'
@@ -919,7 +937,7 @@ def _build_turn_taking(scored: dict) -> str:
                 if v and v > 0:
                     values.append(v)
 
-            p.append(f'<div style="margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #e5e7eb">')
+            p.append('<div style="margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid #e5e7eb">')
             p.append(
                 f'<div style="display:flex;align-items:baseline;gap:12px;margin-bottom:4px">'
                 f'<span style="font-weight:600;font-size:13px;min-width:100px">{label}</span>'
@@ -993,9 +1011,7 @@ def _build_turn_taking(scored: dict) -> str:
             has_asr_diff = asr_text and sys_text and asr_text != sys_text
 
             # Color class based on response latency
-            if error:
-                lat_cls = "bad"
-            elif lat and lat > 3000:
+            if error or lat and lat > 3000:
                 lat_cls = "bad"
             elif lat and lat > 2000:
                 lat_cls = "warn"
@@ -1058,6 +1074,178 @@ def _build_turn_taking(scored: dict) -> str:
         if current_cat is not None:
             p.append("</div>")
         p.append("</div>")
+
+    p.append("</div>")  # close tt-latency
+
+    # ============================================================
+    # Sub-tab: Prepare similarity gate
+    # ============================================================
+    p.append('<div id="tt-gate" class="sub-pane" style="display:none">')
+    p.append(_build_prepare_gate(scored))
+    p.append("</div>")
+
+    return "\n".join(p)
+
+
+_GATE_DECISION_META = {
+    "skip": ("#6b9e7a", "skip — 유사 판정, 재생성 생략"),
+    "keep": ("#8aa9c9", "keep — PENDING 중 유사, 취소 안 함"),
+    "regenerate": ("#b8976b", "regenerate — 의미 변화, 재생성"),
+    "cancel": ("#c47a7a", "cancel — PENDING 중 의미 변화, 턴 전환 취소"),
+}
+
+
+def _build_prepare_gate(scored: dict) -> str:
+    """Prepare similarity gate sub-tab: judge verdicts + similarity distributions."""
+    scores = scored.get("scores", {})
+    gate = scores.get("prepare_gate", {})
+    turns = scored.get("turns", [])
+    judged_turns = [t for t in turns if "gate_judge" in t]
+    event_turns = [t for t in turns if t.get("similarity_events")]
+
+    if not gate and not judged_turns and not event_turns:
+        return '<div class="empty">유사도 게이트 데이터 없음 (similarity_gate call record 필요)</div>'
+
+    threshold = None
+    for t in event_turns:
+        for e in t["similarity_events"]:
+            if e.get("threshold"):
+                threshold = e["threshold"]
+                break
+        if threshold:
+            break
+
+    p = []
+
+    # --- Description ---
+    p.append(
+        '<div class="panel mute" style="font-size:12px">'
+        "ASR 업데이트 시 직전 prepare 텍스트와의 임베딩 유사도가 threshold"
+        + (f"({threshold})" if threshold else "")
+        + " 이상이면 응답 재생성을 생략(skip)한다. "
+        "최종 인식 텍스트와 시스템 텍스트(LLM 입력)가 달라진 턴을 LLM Judge가 판정하여, "
+        "의미가 달라졌는데 skip되어 응답이 부적절해진 경우를 harmful skip으로 집계."
+        "</div>"
+    )
+
+    # --- Summary cards ---
+    if gate:
+        p.append('<div class="cards">')
+        diff = gate.get("diff_turn_count", 0)
+        total = gate.get("voice_turn_count", 0)
+        p.append(
+            f'<div class="card"><div class="card-label">텍스트 불일치</div>'
+            f'<div class="card-value">{diff}<span class="unit">/{total}</span></div>'
+            f'<div class="card-sub">인식 ≠ 시스템 (음성 턴)</div></div>'
+        )
+        judged = gate.get("judged_count", 0)
+        if judged:
+            harmful = gate.get("harmful_count", 0)
+            cls = "bad" if harmful else "good"
+            p.append(
+                f'<div class="card"><div class="card-label">Harmful skip</div>'
+                f'<div class="card-value {cls}">{harmful}<span class="unit">/{judged}</span></div>'
+                f'<div class="card-sub">의미 변화 + 응답 부적절</div></div>'
+            )
+            mc = gate.get("meaning_changed_count", 0)
+            p.append(
+                f'<div class="card"><div class="card-label">의미 변화</div>'
+                f'<div class="card-value">{mc}<span class="unit">/{judged}</span></div>'
+                f'<div class="card-sub">Judge 판정</div></div>'
+            )
+        sa = gate.get("speculative_attempts") or {}
+        if sa:
+            p.append(
+                f'<div class="card"><div class="card-label">재생성 횟수</div>'
+                f'<div class="card-value">{sa["mean"]}</div>'
+                f'<div class="card-sub">턴당 평균 prepare (최대 {sa["max"]})</div></div>'
+            )
+        p.append("</div>")
+
+    # --- Similarity strip plot per decision ---
+    sims_by_decision = gate.get("similarities_by_decision", {})
+    if sims_by_decision:
+        harmful_set = {round(s, 4) for s in gate.get("harmful_similarities", [])}
+        all_sims = [s for v in sims_by_decision.values() for s in v]
+        thresh = threshold or 0.85
+        lo = max(0.0, min(min(all_sims), thresh) - 0.05)
+        hi = 1.0
+
+        def _pct(s: float) -> float:
+            return (s - lo) / (hi - lo) * 100
+
+        p.append('<div class="panel">')
+        p.append('<div class="section-title">유사도 분포 (게이트 판정별)</div>')
+        for decision in ("skip", "keep", "regenerate", "cancel"):
+            sims = sims_by_decision.get(decision)
+            if not sims:
+                continue
+            color, label = _GATE_DECISION_META[decision]
+            p.append('<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">')
+            p.append(f'<span style="font-size:12px;min-width:260px;color:{color};font-weight:500">{label} <span class="mute">({len(sims)})</span></span>')
+            p.append('<div style="position:relative;flex:1;height:18px;background:#f9fafb;border-radius:4px">')
+            p.append(
+                f'<div style="position:absolute;left:{_pct(thresh):.1f}%;top:0;bottom:0;'
+                f'width:1px;background:#c47a7a"></div>'
+            )
+            for s in sims:
+                is_harmful = decision in ("skip", "keep") and round(s, 4) in harmful_set
+                border = "border:2px solid #991b1b;" if is_harmful else ""
+                p.append(
+                    f'<div title="{s:.3f}" style="position:absolute;left:{_pct(s):.1f}%;top:50%;'
+                    f'transform:translate(-50%,-50%);width:8px;height:8px;border-radius:50%;'
+                    f'background:{color};opacity:0.8;{border}"></div>'
+                )
+            p.append("</div></div>")
+        p.append(
+            f'<div style="position:relative;margin-left:272px;height:14px;font-size:10px" class="mute mono">'
+            f'<span style="position:absolute;left:0">{lo:.2f}</span>'
+            f'<span style="position:absolute;left:{_pct(thresh):.1f}%;transform:translateX(-50%);'
+            f'color:#c47a7a">threshold {thresh}</span>'
+            f'<span style="position:absolute;right:0">1.00</span>'
+            f'</div>'
+        )
+        p.append("</div>")
+
+    # --- Individual judged turns ---
+    if judged_turns:
+        p.append('<div class="section">')
+        p.append('<div class="section-title">개별 판정 (인식 ≠ 시스템 텍스트)</div>')
+        for t in judged_turns:
+            gj = t["gate_judge"]
+            if gj.get("harmful"):
+                tag = '<span class="tag tag-fail">harmful skip</span>'
+            elif gj.get("meaning_changed"):
+                tag = '<span class="tag tag-warn">의미 변화 (응답은 적절)</span>'
+            else:
+                tag = '<span class="tag tag-ok">skip 적절</span>'
+
+            sim_chips = []
+            for e in t.get("similarity_events", []):
+                s = e.get("similarity")
+                d = e.get("decision", "?")
+                if s is not None:
+                    color = _GATE_DECISION_META.get(d, ("#6b7280", ""))[0]
+                    sim_chips.append(f'<span class="mono" style="color:{color}">{d} {s:.3f}</span>')
+            chips_str = " · ".join(sim_chips)
+
+            p.append('<div class="item" style="margin-bottom:8px">')
+            p.append(
+                f'<div class="item-header"><span class="item-id">{t["question_id"]}</span> '
+                f'<span class="mute" style="font-size:11px">{t.get("suite_name", "")}</span> {tag}'
+                + (f" {_error_tag(t['error'])}" if t.get("error") else "")
+                + (f' <span class="mute" style="font-size:11px">|</span> <span style="font-size:11px">{chips_str}</span>' if chips_str else "")
+                + "</div>"
+            )
+            p.append(f'<div class="item-row"><span class="item-label mute">시스템</span><span class="item-text diff-mark">{_esc(t.get("system_text") or "")}</span></div>')
+            p.append(f'<div class="item-row"><span class="item-label mute">인식</span><span class="item-text">{_esc(t.get("asr_text") or "")}</span></div>')
+            p.append(f'<div class="item-row"><span class="item-label mute">응답</span><span class="item-text mute">{_esc((t.get("response_text") or "")[:200])}</span></div>')
+            if gj.get("reasoning"):
+                p.append(f'<div class="reasoning">{_esc(gj["reasoning"])}</div>')
+            p.append("</div>")
+        p.append("</div>")
+    elif gate.get("diff_turn_count"):
+        p.append('<div class="empty">Judge 판정 없음 (judge 호출 실패 또는 미실행)</div>')
 
     return "\n".join(p)
 
@@ -1245,13 +1433,13 @@ def _build_interruption(scored: dict) -> str:
 
             # Left: question + metadata
             p.append('<div>')
-            p.append(f'<div style="display:flex;align-items:center;gap:12px">')
+            p.append('<div style="display:flex;align-items:center;gap:12px">')
             p.append(f'<span style="font-weight:600;font-size:14px">{q_text}</span>')
             p.append(f'{_outcome_tag(outcome)}')
             if not played:
                 p.append('<span class="tag tag-mute">미재생</span>')
             p.append('</div>')
-            p.append(f'<div style="margin-top:2px">')
+            p.append('<div style="margin-top:2px">')
             p.append(f'<span class="mute" style="font-size:11px">{t["question_id"]}</span>')
             if lat_str:
                 p.append(f' <span class="mute" style="font-size:11px">|</span> <span class="mono mute" style="font-size:11px">{lat_str}</span>')
@@ -1513,7 +1701,7 @@ def _build_memory(scored: dict) -> str:
             utts = s.get("utterances", [])
             eps = s.get("episodes", [])
             if utts or eps:
-                p.append(f'<div class="collapsible-toggle mute" style="margin-top:6px;font-size:12px">Seed 대화 · 추출된 에피소드</div>')
+                p.append('<div class="collapsible-toggle mute" style="margin-top:6px;font-size:12px">Seed 대화 · 추출된 에피소드</div>')
                 p.append('<div class="collapsible-body" style="margin-top:4px">')
                 p.append('<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">')
 

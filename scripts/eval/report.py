@@ -68,6 +68,7 @@ def build_report(results_dir: Path) -> dict:
     msg_cache: dict[str, list[dict]] = {}
     trace_cache: dict[str, list] = {}
     call_cache: dict[str, dict] = {}
+    gate_cache: dict[str, list[dict]] = {}
     for sid in session_ids:
         rows = conn.execute(
             "SELECT item_json FROM messages WHERE session_id = ? ORDER BY msg_id",
@@ -102,6 +103,21 @@ def build_report(results_dir: Path) -> dict:
             error_count = sum(1 for r in rows if r["status"] in ("error", "timeout"))
             if retry_count or error_count:
                 call_cache[sid] = {"retry_count": retry_count, "error_count": error_count}
+
+            rows = conn.execute(
+                "SELECT operation, elapsed_ms, metadata FROM call_records"
+                " WHERE session_id = ? AND module = 'similarity_gate' ORDER BY id",
+                (sid,),
+            ).fetchall()
+            events = []
+            for r in rows:
+                try:
+                    meta = json.loads(r["metadata"]) if r["metadata"] else {}
+                except json.JSONDecodeError:
+                    meta = {}
+                events.append({"operation": r["operation"], "elapsed_ms": r["elapsed_ms"], **meta})
+            if events:
+                gate_cache[sid] = events
 
     # Track turn index within each session for multi-turn
     session_turn_idx: dict[str, int] = {}
@@ -143,6 +159,12 @@ def build_report(results_dir: Path) -> dict:
             "error": entry.get("error"),
             "turn_detection_delay_ms": entry.get("turn_detection_delay_ms"),
         }
+        # sqlite3.Row: `in trace` checks values, not column names — keys() required
+        if trace is not None and "speculative_attempts" in trace.keys():  # noqa: SIM118
+            turn_data["speculative_attempts"] = trace["speculative_attempts"]
+        gate_events = [e for e in gate_cache.get(sid, []) if e.get("turn_index") == idx]
+        if gate_events:
+            turn_data["similarity_events"] = gate_events
         if call_issues:
             turn_data["call_issues"] = call_issues
         for key in (
