@@ -241,6 +241,33 @@ class TestAwaitingResponse:
         mocks["turn_detector"].reset.assert_not_called()
         assert orch._phase is Phase.LISTENING
 
+    def test_cancel_invokes_on_cancel_callback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """on_cancel callback fires when a tentative turn_shift is retracted."""
+        cancels = []
+        orch, mocks = _make_session_loop(monkeypatch)
+        orch._on_cancel_cb = lambda: cancels.append(1)
+        orch._start_session()
+        orch._phase = Phase.AWAITING
+        mocks["turn_detector"].process_frame.return_value = TurnDecision(cancel=True)
+
+        orch._audio_queue = _audio_queue_with(_frame())
+        orch._run_frame()
+
+        assert cancels == [1]
+
+    def test_on_cancel_callback_error_suppressed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """on_cancel callback exceptions must not break cancel handling."""
+        orch, mocks = _make_session_loop(monkeypatch)
+        orch._on_cancel_cb = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        orch._start_session()
+        orch._phase = Phase.AWAITING
+        mocks["turn_detector"].process_frame.return_value = TurnDecision(cancel=True)
+
+        orch._audio_queue = _audio_queue_with(_frame())
+        orch._run_frame()
+
+        assert orch._phase is Phase.LISTENING
+
     def test_awaiting_generator_failed_skips_turn(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Generator FAILED during awaiting skips turn and resets turn_detector."""
         orch, mocks = _make_session_loop(monkeypatch)

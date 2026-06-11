@@ -94,6 +94,7 @@ def build_report(results_dir: Path) -> dict:
         ).fetchall()
         # cancelled trace는 잠정 turn_shift가 취소된 흔적이라 턴과 1:1이 아님 —
         # 조인에서 제외하고 직후 확정 trace의 턴에 cancelled_turn_shifts로 귀속.
+        # 잔여(trailing) cancel은 확정 trace 없이 끝난 턴(감지 타임아웃 등)의 것.
         aligned: list[tuple[sqlite3.Row, int]] = []
         pending_cancels = 0
         for row in rows:
@@ -102,7 +103,7 @@ def build_report(results_dir: Path) -> dict:
             else:
                 aligned.append((row, pending_cancels))
                 pending_cancels = 0
-        trace_cache[sid] = aligned
+        trace_cache[sid] = (aligned, pending_cancels)
 
         if has_call_records:
             rows = conn.execute(
@@ -139,7 +140,7 @@ def build_report(results_dir: Path) -> dict:
         session_turn_idx[sid] = idx + 1
 
         msg_pairs = msg_cache.get(sid, [])
-        traces = trace_cache.get(sid, [])
+        traces, trailing_cancels = trace_cache.get(sid, ([], 0))
 
         if idx < len(msg_pairs):
             system_text = msg_pairs[idx]["user"]
@@ -148,7 +149,11 @@ def build_report(results_dir: Path) -> dict:
             system_text = ""
             response_text = ""
 
-        trace, cancelled_shifts = traces[idx] if idx < len(traces) else (None, 0)
+        if idx < len(traces):
+            trace, cancelled_shifts = traces[idx]
+        else:
+            trace = None
+            cancelled_shifts = trailing_cancels if idx == len(traces) else 0
         latency = _extract_latency(trace)
         outcome = trace["outcome"] if trace else None
         asr_text = entry.get("asr_text") or system_text

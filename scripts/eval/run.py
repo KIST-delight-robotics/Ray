@@ -82,6 +82,7 @@ _AUDIO_QUEUE_SIZE = 300
 _STARTUP_DELAY_SEC = 1.5
 _TURN_TIMEOUT_SEC = 60.0
 _TURN_DETECT_TIMEOUT_SEC = 10.0
+_WATCHDOG_POLL_SEC = 0.1  # 감지 워치독 폴링 주기
 _BEEP_SETTLE_SEC = 0.2  # 비프음이 마이크 큐에 다 들어온 뒤 drain하기 위한 대기
 _TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -488,11 +489,13 @@ def _run_single_turn(
     _begin_session_audio(player, audio_queue)
 
     turn_event = threading.Event()
-    turn_shift_event = threading.Event()
     gen_failed_event = threading.Event()
+    watchdog_stop = threading.Event()
     play_end_time = [0.0]
     turn_shift_time = [0.0]
     final_asr_text = [""]
+    shift_count = [0]
+    cancel_count = [0]
 
     def on_turn_done(ts_time: float, asr_text: str) -> None:
         turn_shift_time[0] = ts_time
@@ -501,7 +504,10 @@ def _run_single_turn(
         components.session_loop.request_stop()
 
     def on_turn_shift(ts_time: float, asr_text: str) -> None:
-        turn_shift_event.set()
+        shift_count[0] += 1
+
+    def on_cancel() -> None:
+        cancel_count[0] += 1
 
     def on_gen_failed() -> None:
         gen_failed_event.set()
@@ -513,6 +519,7 @@ def _run_single_turn(
         on_turn_complete=on_turn_done,
         on_turn_shift=on_turn_shift,
         on_generation_failed=on_gen_failed,
+        on_cancel=on_cancel,
         memory_enabled=suite.get("memory", False),
         skip_generation=skip,
         record_path=rec_path,
@@ -527,9 +534,17 @@ def _run_single_turn(
         except Exception:
             logger.error("Failed to play %s", wav_path, exc_info=True)
             return
-        if not turn_shift_event.wait(timeout=_TURN_DETECT_TIMEOUT_SEC):
-            logger.warning("Turn detection timeout for %s", question["id"])
-            components.session_loop.request_stop()
+        # 감지 타임아웃은 질문 재생 종료 시점에 고정 — 잠정 shift가 cancel로
+        # 철회되면 같은 기준선으로 재대기. 잠정 shift가 서 있는 동안(생성 중)은
+        # 타임아웃을 평가하지 않음 (생성 지연을 감지 실패로 오분류 방지).
+        deadline = play_end_time[0] + _TURN_DETECT_TIMEOUT_SEC
+        while not turn_event.is_set() and not watchdog_stop.is_set():
+            standing_shift = shift_count[0] > cancel_count[0]
+            if not standing_shift and time.monotonic() >= deadline:
+                logger.warning("Turn detection timeout for %s", question["id"])
+                components.session_loop.request_stop()
+                return
+            time.sleep(_WATCHDOG_POLL_SEC)
 
     player_thread = threading.Thread(target=play_with_delay, daemon=True)
     player_thread.start()
@@ -540,6 +555,7 @@ def _run_single_turn(
         logger.error("SessionLoop error", exc_info=True)
     finally:
         components.history.save()
+        watchdog_stop.set()
 
     player_thread.join(timeout=5.0)
 
@@ -647,12 +663,14 @@ def _run_interruption(
     _begin_session_audio(player, audio_queue)
 
     turn_event = threading.Event()
-    turn_shift_event = threading.Event()
     gen_failed_event = threading.Event()
     playback_started_event = threading.Event()
+    watchdog_stop = threading.Event()
     play_end_time = [0.0]
     turn_shift_time = [0.0]
     interrupt_played = [False]
+    shift_count = [0]
+    cancel_count = [0]
 
     def on_turn_done(ts_time: float, asr_text: str) -> None:
         turn_shift_time[0] = ts_time
@@ -660,7 +678,10 @@ def _run_interruption(
         components.session_loop.request_stop()
 
     def on_turn_shift(ts_time: float, asr_text: str) -> None:
-        turn_shift_event.set()
+        shift_count[0] += 1
+
+    def on_cancel() -> None:
+        cancel_count[0] += 1
 
     def on_gen_failed() -> None:
         gen_failed_event.set()
@@ -679,6 +700,7 @@ def _run_interruption(
         on_turn_shift=on_turn_shift,
         on_playback_started=on_playback_started,
         on_generation_failed=on_gen_failed,
+        on_cancel=on_cancel,
         memory_enabled=suite.get("memory", False),
         record_path=rec_path,
     )
@@ -693,15 +715,25 @@ def _run_interruption(
             logger.error("Failed to play %s", wav_path, exc_info=True)
             return
 
-        if not turn_shift_event.wait(timeout=_TURN_DETECT_TIMEOUT_SEC):
-            logger.warning("Turn detection timeout for %s", question["id"])
-            components.session_loop.request_stop()
-            return
-
-        if not playback_started_event.wait(timeout=_TURN_TIMEOUT_SEC):
-            logger.warning("Playback never started for %s", question["id"])
-            components.session_loop.request_stop()
-            return
+        # 감지 타임아웃은 질문 재생 종료 시점에 고정 — 잠정 shift가 cancel로
+        # 철회되면 같은 기준선으로 재대기 (tt 러너와 동일). 재생 시작 대기 중
+        # cancel이 나면 감지 대기로 복귀한다.
+        detect_deadline = play_end_time[0] + _TURN_DETECT_TIMEOUT_SEC
+        playback_deadline = play_end_time[0] + _TURN_TIMEOUT_SEC
+        while not playback_started_event.is_set():
+            if turn_event.is_set() or watchdog_stop.is_set():
+                return
+            standing_shift = shift_count[0] > cancel_count[0]
+            now = time.monotonic()
+            if not standing_shift and now >= detect_deadline:
+                logger.warning("Turn detection timeout for %s", question["id"])
+                components.session_loop.request_stop()
+                return
+            if standing_shift and now >= playback_deadline:
+                logger.warning("Playback never started for %s", question["id"])
+                components.session_loop.request_stop()
+                return
+            time.sleep(_WATCHDOG_POLL_SEC)
         time.sleep(interrupt_delay_sec)
 
         try:
@@ -719,6 +751,7 @@ def _run_interruption(
         logger.error("SessionLoop error", exc_info=True)
     finally:
         components.history.save()
+        watchdog_stop.set()
 
     player_thread.join(timeout=10.0)
 
@@ -803,9 +836,11 @@ def _run_multi_turn_suite(
 
     questions = scenario["questions"]
     turn_event = threading.Event()
-    turn_shift_event = threading.Event()
     gen_failed_event = threading.Event()
+    watchdog_stop = threading.Event()
     turn_index = [0]
+    shift_count = [0]
+    cancel_count = [0]
     turn_shift_times: dict[int, float] = {}
     turn_asr_texts: dict[int, str] = {}
     turn_shift_reasons: dict[int, str | None] = {}
@@ -820,7 +855,10 @@ def _run_multi_turn_suite(
         turn_event.set()
 
     def on_turn_shift(ts_time: float, asr_text: str) -> None:
-        turn_shift_event.set()
+        shift_count[0] += 1
+
+    def on_cancel() -> None:
+        cancel_count[0] += 1
 
     def on_gen_failed() -> None:
         gen_failed_event.set()
@@ -832,6 +870,7 @@ def _run_multi_turn_suite(
         on_turn_complete=on_turn_done,
         on_turn_shift=on_turn_shift,
         on_generation_failed=on_gen_failed,
+        on_cancel=on_cancel,
         memory_enabled=suite.get("memory", False),
         skip_generation=skip,
         record_path=rec_path,
@@ -850,19 +889,34 @@ def _run_multi_turn_suite(
                 break
             if i > 0:
                 turn_event.clear()
-                turn_shift_event.clear()
+            base_shift = shift_count[0]
+            base_cancel = cancel_count[0]
             try:
                 player.play(wav_path)
                 play_end_times[q["id"]] = time.monotonic()
             except Exception:
                 logger.error("Failed to play %s", wav_path, exc_info=True)
                 break
-            if not turn_shift_event.wait(timeout=_TURN_DETECT_TIMEOUT_SEC):
-                logger.warning("Turn detection timeout at question %s", q["id"])
-                components.session_loop.request_stop()
+            # 감지 타임아웃은 질문 재생 종료 시점에 고정 — cancel로 잠정 shift가
+            # 철회되면 같은 기준선으로 재대기. 잠정 shift가 서 있는 동안은
+            # 감지 타임아웃을 평가하지 않고, 턴 완료 상한만 적용.
+            detect_deadline = play_end_times[q["id"]] + _TURN_DETECT_TIMEOUT_SEC
+            complete_deadline = play_end_times[q["id"]] + _TURN_TIMEOUT_SEC
+            failed = None
+            while not turn_event.is_set() and not watchdog_stop.is_set():
+                now = time.monotonic()
+                standing_shift = (shift_count[0] - base_shift) > (cancel_count[0] - base_cancel)
+                if not standing_shift and now >= detect_deadline:
+                    failed = "detection"
+                    break
+                if now >= complete_deadline:
+                    failed = "completion"
+                    break
+                time.sleep(_WATCHDOG_POLL_SEC)
+            if watchdog_stop.is_set():
                 break
-            if i < len(questions) - 1 and not turn_event.wait(timeout=_TURN_TIMEOUT_SEC):
-                logger.warning("Turn completion timeout at question %s", q["id"])
+            if failed:
+                logger.warning("Turn %s timeout at question %s", failed, q["id"])
                 components.session_loop.request_stop()
                 break
 
@@ -875,6 +929,7 @@ def _run_multi_turn_suite(
         logger.error("SessionLoop error", exc_info=True)
     finally:
         components.history.save()
+        watchdog_stop.set()
 
     player_thread.join(timeout=5.0)
 
@@ -1162,6 +1217,7 @@ def main() -> None:
         on_turn_shift: Callable[[float, str], None] | None = None,
         on_playback_started: Callable[[], None] | None = None,
         on_generation_failed: Callable[[], None] | None = None,
+        on_cancel: Callable[[], None] | None = None,
         memory_enabled: bool = True,
         skip_generation: bool = False,
         record_path: str | None = None,
@@ -1224,6 +1280,7 @@ def main() -> None:
             on_turn_shift=on_turn_shift,
             on_playback_started=on_playback_started,
             on_generation_failed=on_generation_failed,
+            on_cancel=on_cancel,
             disable_exit_keywords=True,
             skip_generation=skip_generation,
             record_path=record_path,

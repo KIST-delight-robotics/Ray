@@ -88,6 +88,7 @@ class SessionLoop:
         on_turn_shift: Callable[[float, str], None] | None = None,
         on_playback_started: Callable[[], None] | None = None,
         on_generation_failed: Callable[[], None] | None = None,
+        on_cancel: Callable[[], None] | None = None,
         disable_exit_keywords: bool = False,
         skip_generation: bool = False,
         record_path: str | None = None,
@@ -120,6 +121,7 @@ class SessionLoop:
             on_turn_shift: 턴 감지 시 호출되는 콜백.
                 (turn_shift_time, asr_text) 전달.
             on_playback_started: 응답 재생 시작 시 호출되는 콜백.
+            on_cancel: 잠정 turn_shift가 cancel로 철회될 때 호출되는 콜백.
             disable_exit_keywords: True이면 exit keyword 감지 비활성화.
             skip_generation: True이면 turn_shift 감지 시 응답 생성 없이
                 ASR 텍스트만 캡처하고 세션 종료.
@@ -141,6 +143,7 @@ class SessionLoop:
         self._on_turn_shift_cb = on_turn_shift
         self._on_playback_started_cb = on_playback_started
         self._on_generation_failed_cb = on_generation_failed
+        self._on_cancel_cb = on_cancel
         self._disable_exit_keywords = disable_exit_keywords
         self._skip_generation = skip_generation
 
@@ -513,6 +516,11 @@ class SessionLoop:
         self._save_trace("cancelled")
         self._generator.cancel()
         self._phase = Phase.LISTENING
+        if self._on_cancel_cb is not None:
+            try:
+                self._on_cancel_cb()
+            except Exception:
+                logger.warning("on_cancel callback error", exc_info=True)
 
     def _handle_interrupt(self) -> None:
         """Handle interrupt signal from TurnDetector.
