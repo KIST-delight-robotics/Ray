@@ -88,11 +88,21 @@ def build_report(results_dir: Path) -> dict:
             msg_pairs.append(pair)
         msg_cache[sid] = msg_pairs
 
-        traces = conn.execute(
+        rows = conn.execute(
             "SELECT * FROM pipeline_traces WHERE session_id = ? ORDER BY id",
             (sid,),
         ).fetchall()
-        trace_cache[sid] = traces
+        # cancelled trace는 잠정 turn_shift가 취소된 흔적이라 턴과 1:1이 아님 —
+        # 조인에서 제외하고 직후 확정 trace의 턴에 cancelled_turn_shifts로 귀속.
+        aligned: list[tuple[sqlite3.Row, int]] = []
+        pending_cancels = 0
+        for row in rows:
+            if row["outcome"] == "cancelled":
+                pending_cancels += 1
+            else:
+                aligned.append((row, pending_cancels))
+                pending_cancels = 0
+        trace_cache[sid] = aligned
 
         if has_call_records:
             rows = conn.execute(
@@ -138,7 +148,7 @@ def build_report(results_dir: Path) -> dict:
             system_text = ""
             response_text = ""
 
-        trace = traces[idx] if idx < len(traces) else None
+        trace, cancelled_shifts = traces[idx] if idx < len(traces) else (None, 0)
         latency = _extract_latency(trace)
         outcome = trace["outcome"] if trace else None
         asr_text = entry.get("asr_text") or system_text
@@ -162,6 +172,8 @@ def build_report(results_dir: Path) -> dict:
         # sqlite3.Row: `in trace` checks values, not column names — keys() required
         if trace is not None and "speculative_attempts" in trace.keys():  # noqa: SIM118
             turn_data["speculative_attempts"] = trace["speculative_attempts"]
+        if cancelled_shifts:
+            turn_data["cancelled_turn_shifts"] = cancelled_shifts
         gate_events = [e for e in gate_cache.get(sid, []) if e.get("turn_index") == idx]
         if gate_events:
             turn_data["similarity_events"] = gate_events

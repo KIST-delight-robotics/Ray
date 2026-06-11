@@ -227,6 +227,26 @@ _QUALITY_SUITES: dict[str, dict[str, str]] = {
     },
 }
 
+# 턴테이킹 카테고리 응답도 공통 3기준으로 품질 채점 (스위트 고유 기준 없음).
+# 값은 judge system 프롬프트에 덧붙일 스위트별 추가 컨텍스트 (없으면 빈 문자열).
+_TT_QUALITY_SUITES: dict[str, str] = {
+    "tt_ultra_short": "",
+    "tt_short_statements": "",
+    "tt_long_statements": "",
+    "tt_questions": "",
+    "tt_lists": "",
+    "tt_weak_endings": "",
+    "tt_incomplete": (
+        "NOTE: The user's utterance is INTENTIONALLY INCOMPLETE — they trailed "
+        "off mid-sentence. A good response acknowledges this naturally, e.g. by "
+        "gently prompting them to continue. Do not penalize the response for "
+        "not answering an unasked question."
+    ),
+    "tt_multi_turn": "",
+}
+
+_MULTI_TURN_QUALITY_SUITES = ("lq_multi_turn", "tt_multi_turn")
+
 _COMMON_RUBRIC = """\
 relevance (1-5):
   1: Completely ignores or misunderstands the input
@@ -250,9 +270,18 @@ naturalness (1-5):
   5: Completely natural, indistinguishable from human conversation"""
 
 
+def _suite_criterion(suite_name: str) -> str | None:
+    """Return the suite-specific criterion name, or None for common-criteria-only suites."""
+    cfg = _QUALITY_SUITES.get(suite_name)
+    return cfg["criterion"] if cfg else None
+
+
 def _build_judge_messages(suite_name: str, turns: list[dict], *, multi_turn: bool = False) -> list[dict]:
-    cfg = _QUALITY_SUITES[suite_name]
-    criterion = cfg["criterion"]
+    cfg = _QUALITY_SUITES.get(suite_name)
+    criterion_block = f"\n\n{cfg['criterion']} (1-5):\n{cfg['rubric']}" if cfg else ""
+    criterion_key = f"{cfg['criterion']}, " if cfg else ""
+    extra = _TT_QUALITY_SUITES.get(suite_name, "")
+    extra_block = f"\n\n{extra}" if extra else ""
 
     if multi_turn:
         system = (
@@ -260,10 +289,9 @@ def _build_judge_messages(suite_name: str, turns: list[dict], *, multi_turn: boo
             "The robot speaks to users through a physical speaker — "
             "responses must be suitable for listening, not reading.\n\n"
             "Evaluate the ENTIRE conversation as a whole on these criteria:\n\n"
-            f"{_COMMON_RUBRIC}\n\n"
-            f"{criterion} (1-5):\n{cfg['rubric']}\n\n"
+            f"{_COMMON_RUBRIC}{criterion_block}{extra_block}\n\n"
             "Return a JSON object with: relevance, voice_appropriateness, "
-            f"naturalness, {criterion}, reasoning (one sentence in Korean)."
+            f"naturalness, {criterion_key}reasoning (one sentence in Korean)."
         )
         parts = [
             f"User: {t['input_text']}\nResponse: {t['response_text']}"
@@ -276,11 +304,10 @@ def _build_judge_messages(suite_name: str, turns: list[dict], *, multi_turn: boo
             "The robot speaks to users through a physical speaker — "
             "responses must be suitable for listening, not reading.\n\n"
             f"Score each response on these criteria:\n\n"
-            f"{_COMMON_RUBRIC}\n\n"
-            f"{criterion} (1-5):\n{cfg['rubric']}\n\n"
+            f"{_COMMON_RUBRIC}{criterion_block}{extra_block}\n\n"
             'Return a JSON object with an "evaluations" array. '
             "Each element must have: question_id, relevance, voice_appropriateness, "
-            f"naturalness, {criterion}, reasoning (one sentence in Korean)."
+            f"naturalness, {criterion_key}reasoning (one sentence in Korean)."
         )
         parts = [f"[{t['question_id']}]\nUser: {t['input_text']}\nResponse: {t['response_text']}" for t in turns]
         user = "Evaluate these responses:\n\n" + "\n\n".join(parts)
@@ -310,9 +337,11 @@ def _apply_judge_result(
     result: dict,
     criterion_agg: dict[str, list[float]],
 ) -> None:
-    criterion = _QUALITY_SUITES[suite_name]["criterion"]
+    criterion = _suite_criterion(suite_name)
     eval_by_id = {e["question_id"]: e for e in result["evaluations"]}
-    score_keys = ["relevance", "voice_appropriateness", "naturalness", criterion]
+    score_keys = ["relevance", "voice_appropriateness", "naturalness"]
+    if criterion:
+        score_keys.append(criterion)
 
     for turn in turns:
         ev = eval_by_id.get(turn["question_id"])
@@ -333,7 +362,7 @@ def _score_quality(turns: list[dict]) -> dict:
     by_suite: dict[str, list[dict]] = {}
     for turn in turns:
         suite = turn["suite_name"]
-        if suite in _QUALITY_SUITES and turn.get("response_text"):
+        if (suite in _QUALITY_SUITES or suite in _TT_QUALITY_SUITES) and turn.get("response_text"):
             by_suite.setdefault(suite, []).append(turn)
 
     if not by_suite:
@@ -343,9 +372,11 @@ def _score_quality(turns: list[dict]) -> dict:
     suite_summaries: dict[str, dict] = {}
 
     for suite_name, suite_turns in by_suite.items():
-        if suite_name == "lq_multi_turn":
-            criterion = _QUALITY_SUITES[suite_name]["criterion"]
-            score_keys = ["relevance", "voice_appropriateness", "naturalness", criterion]
+        if suite_name in _MULTI_TURN_QUALITY_SUITES:
+            criterion = _suite_criterion(suite_name)
+            score_keys = ["relevance", "voice_appropriateness", "naturalness"]
+            if criterion:
+                score_keys.append(criterion)
             by_session: dict[str, list[dict]] = {}
             for t in suite_turns:
                 by_session.setdefault(t.get("session_id", ""), []).append(t)

@@ -178,23 +178,6 @@ document.addEventListener('DOMContentLoaded', function() {
 # Labels
 # ---------------------------------------------------------------------------
 
-_SUITE_LABELS = {
-    "lq_factual": "사실 정확성",
-    "lq_advice": "조언/설명",
-    "lq_casual": "일상 대화",
-    "lq_empathy": "감정 대응",
-    "lq_voice_adaptation": "음성 적합성",
-    "lq_multi_turn": "맥락 유지",
-    "lq_wrong_premise": "잘못된 전제",
-    "lq_impossible": "불가능한 요청",
-    "mem_recall": "기본 회상",
-    "mem_profile": "프로필 종합",
-    "mem_update": "정보 갱신",
-    "mem_no_hallucination": "환각 방지",
-    "mem_relevance": "맥락 활용",
-    "mem_multi_session": "다중 세션",
-}
-
 _CRITERION_LABELS = {
     "relevance": "관련성",
     "voice_appropriateness": "음성 적합성",
@@ -303,10 +286,6 @@ def _call_issues_tag(issues: dict) -> str:
     label = " · ".join(parts)
     cls = "tag-fail" if error else "tag-warn"
     return f'<span class="tag {cls}">{label}</span>'
-
-
-def _suite_label(name: str) -> str:
-    return _SUITE_LABELS.get(name, name)
 
 
 def _esc(text: str) -> str:
@@ -850,6 +829,15 @@ def _build_turn_taking(scored: dict) -> str:
                 f'<div class="card-sub">턴 감지 → 재생 (중위값)</div></div>'
             )
 
+        cancel_total = sum(t.get("cancelled_turn_shifts", 0) for t in all_tt_turns)
+        if cancel_total:
+            cancel_turns = sum(1 for t in all_tt_turns if t.get("cancelled_turn_shifts"))
+            p.append(
+                f'<div class="card"><div class="card-label">잠정 전환 취소</div>'
+                f'<div class="card-value warn">{cancel_total}<span class="unit">회</span></div>'
+                f'<div class="card-sub">{cancel_turns}개 턴 — 조기 turn shift 신호</div></div>'
+            )
+
         p.append("</div>")
 
     # --- Suite summary + Latency side by side ---
@@ -1062,6 +1050,9 @@ def _build_turn_taking(scored: dict) -> str:
             ts_reason = t.get("turn_shift_reason")
             if ts_reason:
                 p.append(f' <span class="tag tag-mute">{_esc(ts_reason)}</span>')
+            cancels = t.get("cancelled_turn_shifts")
+            if cancels:
+                p.append(f' <span class="tag tag-warn">전환 취소 {cancels}회</span>')
             call_issues = t.get("call_issues")
             if call_issues:
                 p.append(f' <span class="mute" style="font-size:11px">|</span> {_call_issues_tag(call_issues)}')
