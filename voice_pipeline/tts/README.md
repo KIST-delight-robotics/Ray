@@ -40,10 +40,9 @@ export OPENAI_API_KEY=sk-...    # OpenAITTS
 
 | 변수 | 값 | 의미 |
 |------|------|------|
-| `OUTPUT_SAMPLE_RATE` | `24000` | `pcm_24000` 출력 샘플레이트 (Hz). OpenAITTS와 동일 |
+| `OUTPUT_SAMPLE_RATE` | `24000` | PCM 출력 샘플레이트 (Hz). `output_format`(`"pcm_<rate>"`)이 이 값에서 파생. `pcm_44100`은 Pro 전용 |
 | `_VOICE_ID` | `"EXAVITQu4vr4xnSDxMaL"` | ElevenLabs voice ID (Sarah — 임시 영어 default voice) |
 | `_MODEL` | `"eleven_flash_v2_5"` | 최저 지연 모델 (`eleven_turbo_v2_5`, `eleven_multilingual_v2` 등) |
-| `_OUTPUT_FORMAT` | `"pcm_24000"` | 출력 포맷 (tier 제한 없음; `pcm_44100`은 Pro 전용) |
 | `_VOICE_SETTINGS` | `None` | voice 세부 설정 dict (`stability`, `similarity_boost`, `style`, `speed`) |
 | `_MAX_RETRIES` | `2` | 자동 재시도 횟수 (스트리밍 시작 전 한정) |
 | `_TIMEOUT_SEC` | `10.0` | httpx timeout (SDK 기본 240s override) |
@@ -114,7 +113,7 @@ tts = OpenAITTS()
 
 ## PCM output format
 
-두 vendor 모두 동일 (OpenAI `response_format="pcm"`, ElevenLabs `output_format="pcm_24000"`):
+두 vendor 모두 동일 (OpenAI `response_format="pcm"`, ElevenLabs `output_format="pcm_<OUTPUT_SAMPLE_RATE>"`):
 
 | Property | Value |
 |----------|-------|

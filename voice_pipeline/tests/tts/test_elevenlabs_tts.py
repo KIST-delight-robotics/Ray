@@ -391,6 +391,18 @@ class TestRequestParams:
         assert call.kwargs["request_options"] == {"max_retries": 2}
         assert "voice_settings" not in call.kwargs
 
+    def test_output_format_derived_from_sample_rate(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """output_format must follow OUTPUT_SAMPLE_RATE, not a separate constant."""
+        client = create_mock_elevenlabs_client([make_elevenlabs_chunk(b"\x01")])
+        monkeypatch.setattr(ElevenLabsTTS, "OUTPUT_SAMPLE_RATE", 16000)
+        tts = _build_tts(client)
+
+        stream = tts.synthesize("Hello")
+        list(stream)
+
+        call = client.text_to_speech.stream_with_timestamps.call_args
+        assert call.kwargs["output_format"] == "pcm_16000"
+
     def test_voice_settings_passed_when_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         client = create_mock_elevenlabs_client([make_elevenlabs_chunk(b"\x01")])
         tts = _build_tts(client, monkeypatch, voice_settings={"stability": 0.5})

@@ -34,11 +34,12 @@ class ElevenLabsTTS(ITTS):
     closed to release the underlying HTTP connection.
     """
 
-    OUTPUT_SAMPLE_RATE: int = 24000  # pcm_24000 — OpenAITTS와 동일 (downstream 무변경)
+    # PCM 출력 샘플레이트 (Hz) — output_format("pcm_<rate>")이 이 값에서 파생됨.
+    # ElevenLabs 지원: 8000/16000/22050/24000/32000 (44100은 Pro 전용). 24000 = OpenAITTS와 동일.
+    OUTPUT_SAMPLE_RATE: int = 24000
 
     _VOICE_ID: str = "EXAVITQu4vr4xnSDxMaL"  # Sarah — 임시 영어 default voice (추후 교체 예정)
     _MODEL: str = "eleven_flash_v2_5"  # 최저 지연 모델 (예: "eleven_turbo_v2_5", "eleven_multilingual_v2")
-    _OUTPUT_FORMAT: str = "pcm_24000"  # 24kHz 16-bit signed LE mono (tier 제한 없음)
     _VOICE_SETTINGS: dict[str, float] | None = None  # 예: {"stability": 0.5}; None이면 voice 기본값
 
     _MAX_RETRIES = 2  # 합성 실패 시 자동 재시도 횟수 (request_options.max_retries)
@@ -85,7 +86,7 @@ class ElevenLabsTTS(ITTS):
         kwargs: dict[str, Any] = {
             "text": text,
             "model_id": self._MODEL,
-            "output_format": self._OUTPUT_FORMAT,
+            "output_format": f"pcm_{self.OUTPUT_SAMPLE_RATE}",
             "request_options": {"max_retries": self._MAX_RETRIES},
         }
         if self._VOICE_SETTINGS:
