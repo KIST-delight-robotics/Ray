@@ -335,3 +335,75 @@ class TestClientConfig:
 
         call_kwargs = client.responses.create.call_args[1]
         assert "text" not in call_kwargs
+
+
+# ---------------------------------------------------------------------------
+# TestCompletedResponsePayload — 객체/dict 양쪽 payload 허용
+# ---------------------------------------------------------------------------
+
+
+class TestCompletedResponsePayload:
+    """response.completed의 response가 pydantic 객체든 dict든 metrics가 추출되어야 한다."""
+
+    def _consume(self, client: MagicMock):
+        llm = _build_llm(client)
+        stream = llm.generate([_user_msg("hi")])
+        "".join(stream)
+        return stream.result
+
+    def test_metrics_from_object_response(self) -> None:
+        from voice_pipeline.tests.llm.conftest import FakeCompletedResponse, FakeUsage, FakeUsageDetails
+
+        resp = FakeCompletedResponse(
+            model="gpt-obj",
+            usage=FakeUsage(input_tokens=50, output_tokens=10, input_tokens_details=FakeUsageDetails(cached_tokens=5)),
+        )
+        client = create_mock_client(make_stream_events(["hi"], completed_response=resp))
+
+        result = self._consume(client)
+        assert result.metrics is not None
+        assert result.metrics.usage.input_tokens == 50
+        assert result.metrics.usage.cached_tokens == 5
+        assert result.metrics.model == "gpt-obj"
+
+    def test_metrics_from_dict_response(self) -> None:
+        resp = {
+            "model": "gpt-dict",
+            "usage": {
+                "input_tokens": 50,
+                "output_tokens": 10,
+                "input_tokens_details": {"cached_tokens": 5},
+                "output_tokens_details": {"reasoning_tokens": 2},
+            },
+            "output": [],
+        }
+        client = create_mock_client(make_stream_events(["hi"], completed_response=resp))
+
+        result = self._consume(client)
+        assert result.metrics is not None
+        assert result.metrics.usage.input_tokens == 50
+        assert result.metrics.usage.output_tokens == 10
+        assert result.metrics.usage.cached_tokens == 5
+        assert result.metrics.usage.reasoning_tokens == 2
+        assert result.metrics.model == "gpt-dict"
+        assert result.metrics.ttft_ms >= 0
+
+    def test_tool_calls_from_dict_response(self) -> None:
+        resp = {
+            "model": "m",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+            "output": [{"type": "function_call", "call_id": "c1", "name": "do_it", "arguments": "{}"}],
+        }
+        client = create_mock_client(make_stream_events(["hi"], completed_response=resp))
+
+        result = self._consume(client)
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].call_id == "c1"
+        assert result.tool_calls[0].name == "do_it"
+
+    def test_dict_response_without_usage_returns_none_metrics(self) -> None:
+        resp = {"model": "m", "output": []}
+        client = create_mock_client(make_stream_events(["hi"], completed_response=resp))
+
+        result = self._consume(client)
+        assert result.metrics is None

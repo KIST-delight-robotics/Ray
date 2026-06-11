@@ -155,25 +155,30 @@ class _StreamState:
         )
 
     def _extract_metrics(self, latency_ms: int, ttft_ms: int) -> LLMMetrics | None:
-        """Extract metrics from the completed response."""
+        """Extract metrics from the completed response.
+
+        ``response.completed`` 이벤트의 ``response``는 pydantic 객체일 수도,
+        서버 페이로드에 따라 plain dict일 수도 있어 ``_field``로 양쪽을 허용한다.
+        """
         resp = self.completed_response
         if resp is None:
             return None
 
-        try:
-            usage_data = resp.usage
-            usage = Usage(
-                input_tokens=usage_data.input_tokens,
-                output_tokens=usage_data.output_tokens,
-                cached_tokens=getattr(getattr(usage_data, "input_tokens_details", None), "cached_tokens", 0) or 0,
-                reasoning_tokens=getattr(getattr(usage_data, "output_tokens_details", None), "reasoning_tokens", 0)
-                or 0,
-            )
-        except (AttributeError, TypeError):
-            logger.debug("Failed to extract usage from response", exc_info=True)
+        usage_data = _field(resp, "usage")
+        input_tokens = _field(usage_data, "input_tokens")
+        output_tokens = _field(usage_data, "output_tokens")
+        if input_tokens is None or output_tokens is None:
+            logger.debug("Usage missing from completed response (type=%s)", type(resp).__name__)
             return None
 
-        model = getattr(resp, "model", self.model) or self.model
+        usage = Usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_tokens=_field(_field(usage_data, "input_tokens_details"), "cached_tokens", 0) or 0,
+            reasoning_tokens=_field(_field(usage_data, "output_tokens_details"), "reasoning_tokens", 0) or 0,
+        )
+
+        model = _field(resp, "model", self.model) or self.model
         return LLMMetrics(
             usage=usage,
             model=model,
@@ -191,6 +196,17 @@ def _split_system_message(
     return None, messages
 
 
+def _field(obj: Any, key: str, default: Any = None) -> Any:
+    """Read *key* from a pydantic object or a plain dict.
+
+    Responses API 스트림의 completed payload가 SDK 파싱 결과에 따라
+    객체/dict 어느 쪽으로도 도착할 수 있어 양쪽을 허용한다.
+    """
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 def _iter_stream(stream: Any, state: _StreamState) -> Generator[str, None, None]:
     """Iterate over a Responses API stream, yielding text deltas.
 
@@ -206,16 +222,15 @@ def _iter_stream(stream: Any, state: _StreamState) -> Generator[str, None, None]
             elif event.type == "response.completed":
                 state.completed_response = event.response
                 # Extract tool calls from response output
-                if hasattr(event.response, "output"):
-                    for output_item in event.response.output:
-                        if getattr(output_item, "type", None) == "function_call":
-                            state.tool_calls.append(
-                                ToolCall(
-                                    call_id=output_item.call_id,
-                                    name=output_item.name,
-                                    arguments=output_item.arguments,
-                                )
+                for output_item in _field(event.response, "output") or []:
+                    if _field(output_item, "type") == "function_call":
+                        state.tool_calls.append(
+                            ToolCall(
+                                call_id=_field(output_item, "call_id"),
+                                name=_field(output_item, "name"),
+                                arguments=_field(output_item, "arguments"),
                             )
+                        )
 
     except GeneratorExit:
         return
