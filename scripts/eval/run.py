@@ -69,7 +69,7 @@ from voice_pipeline.trace.openai_retry_handler import OpenAIRetryHandler
 from voice_pipeline.trace.trace_store import SQLiteCallStore, SQLiteTraceStore
 from voice_pipeline.trace.tracked_embedder import TrackedEmbedder
 from voice_pipeline.trace.tracked_tts import TrackedTTS
-from voice_pipeline.tts.tts import OpenAITTS
+from voice_pipeline.tts.factory import create_tts
 from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT
 from voice_pipeline.turn_taking.async_vap import AsyncVAP
 from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
@@ -1167,7 +1167,7 @@ def main() -> None:
 
     if needs_audio:
         asr = GoogleCloudASR(language_code=language_code)
-        raw_tts = OpenAITTS()
+        raw_tts = create_tts()  # 프로덕션 기본 vendor를 따라감
         tts = TrackedTTS(raw_tts, call_store)
         vap = MaAIVAPWrapper(raw_tts.output_sample_rate)
         turngpt = TurnGPTWrapper()
