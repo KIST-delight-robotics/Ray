@@ -250,6 +250,19 @@ Exclude:
 - Refactoring history (removed X, replaced with Y)
 
 
+## Collaboration Workflow
+
+- **Discuss before implementing.** For non-trivial work, first resolve ambiguities and
+  present a plan (or a proposed fix). Start code changes only after the user explicitly
+  confirms. Answering the user's question is not approval to implement.
+- **Questions get answers, not edits.** When the user asks a question or describes a
+  problem, respond with findings and proposed solutions, then stop and wait.
+- **Mid-work deviations**: if an important change from the agreed plan comes up, stop,
+  explain it with alternatives, and continue only after the user decides.
+- **Commits require explicit approval.** Never commit unless the user explicitly asks or
+  approves that specific commit. Announcing an intent to commit is not approval.
+
+
 ## Commit Convention
 
 ```
@@ -260,6 +273,6 @@ Exclude:
 - **scope**: module name (`core`, `asr`, `tts`, `session_loop`, …) or `project` for cross-cutting changes
 - **subject**: lowercase, imperative, no period (e.g. `add ASR interface`)
 
-Commit at natural checkpoints — when a task is complete and before starting the next one. Don’t split a single task into multiple commits.
+Propose a commit at natural checkpoints — when a task is complete and before starting the next one — and commit only after the user approves. Don’t split a single task into multiple commits.
 
 
