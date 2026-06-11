@@ -68,7 +68,7 @@ def run_concurrent_benchmark(
     from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
     print("  Loading VAP (maai-full-onnx)...")
-    from voice_pipeline.tts.tts import OpenAITTS
+    from voice_pipeline.tts.openai_tts import OpenAITTS
 
     MaAIVAPWrapper._FRAME_RATE = vap_frame_rate
     MaAIVAPWrapper._ORT_THREADS = vap_ort_threads

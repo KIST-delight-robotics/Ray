@@ -66,7 +66,7 @@ voice_pipeline/
 │   └── exceptions.py
 │
 ├── tts/
-│   ├── tts.py                 # OpenAITTS
+│   ├── openai_tts.py          # OpenAITTS
 │   ├── elevenlabs_tts.py      # ElevenLabsTTS (word timestamps)
 │   ├── factory.py             # create_tts vendor factory
 │   ├── greeting_audio.py      # Pre-generated greeting/farewell audio

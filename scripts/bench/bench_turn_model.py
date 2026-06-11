@@ -310,7 +310,7 @@ def create_vap_variant(
     import torch
 
     torch.set_num_threads(pt_threads)
-    from voice_pipeline.tts.tts import OpenAITTS
+    from voice_pipeline.tts.openai_tts import OpenAITTS
 
     tts_sample_rate = OpenAITTS.OUTPUT_SAMPLE_RATE
 

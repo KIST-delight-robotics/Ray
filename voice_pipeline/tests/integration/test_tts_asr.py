@@ -25,7 +25,7 @@ import pytest
 
 from voice_pipeline.asr.asr import GoogleCloudASR
 from voice_pipeline.tts.greeting_audio import synthesize_to_wav
-from voice_pipeline.tts.tts import OpenAITTS
+from voice_pipeline.tts.openai_tts import OpenAITTS
 
 from .conftest import make_silence_frames, read_wav_frames
 

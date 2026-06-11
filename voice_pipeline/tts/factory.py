@@ -6,7 +6,7 @@ from typing import Literal
 
 from voice_pipeline.core.interfaces import ITTS
 from voice_pipeline.tts.elevenlabs_tts import ElevenLabsTTS
-from voice_pipeline.tts.tts import OpenAITTS
+from voice_pipeline.tts.openai_tts import OpenAITTS
 
 _DEFAULT_VENDOR: Literal["openai", "elevenlabs"] = "elevenlabs"  # 기본 TTS vendor
 

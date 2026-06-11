@@ -9,7 +9,7 @@ import pytest
 
 from voice_pipeline.tts.elevenlabs_tts import ElevenLabsTTS
 from voice_pipeline.tts.factory import create_tts
-from voice_pipeline.tts.tts import OpenAITTS
+from voice_pipeline.tts.openai_tts import OpenAITTS
 
 
 class TestCreateTTS:
@@ -32,7 +32,7 @@ class TestCreateTTS:
         assert isinstance(tts, ElevenLabsTTS)
 
     def test_openai(self) -> None:
-        with patch("voice_pipeline.tts.tts.openai.OpenAI", return_value=MagicMock()):
+        with patch("voice_pipeline.tts.openai_tts.openai.OpenAI", return_value=MagicMock()):
             tts = create_tts("openai")
 
         assert isinstance(tts, OpenAITTS)

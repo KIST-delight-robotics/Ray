@@ -22,7 +22,7 @@ from voice_pipeline.core.types import (
 )
 from voice_pipeline.session_loop import SessionLoop, _PendingTruncation
 from voice_pipeline.trace.trace_store import InMemoryTraceStore
-from voice_pipeline.tts.tts import OpenAITTS
+from voice_pipeline.tts.openai_tts import OpenAITTS
 
 # ---------------------------------------------------------------------------
 # Fixture helper

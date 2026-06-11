@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from voice_pipeline.tts.elevenlabs_tts import ElevenLabsTTS
 from voice_pipeline.tts.factory import _DEFAULT_VENDOR, create_tts
 from voice_pipeline.tts.greeting_audio import synthesize_to_wav
-from voice_pipeline.tts.tts import OpenAITTS
+from voice_pipeline.tts.openai_tts import OpenAITTS
 
 
 def main() -> None:

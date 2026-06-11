@@ -17,7 +17,7 @@ import time
 import pytest
 
 from voice_pipeline.core.types import VAPResult
-from voice_pipeline.tts.tts import OpenAITTS
+from voice_pipeline.tts.openai_tts import OpenAITTS
 
 pytestmark = pytest.mark.requires_model
 

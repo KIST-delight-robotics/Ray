@@ -16,7 +16,7 @@ import struct
 import pytest
 
 from voice_pipeline.core.types import VAPResult
-from voice_pipeline.tts.tts import OpenAITTS
+from voice_pipeline.tts.openai_tts import OpenAITTS
 from voice_pipeline.turn_taking.exceptions import VAPError
 
 pytestmark = pytest.mark.requires_model

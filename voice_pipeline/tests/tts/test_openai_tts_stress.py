@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from voice_pipeline.tts.tts import OpenAITTS
+from voice_pipeline.tts.openai_tts import OpenAITTS
 
 pytestmark = pytest.mark.requires_api
 

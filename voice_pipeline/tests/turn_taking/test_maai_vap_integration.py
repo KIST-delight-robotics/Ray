@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from voice_pipeline.core.types import VAPResult
-from voice_pipeline.tts.tts import OpenAITTS
+from voice_pipeline.tts.openai_tts import OpenAITTS
 
 if TYPE_CHECKING:
     from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper

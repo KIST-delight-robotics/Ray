@@ -9,7 +9,7 @@ import pytest
 
 from voice_pipeline.tests.tts.conftest import create_mock_client
 from voice_pipeline.tts.exceptions import TTSError
-from voice_pipeline.tts.tts import OpenAITTS
+from voice_pipeline.tts.openai_tts import OpenAITTS
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,7 +41,7 @@ def _build_tts(
         if key not in _CLASS_VAR_MAP:
             raise TypeError(f"Unknown override: {key}")
         monkeypatch.setattr(OpenAITTS, _CLASS_VAR_MAP[key], value)
-    with patch("voice_pipeline.tts.tts.openai.OpenAI", return_value=mock_client):
+    with patch("voice_pipeline.tts.openai_tts.openai.OpenAI", return_value=mock_client):
         return OpenAITTS()
 
 

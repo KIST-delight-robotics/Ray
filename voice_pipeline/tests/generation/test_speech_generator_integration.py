@@ -25,7 +25,7 @@ from voice_pipeline.history.conversation_history import ConversationHistory
 from voice_pipeline.history.storage_backend import MemoryStorageBackend
 from voice_pipeline.llm.llm import OpenAILLM
 from voice_pipeline.llm.token_counter import create_token_counter
-from voice_pipeline.tts.tts import OpenAITTS
+from voice_pipeline.tts.openai_tts import OpenAITTS
 
 pytestmark = pytest.mark.requires_api
 
