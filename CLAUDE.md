@@ -66,7 +66,9 @@ voice_pipeline/
 │   └── exceptions.py
 │
 ├── tts/
-│   ├── tts.py                 # TTS interface impl
+│   ├── tts.py                 # OpenAITTS
+│   ├── elevenlabs_tts.py      # ElevenLabsTTS (word timestamps)
+│   ├── factory.py             # create_tts vendor factory
 │   ├── greeting_audio.py      # Pre-generated greeting/farewell audio
 │   ├── utterance_truncator.py # Barge-in text truncation strategies
 │   └── exceptions.py

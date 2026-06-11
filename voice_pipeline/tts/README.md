@@ -1,22 +1,28 @@
 # TTS Module
 
-Streaming text-to-speech using the OpenAI Audio API.
+Streaming text-to-speech. `ITTS` 인터페이스 뒤에 두 vendor 구현:
 
-API constraints (models, rate limits, PCM format, etc.) are documented in [`openai_tts_api_reference.md`](openai_tts_api_reference.md).
+- **`ElevenLabsTTS`** (기본) — ElevenLabs `stream/with-timestamps` API. word timestamps 지원.
+- **`OpenAITTS`** — OpenAI Audio API. timestamps 미지원.
+
+vendor 선택은 `create_tts()` 팩토리 — 기본 vendor는 `factory.py`의 `_DEFAULT_VENDOR`.
+
+OpenAI API constraints (models, rate limits, PCM format, etc.) are documented in [`openai_tts_api_reference.md`](openai_tts_api_reference.md).
 
 
 ## Setup
 
-Set the OpenAI API key environment variable:
+사용하는 vendor의 API 키 환경변수 설정:
 
 ```bash
-export OPENAI_API_KEY=sk-...
+export ELEVENLABS_API_KEY=...   # ElevenLabsTTS (기본 vendor)
+export OPENAI_API_KEY=sk-...    # OpenAITTS
 ```
 
 
 ## 클래스 변수
 
-`OpenAITTS` 클래스 내부 상수.
+### `OpenAITTS`
 
 | 변수 | 값 | 의미 |
 |------|------|------|
@@ -30,19 +36,38 @@ export OPENAI_API_KEY=sk-...
 | `_TIMEOUT_SEC` | `30.0` | 합성 응답 대기 최대 시간 (초) |
 | `_CHUNK_SIZE` | `4096` | 스트리밍 오디오 버퍼 크기 (바이트) |
 
+### `ElevenLabsTTS`
+
+| 변수 | 값 | 의미 |
+|------|------|------|
+| `OUTPUT_SAMPLE_RATE` | `24000` | `pcm_24000` 출력 샘플레이트 (Hz). OpenAITTS와 동일 |
+| `_VOICE_ID` | `"EXAVITQu4vr4xnSDxMaL"` | ElevenLabs voice ID (Sarah — 임시 영어 default voice) |
+| `_MODEL` | `"eleven_flash_v2_5"` | 최저 지연 모델 (`eleven_turbo_v2_5`, `eleven_multilingual_v2` 등) |
+| `_OUTPUT_FORMAT` | `"pcm_24000"` | 출력 포맷 (tier 제한 없음; `pcm_44100`은 Pro 전용) |
+| `_VOICE_SETTINGS` | `None` | voice 세부 설정 dict (`stability`, `similarity_boost`, `style`, `speed`) |
+| `_MAX_RETRIES` | `2` | 자동 재시도 횟수 (스트리밍 시작 전 한정) |
+| `_TIMEOUT_SEC` | `10.0` | httpx timeout (SDK 기본 240s override) |
+| `_MAX_TEXT_LEN` | `4096` | 입력 길이 상한 |
+
 `voice_id`는 음성 식별자 (vendor + 설정), 캐시 무효화 등에 사용.
 
 
 ## Usage
+
+### Vendor selection
+
+```python
+from voice_pipeline.tts import create_tts
+
+tts = create_tts()          # 기본 vendor (elevenlabs)
+tts = create_tts("openai")  # 명시적 선택
+```
 
 ### Streaming synthesis
 
 `synthesize()` returns a `TTSStream` that yields PCM audio chunks (24 kHz, 16-bit signed LE, mono).
 
 ```python
-from voice_pipeline.tts import OpenAITTS
-
-tts = OpenAITTS()
 stream = tts.synthesize("Hello world")
 
 for chunk in stream:
@@ -50,8 +75,8 @@ for chunk in stream:
     pass
 
 # After full iteration, audio and timestamps are available
-audio = stream.audio          # bytes: full PCM audio
-timestamps = stream.timestamps  # tuple: () for OpenAI (no word timestamps)
+audio = stream.audio            # bytes: full PCM audio
+timestamps = stream.timestamps  # ElevenLabs: word timestamps / OpenAI: ()
 result = stream.result          # TTSResult(audio, timestamps)
 ```
 
@@ -89,7 +114,7 @@ tts = OpenAITTS()
 
 ## PCM output format
 
-OpenAI TTS with `response_format="pcm"` produces:
+두 vendor 모두 동일 (OpenAI `response_format="pcm"`, ElevenLabs `output_format="pcm_24000"`):
 
 | Property | Value |
 |----------|-------|
@@ -102,7 +127,12 @@ OpenAI TTS with `response_format="pcm"` produces:
 
 ## Word timestamps
 
-OpenAI TTS does **not** support word-level timestamps. `stream.timestamps` returns `()`. For barge-in text truncation, use `DurationRatioTruncator` which estimates from audio duration.
+| Vendor | 지원 | barge-in 절단 경로 |
+|--------|------|--------------------|
+| `ElevenLabsTTS` | O | `truncate_by_timestamps` (정밀) |
+| `OpenAITTS` | X (`()` 반환) | `truncate_by_ratio` (duration 비율 추정 fallback) |
+
+ElevenLabs는 character alignment를 공백 기준 word로 집계해 제공. timestamps는 스트림 완전 소비 후에만 접근 가능 (`TTSStream` 계약). 집계는 best-effort — alignment 이상(길이 불일치, 시간 역전)은 절단/clamp 처리하며 예외를 던지지 않음.
 
 
 ## Greeting/Farewell Audio
@@ -131,19 +161,22 @@ OpenAI TTS does **not** support word-level timestamps. `stream.timestamps` retur
 ### Unit tests (mocked)
 
 ```bash
-uv run pytest voice_pipeline/tests/tts/test_tts.py -v
+uv run pytest voice_pipeline/tests/tts -v
 ```
 
-35 tests with mocked OpenAI client — no API credentials needed.
+Mocked vendor clients — no API credentials needed.
 
 ### Integration & stress tests (real API)
 
 ```bash
-OPENAI_API_KEY=sk-... uv run pytest -m requires_api voice_pipeline/tests/tts/ -v
+OPENAI_API_KEY=sk-... ELEVENLABS_API_KEY=... uv run pytest -m requires_api voice_pipeline/tests/tts/ -v
 ```
+
+키가 없는 vendor의 테스트는 자동 skip.
 
 ### Environment variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `OPENAI_API_KEY` | Yes | — | OpenAI API key |
+| `OPENAI_API_KEY` | openai 사용/테스트 시 | — | OpenAI API key |
+| `ELEVENLABS_API_KEY` | elevenlabs 사용/테스트 시 | — | ElevenLabs API key |

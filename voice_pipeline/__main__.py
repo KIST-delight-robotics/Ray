@@ -55,8 +55,8 @@ from voice_pipeline.trace.openai_retry_handler import OpenAIRetryHandler
 from voice_pipeline.trace.trace_store import SQLiteCallStore, SQLiteTraceStore
 from voice_pipeline.trace.tracked_embedder import TrackedEmbedder
 from voice_pipeline.trace.tracked_tts import TrackedTTS
+from voice_pipeline.tts.factory import create_tts
 from voice_pipeline.tts.greeting_audio import ensure_greeting_audio
-from voice_pipeline.tts.tts import OpenAITTS
 from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT
 from voice_pipeline.turn_taking.async_vap import AsyncVAP
 from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
@@ -137,7 +137,7 @@ def main() -> None:
     # --- Process-level singletons ---
     asr = GoogleCloudASR(language_code=language_code)
     llm = OpenAILLM(model="gpt-5.4", temperature=0.7, reasoning_effort="none", max_tokens=256, tools=["web_search"])
-    tts = OpenAITTS()
+    tts = create_tts()
     vap = MaAIVAPWrapper(tts.output_sample_rate)
     turngpt = TurnGPTWrapper()
     bridge = CppBridge()

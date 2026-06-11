@@ -558,6 +558,23 @@ wheels = [
 ]
 
 [[package]]
+name = "elevenlabs"
+version = "2.52.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "requests" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d0/eb/8673dac4b69c1bd8f4d7257fe876e2d5d688d97c496296056ecbd12f67fd/elevenlabs-2.52.0.tar.gz", hash = "sha256:8cbb22418a9ff51251f5e524fe88505bd70be1c4c180b7ebe7998110c8330bee", size = 632488, upload-time = "2026-06-09T09:44:45.405Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b0/e3/e6aaadb21d2b3f190edf4dcecf83290d2ea8bbc11b6d1fcf807ff7f33fed/elevenlabs-2.52.0-py3-none-any.whl", hash = "sha256:c9c8048431dadea691a1561b44e775240c012a1eaa84159d67a1ee935bed3b3f", size = 1715594, upload-time = "2026-06-09T09:44:43.416Z" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.135.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2563,6 +2580,7 @@ name = "ray-revamped"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "elevenlabs" },
     { name = "google-cloud-speech" },
     { name = "num2words" },
     { name = "onnxruntime" },
@@ -2600,6 +2618,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "einops", marker = "extra == 'models-pytorch'", specifier = ">=0.8" },
+    { name = "elevenlabs", specifier = ">=2.52,<3.0" },
     { name = "google-cloud-speech", specifier = ">=2.0,<3.0" },
     { name = "maai", marker = "extra == 'models-pytorch'", specifier = ">=0.1" },
     { name = "num2words", specifier = ">=0.5.14" },

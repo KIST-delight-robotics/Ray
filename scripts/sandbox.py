@@ -521,12 +521,15 @@ def create_turngpt() -> ITurnGPT:
     return TurnGPTWrapper()
 
 
-def create_tts() -> ITTS:
-    """Create a real OpenAI TTS.
+def create_tts(vendor: str | None = None) -> ITTS:
+    """Create a real TTS via the vendor factory (production parity).
 
-    Requires ``OPENAI_API_KEY`` environment variable.
+    Requires the vendor's API key env var (``ELEVENLABS_API_KEY`` or
+    ``OPENAI_API_KEY``). *vendor*가 None이면 팩토리 기본 vendor 사용.
     """
-    return OpenAITTS()
+    from voice_pipeline.tts.factory import create_tts as _create_tts
+
+    return _create_tts(vendor) if vendor is not None else _create_tts()
 
 
 def create_bridge() -> ICppBridge:

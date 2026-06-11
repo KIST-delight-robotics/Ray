@@ -201,6 +201,17 @@ use-after-free 경합 회피) — 토크만 끄고 즉시 종료, 나머지는 O
 - 계측 코드는 진단 후 제거함 — 재발 시 같은 방식(단계별 마킹 + 세션 종료 debug 요약)을 다시 삽입하면 busy/it 부풀음(시스템 부하) vs 특정 스테이지 스파이크(코드 문제)를 한 줄로 구분 가능.
 
 
+## TTS vendor 추가 — ElevenLabs
+
+- **`stream/with-timestamps` endpoint 채택**: base64+JSON 스트림이라 raw PCM 대비 네트워크 ~33% 오버헤드가 있지만, character alignment → word timestamp 집계로 `truncate_by_timestamps` 정밀 barge-in 절단이 처음으로 활성화됨 (OpenAI는 timestamp 미지원이라 지금까지 항상 ratio 추정 fallback). 오버헤드가 Pi에서 문제로 실측되면(TrackedTTS `ttfc_ms`/`max_gap_ms`) 기본 stream endpoint로 전환 가능한 구조 — `_iter_chunks`만 교체.
+- **`pcm_24000` 고정**: OpenAITTS와 샘플레이트를 맞춰 VAP 참조 채널·C++ 재생·greeting WAV 등 downstream 전부 무변경. tier 제한도 없음 (`pcm_44100`은 Pro 전용).
+- **vendor 선택 = `create_tts()` 팩토리 + 모듈 내 파라미터 기본값**: 팩토리는 추상화 수단이 아니라(추상화는 `ITTS`가 담당) "이름→클래스" 매핑의 단일 위치 — 스크립트 `--vendor` 인자 같은 런타임 선택용. 기본 vendor는 `factory.py`의 `_DEFAULT_VENDOR`처럼 모듈 안 파라미터 기본값으로 — `create_embedder(backend="local")` 선례. env var는 설정 표면 증가라 배제, mutable 모듈 전역 대입은 wiring 결정이 두 곳으로 갈라져 기각.
+- **SDK gotcha — lazy generator**: `stream_with_timestamps()`는 generator function이라 HTTP 요청·에러가 첫 `next()`에서 발생 (OpenAI의 eager CM enter와 다름). 인증/voice 에러도 `synthesize()`가 아닌 iteration 중 TTSError로 표면화 — TrackedTTS에는 synthesize=ok + stream=error로 기록됨 (cosmetic). pydantic 속성명은 `audio_base_64` (wire alias는 `audio_base64`). SDK 기본 timeout 240s는 실시간 대화에 부적합해 override 필수.
+- **timestamps 집계는 절대 raise 금지**: sentence 모드 consumer에서 `stream.timestamps` 읽기 예외는 턴 전체를 실패시킴 (consumer_error 경로). alignment 길이 불일치는 절단+warning, 시간 역전/음수는 clamp. timestamps는 best-effort 부가 기능 — 실패해도 오디오 재생은 정상이어야 함.
+- **단어 집계 = 공백 run 분리, 전역 누적 후 1회 집계**: `truncate_by_timestamps`가 `text.split()` 토큰을 전제하므로 character alignment를 `ch.isspace()` run 기준으로 묶음. 단어가 chunk 경계에 걸칠 수 있어 chunk별 집계가 아니라 스트림 종료 시점 1회 집계 (alignment 시간은 오디오 시작 기준 절대값).
+- **Free tier voice 제약 — 구형 premade는 API 불가**: Rachel(`21m00…`) 등 구형 premade voice는 라이브러리로 이관돼 Free tier에서 API 호출 시 402 `paid_plan_required`. 현행 default voice(Sarah/George/Daniel/Jessica 등)는 사용 가능 — 실호출로 확인. scoped API 키는 `voices_read` 권한이 없어 voice 목록 조회도 불가하므로, voice 교체 시 TTS 실호출로 검증해야 함. `pcm_24000`+`eleven_flash_v2_5`+`stream_with_timestamps` 조합은 Free tier에서 동작 확인됨.
+
+
 ## 차후 고려
 
 - **SimilarityConfig/MemoryConfig 임베딩 필드 중복**: 양쪽 config에 model, use_onnx 등이 중복 존재. 공유 EmbeddingConfig 추출 여부는 실제 사용 패턴 보고 판단.
