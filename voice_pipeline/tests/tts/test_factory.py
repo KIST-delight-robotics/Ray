@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,13 +14,19 @@ from voice_pipeline.tts.tts import OpenAITTS
 
 class TestCreateTTS:
     def test_default_is_elevenlabs(self) -> None:
-        with patch("voice_pipeline.tts.elevenlabs_tts.ElevenLabs", return_value=MagicMock()):
+        with (
+            patch.dict(os.environ, {"ELEVENLABS_API_KEY": "test-key"}),
+            patch("voice_pipeline.tts.elevenlabs_tts.ElevenLabs", return_value=MagicMock()),
+        ):
             tts = create_tts()
 
         assert isinstance(tts, ElevenLabsTTS)
 
     def test_elevenlabs(self) -> None:
-        with patch("voice_pipeline.tts.elevenlabs_tts.ElevenLabs", return_value=MagicMock()):
+        with (
+            patch.dict(os.environ, {"ELEVENLABS_API_KEY": "test-key"}),
+            patch("voice_pipeline.tts.elevenlabs_tts.ElevenLabs", return_value=MagicMock()),
+        ):
             tts = create_tts("elevenlabs")
 
         assert isinstance(tts, ElevenLabsTTS)

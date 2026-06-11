@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -41,7 +42,10 @@ def _build_tts(
         if key not in _CLASS_VAR_MAP:
             raise TypeError(f"Unknown override: {key}")
         monkeypatch.setattr(ElevenLabsTTS, _CLASS_VAR_MAP[key], value)
-    with patch("voice_pipeline.tts.elevenlabs_tts.ElevenLabs", return_value=mock_client):
+    with (
+        patch.dict(os.environ, {"ELEVENLABS_API_KEY": "test-key"}),
+        patch("voice_pipeline.tts.elevenlabs_tts.ElevenLabs", return_value=mock_client),
+    ):
         return ElevenLabsTTS()
 
 
@@ -216,6 +220,26 @@ class TestTimestamps:
         result = stream.result
         assert result.audio == b"\x01\x02"
         assert [t.word for t in result.timestamps] == ["Hi"]
+
+
+# ---------------------------------------------------------------------------
+# TestMissingApiKey
+# ---------------------------------------------------------------------------
+
+
+class TestMissingApiKey:
+    def test_constructor_fails_fast_without_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """SDK alone would defer the 401 to the first request — we fail at construction."""
+        monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+
+        with pytest.raises(TTSError, match="ELEVENLABS_API_KEY"):
+            ElevenLabsTTS()
+
+    def test_empty_key_also_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ELEVENLABS_API_KEY", "")
+
+        with pytest.raises(TTSError, match="ELEVENLABS_API_KEY"):
+            ElevenLabsTTS()
 
 
 # ---------------------------------------------------------------------------

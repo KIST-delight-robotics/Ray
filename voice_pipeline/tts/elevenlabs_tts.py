@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 from collections.abc import Generator
 from typing import Any
 
@@ -23,10 +24,11 @@ logger = logging.getLogger("voice_pipeline.tts")
 class ElevenLabsTTS(ITTS):
     """TTS implementation using the ElevenLabs API with streaming + timestamps.
 
-    Reads ``ELEVENLABS_API_KEY`` from the environment (SDK default). Streams
-    raw PCM audio (24 kHz, 16-bit signed LE, mono) via the
-    ``stream_with_timestamps`` endpoint; word-level timestamps are aggregated
-    from character alignment and exposed on the stream after full consumption.
+    Reads ``ELEVENLABS_API_KEY`` from the environment; raises :class:`TTSError`
+    at construction if missing. Streams raw PCM audio (24 kHz, 16-bit signed
+    LE, mono) via the ``stream_with_timestamps`` endpoint; word-level
+    timestamps are aggregated from character alignment and exposed on the
+    stream after full consumption.
 
     The returned :class:`TTSStream` must be fully consumed or explicitly
     closed to release the underlying HTTP connection.
@@ -44,7 +46,10 @@ class ElevenLabsTTS(ITTS):
     _MAX_TEXT_LEN = 4096  # 보수적 입력 길이 상한 (OpenAITTS와 동일 동작)
 
     def __init__(self) -> None:
-        # api_key 미지정 시 SDK가 ELEVENLABS_API_KEY env var를 읽음.
+        # SDK는 키가 없어도 클라이언트를 생성하고 첫 요청에야 401을 내므로
+        # (OpenAI SDK와 달리) 생성 시점에 직접 검증해 fail-fast.
+        if not os.environ.get("ELEVENLABS_API_KEY"):
+            raise TTSError("ELEVENLABS_API_KEY environment variable not set")
         self._client = ElevenLabs(timeout=self._TIMEOUT_SEC)
 
     @property
