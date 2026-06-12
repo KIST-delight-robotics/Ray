@@ -75,6 +75,7 @@ class TurnDetector(ITurnDetector):
 
     # ROBOT_TURN 중 interrupt 판정
     _INTERRUPT_USER_THRESHOLD = 0.5  # p_now/p_fut가 이 값 초과면 user 선호
+    _ROBOT_SPEECH_LOG_INTERVAL = 5  # ROBOT_TURN 중 user 발화 프레임의 p값 debug 로그 주기 (임계 마진 관측용)
 
     # 외부 VAD 임계값 (vad_fn 사용 시)
     _EXT_VAD_THRESHOLD = 0.5
@@ -118,6 +119,7 @@ class TurnDetector(ITurnDetector):
         self._last_prepare_text: str = ""
         self._turngpt_prob: float = 0.0
         self._debug_vad_counter: int = 0
+        self._robot_speech_frame_count: int = 0
 
     # ------------------------------------------------------------------
     # ITurnDetector interface
@@ -257,6 +259,7 @@ class TurnDetector(ITurnDetector):
     def _reset_per_frame_state(self) -> None:
         """Clear all per-frame tracking variables."""
         self._turngpt.clear_pending()
+        self._robot_speech_frame_count = 0
         self._prev_asr_text = ""
         self._vap_favor_robot_elapsed_sec = 0.0
         self._silence_elapsed_sec = 0.0
@@ -312,6 +315,17 @@ class TurnDetector(ITurnDetector):
         """
         if not user_is_speaking:
             return TurnDecision.none()
+
+        # 임계 마진 관측: user 발화 중인데 interrupt가 안 뜨는 경우의 p값을 남긴다
+        self._robot_speech_frame_count += 1
+        if self._robot_speech_frame_count % self._ROBOT_SPEECH_LOG_INTERVAL == 1:
+            logger.debug(
+                "ROBOT_TURN user speech: p_now=%.2f p_fut=%.2f (threshold %.2f) robot_audio=%s",
+                vap_result.p_now,
+                vap_result.p_fut,
+                self._INTERRUPT_USER_THRESHOLD,
+                robot_audio is not None,
+            )
 
         # VAP needs both channels to distinguish interrupt vs backchannel
         if (
