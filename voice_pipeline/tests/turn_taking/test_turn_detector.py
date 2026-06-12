@@ -263,6 +263,49 @@ class TestTurnShiftPrepareDefer:
         assert decision.turn_shift
         assert detector._turn_state is _TurnState.PENDING
 
+    def test_fresh_dissimilar_change_preempts_shift(self):
+        """발화 조건(turngpt/0.2s 스로틀) 미충족인 신규 변화도 turn_shift 직전에는 prepare가 선점."""
+        detector, mock_vap, _ = _make_detector(embedder=_make_embedder_mock(similarity=0.3))
+        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, False)
+        detector._silence_elapsed_sec = 3.0  # turn_shift 조건 충족 (turngpt_3.0)
+        detector._prev_asr_text = "is there"
+        detector._last_prepare_text = "is"
+        detector._asr_has_changed = True
+        detector._last_asr_change_elapsed_sec = 0.03  # 스로틀(0.2s) 미충족 — 우회 대상
+
+        decision = detector.process_frame(FRAME, "is there")
+        assert decision.prepare
+        assert not decision.turn_shift
+        assert detector._turn_state is _TurnState.USER_TURN
+
+    def test_fresh_similar_change_records_skip_and_shifts(self):
+        """유사한 신규 변화는 skip을 기록하고 같은 프레임에서 shift가 진행된다."""
+        store = InMemoryCallStore()
+        mock_vap = MagicMock(spec=IVAP)
+        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, False)
+        mock_turngpt = MagicMock(spec=ITurnGPT)
+        mock_turngpt.predict.return_value = 0.0
+        detector = TurnDetector(
+            mock_vap,
+            SyncTurnGPTAdapter(mock_turngpt),
+            _make_embedder_mock(similarity=0.95),
+            call_store=store,
+            session_id="s",
+        )
+        detector._silence_elapsed_sec = 3.0
+        detector._prev_asr_text = "is there."
+        detector._last_prepare_text = "is there"
+        detector._asr_has_changed = True
+        detector._last_asr_change_elapsed_sec = 0.03
+
+        decision = detector.process_frame(FRAME, "is there.")
+        assert decision.turn_shift
+        assert detector._turn_state is _TurnState.PENDING
+
+        recs = [r for r in store.records if r.operation == "prepare_gate"]
+        assert len(recs) == 1
+        assert json.loads(recs[0].metadata)["decision"] == "skip"
+
 
 # ---------------------------------------------------------------------------
 # Test 6b: PENDING cancel detection

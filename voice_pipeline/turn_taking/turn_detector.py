@@ -192,14 +192,18 @@ class TurnDetector(ITurnDetector):
         )
 
         # Prepare preempts turn-shift on a fresh dissimilar change (→ regenerate).
-        if self._check_prepare(asr_text):
+        # turn_shift 직전에는 발화 조건(turngpt/0.2s 스로틀)을 우회 — 스로틀은 발화
+        # 진행 중의 재생성 억제가 목적인데, 이 턴의 마지막 평가 기회인 shift 시점에는
+        # 미처리 변화를 유사도 게이트로 즉시 판정해야 stale 응답 커밋을 막는다.
+        if self._check_prepare(asr_text, at_turn_shift=turn_shift_reason is not None):
             prob = self._turngpt_prob
             thresh = self._PREPARE_TURNGPT_THRESHOLD
-            prepare_reason = (
-                f"turngpt={prob:.2f}>{thresh:.2f}"
-                if prob > thresh
-                else f"timeout={self._last_asr_change_elapsed_sec:.2f}s"
-            )
+            if prob > thresh:
+                prepare_reason = f"turngpt={prob:.2f}>{thresh:.2f}"
+            elif self._last_asr_change_elapsed_sec >= self._PREPARE_TIMEOUT_SEC:
+                prepare_reason = f"timeout={self._last_asr_change_elapsed_sec:.2f}s"
+            else:
+                prepare_reason = "turn_shift"
             logger.debug("PREPARE (%s): text=%r", prepare_reason, asr_text[:60])
             return TurnDecision(prepare=True)
 
@@ -437,17 +441,25 @@ class TurnDetector(ITurnDetector):
         sim = float(np.dot(vecs[0], vecs[1]) / (np.linalg.norm(vecs[0]) * np.linalg.norm(vecs[1]) + 1e-9))
         return sim, elapsed_ms
 
-    def _check_prepare(self, asr_text: str) -> bool:
-        """Check if speculative generation should be triggered."""
+    def _check_prepare(self, asr_text: str, at_turn_shift: bool = False) -> bool:
+        """Check if speculative generation should be triggered.
+
+        Args:
+            asr_text: 현재 ASR 텍스트.
+            at_turn_shift: turn_shift가 같은 프레임에서 발화 직전인지. True면
+                발화 조건(turngpt/0.2s 스로틀)을 우회해 미처리 변화를 즉시
+                판정한다 — ``_asr_has_changed`` 요건과 유사도 게이트는 그대로.
+        """
         if not self._asr_has_changed or not asr_text:
             return False
 
-        condition = (
-            self._turngpt_prob > self._PREPARE_TURNGPT_THRESHOLD
-            or self._last_asr_change_elapsed_sec >= self._PREPARE_TIMEOUT_SEC
-        )
-        if not condition:
-            return False
+        if not at_turn_shift:
+            condition = (
+                self._turngpt_prob > self._PREPARE_TURNGPT_THRESHOLD
+                or self._last_asr_change_elapsed_sec >= self._PREPARE_TIMEOUT_SEC
+            )
+            if not condition:
+                return False
 
         # Similarity gate: skip if text is too similar to last prepare
         if self._last_prepare_text:
