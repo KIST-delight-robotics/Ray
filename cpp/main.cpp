@@ -66,10 +66,13 @@ std::string vocal_file_path;
 
 std::chrono::time_point<std::chrono::high_resolution_clock> start_time; // 쓰레드 대기 시간 설정용
 
-std::atomic<bool> stop_flag(false);
+// 파이프라인 단계별 생산 완료 플래그 — 각 소비 스레드는 "직속 상류 done && 입력 큐 empty"로 종료 판단
+std::atomic<bool> audio_done_flag(false);   // read/stream_and_split → generate_motion, CustomSoundStream
+std::atomic<bool> motion_done_flag(false);  // generate_motion → control_motor
 std::atomic<bool> user_interruption_flag(false);
 std::atomic<bool> is_speaking(false);
 std::atomic<bool> g_shutdown_requested(false);  // 시그널 핸들러가 세움 → 워처 스레드가 정리·종료
+std::atomic<int>  g_shutdown_signum{0};          // 핸들러가 저장(async-signal-safe) → 워처가 메시지에 출력
 
 int first_move_flag = 1;
 float final_result = 0.0f;
@@ -209,8 +212,8 @@ protected:
     std::unique_lock<std::mutex> lock(m_mutex);
 
         if (m_samples.empty()) {
-            // stop_flag가 설정되었고 버퍼가 비었으면 스트림을 중지합니다.
-            if (stop_flag) {
+            // 오디오 생산이 끝났고(audio_done_flag) 버퍼가 비었으면 스트림을 중지합니다.
+            if (audio_done_flag) {
                 return false;
             }
 
@@ -624,7 +627,7 @@ void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream) {
     }
 
     // --- 4. 종료 처리 ---
-    stop_flag = true;
+    audio_done_flag = true;
     audio_queue_cv.notify_one();
 }
 
@@ -649,7 +652,7 @@ void read_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& 
         if (!vocal_sndfile) {
             std::lock_guard<std::mutex> lock(cout_mutex);
             std::cerr << "Error: Vocal file not found at " << vocal_file_path << ". Aborting playback." << std::endl;
-            stop_flag = true;
+            audio_done_flag = true;
             audio_queue_cv.notify_one(); // 대기 중인 스레드를 깨워 즉시 종료
             return; // 함수 즉시 종료
         }
@@ -709,7 +712,7 @@ void read_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& 
 
     // --- 4. 종료 처리 ---
     // 모든 처리가 끝났음을 후속 스레드에 알립니다.
-    stop_flag = true;
+    audio_done_flag = true;
     audio_queue_cv.notify_one(); // 대기 중인 generate_motion 스레드를 깨워 종료 조건을 확인시킵니다.
     if (vocal_sndfile) sf_close(vocal_sndfile);
 }
@@ -952,7 +955,7 @@ void generate_motion(int channels, int samplerate) {
         }
         wait_for_next_cycle(cycle_num);
 
-        if (stop_flag && audio_queue.empty()) {
+        if (audio_done_flag && audio_queue.empty()) {
             std::cout << "generate motion break ------------------------" << std::endl;
             break;
         }
@@ -971,9 +974,9 @@ void generate_motion(int channels, int samplerate) {
         std::vector<float> next_peek;
         {
             std::unique_lock<std::mutex> lock(audio_queue_mutex);
-            audio_queue_cv.wait(lock, [] { return !audio_queue.empty() || stop_flag || user_interruption_flag; });
+            audio_queue_cv.wait(lock, [] { return !audio_queue.empty() || audio_done_flag || user_interruption_flag; });
 
-            if ((stop_flag || user_interruption_flag) && audio_queue.empty()) {
+            if ((audio_done_flag || user_interruption_flag) && audio_queue.empty()) {
                 std::cout << "generate motion break ------------------------" << std::endl;
                 break;
             }
@@ -1199,6 +1202,8 @@ void generate_motion(int channels, int samplerate) {
         mouth_motion_queue_cv.notify_one();
     }
 
+    // 모션 생산 완료 — control_motor의 종료 판단 기준 (모든 종료 경로 공통)
+    motion_done_flag = true;
     // interrupt/종료 시 control_motor가 wait에서 깨어날 수 있도록 notify
     mouth_motion_queue_cv.notify_all();
 }
@@ -1239,7 +1244,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
 
         std::unique_lock<std::mutex> lock(mouth_motion_queue_mutex);
         mouth_motion_queue_cv.wait(lock, [&] {
-            return user_interruption_flag || (stop_flag && mouth_motion_queue.empty()) || (!mouth_motion_queue.empty() && !head_motion_queue.empty());
+            return user_interruption_flag || (motion_done_flag && mouth_motion_queue.empty()) || (!mouth_motion_queue.empty() && !head_motion_queue.empty());
         });
         if (user_interruption_flag) {
             std::cout << "Interruption detected in control_motor (outer wait)." << std::endl;
@@ -1252,7 +1257,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
         }
         lock.unlock();
 
-        if (stop_flag && mouth_motion_queue.empty()) {
+        if (motion_done_flag && mouth_motion_queue.empty()) {
             std::cout << "control_motor break1 -------------------- " << get_time_str() << std::endl;
             break;
         }
@@ -1284,14 +1289,14 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
             {
                 std::unique_lock<std::mutex> lock(mouth_motion_queue_mutex);
 
-                if (stop_flag && mouth_motion_queue.empty()) {
+                if (motion_done_flag && mouth_motion_queue.empty()) {
                     std::cout << "motion queue size :  " << mouth_motion_queue.size() << ", control_motor (" << mode_label << ") break2 -------------------- " << get_time_str() << std::endl;
                     if (log_opened) g_pos4_audio_logger.close();
                     return;
                 }
 
                 mouth_motion_queue_cv.wait(lock, [&] {
-                    return user_interruption_flag || (stop_flag && mouth_motion_queue.empty()) || (!mouth_motion_queue.empty() && mouth_motion_queue.front().first == cycle_num - 1);
+                    return user_interruption_flag || (motion_done_flag && mouth_motion_queue.empty()) || (!mouth_motion_queue.empty() && mouth_motion_queue.front().first == cycle_num - 1);
                 });
 
                 if (user_interruption_flag) {
@@ -1299,7 +1304,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
                     return;
                 }
 
-                if (stop_flag && mouth_motion_queue.empty()) {
+                if (motion_done_flag && mouth_motion_queue.empty()) {
                     if (log_opened) g_pos4_audio_logger.close();
                     return;
                 }
@@ -1452,7 +1457,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
 //         }
 //         wait_for_next_cycle(cycle_num);
 //
-//         if (stop_flag && audio_queue.empty()) {
+//         if (audio_done_flag && audio_queue.empty()) {
 //             std::cout << "generate motion break ------------------------" << std::endl;
 //             break;
 //         }
@@ -1469,9 +1474,9 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
 //         std::vector<float> next_peek;
 //         {
 //             std::unique_lock<std::mutex> lock(audio_queue_mutex);
-//             audio_queue_cv.wait(lock, [] { return !audio_queue.empty() || stop_flag; });
+//             audio_queue_cv.wait(lock, [] { return !audio_queue.empty() || audio_done_flag; });
 //
-//             if (stop_flag && audio_queue.empty()) {
+//             if (audio_done_flag && audio_queue.empty()) {
 //                 std::cout << "generate motion break ------------------------" << std::endl;
 //                 break;
 //             }
@@ -1692,7 +1697,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
 //
 //             std::unique_lock<std::mutex> lock(mouth_motion_queue_mutex);
 //             mouth_motion_queue_cv.wait(lock, [&] {
-//                 return (stop_flag && mouth_motion_queue.empty()) ||
+//                 return (audio_done_flag && mouth_motion_queue.empty()) ||
 //                     (!mouth_motion_queue.empty() && !head_motion_queue.empty());
 //             });
 //             if (!head_motion_queue.empty()) {
@@ -1701,7 +1706,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
 //             }
 //             lock.unlock();
 //
-//             if (stop_flag && mouth_motion_queue.empty()) {
+//             if (audio_done_flag && mouth_motion_queue.empty()) {
 //                 std::cout << "control_motor break1 -------------------- " << get_time_str() << std::endl;
 //                 break;
 //             }
@@ -1725,14 +1730,14 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
 //                 {
 //                     std::unique_lock<std::mutex> lock(mouth_motion_queue_mutex);
 //
-//                     if (stop_flag && mouth_motion_queue.empty()) {
+//                     if (audio_done_flag && mouth_motion_queue.empty()) {
 //                         std::cout << "motion queue size :  " << mouth_motion_queue.size()
 //                                 << ", control_motor (" << mode_label << ") break2 -------------------- " << get_time_str() << std::endl;
 //                         return;
 //                     }
 //
 //                     mouth_motion_queue_cv.wait(lock, [&] {
-//                         return (stop_flag && mouth_motion_queue.empty()) ||
+//                         return (audio_done_flag && mouth_motion_queue.empty()) ||
 //                             (!mouth_motion_queue.empty() &&
 //                                 mouth_motion_queue.front().first == cycle_num - 1);
 //                     });
@@ -2602,7 +2607,7 @@ void cleanup_dynamixel() {
 //  모터 write 중 인터럽트당하면 같은 뮤텍스를 기다리며 데드락 → Ctrl+C 무반응이었다.)
 // 실제 정리·종료는 정상 스레드 컨텍스트인 shutdown_watcher가 수행한다.
 void signal_handler(int signum) {
-    (void)signum;
+    g_shutdown_signum = signum;
     g_shutdown_requested = true;
 }
 
@@ -2612,9 +2617,9 @@ void shutdown_watcher() {
     while (!g_shutdown_requested) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    std::cout << "\n종료 신호 수신. 정리 후 종료합니다." << std::endl;
+    std::cout << "\n종료 신호 (" << g_shutdown_signum.load()
+              << ") 수신. 정리 후 종료합니다." << std::endl;
 
-    stop_flag = true;
     wait_mode_flag = false;
     user_interruption_flag = true;
 
@@ -2659,7 +2664,8 @@ void robot_main_loop(std::future<void> server_ready_future) {
     std::pair<std::string,std::string> play_music;
     while (true) {
         // --- 루프 시작 시 상태 초기화 ---
-        stop_flag = false;
+        audio_done_flag = false;
+        motion_done_flag = false;
         is_responses_streaming = false;
         {
             std::lock_guard<std::mutex> lock(responses_stream_buffer_mutex);
@@ -2776,7 +2782,8 @@ void robot_main_loop(std::future<void> server_ready_future) {
 						wait_mode_thread.join();
 					}
 
-                    stop_flag = false;
+                    audio_done_flag = false;
+                    motion_done_flag = false;
                     start_time = std::chrono::high_resolution_clock::now();
                     std::thread t1_responses(stream_and_split, std::ref(sfinfo), std::ref(soundStream));
                     std::thread t2_responses(generate_motion, sfinfo.channels, sfinfo.samplerate);

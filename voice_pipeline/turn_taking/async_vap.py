@@ -12,7 +12,7 @@ import threading
 import time
 from datetime import UTC, datetime
 
-from voice_pipeline.core.interfaces import ICallStore, IVAP
+from voice_pipeline.core.interfaces import IVAP, ICallStore
 from voice_pipeline.core.types import AudioFrame, CallRecord, VAPResult
 
 logger = logging.getLogger("voice_pipeline.turn_taking")
