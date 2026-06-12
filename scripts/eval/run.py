@@ -561,7 +561,13 @@ def _run_single_turn(
 
     success = turn_event.is_set()
     gen_failed = gen_failed_event.is_set()
-    early_turn_shift = success and play_end_time[0] == 0.0
+    # 조기 턴 전환: 발화 종료 전에 shift가 커밋된 경우. WAV 꼬리 무음이 트림되어
+    # play_end ≈ 발화 종료 +0.2s이고, 정상 shift는 침묵 ≥0.5s가 필요하므로
+    # ts < play_end면 구조적으로 발화 도중 전환이다.
+    early_turn_shift = success and (
+        play_end_time[0] == 0.0  # 극단: 질문 재생 중 세션 종료 — join(5s)로도 play() 미반환
+        or turn_shift_time[0] < play_end_time[0]
+    )
     ts_reason = components.session_loop.turn_shift_reason
     # expect_wait 스위트(미완성 발화)는 최대 timeout까지 대기한 전환만 정답 —
     # 그보다 빠른 전환은 미완성 발화를 완결로 오판한 것(premature).
@@ -574,7 +580,7 @@ def _run_single_turn(
         late_turn_shift = completed_normally and ts_reason == "turngpt_3.0"
         premature_turn_shift = False
     vap_delay = None
-    if not early_turn_shift and play_end_time[0] > 0 and turn_shift_time[0] >= play_end_time[0]:
+    if success and not early_turn_shift:
         vap_delay = round((turn_shift_time[0] - play_end_time[0]) * 1000, 1)
 
     error = None
@@ -937,11 +943,8 @@ def _run_multi_turn_suite(
     scenario_voice = wav_map.get(questions[0]["id"], {}).get("voice", "") if questions else ""
     mem_results = components.session_loop.memory_results
     for i, q in enumerate(questions):
-        vap_delay = None
         pe = play_end_times.get(q["id"], 0.0)
         ts = turn_shift_times.get(i, 0.0)
-        if pe > 0 and ts >= pe:
-            vap_delay = round((ts - pe) * 1000, 1)
 
         retrieved_episodes = []
         if mem_results and i < len(mem_results) and mem_results[i] is not None:
@@ -963,19 +966,28 @@ def _run_multi_turn_suite(
 
         ts_reason = turn_shift_reasons.get(i)
         is_completed = i < completed_turns
+        # 조기 턴 전환: 발화 종료(+트림 여유 0.2s) 전 shift 커밋 (단일 러너와 동일 기준)
+        is_early = is_completed and (pe == 0.0 or ts < pe)
         expect_wait = suite.get("expect_wait", False)
+        completed_normally = is_completed and not is_early
         if expect_wait:
             is_late = False
-            is_premature = is_completed and ts_reason != "turngpt_3.0"
+            is_premature = completed_normally and ts_reason != "turngpt_3.0"
         else:
-            is_late = is_completed and ts_reason == "turngpt_3.0"
+            is_late = completed_normally and ts_reason == "turngpt_3.0"
             is_premature = False
         is_gen_failed = not is_completed and gen_failed_event.is_set() and i == completed_turns
+
+        vap_delay = None
+        if completed_normally:
+            vap_delay = round((ts - pe) * 1000, 1)
 
         if is_gen_failed:
             error = "generation_failed"
         elif not is_completed:
             error = "no_turn_shift" if turn_asr_texts.get(i) else "no_recognition"
+        elif is_early:
+            error = "early_turn_shift"
         elif is_late:
             error = "late_turn_shift"
         elif is_premature:
@@ -991,7 +1003,7 @@ def _run_multi_turn_suite(
             "input_text": q["text"],
             "asr_text": turn_asr_texts.get(i, ""),
             "voice": scenario_voice,
-            "success": is_completed and not is_late and not is_premature,
+            "success": is_completed and not is_early and not is_late and not is_premature,
             "error": error,
             "turn_shift_reason": ts_reason,
             "turn_detection_delay_ms": vap_delay,
