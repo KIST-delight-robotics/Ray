@@ -1358,6 +1358,14 @@ def main() -> None:
         player = QuestionPlayer(args.device, beep_wav=beep_wav)
         bridge.connect()
         audio_input.start()
+        # PyAudio 초기화(장치 프로빙) 중에는 aplay가 device busy로 실패할 수 있음 —
+        # 첫 프레임 도착 = 캡처 스트림 open 완료를 확인한 뒤에 비프/재생을 시작한다.
+        try:
+            audio_queue.get(timeout=10.0)
+        except queue.Empty:
+            if audio_input.error is not None:
+                raise audio_input.error from None
+            logger.warning("No audio frame within 10s after AudioInput start")
 
         try:
             for suite in audio_suites:
