@@ -239,8 +239,13 @@ def _resolve_target_episodes(target_sessions, seed_session_map, seed_episode_map
 class _PauseController:
     """Listens for Enter key on stdin to toggle pause/resume between sessions."""
 
-    def __init__(self, shutdown_event: threading.Event) -> None:
+    def __init__(
+        self,
+        shutdown_event: threading.Event,
+        audio_queue: queue.Queue[AudioFrame] | None = None,
+    ) -> None:
         self._shutdown = shutdown_event
+        self._audio_queue = audio_queue
         self._pause_requested = threading.Event()
         self._resume = threading.Event()
         self._paused = threading.Event()
@@ -279,6 +284,11 @@ class _PauseController:
             if self._shutdown.is_set():
                 self._paused.clear()
                 return True
+            # audio_input은 일시정지 중에도 계속 캡처해 큐를 채운다. 소비자(SessionLoop)가
+            # 멈춰 있으므로 비워주지 않으면 큐가 가득 차 "queue full" 경고가 초당 수십 번
+            # 쏟아진다. 어차피 버릴 오디오이므로 대기 주기마다 드레인한다.
+            if self._audio_queue is not None:
+                _drain_audio_queue(self._audio_queue)
             self._resume.wait(timeout=0.5)
         self._resume.clear()
         self._paused.clear()
@@ -1309,7 +1319,7 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, _handle_signal)
 
-    pause_ctrl = _PauseController(shutdown_event)
+    pause_ctrl = _PauseController(shutdown_event, audio_queue=audio_queue)
     pause_ctrl.start()
 
     # --- Run eval ---
