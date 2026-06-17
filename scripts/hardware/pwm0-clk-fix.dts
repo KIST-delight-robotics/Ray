@@ -1,0 +1,19 @@
+/dts-v1/;
+/plugin/;
+
+/* Pi 5 RP1 PWM0 (1f00098000, GPIO12/13) 클럭 부모 미지정으로 rate=0 → period 쓰기 EIO 되는 문제 수정.
+ * 팬이 쓰는 PWM1(clk_pwm1)은 부모가 xosc라 정상이지만, GPIO13이 속한 PWM0(clk_pwm0)은 부모가 비어
+ * rate 0이었다. clk_pwm0의 부모를 xosc(50MHz)로 명시해 클럭을 살린다.
+ * (핀 mux는 별도 dtoverlay=pwm-2chan,pin=12,func=4,pin2=13,func2=4 가 담당) */
+/ {
+    compatible = "brcm,bcm2712";
+
+    fragment@0 {
+        target = <&rp1_pwm0>;
+        __overlay__ {
+            assigned-clocks = <&rp1_clocks 0x11>;   /* clk_pwm0 (RP1 clk id 17) */
+            assigned-clock-parents = <&clk_xosc>;   /* 부모 = xosc */
+            assigned-clock-rates = <50000000>;      /* 50MHz (xosc 패스스루) */
+        };
+    };
+};

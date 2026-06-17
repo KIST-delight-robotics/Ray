@@ -20,6 +20,7 @@ private:
     dynamixel::PacketHandler* packetHandler_;
     
     std::vector<uint8_t> dxl_ids_;
+    size_t robot_motor_count_;  // 로봇 모터 개수. ids 앞쪽 이 개수만큼이 로봇 모터, 나머지는 aux (예: LED)
     std::string device_name_;
     float protocol_version_;
 
@@ -63,7 +64,7 @@ private:
 
 public:
     // --- 생성자 및 소멸자 ---
-    DynamixelDriver(const std::string& device_name, float protocol_version, const std::vector<uint8_t>& ids);
+    DynamixelDriver(const std::string& device_name, float protocol_version, const std::vector<uint8_t>& ids, size_t robot_motor_count);
     ~DynamixelDriver();
 
     // 복사 방지
@@ -93,6 +94,7 @@ public:
     // --- 구동 (Write) ---
     bool writeGoalPosition(const std::vector<int32_t>& position);
     bool writeGoalVelocity(const std::vector<int32_t>& velocity);
+    bool writeSingleGoalPosition(uint8_t id, int32_t position);
 
 
     // --- 상태 읽기 (Read) ---

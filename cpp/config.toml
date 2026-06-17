@@ -5,21 +5,21 @@ port = 9200
 protocol_version = 2.0
 device_name = "/dev/ttyUSB0"
 
-ids = [1, 2, 3, 4, 5]   # Pitch, Roll_R, Roll_L, Yaw, Mouth
+ids = [1, 2, 3, 4, 5, 6]   # Pitch, Roll_R, Roll_L, Yaw, Mouth, LED
 baudrate = 2000000      # 9600, 57600, 115200, 1000000, 2000000, 3000000, 4000000, 4500000
 is_time_based = true    # true: Time-based, false: Velocity-based
 operating_mode = 4      # 1: Velocity, 3: Position, 4: Extended Position, 16: PWM
 return_delay_time = 0
 
-profile_velocity_homing = 500   # 기기 부팅 시 초기 위치로 이동할 때 속도
+profile_velocity_homing = 5000   # 기기 부팅 시 초기 위치로 이동할 때 속도
 profile_velocity = 60
 profile_acceleration = 0
 
-pos_p_gain = [500, 500, 500, 500, 500]
-pos_i_gain = [0, 0, 0, 0, 0]
-pos_d_gain = [0, 0, 0, 0, 0]
-ff1_gain = [0, 0, 0, 0, 0]
-ff2_gain = [0, 0, 0, 0, 0]
+pos_p_gain = [500, 500, 500, 500, 500, 500]
+pos_i_gain = [0, 0, 0, 0, 0, 0]
+pos_d_gain = [0, 0, 0, 0, 0, 0]
+ff1_gain = [0, 0, 0, 0, 0, 0]
+ff2_gain = [0, 0, 0, 0, 0, 0]
 
 [robot]
 # 모터 초기 위치
@@ -31,24 +31,42 @@ ff2_gain = [0, 0, 0, 0, 0]
 # default_mouth   = 3040
 
 # 2호기
+# default_pitch   = 1100
+# default_roll_r  = 2750
+# default_roll_l  = 1450
+# default_yaw     = 2085
+# default_mouth   = 1980
+
+# 3호기
 default_pitch   = 1100
 default_roll_r  = 2750
 default_roll_l  = 1450
-default_yaw     = 2085
+default_yaw     = 3600
 default_mouth   = 1980
+default_led     = 1550               # ID6 홈 tick - 100 (angle_deg 0°일 때 절대 위치). 장착 후 실측
+
+# LED(ID6 막대) 각도/밝기 변환
+# CSV col0 = 절대 tick(PC home=led_csv_home 기준). 우리 home(default_led)에 재앵커링:
+#   goal = default_led + led_dir*(csv_tick - led_csv_home)
+# default_led == led_csv_home 이면 절대치와 동일. default_led를 내리면 궤적 전체가 같이 내려감.
+led_csv_home      = 1550            # LED CSV를 생성한 PC의 home tick (led_motion.py home_tick)
+led_dir           = 1               # +1 / -1: CSV tick 증가가 "빛 위로(천장)"가 되도록
+led_pwm_pin       = 13              # LED 밝기 PWM용 BCM GPIO 번호 (GPIO13, 물리 33번). -1 = 비활성
+led_pwm_range     = 100             # softPwm duty 범위 (0..range). 100 → ~100Hz
 
 #robot parameter
 pulley_diameter = 40
 height = 110                        # 베이스부터 실이 연결된 레이어 까지의 높이 small -> 100,Large -> 180
 hole_radius = 25                    # 로봇 머리 구멍 반지름 small -> 25, Large -> 50
 yaw_gear_ratio = 1                  # yaw 모터가 direct하게 머리를 회전시킨다면 1로 설정 아니면 2
-mouth_back_compensation = 1.3       # 입 움직임에 대한 뒷쪽 보상 -> TRO 논문 참조  small -> 1.2, Large -> 1.5
-mouth_pitch_compensation = 1.7      # pitch 에 따른 입 움직임 보상
+# 보상 계수 = 곱셈 인자 (값↑ → 보상↑). 코드: ...- delta_mouth*mouth_back, ...- pitch_diff*mouth_pitch
+mouth_back_compensation = 0.7692    # 입 움직임에 대한 뒷쪽 보상 (값↑=보상↑). 예전 분모 1.3과 동일 거동(=1/1.3). small≈0.83, Large≈0.67
+mouth_pitch_compensation = 0.5882   # pitch에 따른 입 움직임 보상 (값↑=보상↑). 예전 분모 1.7과 동일 거동(=1/1.7)
 
 max_mouth = 0
 min_mouth = 400                    # 최대 mouth movement size in DXL dimension
 
-# 머리 올릴 시: back 1.3, pitch 1.7, min 400
+# 머리 올릴 시: back 0.7692(=1/1.3), pitch 0.5882(=1/1.7), min 400
 # 안 올릴 시: back 1.0, pitch 1.0, min 350
 
 

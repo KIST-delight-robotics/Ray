@@ -19,8 +19,8 @@
 // #define DXL_LOWORD(l)           ((uint16_t)(((uint64_t)(l)) & 0xffff))
 // #define DXL_HIWORD(l)           ((uint16_t)(((uint64_t)(l) >> 16) & 0xffff))
 
-DynamixelDriver::DynamixelDriver(const std::string& device_name, float protocol_version, const std::vector<uint8_t>& ids)
-    : device_name_(device_name), protocol_version_(protocol_version), dxl_ids_(ids),
+DynamixelDriver::DynamixelDriver(const std::string& device_name, float protocol_version, const std::vector<uint8_t>& ids, size_t robot_motor_count)
+    : device_name_(device_name), protocol_version_(protocol_version), dxl_ids_(ids), robot_motor_count_(robot_motor_count),
       portHandler_(nullptr), packetHandler_(nullptr),
       groupSyncWritePos_(nullptr), groupSyncWriteVel_(nullptr), groupSyncWritePID_(nullptr), groupSyncWriteFF_(nullptr), groupBulkReadState_(nullptr)
 {
@@ -382,16 +382,17 @@ bool DynamixelDriver::setProfile(uint32_t velocity, uint32_t acceleration) {
 
 bool DynamixelDriver::writeGoalPosition(const std::vector<int32_t>& position) {
     std::lock_guard<std::mutex> lock(dxl_mutex_);
-    
-    if (position.size() != dxl_ids_.size()) {
-        std::cerr << "[DynamixelDriver] Position count mismatch!" << std::endl;
+
+    if (position.size() != robot_motor_count_) {
+        std::cerr << "[DynamixelDriver] Position count mismatch! Expected " << robot_motor_count_
+                  << ", got " << position.size() << std::endl;
         return false;
     }
 
     groupSyncWritePos_->clearParam();
     uint8_t param_goal_position[4];
 
-    for (size_t i = 0; i < dxl_ids_.size(); i++) {
+    for (size_t i = 0; i < robot_motor_count_; i++) {
         // int32 -> byte array conversion
         param_goal_position[0] = DXL_LOBYTE(DXL_LOWORD(position[i]));
         param_goal_position[1] = DXL_HIBYTE(DXL_LOWORD(position[i]));
@@ -417,12 +418,12 @@ bool DynamixelDriver::writeGoalPosition(const std::vector<int32_t>& position) {
 bool DynamixelDriver::writeGoalVelocity(const std::vector<int32_t>& velocity) {
     std::lock_guard<std::mutex> lock(dxl_mutex_);
 
-    if (velocity.size() != dxl_ids_.size()) return false;
+    if (velocity.size() != robot_motor_count_) return false;
 
     groupSyncWriteVel_->clearParam();
     uint8_t param_goal_velocity[4];
 
-    for (size_t i = 0; i < dxl_ids_.size(); i++) {
+    for (size_t i = 0; i < robot_motor_count_; i++) {
         param_goal_velocity[0] = DXL_LOBYTE(DXL_LOWORD(velocity[i]));
         param_goal_velocity[1] = DXL_HIBYTE(DXL_LOWORD(velocity[i]));
         param_goal_velocity[2] = DXL_LOBYTE(DXL_HIWORD(velocity[i]));
@@ -434,6 +435,19 @@ bool DynamixelDriver::writeGoalVelocity(const std::vector<int32_t>& velocity) {
     }
 
     if (groupSyncWriteVel_->txPacket() != COMM_SUCCESS) return false;
+    return true;
+}
+
+bool DynamixelDriver::writeSingleGoalPosition(uint8_t id, int32_t position) {
+    std::lock_guard<std::mutex> lock(dxl_mutex_);
+    uint8_t error = 0;
+    int result = packetHandler_->write4ByteTxRx(portHandler_, id, ADDR_GOAL_POSITION,
+                                                static_cast<uint32_t>(position), &error);
+    if (result != COMM_SUCCESS) {
+        std::cerr << "[DynamixelDriver] writeSingleGoalPosition failed for ID " << (int)id
+                  << ": " << packetHandler_->getTxRxResult(result) << std::endl;
+        return false;
+    }
     return true;
 }
 

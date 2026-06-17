@@ -33,6 +33,7 @@
 #ifdef MOTOR_ENABLED
 #include <wiringPiI2C.h>
 #include <wiringPi.h>
+#include <softPwm.h>
 #include "DynamixelDriver.h"
 #endif
 
@@ -68,6 +69,7 @@ std::chrono::time_point<std::chrono::high_resolution_clock> start_time; // 쓰�
 std::atomic<bool> stop_flag(false);
 std::atomic<bool> user_interruption_flag(false);
 std::atomic<bool> is_speaking(false);
+std::atomic<bool> g_shutdown_requested(false);  // 시그널 핸들러가 세움 → 워처 스레드가 정리·종료
 
 int first_move_flag = 1;
 float final_result = 0.0f;
@@ -87,6 +89,8 @@ std::condition_variable mouth_motion_queue_cv;
 DynamixelDriver* dxl_driver = nullptr;
 DataLogger motion_logger;
 HighFreqLogger* tuning_logger = nullptr;
+
+bool g_led_pwm_ready = false;  // LED 밝기 GPIO PWM 초기화 여부
 #endif
 
 
@@ -372,7 +376,7 @@ std::vector<std::vector<double>> applyOffsetDecay(
 #ifdef MOTOR_ENABLED
 bool initialize_dynamixel() {
     // 1. 드라이버 생성
-    dxl_driver = new DynamixelDriver(cfg_dxl.device_name, cfg_dxl.protocol_version, cfg_dxl.ids);
+    dxl_driver = new DynamixelDriver(cfg_dxl.device_name, cfg_dxl.protocol_version, cfg_dxl.ids, DXL_NUM);
 
 
     // 2. 연결 (Baudrate 설정 포함)
@@ -412,6 +416,11 @@ void move_to_initial_position_posctrl() {
     std::vector<int32_t> DXL_initial_position = { g_home.home_pitch, g_home.home_roll_r, g_home.home_roll_l, g_home.home_yaw, g_home.home_mouth };
 
     dxl_driver->writeGoalPosition(DXL_initial_position);
+
+    // LED 모터
+    if (cfg_dxl.ids.size() > DXL_NUM) {
+        dxl_driver->writeSingleGoalPosition(cfg_dxl.ids.back(), g_home.home_led);
+    }
 }
 
 
@@ -484,6 +493,65 @@ void move_to_initial_position_velctrl() {
     for (int i = 0; i < DXL_NUM; i++) goal_velocity[i] = 0;
 
     dxl_driver->writeGoalVelocity(goal_velocity);
+}
+
+// === LED (ID6 막대 각도 + GPIO PWM 밝기) ===
+//
+// 무대 조명형 LED 막대: 각도는 ID6 Dynamixel(위치 제어), 밝기는 별도 GPIO 핀의
+// 소프트웨어 PWM(WiringPi softPwm). 오프라인 생성한 <곡>-led.csv를 헤드/입과 같은
+// 40ms 프레임으로 읽어 두 채널을 함께 구동한다.
+
+// LED 밝기 = RP1 하드웨어 PWM (sysfs /sys/class/pwm). GPIO13 = PWM1 = pwmchip0 채널1.
+// softPwm(~100Hz, CPU 토글, 플리커)을 대체. 캐리어(예 20kHz)는 부팅 시 systemd 서비스
+// (led-pwm.service → /usr/local/bin/led-pwm-setup.sh)가 export+period+enable+권한까지 설정하고,
+// 여기서는 duty_cycle(ns)만 쓴다. 설정: scripts/hardware/setup_led_hwpwm.sh (sudo 1회 + 재부팅).
+// led_pwm_pin < 0 이면 비활성(기존 의미 유지).
+static const char* LED_PWM_DUTY   = "/sys/class/pwm/pwmchip0/pwm1/duty_cycle";
+static const char* LED_PWM_PERIOD = "/sys/class/pwm/pwmchip0/pwm1/period";
+static long g_led_period_ns = 0;  // 부팅 서비스가 설정한 PWM 주기(ns). duty 스케일 기준.
+
+void initialize_led_pwm() {
+    if (cfg_robot.led_pwm_pin < 0) {
+        std::cout << "[LED] 밝기 PWM 비활성 (led_pwm_pin < 0)" << std::endl;
+        return;
+    }
+    // 부팅 서비스가 채널을 export하고 period/enable/권한을 설정해 둠. period를 읽어 duty 환산에 사용.
+    std::ifstream pin(LED_PWM_PERIOD);
+    if (!pin || !(pin >> g_led_period_ns) || g_led_period_ns <= 0) {
+        std::cerr << "[LED] 하드웨어 PWM 미준비 (" << LED_PWM_PERIOD
+                  << " 없음/읽기실패). setup_led_hwpwm.sh 실행 + 재부팅 확인. 밝기 비활성." << std::endl;
+        return;
+    }
+    // duty_cycle 쓰기 권한 확인 (gpio 그룹/서비스 chmod 필요)
+    std::ofstream test(LED_PWM_DUTY);
+    if (!test) {
+        std::cerr << "[LED] " << LED_PWM_DUTY << " 쓰기 권한 없음 (gpio 그룹/led-pwm.service 확인). 밝기 비활성." << std::endl;
+        return;
+    }
+    test << 0;
+    test.close();
+    g_led_pwm_ready = true;
+    std::cout << "[LED] 하드웨어 PWM 활성 (pwmchip0/pwm1, period " << g_led_period_ns
+              << "ns ≈ " << (1.0e9 / g_led_period_ns) << "Hz, 무플리커)" << std::endl;
+}
+
+// LED 밝기(0.0~1.0) → 하드웨어 PWM duty_cycle(ns). 부팅 서비스가 잡은 캐리어 주파수로 출력.
+void set_led_brightness(float brightness) {
+    if (!g_led_pwm_ready) return;
+    brightness = std::clamp(brightness, 0.0f, 1.0f);
+    long duty = std::lround(brightness * g_led_period_ns);
+    std::ofstream ofs(LED_PWM_DUTY);  // sysfs: 매 호출 새로 열어 정수 기록
+    if (ofs) ofs << duty;
+}
+
+// LED CSV의 절대 tick(PC가 led_csv_home 기준으로 생성) → 우리 하드웨어 ID6 목표 tick.
+// CSV는 PC home(led_csv_home, 예 1550)을 기준으로 한 절대 position이지만, 우리 ID6의 실제
+// home(default_led)은 다를 수 있다. 그래서 CSV 모션을 우리 home에 다시 앵커링한다:
+//   goal = default_led + led_dir * (csv_tick - led_csv_home)
+// (csv_tick - led_csv_home)는 PC가 만든 0~60° 스윕의 상대 오프셋. led_dir로 회전 방향 보정.
+int32_t led_csv_tick_to_goal(float csv_tick) {
+    return static_cast<int32_t>(std::lround(
+        g_home.home_led + cfg_robot.led_dir * (csv_tick - cfg_robot.led_csv_home)));
 }
 #endif // MOTOR_ENABLED
 
@@ -1852,6 +1920,7 @@ void csv_control_motor(std::string audioName) {
 
     std::string headMotionFilePath = "assets/headMotion/" + audioName + ".csv";
     std::string mouthMotionFilePath = "assets/mouthMotion/" + audioName + "-delta-big.csv";
+    std::string ledMotionFilePath = "assets/ledMotion/" + audioName + "-led.csv";
     std::string audioFilePath = "assets/audio/music/" + audioName + ".wav";
 
     if (!music.openFromFile(audioFilePath)) {
@@ -1876,9 +1945,27 @@ void csv_control_motor(std::string audioName) {
             return;
         }
 
+        // LED 궤적: 없으면 LED 비활성으로 graceful 처리 (각도·밝기 미구동)
+        std::ifstream ledGesture(ledMotionFilePath);
+        bool led_enabled = ledGesture.good() && cfg_dxl.ids.size() > DXL_NUM;
+        uint8_t led_id = led_enabled ? cfg_dxl.ids.back() : 0;
+        if (!led_enabled) {
+            std::cout << "LED 궤적 없음 — LED 비활성: " << ledMotionFilePath << std::endl;
+        }
+        // [csv_tick, brightness]를 헤드/입과 같은 프레임으로 한 줄씩 읽는다.
+        // col0 = PC home(led_csv_home) 기준 절대 tick. (예전엔 상대 deg였음.)
+        auto read_led_frame = [&](float& csv_tick, float& brightness) {
+            csv_tick = cfg_robot.led_csv_home; brightness = 0.f;  // 없으면 PC home(=우리 home) = 휴지
+            if (!led_enabled || !ledGesture.good()) return;
+            auto ledRow = csv_read_row(ledGesture, ',');
+            if (ledRow.size() >= 1 && !ledRow[0].empty()) csv_tick = std::stof(ledRow[0]);
+            if (ledRow.size() >= 2 && !ledRow[1].empty()) brightness = std::stof(ledRow[1]);
+        };
+
         // 초기 프레임 궤적 보간
         int SKIP_FRAMES = 20;
         std::vector<std::vector<double>> targetTraj;
+        std::vector<std::pair<float, float>> ledTraj;  // (csv_tick, brightness)
 
         for (int i = 0; i < SKIP_FRAMES; i++) {
             if (!headGesture.good() || !MouthGesture.good()) break;
@@ -1892,6 +1979,11 @@ void csv_control_motor(std::string audioName) {
             float ratiooo = std::stof(mouthRow[1]) * 1.4;
 
             targetTraj.push_back({roll_s * ratiooo, pitch_s * ratiooo, yaw_s * ratiooo, mouth_s});
+
+            // LED는 보간 없이 원본 값을 프레임 정렬만 맞춰 보관
+            float led_csv_tick, led_bright;
+            read_led_frame(led_csv_tick, led_bright);
+            ledTraj.push_back({led_csv_tick, led_bright});
         }
 
         std::vector<double> startPose;
@@ -1918,6 +2010,7 @@ void csv_control_motor(std::string audioName) {
         while(headGesture.good() && MouthGesture.good()){
             if (user_interruption_flag) {
                 std::cout << "Interruption detected in csv_control_motor." << std::endl;
+                set_led_brightness(0.0f);
                 music.stop();
                 return;
             }
@@ -1927,17 +2020,22 @@ void csv_control_motor(std::string audioName) {
             }
 
             double roll_final, pitch_final, yaw_final, mouth_final;
+            float led_csv_tick = cfg_robot.led_csv_home, led_bright = 0.f;
 
             if (step < SKIP_FRAMES) {
                 roll_final = targetTraj[step][0];
                 pitch_final = targetTraj[step][1];
                 yaw_final = targetTraj[step][2];
                 mouth_final = targetTraj[step][3];
+                if (step < (int)ledTraj.size()) {
+                    led_csv_tick = ledTraj[step].first;
+                    led_bright = ledTraj[step].second;
+                }
             }
             else {
                 auto headRow = csv_read_row(headGesture, ',');
                 auto mouthRow = csv_read_row(MouthGesture, ',');
-                
+
                 float roll_s = std::stof(headRow[0]);
                 float pitch_s = std::stof(headRow[1]);
                 float yaw_s = std::stof(headRow[2]);
@@ -1949,6 +2047,8 @@ void csv_control_motor(std::string audioName) {
                 pitch_final = pitch_s * ratiooo;
                 yaw_final = yaw_s * ratiooo;
                 mouth_final = mouth_s;
+
+                read_led_frame(led_csv_tick, led_bright);
             }
 
             target_position = RPY2DXL(roll_final , pitch_final, yaw_final, mouth_final, 0);
@@ -1970,6 +2070,12 @@ void csv_control_motor(std::string audioName) {
                 dxl_driver->writeGoalPosition(target_position);
             }
 
+            // LED 구동: 각도(ID6 위치) + 밝기(GPIO PWM) — 모터와 같은 40ms 프레임
+            if (led_enabled) {
+                dxl_driver->writeSingleGoalPosition(led_id, led_csv_tick_to_goal(led_csv_tick));
+            }
+            set_led_brightness(led_bright);
+
             // 과거 위치 업데이트
             past_position = target_position;
             updatePrevValues(roll_final , pitch_final, yaw_final, mouth_final);
@@ -1985,6 +2091,12 @@ void csv_control_motor(std::string audioName) {
             // 제어 주기 맞추기
             std::this_thread::sleep_until(csv_start_time + FRAME_INTERVAL * step);
             step ++;
+        }
+
+        // 재생 종료: LED 소등 + ID6 각도 홈 복귀
+        set_led_brightness(0.0f);
+        if (led_enabled) {
+            dxl_driver->writeSingleGoalPosition(led_id, g_home.home_led);
         }
         #else
         // --- 모터 비활성화됨 ---
@@ -2474,6 +2586,9 @@ void initialize_robot_posture() {
 }
 
 void cleanup_dynamixel() {
+    // LED 소등
+    set_led_brightness(0.0f);
+
     std::cout << "토크를 끄고 포트를 닫습니다..." << std::endl;
     if (dxl_driver) {
         delete dxl_driver;
@@ -2482,27 +2597,33 @@ void cleanup_dynamixel() {
 }
 #endif // MOTOR_ENABLED
 
+// 시그널 핸들러는 async-signal-safe 해야 한다: 원자 플래그만 세우고 즉시 반환.
+// (이전 구현은 핸들러 안에서 cleanup_dynamixel()→dxl_mutex_ 잠금을 시도해,
+//  모터 write 중 인터럽트당하면 같은 뮤텍스를 기다리며 데드락 → Ctrl+C 무반응이었다.)
+// 실제 정리·종료는 정상 스레드 컨텍스트인 shutdown_watcher가 수행한다.
 void signal_handler(int signum) {
-    std::cout << "종료 신호 (" << signum << ") 수신. 프로그램을 정리합니다." << std::endl;
-    
+    (void)signum;
+    g_shutdown_requested = true;
+}
+
+// 셧다운 워처: 시그널 플래그를 폴링하다가 정상 컨텍스트에서 하드웨어 정리 후 종료.
+// 별도 스레드라 dxl_mutex_를 메인 스레드가 놓는 순간 정상적으로 획득 → 데드락 없음.
+void shutdown_watcher() {
+    while (!g_shutdown_requested) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    std::cout << "\n종료 신호 수신. 정리 후 종료합니다." << std::endl;
+
     stop_flag = true;
     wait_mode_flag = false;
     user_interruption_flag = true;
 
-    server_message_queue_cv.notify_all();
-    audio_queue_cv.notify_all();
-    mouth_motion_queue_cv.notify_all();
-    responses_stream_buffer_cv.notify_all();
-
-    if (g_ws_server) g_ws_server->stop();
-
     #ifdef MOTOR_ENABLED
-    if (tuning_logger) tuning_logger->stop();
-    motion_logger.stop();
-    cleanup_dynamixel();
+    set_led_brightness(0.0f);                       // LED 소등
+    if (dxl_driver) dxl_driver->setTorque(false);   // 토크 해제 (다른 스레드라 잠금 안전)
     #endif
 
-    std::_Exit(signum);
+    std::_Exit(0);
 }
 
 // 큐 초기화용 함수
@@ -2690,6 +2811,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
 int main(int argc, char* argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+    std::thread(shutdown_watcher).detach();  // 시그널 → 정상 컨텍스트 정리·종료
 
     LoadConfig("cpp/config.toml");
 
@@ -2698,6 +2820,7 @@ int main(int argc, char* argv[]) {
     g_home.home_roll_l = cfg_robot.default_roll_l;
     g_home.home_yaw    = cfg_robot.default_yaw;
     g_home.home_mouth  = cfg_robot.default_mouth;
+    g_home.home_led    = cfg_robot.default_led;
 
     // Idle Motion 파일 로드
     if (!IdleMotionManager::getInstance().loadCSV(IDLE_MOTION_FILE)) {
@@ -2721,6 +2844,9 @@ int main(int argc, char* argv[]) {
     }
 
     std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // LED 밝기 GPIO PWM 초기화
+    initialize_led_pwm();
 
     // 자이로센서를 이용한 로봇 초기자세 설정
     // dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);

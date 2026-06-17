@@ -58,6 +58,7 @@ struct RobotHomePose {
     int32_t home_roll_l;
     int32_t home_yaw;
     int32_t home_mouth;
+    int32_t home_led;
 };
 
 inline RobotHomePose g_home;

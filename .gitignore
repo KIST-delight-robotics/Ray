@@ -51,6 +51,7 @@ assets/audio/music/
 assets/audio/vocal/
 assets/headMotion/
 assets/mouthMotion/
+assets/ledMotion/
 
 # Script output (TTS wav files, etc.)
 output/
@@ -73,3 +74,12 @@ docs/memory-research/
 # SQLite database
 data/
 !data/eval/questions.json
+
+# Large media / runtime logs / vendored libs / received bundles (distributed separately)
+/*.wav
+pmic_log_*.csv
+OS_LED_setup.zip
+WiringPi/
+cpp/*.bak_*
+*.log
+/LED_handoff_bundle*/

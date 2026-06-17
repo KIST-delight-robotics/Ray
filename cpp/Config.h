@@ -34,6 +34,11 @@ struct RobotConfig {
     int32_t default_roll_l;
     int32_t default_yaw;
     int32_t default_mouth;
+    int32_t default_led;
+    double led_csv_home;        // LED CSV가 기준으로 삼은 PC home tick (예 1550). CSV를 default_led에 재앵커링용
+    int led_dir;                // +1 / -1: CSV tick 증가 방향이 "빛 위로"가 되도록 (우리 모터 회전 보정)
+    int led_pwm_pin;            // LED 밝기 PWM용 BCM GPIO 번호. -1 = 비활성
+    int led_pwm_range;          // softPwm duty 범위 (0..range)
 
     double pulley_diameter;
     double height;
@@ -143,6 +148,11 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
     ok &= REQ(robot_node, "default_roll_l", cfg_robot.default_roll_l);
     ok &= REQ(robot_node, "default_yaw",    cfg_robot.default_yaw);
     ok &= REQ(robot_node, "default_mouth",  cfg_robot.default_mouth);
+    ok &= REQ(robot_node, "default_led",    cfg_robot.default_led);
+    ok &= REQ(robot_node, "led_csv_home",      cfg_robot.led_csv_home);
+    ok &= REQ(robot_node, "led_dir",           cfg_robot.led_dir);
+    ok &= REQ(robot_node, "led_pwm_pin",       cfg_robot.led_pwm_pin);
+    ok &= REQ(robot_node, "led_pwm_range",     cfg_robot.led_pwm_range);
 
     ok &= REQ(robot_node, "pulley_diameter", cfg_robot.pulley_diameter);
     ok &= REQ(robot_node, "height",          cfg_robot.height);
