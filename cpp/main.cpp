@@ -419,11 +419,6 @@ void move_to_initial_position_posctrl() {
     std::vector<int32_t> DXL_initial_position = { g_home.home_pitch, g_home.home_roll_r, g_home.home_roll_l, g_home.home_yaw, g_home.home_mouth };
 
     dxl_driver->writeGoalPosition(DXL_initial_position);
-
-    // LED 모터
-    if (cfg_dxl.ids.size() > DXL_NUM) {
-        dxl_driver->writeSingleGoalPosition(cfg_dxl.ids.back(), g_home.home_led);
-    }
 }
 
 
@@ -547,15 +542,6 @@ void set_led_brightness(float brightness) {
     if (ofs) ofs << duty;
 }
 
-// LED CSV의 절대 tick(PC가 led_csv_home 기준으로 생성) → 우리 하드웨어 ID6 목표 tick.
-// CSV는 PC home(led_csv_home, 예 1550)을 기준으로 한 절대 position이지만, 우리 ID6의 실제
-// home(default_led)은 다를 수 있다. 그래서 CSV 모션을 우리 home에 다시 앵커링한다:
-//   goal = default_led + led_dir * (csv_tick - led_csv_home)
-// (csv_tick - led_csv_home)는 PC가 만든 0~60° 스윕의 상대 오프셋. led_dir로 회전 방향 보정.
-int32_t led_csv_tick_to_goal(float csv_tick) {
-    return static_cast<int32_t>(std::lround(
-        g_home.home_led + cfg_robot.led_dir * (csv_tick - cfg_robot.led_csv_home)));
-}
 #endif // MOTOR_ENABLED
 
 // 첫 번째 쓰레드: 오디오 스트림을 받아 분할합니다.
@@ -1950,27 +1936,24 @@ void csv_control_motor(std::string audioName) {
             return;
         }
 
-        // LED 궤적: 없으면 LED 비활성으로 graceful 처리 (각도·밝기 미구동)
+        // LED 밝기 궤적: 없으면 밝기 미구동으로 graceful 처리 (ID6 각도 모터는 제거됨)
         std::ifstream ledGesture(ledMotionFilePath);
-        bool led_enabled = ledGesture.good() && cfg_dxl.ids.size() > DXL_NUM;
-        uint8_t led_id = led_enabled ? cfg_dxl.ids.back() : 0;
+        bool led_enabled = ledGesture.good();
         if (!led_enabled) {
-            std::cout << "LED 궤적 없음 — LED 비활성: " << ledMotionFilePath << std::endl;
+            std::cout << "LED 궤적 없음 — 밝기 비활성: " << ledMotionFilePath << std::endl;
         }
-        // [csv_tick, brightness]를 헤드/입과 같은 프레임으로 한 줄씩 읽는다.
-        // col0 = PC home(led_csv_home) 기준 절대 tick. (예전엔 상대 deg였음.)
-        auto read_led_frame = [&](float& csv_tick, float& brightness) {
-            csv_tick = cfg_robot.led_csv_home; brightness = 0.f;  // 없으면 PC home(=우리 home) = 휴지
+        // 헤드/입과 같은 프레임으로 한 줄씩 읽어 밝기(col1)만 사용한다. (col0 = 예전 ID6 각도 tick, 무시)
+        auto read_led_frame = [&](float& brightness) {
+            brightness = 0.f;  // 없으면 소등
             if (!led_enabled || !ledGesture.good()) return;
             auto ledRow = csv_read_row(ledGesture, ',');
-            if (ledRow.size() >= 1 && !ledRow[0].empty()) csv_tick = std::stof(ledRow[0]);
-            if (ledRow.size() >= 2 && !ledRow[1].empty()) brightness = std::stof(ledRow[1]);
+            if (!ledRow.empty() && !ledRow[0].empty()) brightness = std::stof(ledRow[0]);
         };
 
         // 초기 프레임 궤적 보간
         int SKIP_FRAMES = 20;
         std::vector<std::vector<double>> targetTraj;
-        std::vector<std::pair<float, float>> ledTraj;  // (csv_tick, brightness)
+        std::vector<float> ledTraj;  // brightness
 
         for (int i = 0; i < SKIP_FRAMES; i++) {
             if (!headGesture.good() || !MouthGesture.good()) break;
@@ -1985,10 +1968,10 @@ void csv_control_motor(std::string audioName) {
 
             targetTraj.push_back({roll_s * ratiooo, pitch_s * ratiooo, yaw_s * ratiooo, mouth_s});
 
-            // LED는 보간 없이 원본 값을 프레임 정렬만 맞춰 보관
-            float led_csv_tick, led_bright;
-            read_led_frame(led_csv_tick, led_bright);
-            ledTraj.push_back({led_csv_tick, led_bright});
+            // LED 밝기는 보간 없이 프레임 정렬만 맞춰 보관
+            float led_bright;
+            read_led_frame(led_bright);
+            ledTraj.push_back(led_bright);
         }
 
         std::vector<double> startPose;
@@ -2025,7 +2008,7 @@ void csv_control_motor(std::string audioName) {
             }
 
             double roll_final, pitch_final, yaw_final, mouth_final;
-            float led_csv_tick = cfg_robot.led_csv_home, led_bright = 0.f;
+            float led_bright = 0.f;
 
             if (step < SKIP_FRAMES) {
                 roll_final = targetTraj[step][0];
@@ -2033,8 +2016,7 @@ void csv_control_motor(std::string audioName) {
                 yaw_final = targetTraj[step][2];
                 mouth_final = targetTraj[step][3];
                 if (step < (int)ledTraj.size()) {
-                    led_csv_tick = ledTraj[step].first;
-                    led_bright = ledTraj[step].second;
+                    led_bright = ledTraj[step];
                 }
             }
             else {
@@ -2053,7 +2035,7 @@ void csv_control_motor(std::string audioName) {
                 yaw_final = yaw_s * ratiooo;
                 mouth_final = mouth_s;
 
-                read_led_frame(led_csv_tick, led_bright);
+                read_led_frame(led_bright);
             }
 
             target_position = RPY2DXL(roll_final , pitch_final, yaw_final, mouth_final, 0);
@@ -2075,10 +2057,7 @@ void csv_control_motor(std::string audioName) {
                 dxl_driver->writeGoalPosition(target_position);
             }
 
-            // LED 구동: 각도(ID6 위치) + 밝기(GPIO PWM) — 모터와 같은 40ms 프레임
-            if (led_enabled) {
-                dxl_driver->writeSingleGoalPosition(led_id, led_csv_tick_to_goal(led_csv_tick));
-            }
+            // LED 구동: 밝기(GPIO PWM)만 — 모터와 같은 40ms 프레임 (ID6 각도 모터 제거됨)
             set_led_brightness(led_bright);
 
             // 과거 위치 업데이트
@@ -2098,11 +2077,8 @@ void csv_control_motor(std::string audioName) {
             step ++;
         }
 
-        // 재생 종료: LED 소등 + ID6 각도 홈 복귀
+        // 재생 종료: LED 소등
         set_led_brightness(0.0f);
-        if (led_enabled) {
-            dxl_driver->writeSingleGoalPosition(led_id, g_home.home_led);
-        }
         #else
         // --- 모터 비활성화됨 ---
         std::cout << "[DUMMY MOTOR] 모션 CSV 재생 모드 (csv_control_motor)." << std::endl;
@@ -2827,7 +2803,6 @@ int main(int argc, char* argv[]) {
     g_home.home_roll_l = cfg_robot.default_roll_l;
     g_home.home_yaw    = cfg_robot.default_yaw;
     g_home.home_mouth  = cfg_robot.default_mouth;
-    g_home.home_led    = cfg_robot.default_led;
 
     // Idle Motion 파일 로드
     if (!IdleMotionManager::getInstance().loadCSV(IDLE_MOTION_FILE)) {
