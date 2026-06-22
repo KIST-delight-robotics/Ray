@@ -70,6 +70,8 @@ std::chrono::time_point<std::chrono::high_resolution_clock> start_time; // 쓰�
 std::atomic<bool> audio_done_flag(false);   // read/stream_and_split → generate_motion, CustomSoundStream
 std::atomic<bool> motion_done_flag(false);  // generate_motion → control_motor
 std::atomic<bool> user_interruption_flag(false);
+std::mutex cycle_wait_mutex;                 // wait_for_next_cycle 인터럽트 가능 대기용
+std::condition_variable cycle_wait_cv;
 std::atomic<bool> is_speaking(false);
 std::atomic<bool> g_shutdown_requested(false);  // 시그널 핸들러가 세움 → 워처 스레드가 정리·종료
 std::atomic<int>  g_shutdown_signum{0};          // 핸들러가 저장(async-signal-safe) → 워처가 메시지에 출력
@@ -149,7 +151,9 @@ std::string get_time_str() {
 // 쓰레드가 INTERVAL_MS 주기로 동작하게 하는 함수
 void wait_for_next_cycle(int cycle_num) {
     auto next_cycle_time = start_time + std::chrono::milliseconds(INTERVAL_MS * cycle_num);
-    std::this_thread::sleep_until(next_cycle_time);
+    // 인터럽트가 오면 deadline 전이라도 즉시 깸 (sleep_until은 notify로 못 깨움)
+    std::unique_lock<std::mutex> lock(cycle_wait_mutex);
+    cycle_wait_cv.wait_until(lock, next_cycle_time, [] { return user_interruption_flag.load(); });
 }
 
 // CSV파일 행 읽기 함수
@@ -2601,6 +2605,7 @@ void shutdown_watcher() {
 
     wait_mode_flag = false;
     user_interruption_flag = true;
+    { std::lock_guard<std::mutex> lk(cycle_wait_mutex); cycle_wait_cv.notify_all(); }
 
     #ifdef MOTOR_ENABLED
     set_led_brightness(0.0f);                       // LED 소등
@@ -2967,6 +2972,7 @@ int main(int argc, char* argv[]) {
                         responses_stream_buffer_cv.notify_all();
                         audio_queue_cv.notify_all();
                         mouth_motion_queue_cv.notify_all();
+                        { std::lock_guard<std::mutex> lk(cycle_wait_mutex); cycle_wait_cv.notify_all(); }
                     }
                 }
                 else {
