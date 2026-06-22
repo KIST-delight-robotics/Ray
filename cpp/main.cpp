@@ -1221,6 +1221,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
     for (int cycle_num = 0;; cycle_num++) {
         if (user_interruption_flag) {
             std::cout << "Interruption detected in control_motor." << std::endl;
+            soundStream.stop();
             break;
         }
 
@@ -1234,6 +1235,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
         });
         if (user_interruption_flag) {
             std::cout << "Interruption detected in control_motor (outer wait)." << std::endl;
+            soundStream.stop();
             break;
         }
 
@@ -1287,6 +1289,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
 
                 if (user_interruption_flag) {
                     std::cout << "Interruption detected in control_motor (inner wait)." << std::endl;
+                    soundStream.stop();
                     return;
                 }
 
