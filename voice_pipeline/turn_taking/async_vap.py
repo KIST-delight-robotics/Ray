@@ -10,10 +10,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import UTC, datetime
 
 from voice_pipeline.core.interfaces import IVAP, ICallStore
-from voice_pipeline.core.types import AudioFrame, CallRecord, VAPResult
+from voice_pipeline.core.types import AudioFrame, CallRecord, VAPResult, utc_now_str
 
 logger = logging.getLogger("voice_pipeline.turn_taking")
 
@@ -108,15 +107,18 @@ class AsyncVAP(IVAP):
 
             if audio_pairs and self._call_store is not None:
                 status = "ok" if remaining > 0 else "overrun"
-                self._call_records.append(CallRecord(
-                    session_id=self._session_id,
-                    timestamp=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
-                    module="vap",
-                    operation="feed_audio",
-                    model="maai-vap",
-                    elapsed_ms=elapsed * 1000,
-                    status=status,
-                ))
+                self._call_records.append(
+                    CallRecord(
+                        session_id=self._session_id,
+                        timestamp=utc_now_str(),
+                        module="vap",
+                        operation="feed_audio",
+                        model="maai-vap",
+                        elapsed_ms=elapsed * 1000,
+                        status=status,
+                        turn_index=self._call_store.current_turn_index,
+                    )
+                )
 
             if remaining > 0:
                 self._stop_event.wait(remaining)

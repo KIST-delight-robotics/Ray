@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import UTC, datetime
 
 from voice_pipeline.core.interfaces import ICallStore
-from voice_pipeline.core.types import CallRecord
+from voice_pipeline.core.types import CallRecord, utc_now_str
 
 _PATTERN = re.compile(r"Retrying request to (/\S+) in ([\d.]+) seconds")
 
@@ -44,13 +43,14 @@ class OpenAIRetryHandler(logging.Handler):
 
         call_record = CallRecord(
             session_id=self.session_id,
-            timestamp=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+            timestamp=utc_now_str(),
             module=module,
             operation=operation,
             model="",
             elapsed_ms=0.0,
             status="retry",
             metadata=f'{{"endpoint": "{endpoint}", "retry_delay_sec": {delay_sec}}}',
+            turn_index=self._store.current_turn_index,
         )
         try:
             self._store.record(call_record)

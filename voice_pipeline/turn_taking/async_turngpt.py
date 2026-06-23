@@ -9,10 +9,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import UTC, datetime
 
 from voice_pipeline.core.interfaces import ICallStore, ITurnGPT
-from voice_pipeline.core.types import CallRecord
+from voice_pipeline.core.types import CallRecord, utc_now_str
 
 logger = logging.getLogger("voice_pipeline.turn_taking")
 
@@ -134,15 +133,18 @@ class AsyncTurnGPT:
 
             if self._call_store is not None:
                 status = "ok" if elapsed_ms <= 100 else "slow"
-                self._call_records.append(CallRecord(
-                    session_id=self._session_id,
-                    timestamp=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
-                    module="turngpt",
-                    operation="predict",
-                    model="turngpt",
-                    elapsed_ms=elapsed_ms,
-                    status=status,
-                ))
+                self._call_records.append(
+                    CallRecord(
+                        session_id=self._session_id,
+                        timestamp=utc_now_str(),
+                        module="turngpt",
+                        operation="predict",
+                        model="turngpt",
+                        elapsed_ms=elapsed_ms,
+                        status=status,
+                        turn_index=self._call_store.current_turn_index,
+                    )
+                )
 
     # ------------------------------------------------------------------
     # Call record flush

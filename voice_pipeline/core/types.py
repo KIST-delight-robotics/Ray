@@ -10,9 +10,21 @@ import enum
 import logging
 from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger("voice_pipeline.core")
+
+
+def utc_now_str() -> str:
+    """Current UTC wall-clock as a sortable string with microsecond resolution.
+
+    Microsecond precision lets call records produced by different module
+    threads be ordered against each other; second resolution collapses
+    cross-stage interleaving within the same second.
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
+
 
 # ---------------------------------------------------------------------------
 # Callable type aliases
@@ -647,7 +659,13 @@ class PipelineTrace:
 
 @dataclass
 class CallRecord:
-    """Single module call record — latency, status, and optional metadata."""
+    """Single module call record — latency, status, and optional metadata.
+
+    ``turn_index`` is the conversation exchange this call belongs to (0-based),
+    letting per-call data be attributed to a specific question/turn within a
+    multi-turn session. Stamped at construction time from the shared turn
+    counter (see ICallStore.current_turn_index).
+    """
 
     session_id: str
     timestamp: str
@@ -657,3 +675,4 @@ class CallRecord:
     elapsed_ms: float
     status: str = "ok"
     metadata: str | None = None
+    turn_index: int = 0

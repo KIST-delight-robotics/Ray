@@ -38,6 +38,35 @@ def _extract_latency(row: sqlite3.Row | None) -> dict[str, float]:
     return {col: row[col] for col in _LATENCY_COLUMNS if row[col]}
 
 
+def _summarize_stage_calls(bucket: dict) -> tuple[dict, dict | None]:
+    """Reduce a per-turn call bucket to a compact ``stage_calls`` dict + issues.
+
+    vap/turngpt are collapsed to count/avg/max (raw per-frame rows would bloat
+    the report); tts keeps its few per-call rows; ``counts`` is the collapsed
+    module.operation tally for the ⑦ timeline overview. Returns
+    ``(stage_calls, call_issues_or_None)``.
+    """
+    stage_calls: dict = {}
+    for mod, bad_status in (("vap", "overrun"), ("turngpt", "slow")):
+        samples = bucket[mod]
+        if not samples:
+            continue
+        ms = [m for m, _ in samples]
+        summary = {"count": len(ms), "avg_ms": round(sum(ms) / len(ms), 1), "max_ms": round(max(ms), 1)}
+        bad = sum(1 for _, s in samples if s == bad_status)
+        if bad:
+            summary[bad_status] = bad
+        stage_calls[mod] = summary
+    if bucket["tts"]:
+        stage_calls["tts"] = bucket["tts"]
+    if bucket["counts"]:
+        stage_calls["counts"] = bucket["counts"]
+    issues = None
+    if bucket["retry_count"] or bucket["error_count"]:
+        issues = {"retry_count": bucket["retry_count"], "error_count": bucket["error_count"]}
+    return stage_calls, issues
+
+
 def build_report(results_dir: Path) -> dict:
     """Build a report from sessions.json and eval.db."""
     sessions_path = results_dir / "sessions.json"
@@ -58,17 +87,19 @@ def build_report(results_dir: Path) -> dict:
 
     # Check if call_records table exists
     has_call_records = bool(
-        conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='call_records'"
-        ).fetchone()
+        conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='call_records'").fetchone()
+    )
+    # Pre-column DBs (turn_index added later) fall back to legacy gate-only attribution.
+    has_turn_index = has_call_records and bool(
+        conn.execute("SELECT 1 FROM pragma_table_info('call_records') WHERE name='turn_index'").fetchone()
     )
 
     # Pre-fetch messages and traces per session
     session_ids = list({e["session_id"] for e in entries})
     msg_cache: dict[str, list[dict]] = {}
     trace_cache: dict[str, list] = {}
-    call_cache: dict[str, dict] = {}
-    gate_cache: dict[str, list[dict]] = {}
+    stage_cache: dict[str, dict] = {}  # sid -> {turn_index -> raw call bucket}
+    gate_cache: dict[str, dict] = {}  # sid -> {turn_index -> [gate events]}
     for sid in session_ids:
         rows = conn.execute(
             "SELECT item_json FROM messages WHERE session_id = ? ORDER BY msg_id",
@@ -105,30 +136,67 @@ def build_report(results_dir: Path) -> dict:
                 pending_cancels = 0
         trace_cache[sid] = (aligned, pending_cancels)
 
-        if has_call_records:
+        if has_call_records and has_turn_index:
+            # One pass over the session's call records, bucketed by the
+            # turn_index column → per-turn stage summaries, similarity-gate
+            # events, and API issue counts. (turn_index is the exchange the
+            # call belongs to; see ICallStore.current_turn_index.)
             rows = conn.execute(
-                "SELECT module, status FROM call_records WHERE session_id = ? AND status != 'ok'",
+                "SELECT module, operation, elapsed_ms, status, metadata, turn_index "
+                "FROM call_records WHERE session_id = ? ORDER BY id",
                 (sid,),
             ).fetchall()
-            retry_count = sum(1 for r in rows if r["status"] == "retry")
-            error_count = sum(1 for r in rows if r["status"] in ("error", "timeout"))
-            if retry_count or error_count:
-                call_cache[sid] = {"retry_count": retry_count, "error_count": error_count}
-
+            per_turn: dict[int, dict] = {}
+            gate_by_turn: dict[int, list[dict]] = {}
+            for r in rows:
+                ti = r["turn_index"]
+                bucket = per_turn.setdefault(
+                    ti,
+                    {"vap": [], "turngpt": [], "tts": [], "counts": {}, "retry_count": 0, "error_count": 0},
+                )
+                op_key = f"{r['module']}.{r['operation']}"
+                bucket["counts"][op_key] = bucket["counts"].get(op_key, 0) + 1
+                if r["status"] == "retry":
+                    bucket["retry_count"] += 1
+                elif r["status"] in ("error", "timeout"):
+                    bucket["error_count"] += 1
+                mod = r["module"]
+                if mod == "vap":
+                    bucket["vap"].append((r["elapsed_ms"], r["status"]))
+                elif mod == "turngpt":
+                    bucket["turngpt"].append((r["elapsed_ms"], r["status"]))
+                elif mod == "tts":
+                    bucket["tts"].append(
+                        {"operation": r["operation"], "elapsed_ms": r["elapsed_ms"], "status": r["status"]}
+                    )
+                elif mod == "similarity_gate":
+                    try:
+                        meta = json.loads(r["metadata"]) if r["metadata"] else {}
+                    except json.JSONDecodeError:
+                        meta = {}
+                    gate_by_turn.setdefault(ti, []).append(
+                        {"operation": r["operation"], "elapsed_ms": r["elapsed_ms"], **meta}
+                    )
+            stage_cache[sid] = per_turn
+            gate_cache[sid] = gate_by_turn
+        elif has_call_records:
+            # Legacy DB without the turn_index column: recover similarity-gate
+            # attribution from metadata (no per-turn stage summaries available).
             rows = conn.execute(
-                "SELECT operation, elapsed_ms, metadata FROM call_records"
-                " WHERE session_id = ? AND module = 'similarity_gate' ORDER BY id",
+                "SELECT operation, elapsed_ms, metadata FROM call_records "
+                "WHERE session_id = ? AND module = 'similarity_gate' ORDER BY id",
                 (sid,),
             ).fetchall()
-            events = []
+            gate_by_turn = {}
             for r in rows:
                 try:
                     meta = json.loads(r["metadata"]) if r["metadata"] else {}
                 except json.JSONDecodeError:
                     meta = {}
-                events.append({"operation": r["operation"], "elapsed_ms": r["elapsed_ms"], **meta})
-            if events:
-                gate_cache[sid] = events
+                gate_by_turn.setdefault(meta.get("turn_index", 0), []).append(
+                    {"operation": r["operation"], "elapsed_ms": r["elapsed_ms"], **meta}
+                )
+            gate_cache[sid] = gate_by_turn
 
     # Track turn index within each session for multi-turn
     session_turn_idx: dict[str, int] = {}
@@ -158,8 +226,6 @@ def build_report(results_dir: Path) -> dict:
         outcome = trace["outcome"] if trace else None
         asr_text = entry.get("asr_text") or system_text
 
-        call_issues = call_cache.get(sid)
-
         turn_data = {
             "suite_name": entry["suite_name"],
             "session_id": sid,
@@ -179,14 +245,21 @@ def build_report(results_dir: Path) -> dict:
             turn_data["speculative_attempts"] = trace["speculative_attempts"]
         if cancelled_shifts:
             turn_data["cancelled_turn_shifts"] = cancelled_shifts
-        gate_events = [e for e in gate_cache.get(sid, []) if e.get("turn_index") == idx]
+        gate_events = gate_cache.get(sid, {}).get(idx, [])
         if gate_events:
             turn_data["similarity_events"] = gate_events
-        if call_issues:
-            turn_data["call_issues"] = call_issues
+        bucket = stage_cache.get(sid, {}).get(idx)
+        if bucket is not None:
+            stage_calls, call_issues = _summarize_stage_calls(bucket)
+            if stage_calls:
+                turn_data["stage_calls"] = stage_calls
+            if call_issues:
+                turn_data["call_issues"] = call_issues
         for key in (
             "scenario_id",
             "voice",
+            "snr",
+            "condition",
             "interrupt_audio",
             "interrupt_delay_sec",
             "interrupt_played",

@@ -125,6 +125,15 @@ tr:last-child td { border-bottom: none; }
 .collapsible-body { display: none; }
 .collapsible-body.open { display: block; }
 
+/* Question stage detail (per-question drill-down) */
+.qd-toggle { display: inline-block; margin: 4px 0 2px; font-size: 11px; color: #0071e3; font-weight: 500; }
+.qd-detail { margin: 4px 0 10px; padding: 10px 12px; background: #f9f9fb; border: 1px solid #e5e7eb; border-radius: 6px; }
+.qd-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 8px 18px; }
+.qd-sec-title { font-size: 11px; font-weight: 700; color: #1d1d1f; margin-bottom: 3px; }
+.qd-line { font-size: 12px; color: #424245; padding: 1px 0; line-height: 1.45; }
+.qd-k { color: #86868b; display: inline-block; min-width: 84px; }
+.qd-mono { font-family: 'SF Mono', 'Consolas', 'Monaco', monospace; font-size: 11px; word-break: break-all; }
+
 /* Sub-tabs */
 .sub-tab.active { color: #1d1d1f !important; border-bottom-color: #0071e3 !important; }
 .sub-pane { display: none; }
@@ -290,6 +299,156 @@ def _call_issues_tag(issues: dict) -> str:
 
 def _esc(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+# ---------------------------------------------------------------------------
+# Per-question stage detail (inline drill-down)
+# ---------------------------------------------------------------------------
+
+_QD_LATENCY_ORDER = (
+    "memory_ms",
+    "context_ms",
+    "llm_ttft_ms",
+    "llm_ms",
+    "tts_ttfc_ms",
+    "tts_ms",
+    "speculative_ms",
+    "prepare_to_streaming_ms",
+    "turn_shift_to_playback_ms",
+    "bridge_ms",
+    "interrupt_latency_ms",
+)
+
+
+def _qd_section(title: str, lines: list[str]) -> str:
+    if not lines:
+        return ""
+    body = "".join(f'<div class="qd-line">{x}</div>' for x in lines)
+    return f'<div><div class="qd-sec-title">{title}</div>{body}</div>'
+
+
+def _build_question_detail(turn: dict) -> str:
+    """Flat 7-section per-question stage view for the inline drill-down.
+
+    Lays every pipeline stage of one question/turn side by side so cross-stage
+    behavior is visible in one place. Renders only sections that have data
+    (ASR-only / text-mode turns omit turn-detection / generation / TTS), and
+    returns "" when there is nothing worth a toggle.
+    """
+    sc = turn.get("stage_calls", {})
+    secs: list[str] = []
+
+    # ① ASR
+    lines = []
+    if turn.get("input_text"):
+        lines.append(f'<span class="qd-k">원본</span>{_esc(turn["input_text"])}')
+    if turn.get("asr_text"):
+        lines.append(f'<span class="qd-k">인식</span>{_esc(turn["asr_text"])}')
+    score = turn.get("asr_score")
+    if score:
+        lines.append(
+            f'<span class="qd-k">WER</span>{score["wer"]:.3f} '
+            f'<span class="mute">(S{score["substitutions"]} D{score["deletions"]} '
+            f'I{score["insertions"]} / {score["ref_words"]}w)</span>'
+        )
+    secs.append(_qd_section("① ASR", lines))
+
+    # ② Turn detection
+    lines = []
+    delay = turn.get("turn_detection_delay_ms")
+    if delay is not None:
+        lines.append(f'<span class="qd-k">감지 지연</span>{delay:.0f}ms')
+    if turn.get("turn_shift_reason"):
+        lines.append(f'<span class="qd-k">turn reason</span>{_esc(str(turn["turn_shift_reason"]))}')
+    if turn.get("cancelled_turn_shifts"):
+        lines.append(f'<span class="qd-k">전환 취소</span>{turn["cancelled_turn_shifts"]}회')
+    vap = sc.get("vap")
+    if vap:
+        extra = f' · overrun {vap["overrun"]}' if vap.get("overrun") else ""
+        lines.append(
+            f'<span class="qd-k">vap</span>{vap["count"]} frames · avg {vap["avg_ms"]}ms · max {vap["max_ms"]}ms{extra}'
+        )
+    tg = sc.get("turngpt")
+    if tg:
+        extra = f' · slow {tg["slow"]}' if tg.get("slow") else ""
+        lines.append(f'<span class="qd-k">turngpt</span>{tg["count"]} calls · avg {tg["avg_ms"]}ms{extra}')
+    secs.append(_qd_section("② 턴 감지", lines))
+
+    # ③ Prepare gate
+    events = turn.get("similarity_events", [])
+    if events:
+        lines = []
+        for e in events:
+            prev = _esc((e.get("prev_text") or "")[:36])
+            new = _esc((e.get("new_text") or "")[:36])
+            tail = f' <span class="mute">{prev} → {new}</span>' if (prev or new) else ""
+            lines.append(
+                f'<span class="qd-mono">{e.get("similarity", 0):.3f} vs {e.get("threshold", 0):.2f} → '
+                f'<b>{_esc(str(e.get("decision", "?")))}</b></span>{tail}'
+            )
+        secs.append(_qd_section(f"③ Prepare gate ({len(events)})", lines))
+
+    # ④ Generation
+    lines = []
+    if turn.get("outcome"):
+        spec = turn.get("speculative_attempts")
+        spec_str = f' · speculative {spec}' if spec else ""
+        lines.append(f'<span class="qd-k">outcome</span>{_esc(str(turn["outcome"]))}{spec_str}')
+    lat = turn.get("latency", {})
+    for col in _QD_LATENCY_ORDER:
+        if lat.get(col):
+            lines.append(f'<span class="qd-k">{col[:-3]}</span>{lat[col]:.0f}ms')
+    secs.append(_qd_section("④ 생성", lines))
+
+    # ⑤ TTS
+    lines = []
+    for c in sc.get("tts", []):
+        st = "" if c.get("status") == "ok" else f' <span class="bad">{_esc(str(c.get("status", "")))}</span>'
+        lines.append(f'<span class="qd-mono">{_esc(str(c["operation"]))}</span> {c["elapsed_ms"]:.0f}ms{st}')
+    secs.append(_qd_section("⑤ TTS", lines))
+
+    # ⑥ Response & quality
+    lines = []
+    if turn.get("response_text"):
+        lines.append(f'<span class="qd-k">응답</span>{_esc(turn["response_text"][:300])}')
+    qs = turn.get("quality_scores")
+    if qs:
+        chips = " · ".join(f"{_CRITERION_LABELS.get(k, k)} {v}" for k, v in qs.items())
+        lines.append(f'<span class="qd-k">품질</span>{chips}')
+    secs.append(_qd_section("⑥ 응답·품질", lines))
+
+    # ⑦ call_records timeline + API issues
+    lines = []
+    counts = sc.get("counts")
+    if counts:
+        parts = " · ".join(f"{k} ×{v}" for k, v in counts.items())
+        lines.append(f'<span class="qd-mono">{parts}</span>')
+    ci = turn.get("call_issues")
+    if ci and (ci.get("retry_count") or ci.get("error_count")):
+        bits = []
+        if ci.get("retry_count"):
+            bits.append(f'재시도 {ci["retry_count"]}')
+        if ci.get("error_count"):
+            bits.append(f'API 오류 {ci["error_count"]}')
+        lines.append(f'<span class="qd-k">issues</span><span class="bad">{" · ".join(bits)}</span>')
+    if lines:
+        secs.append(_qd_section("⑦ call_records", lines))
+
+    secs = [s for s in secs if s]
+    if not secs:
+        return ""
+    return '<div class="qd-grid">' + "".join(secs) + "</div>"
+
+
+def _detail_block(turn: dict, label: str = "단계 상세") -> str:
+    """Collapsible toggle + detail body for one question (reuses .collapsible JS)."""
+    detail = _build_question_detail(turn)
+    if not detail:
+        return ""
+    return (
+        f'<div class="collapsible-toggle qd-toggle">{_esc(label)}</div>'
+        f'<div class="collapsible-body qd-detail">{detail}</div>'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -650,7 +809,9 @@ def _build_asr(scored: dict) -> str:
                 f'<div class="item-row"><span class="item-label mute">시스템</span>'
                 f'<span class="item-text diff-mark">{_esc(sys_text)}</span></div>'
             )
-        p.append("</div></div>")
+        p.append("</div>")
+        p.append(_detail_block(t))
+        p.append("</div>")
 
     if current_cat is not None:
         p.append("</div>")
@@ -1068,6 +1229,7 @@ def _build_turn_taking(scored: dict) -> str:
             p.append('</div>')
 
             p.append("</div>")
+            p.append(_detail_block(t))
 
         if current_cat is not None:
             p.append("</div>")
@@ -1451,6 +1613,7 @@ def _build_interruption(scored: dict) -> str:
             p.append('</div>')
 
             p.append("</div>")
+            p.append(_detail_block(t))
 
         p.append("</div>")
 
@@ -1599,6 +1762,8 @@ def _build_quality(scored: dict) -> str:
                 p.append('</div>')
 
                 p.append("</div>")
+                for t in sc_turns:
+                    p.append(_detail_block(t, f'단계 상세 — {t["question_id"]}'))
         else:
             for t in suite_turns:
                 qs = t.get("quality_scores", {})
@@ -1625,6 +1790,7 @@ def _build_quality(scored: dict) -> str:
                 p.append('</div>')
 
                 p.append("</div>")
+                p.append(_detail_block(t))
 
         p.append("</div>")
 
@@ -1922,6 +2088,7 @@ def _build_memory(scored: dict) -> str:
                     p.append('</div></div>')
 
                 p.append("</div>")
+                p.append(_detail_block(t))
 
             p.append("</div>")
 

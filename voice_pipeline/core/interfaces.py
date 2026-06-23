@@ -877,7 +877,15 @@ class IEmbedder(ABC):
 
 
 class ICallStore(ABC):
-    """Records per-call execution data for pipeline modules."""
+    """Records per-call execution data for pipeline modules.
+
+    Also carries the current conversation exchange index as shared state:
+    the turn authority (TurnDetector) updates it via ``set_turn_index`` and
+    every recording site stamps it onto its ``CallRecord`` at construction
+    time, so per-call data is attributable to a specific turn.
+    """
+
+    _turn_index: int = 0
 
     @abstractmethod
     def record(self, record: CallRecord) -> None:
@@ -886,6 +894,15 @@ class ICallStore(ABC):
         Args:
             record: Call record to store.
         """
+
+    def set_turn_index(self, index: int) -> None:
+        """Set the current exchange index stamped onto new call records."""
+        self._turn_index = index
+
+    @property
+    def current_turn_index(self) -> int:
+        """Current exchange index (0-based) for stamping call records."""
+        return self._turn_index
 
     @abstractmethod
     def close(self) -> None:

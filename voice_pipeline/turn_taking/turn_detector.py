@@ -14,14 +14,13 @@ import json
 import logging
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
 from typing import Literal
 
 import numpy as np
 
 from voice_pipeline.audio.constants import FRAME_DURATION_MS
 from voice_pipeline.core.interfaces import IVAP, ICallStore, IEmbedder, ITurnDetector
-from voice_pipeline.core.types import AudioFrame, CallRecord, TurnDecision, VAPResult
+from voice_pipeline.core.types import AudioFrame, CallRecord, TurnDecision, VAPResult, utc_now_str
 from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT, SyncTurnGPTAdapter
 
 logger = logging.getLogger("voice_pipeline.turn_taking")
@@ -109,6 +108,10 @@ class TurnDetector(ITurnDetector):
         self._turn_state = _TurnState.USER_TURN
         self._dialog_parts: list[str] = []
         self._turn_index = 0
+        # Seed the shared exchange counter so call records of the first turn
+        # (before any commit) are stamped turn_index=0.
+        if self._call_store is not None:
+            self._call_store.set_turn_index(0)
 
         # Per-frame tracking (reset between turns)
         self._prev_asr_text: str = ""
@@ -185,11 +188,7 @@ class TurnDetector(ITurnDetector):
         # Evaluate turn-shift first so its VAP-sustain timer keeps advancing even
         # on frames where prepare preempts the shift below (see _check_turn_shift's
         # side effect). The decision itself is acted on after the prepare check.
-        turn_shift_reason = (
-            self._check_turn_shift(vap_result, elapsed)
-            if not user_is_speaking and asr_text
-            else None
-        )
+        turn_shift_reason = self._check_turn_shift(vap_result, elapsed) if not user_is_speaking and asr_text else None
 
         # Prepare preempts turn-shift on a fresh dissimilar change (→ regenerate).
         # turn_shift 직전에는 발화 조건(turngpt/0.2s 스로틀)을 우회 — 스로틀은 발화
@@ -245,6 +244,11 @@ class TurnDetector(ITurnDetector):
             self._dialog_parts.append(text)
         self._turn_state = _TurnState.ROBOT_TURN
         self._turn_index += 1
+        # Generation (LLM/TTS) for the exchange that just ended runs during
+        # this ROBOT_TURN — attribute its call records to that exchange, not
+        # the next user turn that will reuse the incremented index.
+        if self._call_store is not None:
+            self._call_store.set_turn_index(self._turn_index - 1)
         if self._vad_reset_fn is not None:
             try:
                 self._vad_reset_fn()
@@ -258,6 +262,9 @@ class TurnDetector(ITurnDetector):
         Does NOT clear dialog_parts (TurnGPT context persists across turns).
         """
         self._turn_state = _TurnState.USER_TURN
+        # Entering the next user turn: stamp its exchange index onto records.
+        if self._call_store is not None:
+            self._call_store.set_turn_index(self._turn_index)
         self._reset_per_frame_state()
 
     def _reset_per_frame_state(self) -> None:
@@ -401,12 +408,13 @@ class TurnDetector(ITurnDetector):
         """Record a similarity-gate decision to the call store (if configured)."""
         if self._call_store is None:
             return
+        # turn_index lives on the CallRecord column (below), not in metadata —
+        # report.py groups all call records by that column.
         metadata = json.dumps(
             {
                 "similarity": round(similarity, 4),
                 "threshold": self._SIMILARITY_THRESHOLD,
                 "decision": decision,
-                "turn_index": self._turn_index,
                 "prev_text": prev_text,
                 "new_text": new_text,
             },
@@ -416,12 +424,13 @@ class TurnDetector(ITurnDetector):
             self._call_store.record(
                 CallRecord(
                     session_id=self._session_id,
-                    timestamp=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+                    timestamp=utc_now_str(),
                     module="similarity_gate",
                     operation=operation,
                     model="embedder",
                     elapsed_ms=elapsed_ms,
                     metadata=metadata,
+                    turn_index=self._turn_index,
                 )
             )
         except Exception:

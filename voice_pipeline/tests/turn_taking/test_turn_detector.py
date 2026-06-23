@@ -392,6 +392,34 @@ class TestCommit:
         assert detector._last_prepare_text == ""  # wiped
 
 
+class TestExchangeIndex:
+    """The shared call-store turn counter must track the exchange index so that
+    user-turn (vap/turngpt) and robot-turn (llm/tts) call records of the same
+    exchange share one index, never colliding with the next exchange."""
+
+    def _detector(self, store: InMemoryCallStore) -> TurnDetector:
+        mock_vap = MagicMock(spec=IVAP)
+        adapter = SyncTurnGPTAdapter(MagicMock(spec=ITurnGPT))
+        return TurnDetector(mock_vap, adapter, _make_embedder_mock(), call_store=store)
+
+    def test_counter_tracks_exchange_across_turns(self):
+        store = InMemoryCallStore()
+        detector = self._detector(store)
+
+        # Exchange 0: user turn and its generation share index 0.
+        assert store.current_turn_index == 0  # seeded at construction
+        detector.commit("first")  # user→robot; generation of exchange 0
+        assert store.current_turn_index == 0
+
+        detector.reset()  # entering user turn of exchange 1
+        assert store.current_turn_index == 1
+        detector.commit("second")  # generation of exchange 1
+        assert store.current_turn_index == 1
+
+        detector.reset()  # exchange 2
+        assert store.current_turn_index == 2
+
+
 # ---------------------------------------------------------------------------
 # Test 7: Interrupt with robot_audio
 # ---------------------------------------------------------------------------
@@ -645,7 +673,7 @@ class TestSimilarityGateRecording:
         assert meta["decision"] == "skip"
         assert abs(meta["similarity"] - 0.9) < 0.01
         assert meta["threshold"] == TurnDetector._SIMILARITY_THRESHOLD
-        assert meta["turn_index"] == 0
+        assert rec.turn_index == 0  # turn_index lives on the column now, not metadata
         assert meta["prev_text"] == "hello world"
         assert meta["new_text"] == "hello worlds"
 
@@ -707,8 +735,8 @@ class TestSimilarityGateRecording:
         detector._last_prepare_text = "next turn"
         detector.process_frame(FRAME, "next turn text")
 
-        metas = [json.loads(r.metadata) for r in store.records if r.operation == "cancel_gate"]
-        assert [m["turn_index"] for m in metas] == [0, 1]
+        recs = [r for r in store.records if r.operation == "cancel_gate"]
+        assert [r.turn_index for r in recs] == [0, 1]
 
     def test_no_call_store_no_records(self):
         """Without a call_store the gate works and records nothing."""

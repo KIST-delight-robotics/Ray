@@ -7,10 +7,9 @@ import logging
 import math
 import time
 from collections.abc import Generator
-from datetime import UTC, datetime
 
 from voice_pipeline.core.interfaces import ITTS, ICallStore
-from voice_pipeline.core.types import CallRecord, TTSStream
+from voice_pipeline.core.types import CallRecord, TTSStream, utc_now_str
 
 logger = logging.getLogger("voice_pipeline.trace")
 
@@ -157,13 +156,14 @@ class TrackedTTS(ITTS):
     ) -> None:
         record = CallRecord(
             session_id=self.session_id,
-            timestamp=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+            timestamp=utc_now_str(),
             module="tts",
             operation=operation,
             model=self._inner.model_name,
             elapsed_ms=elapsed_ms,
             status=status,
             metadata=metadata,
+            turn_index=self._store.current_turn_index,
         )
         try:
             self._store.record(record)

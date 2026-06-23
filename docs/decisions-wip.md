@@ -180,7 +180,7 @@ use-after-free 경합 회피) — 토크만 끄고 즉시 종료, 나머지는 O
 
 - **judge 판정을 이진(meaning_changed / response_appropriate)으로**: 목적이 "threshold가 적절한가"라는 예/아니오 질문이라 5점 척도보다 harmful skip *비율*이 바로 해석됨. 응답까지 judge에 보여주는 이유는 의미가 달라져도(meaning_changed) 응답이 우연히 여전히 적절한 경우(짧은 부가어 등)와 실제 피해(harmful)를 구분하기 위함 — threshold 문제의 심각도를 과대평가하지 않게 함.
 - **similarity 값을 CallRecord로 기록하는 이유**: judge 판정만으로는 "현 threshold에서 bad skip이 N건"까지만 알 수 있고 *얼마로 올려야 하는지*를 모름. 게이트의 4종 결정(skip/keep/regenerate/cancel)마다 similarity를 기록하면 harmful skip의 유사도 구간(예: 0.85–0.91)이 보여 조정 폭이 정량화되고, regenerate 기록으로 "threshold를 낮추면 skip으로 바뀌었을 건수"도 역산 가능. 단, 이 평가는 counterfactual 시뮬레이션이 아니라서 *현재* threshold에서 실제 발생한 결정만 판정함.
-- **턴 매칭은 metadata의 turn_index로**: `call_records` 스키마에는 턴/응답 식별자가 없음(세션 단위 설계). 스키마 변경 대신 TurnDetector가 턴 카운터를 metadata JSON에 넣음 — report.py가 messages/pipeline_traces를 세션 내 인덱스로 join하는 기존 방식과 정합. 카운터는 `commit()`에서만 증가 — cancel rewind는 같은 턴의 연속이므로 reset/cancel에서 올리면 안 됨.
+- **턴 매칭은 `call_records.turn_index` 컬럼으로** (초기엔 metadata JSON): 처음엔 스키마 변경을 피해 similarity_gate가 턴 카운터를 metadata에 넣었으나, 질문 단위 e2e 드릴다운(아래 항목)이 vap/turngpt/tts 등 *모든* 모듈 호출을 턴별로 귀속해야 해서 gate에만 있는 metadata로는 부족. 전용 컬럼으로 승격하고 `ICallStore`에 공유 턴 카운터(`set_turn_index`/`current_turn_index`)를 둠 — TurnDetector(턴 권위)가 전환마다 갱신하면 백그라운드 스레드의 vap/turngpt까지 같은 인덱스를 스탬프. 생성(LLM/TTS)은 `commit()`으로 끝난 *직전* 교환에 귀속(`set_turn_index(_turn_index-1)`), 다음 user 턴은 `reset()`에서 올림. 카운터는 `commit()`에서만 증가 — cancel rewind는 같은 턴의 연속이라 reset/cancel에서 올리면 안 됨. 타임스탬프도 초→µs(`utc_now_str`)로 올려 같은 초에 여러 스레드가 찍은 cross-stage 기록을 정렬 가능. report.py는 컬럼 부재(구 DB)를 감지해 metadata 폴백.
 - **asr_text ≠ system_text가 곧 게이트 skip의 흔적**: eval에서 `system_text`(messages의 user 메시지)는 `_begin_streaming`이 기록한 generator의 prepare 입력이고, `asr_text`는 turn shift 시점의 최종 ASR 텍스트. 두 값이 (정규화 후) 다른 경로는 유사도 게이트의 skip/keep뿐이라, 별도 계측 없이 이 차이만으로 judge 후보를 선별할 수 있음.
 
 
@@ -204,12 +204,33 @@ use-after-free 경합 회피) — 토크만 끄고 즉시 종료, 나머지는 O
 ## TTS vendor 추가 — ElevenLabs
 
 - **`stream/with-timestamps` endpoint 채택**: base64+JSON 스트림이라 raw PCM 대비 네트워크 ~33% 오버헤드가 있지만, character alignment → word timestamp 집계로 `truncate_by_timestamps` 정밀 barge-in 절단이 처음으로 활성화됨 (OpenAI는 timestamp 미지원이라 지금까지 항상 ratio 추정 fallback). 오버헤드가 Pi에서 문제로 실측되면(TrackedTTS `ttfc_ms`/`max_gap_ms`) 기본 stream endpoint로 전환 가능한 구조 — `_iter_chunks`만 교체.
+  - Pi 실측(`scripts/bench/bench_tts.py`, flash_v2_5, 3 rounds): with-timestamps TTFB 중앙값 220~305ms로 plain stream(206~272ms) 대비 **+15~35ms** 수준, total도 장문(19s 오디오)에서 1.2s vs 0.8s — realtime factor 15.8×라 재생에 영향 없음. 오버헤드 수용 확정. 참고로 OpenAI tts-1 베이스라인은 TTFB 0.9~8.2s로 편차가 크고 짧은 문장에서 realtime 0.54×(재생보다 느림)까지 떨어짐 — vendor 전환 자체가 큰 지연 개선.
 - **`pcm_24000` 고정**: OpenAITTS와 샘플레이트를 맞춰 VAP 참조 채널·C++ 재생·greeting WAV 등 downstream 전부 무변경. tier 제한도 없음 (`pcm_44100`은 Pro 전용).
 - **vendor 선택 = `create_tts()` 팩토리 + 모듈 내 파라미터 기본값**: 팩토리는 추상화 수단이 아니라(추상화는 `ITTS`가 담당) "이름→클래스" 매핑의 단일 위치 — 스크립트 `--vendor` 인자 같은 런타임 선택용. 기본 vendor는 `factory.py`의 `_DEFAULT_VENDOR`처럼 모듈 안 파라미터 기본값으로 — `create_embedder(backend="local")` 선례. env var는 설정 표면 증가라 배제, mutable 모듈 전역 대입은 wiring 결정이 두 곳으로 갈라져 기각.
 - **SDK gotcha — lazy generator**: `stream_with_timestamps()`는 generator function이라 HTTP 요청·에러가 첫 `next()`에서 발생 (OpenAI의 eager CM enter와 다름). 인증/voice 에러도 `synthesize()`가 아닌 iteration 중 TTSError로 표면화 — TrackedTTS에는 synthesize=ok + stream=error로 기록됨 (cosmetic). pydantic 속성명은 `audio_base_64` (wire alias는 `audio_base64`). SDK 기본 timeout 240s는 실시간 대화에 부적합해 override 필수.
 - **timestamps 집계는 절대 raise 금지**: sentence 모드 consumer에서 `stream.timestamps` 읽기 예외는 턴 전체를 실패시킴 (consumer_error 경로). alignment 길이 불일치는 절단+warning, 시간 역전/음수는 clamp. timestamps는 best-effort 부가 기능 — 실패해도 오디오 재생은 정상이어야 함.
 - **단어 집계 = 공백 run 분리, 전역 누적 후 1회 집계**: `truncate_by_timestamps`가 `text.split()` 토큰을 전제하므로 character alignment를 `ch.isspace()` run 기준으로 묶음. 단어가 chunk 경계에 걸칠 수 있어 chunk별 집계가 아니라 스트림 종료 시점 1회 집계 (alignment 시간은 오디오 시작 기준 절대값).
 - **Free tier voice 제약 — 구형 premade는 API 불가**: Rachel(`21m00…`) 등 구형 premade voice는 라이브러리로 이관돼 Free tier에서 API 호출 시 402 `paid_plan_required`. 현행 default voice(Sarah/George/Daniel/Jessica 등)는 사용 가능 — 실호출로 확인. scoped API 키는 `voices_read` 권한이 없어 voice 목록 조회도 불가하므로, voice 교체 시 TTS 실호출로 검증해야 함. `pcm_24000`+`eleven_flash_v2_5`+`stream_with_timestamps` 조합은 Free tier에서 동작 확인됨.
+
+
+## ASR 배경 잡음 SNR 스윕 (MUSAN 디지털 사전 믹싱)
+
+- **디지털 사전 믹싱 채택, 별도 스피커 음향 동시 재생 기각**: eval의 목적이 WER-vs-SNR 곡선이라 *재현 가능하고 정확한* SNR이 핵심. 두 번째 스피커로 잡음을 동시 재생하면 룸 리버브·마이크 AGC까지 반영돼 더 현실적이지만 SNR을 정밀 통제할 수 없음. 변형 WAV를 사전 생성해 파일로 검수·재사용하는 쪽이 eval 성격에 맞음.
+- **디지털 SNR은 상한선 — 음향 경로가 방 잡음을 더함**: 스피커→마이크 재생이라 마이크에서의 실효 SNR = 디지털 SNR − 룸/마이크 floor. 높은 SNR(20dB)에서는 방 자체 잡음이 지배해 곡선이 평탄해질 수 있음. 조용한 방에서 돌리고, 디지털 SNR을 통제 변수로 삼아 **절대 WER이 아닌 레벨 간 상대 순위**로 해석.
+- **음성 레벨 고정, 잡음 floor만 가변 (SNR이 유일 독립 변수)**: 음성을 clean과 동일한 정규화 레벨(-20 dBFS)로 두고 잡음만 올림 — 음향 리그에서 음성-대-룸noise 비율이 모든 SNR에서 동일해야 주입 잡음의 효과만 분리됨. 합성 후 클리핑은 **피크 가드(>0.95면 합성 전체 감쇠)**로 처리하고 RMS 재정규화는 하지 않음: 재정규화하면 음성 재생 레벨이 SNR마다 달라져 통제가 깨짐. 피크 가드는 음성·잡음을 같은 배율로 줄여 SNR을 보존하며, 실측상 0dB·-20dBFS에서도 피크 0.48이라 발동조차 안 함.
+- **SNR 기준 RMS는 전체 클립이 아닌 유성 구간**: 선행/후행 무음을 포함하면 speech RMS가 희석돼 실효 SNR이 목표보다 높아짐. trim 패스와 동일한 peak 대비 임계로 유성 구간만 잡아 RMS 계산.
+- **변형은 `wav/noise/` 하위 폴더에 — normalize 패스 재진입 방지**: prepare_audio의 정규화/트림 패스가 `output_dir.glob("*.wav")`(비재귀)로 전체를 다시 정규화함. 변형을 같은 폴더에 두면 재실행 시 SNR이 파괴되므로, glob에 안 잡히는 하위 폴더에 격리. 변형 생성은 트림·정규화가 끝난 *최종* clean WAV를 입력으로 받도록 패스 순서 뒤에 배치.
+- **잡음 클립 선택은 (id+SNR) 시드로 결정론적**: 재실행 시 바이트 동일 출력 → eval 재현성. clip 선택과 crop offset을 같은 `random.Random(seed)`에서 뽑음(`Random(str)`은 sha512 기반이라 PYTHONHASHSEED 무관하게 결정론적).
+- **범위 = ASR 스위트 · MUSAN `noise`(앰비언트) · 영어**: 잡음이 VAP/턴 감지에 미치는 영향은 별개 연구라 turn-taking/interruption 스위트는 무잡음 유지. ASR 언어가 영어라 babble(타화자)은 다음 단계로 미룸 — 1차는 앰비언트 단일 카테고리로 SNR을 유일 축으로 둠. SNR 레벨 `[clean, 20, 15, 10, 5, 0]`은 clean~10dB가 정상~약한 잡음, 5/0dB가 스트레스.
+
+
+## 질문 단위 e2e 드릴다운 (대시보드)
+
+- **목적 = 단계 간 상호작용 확인, 카테고리 통계만으론 부족**: 대시보드 각 탭은 질문을 자기 카테고리 지표(ASR=WER, 턴테이킹=감지지연 등) 한 조각으로만 보여줘, 한 질문의 전 단계(ASR→턴감지→게이트→생성→TTS)가 어떻게 맞물렸는지 볼 수 없었음. PoC(`trace_question.py`, 후속 삭제)로 "call_records에 턴 키가 있어야 질문별 재구성이 된다"를 확인 후 본 작업으로 정식화.
+- **표면 = 기존 대시보드 인라인 펼침, 신규 탭/CLI 기각**: 질문은 이미 각 탭에 item으로 나열되므로, 지표 이상을 본 그 자리에서 펼치는 게 탭 이동 0회로 맥락 유지에 최적. 전용 탭(질문 목록 중복)·CLI 승격(비시각·단건)은 기각. 기존 `.collapsible-toggle/.collapsible-body` JS를 그대로 재사용 — 새 토글 스크립트 불필요.
+- **데이터 경로 = report.py 사전 집계, dashboard는 scored.json만**: dashboard는 `f(scored.json)` 순수 함수 유지(자족적·공유 용이). report.py가 call_records를 turn_index로 묶어 턴별 `stage_calls`(vap/turngpt 요약, tts 호출, 모듈별 count)를 첨부 → score.py가 in-place로 통과시켜 무수정. eval.db 직접 조회는 계약을 깨고 두 소스를 요구해 기각.
+- **vap 원시 프레임은 요약만 (count/avg/max)**: 턴당 수십~수백 프레임을 그대로 실으면 scored.json이 폭증. ⑦ 타임라인도 `module.operation ×N` 접힌 카운트로. 1차는 플랫 7섹션이고, 단계 간 인과 화살표는 데이터 플러밍 검증 후 후속.
+- **`call_issues` 세션→턴 단위로 정확화**: turn_index 컬럼이 생기며 재시도/오류를 턴별로 귀속(기존엔 세션 합계를 모든 턴에 붙임). 렌더(`_call_issues_tag`)는 무변경, 키(`retry_count`/`error_count`) 유지.
 
 
 ## 차후 고려
