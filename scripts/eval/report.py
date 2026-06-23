@@ -166,9 +166,17 @@ def build_report(results_dir: Path) -> dict:
                 elif mod == "turngpt":
                     bucket["turngpt"].append((r["elapsed_ms"], r["status"]))
                 elif mod == "tts":
-                    bucket["tts"].append(
-                        {"operation": r["operation"], "elapsed_ms": r["elapsed_ms"], "status": r["status"]}
-                    )
+                    entry = {"operation": r["operation"], "elapsed_ms": r["elapsed_ms"], "status": r["status"]}
+                    # The meaningful TTS timing lives on the stream op (synthesize is
+                    # ~0ms for lazy-generator vendors); lift ttfc/audio out of metadata.
+                    if r["operation"] == "stream" and r["metadata"]:
+                        try:
+                            m = json.loads(r["metadata"])
+                            entry["ttfc_ms"] = m.get("ttfc_ms")
+                            entry["audio_sec"] = m.get("audio_sec")
+                        except json.JSONDecodeError:
+                            pass
+                    bucket["tts"].append(entry)
                 elif mod == "similarity_gate":
                     try:
                         meta = json.loads(r["metadata"]) if r["metadata"] else {}

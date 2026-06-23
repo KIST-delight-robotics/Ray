@@ -400,11 +400,22 @@ def _build_question_detail(turn: dict) -> str:
             lines.append(f'<span class="qd-k">{col[:-3]}</span>{lat[col]:.0f}ms')
     secs.append(_qd_section("④ 생성", lines))
 
-    # ⑤ TTS
+    # ⑤ TTS — the stream op carries the real timing (ttfc = perceived latency);
+    # synthesize is ~0ms for lazy-generator vendors (ElevenLabs), so skip those.
     lines = []
     for c in sc.get("tts", []):
+        op = str(c.get("operation", ""))
+        if op == "synthesize" and c["elapsed_ms"] < 1:
+            continue
         st = "" if c.get("status") == "ok" else f' <span class="bad">{_esc(str(c.get("status", "")))}</span>'
-        lines.append(f'<span class="qd-mono">{_esc(str(c["operation"]))}</span> {c["elapsed_ms"]:.0f}ms{st}')
+        if op == "stream":
+            ttfc = c.get("ttfc_ms")
+            ttfc_str = f"ttfc {ttfc:.0f}ms · " if ttfc else ""
+            audio = c.get("audio_sec")
+            audio_str = f" · {audio}s audio" if audio else ""
+            lines.append(f'<span class="qd-mono">stream</span> {ttfc_str}{c["elapsed_ms"]:.0f}ms total{audio_str}{st}')
+        else:
+            lines.append(f'<span class="qd-mono">{_esc(op)}</span> {c["elapsed_ms"]:.0f}ms{st}')
     secs.append(_qd_section("⑤ TTS", lines))
 
     # ⑥ Response & quality
