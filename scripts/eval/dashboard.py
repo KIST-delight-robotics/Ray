@@ -374,14 +374,20 @@ def _build_question_detail(turn: dict) -> str:
         lines.append(f'<span class="qd-k">turngpt</span>{tg["count"]} calls · avg {tg["avg_ms"]}ms{extra}')
     secs.append(_qd_section("② 턴 감지", lines))
 
-    # ③ Prepare gate
+    # ③ Prepare gate — ASR updates are ~all pure appends (new = prev + suffix),
+    # so show just the added tail; fall back to full prev → new on divergence.
     events = turn.get("similarity_events", [])
     if events:
         lines = []
         for e in events:
-            prev = _esc((e.get("prev_text") or "")[:36])
-            new = _esc((e.get("new_text") or "")[:36])
-            tail = f' <span class="mute">{prev} → {new}</span>' if (prev or new) else ""
+            prev = e.get("prev_text") or ""
+            new = e.get("new_text") or ""
+            if new.startswith(prev):
+                added = new[len(prev):].lstrip()
+                delta = f'<span class="mute">+</span> {_esc(added)}' if added else ""
+            else:
+                delta = f'<span class="mute">{_esc(prev)} → {_esc(new)}</span>'
+            tail = f" {delta}" if delta else ""
             lines.append(
                 f'<span class="qd-mono">{e.get("similarity", 0):.3f} vs {e.get("threshold", 0):.2f} → '
                 f'<b>{_esc(str(e.get("decision", "?")))}</b></span>{tail}'
