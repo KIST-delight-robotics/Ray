@@ -470,7 +470,6 @@ def _build_overview(scored: dict) -> str:
     started = scored.get("started_at", "—")
     finished = scored.get("finished_at", "—")
     total = scored.get("total", 0)
-    failed = scored.get("failed", 0)
     config = scored.get("config", {})
     pipeline = config.get("pipeline", {})
     runner = config.get("runner", {})
@@ -869,7 +868,7 @@ def _build_histogram(values: list[float], stats: dict) -> str:
     svg = [f'<svg width="100%" viewBox="0 0 {w} {h}" style="max-width:{w}px;display:block">']
 
     # Bars
-    for i, (lo, hi) in enumerate(bins):
+    for i, (_lo, _hi) in enumerate(bins):
         c = counts[i]
         if c == 0:
             continue
@@ -882,7 +881,7 @@ def _build_histogram(values: list[float], stats: dict) -> str:
 
     # X-axis labels
     label_interval = max(1, n_bins // 8)
-    for i, (lo, hi) in enumerate(bins):
+    for i, (lo, _hi) in enumerate(bins):
         if i % label_interval == 0 or i == n_bins - 1:
             tx = x_pos(i) + bar_w / 2
             svg.append(f'<text x="{tx}" y="{h - 2}" font-size="8" fill="#9ca3af" text-anchor="middle">{lo}</text>')
@@ -1565,7 +1564,6 @@ def _build_interruption(scored: dict) -> str:
             outcome = t.get("outcome")
             played = t.get("interrupt_played", False)
             q_text = _esc(t.get("input_text", ""))
-            int_text = _esc(_get_question_text(scored, audio_id))
 
             # Delay group header
             if delay != current_delay:
