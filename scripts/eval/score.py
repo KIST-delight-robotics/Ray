@@ -293,10 +293,7 @@ def _build_judge_messages(suite_name: str, turns: list[dict], *, multi_turn: boo
             "Return a JSON object with: relevance, voice_appropriateness, "
             f"naturalness, {criterion_key}reasoning (one sentence in Korean)."
         )
-        parts = [
-            f"User: {t['input_text']}\nResponse: {t['response_text']}"
-            for t in turns
-        ]
+        parts = [f"User: {t['input_text']}\nResponse: {t['response_text']}" for t in turns]
         user = "Evaluate this multi-turn conversation as a whole:\n\n" + "\n\n".join(parts)
     else:
         system = (
@@ -826,6 +823,8 @@ def score_report(report: dict) -> dict:
     asr_scores: list[float] = []
     asr_by_suite: dict[str, list[float]] = {}
     asr_by_voice: dict[str, list[float]] = {}
+    asr_by_condition: dict[str, list[float]] = {}
+    condition_snr: dict[str, float] = {}  # condition label → its SNR (for ordering)
     turn_detection_delays: list[float] = []
     latency_values: dict[str, list[float]] = {
         "turn_shift_to_playback_ms": [],
@@ -848,6 +847,12 @@ def score_report(report: dict) -> dict:
             voice = turn.get("voice", "")
             if voice:
                 asr_by_voice.setdefault(voice, []).append(wer["wer"])
+            # "condition"/"snr" present only in noise-bed (e2e) mode.
+            if "condition" in turn:
+                cond = turn["condition"]
+                asr_by_condition.setdefault(cond, []).append(wer["wer"])
+                if turn.get("snr") is not None:
+                    condition_snr[cond] = turn["snr"]
 
         # Turn detection delay (text mode 제외; expect_wait 스위트는 의도된 대기라
         # 감지 속도가 아닌 timeout 설정값이므로 제외)
@@ -872,6 +877,16 @@ def score_report(report: dict) -> dict:
             "by_suite": {suite: _asr_suite_summary(wers) for suite, wers in asr_by_suite.items()},
             "by_voice": {voice: _asr_suite_summary(wers) for voice, wers in sorted(asr_by_voice.items())},
         }
+        if asr_by_condition:
+            # Order conditions clean→noisy by their SNR (unknown SNR sorts last).
+            asr_summary["by_condition"] = {
+                cond: _asr_suite_summary(wers)
+                for cond, wers in sorted(
+                    asr_by_condition.items(),
+                    key=lambda kv: condition_snr.get(kv[0], float("-inf")),
+                    reverse=True,
+                )
+            }
 
     # Aggregate latency
     latency_summary = {key: compute_latency_stats(vals) for key, vals in latency_values.items() if vals}
@@ -988,6 +1003,12 @@ def print_scores(scored: dict) -> None:
             for voice, stats in by_voice.items():
                 perfect = f"{stats['perfect_count']}/{stats['total_scored']}"
                 print(f"    {voice:>10}: WER={stats['mean_wer']:.2%} ({perfect} perfect)")
+        by_condition = asr.get("by_condition", {})
+        if by_condition:
+            print("  By noise condition (quiet → noisiest):")
+            for cond, stats in by_condition.items():
+                perfect = f"{stats['perfect_count']}/{stats['total_scored']}"
+                print(f"    {cond:>10}: WER={stats['mean_wer']:.2%} ({perfect} perfect)")
 
     latency = scores.get("latency", {})
     if latency:

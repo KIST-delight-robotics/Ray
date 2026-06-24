@@ -44,6 +44,7 @@ except Exception:
     _asound = None
 
 import torch
+from noise_bed import NoiseBed
 from question_player import QuestionPlayer
 from silero_vad import load_silero_vad
 
@@ -85,6 +86,9 @@ _TURN_DETECT_TIMEOUT_SEC = 10.0
 _WATCHDOG_POLL_SEC = 0.1  # 감지 워치독 폴링 주기
 _BEEP_SETTLE_SEC = 0.2  # 비프음이 마이크 큐에 다 들어온 뒤 drain하기 위한 대기
 _TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+# 질문 재생 기본 장치 — ALSA "default"는 로봇 응답 전용이라 질문 재생엔 안 씀.
+# dmix PCM이라 노이즈 베드와 질문을 한 카드에서 섞을 수 있고, 단일 스트림도 정상 동작.
+_DEFAULT_PLAYBACK_DEVICE = "plug:dmix:CARD=DAC,DEV=0"
 
 
 # ---------------------------------------------------------------------------
@@ -1037,6 +1041,210 @@ def _run_multi_turn_suite(
 
 
 # ---------------------------------------------------------------------------
+# Noise-bed e2e mode
+# ---------------------------------------------------------------------------
+
+
+def _load_bed_conditions(
+    bed_dir: str,
+) -> tuple[list[str], str, dict[str, float | None], dict[str, float], str | None]:
+    """Read calibration.json → (ordered labels, master path, gains, snr, device).
+
+    Each condition is a per-master gain (``quiet`` = None = bed off); NoiseBed
+    scales the single master at playback. Conditions are ordered clean→noisy:
+    ``quiet`` (SNR = floor ceiling) first, then the rest by descending SNR.
+    """
+    bed_path = Path(bed_dir)
+    calib = json.loads((bed_path / "calibration.json").read_text())
+    conds = calib["conditions"]
+    master = calib.get("bed_master") or str(bed_path / "bed_master.wav")
+    ordered: list[tuple[str, float | None, float]] = [("quiet", None, float(calib.get("floor_snr_ceiling_db", 0.0)))]
+    for name in sorted(conds, key=lambda n: -conds[n]["achievable_snr_db"]):
+        ordered.append((name, float(conds[name]["gain"]), float(conds[name]["achievable_snr_db"])))
+    labels = [lab for lab, _, _ in ordered]
+    gains = {lab: g for lab, g, _ in ordered}
+    snr_by = {lab: s for lab, _, s in ordered}
+    return labels, master, gains, snr_by, calib.get("device")
+
+
+def _is_exclusive_device(device: str) -> bool:
+    """True if ``device`` is a raw hardware PCM that allows only one open.
+
+    ``hw:``/``plughw:`` PCMs have no software mixing, so the noise bed and
+    question playback can't coexist on them — the bed grabs the device and
+    every later playback fails with "device busy". Only dmix-backed PCMs mix.
+    Conservatively returns False for names we can't classify (``default``,
+    ``pulse``, custom asound.conf PCMs) to avoid false alarms.
+    """
+    name = device.strip().strip("'\"").lower()
+    if "dmix" in name:
+        return False
+    return name.startswith(("hw:", "plughw:"))
+
+
+def _collect_audio_units(
+    audio_suites: list[dict],
+    wav_map: dict[str, dict[str, str]],
+    player: QuestionPlayer,
+    session_map: list[dict],
+    create_session: Callable[..., SessionComponents],
+    audio_queue: queue.Queue[AudioFrame],
+    seed_session_map: dict[int, str],
+    seed_episode_map: dict[str, list[int]],
+    record_dir: str,
+    quick: bool,
+) -> list[Callable[[], None]]:
+    """Build deferred per-session thunks for noise-bed scheduling.
+
+    Each thunk runs exactly one session (single-turn question, multi-turn
+    scenario, or one interruption combo) via the existing runners, so the bed
+    scheduler can reorder them into condition blocks. Quick mode samples down
+    the same way the normal loop does. ASR questions play their clean WAV —
+    the acoustic bed supplies the noise.
+    """
+    units: list[Callable[[], None]] = []
+    for suite in audio_suites:
+        if suite.get("multi_turn"):
+            scenarios = suite["scenarios"]
+            if quick and len(scenarios) > 1:
+                scenarios = random.sample(scenarios, 1)
+            for scenario in scenarios:
+                units.append(
+                    lambda sc=scenario, su=suite: _run_multi_turn_suite(
+                        su,
+                        sc,
+                        wav_map,
+                        player,
+                        session_map,
+                        create_session,
+                        audio_queue,
+                        seed_session_map=seed_session_map,
+                        seed_episode_map=seed_episode_map,
+                        record_dir=record_dir,
+                    )
+                )
+        elif suite.get("category") == "interruption":
+            questions = suite["questions"]
+            if quick and len(questions) > 1:
+                questions = random.sample(questions, 1)
+            delays = suite.get("interrupt_delays_sec", [2.0])
+            interrupt_audios = suite.get("interrupt_audios", [])
+            if not interrupt_audios:
+                logger.error("Suite %s has no interrupt_audios", suite["name"])
+                continue
+            if quick:
+                delays = [delays[0], delays[-1]] if len(delays) > 1 else delays
+                interrupt_audios = random.sample(interrupt_audios, 1)
+            for delay in delays:
+                for int_id in interrupt_audios:
+                    interrupt_wav = wav_map.get(int_id, {}).get("path", "")
+                    if not interrupt_wav:
+                        logger.error("No WAV for interrupt %s", int_id)
+                        continue
+                    for question in questions:
+                        q_entry = wav_map[question["id"]]
+                        units.append(
+                            lambda q=question, qe=q_entry, su=suite, iw=interrupt_wav, d=delay, ii=int_id: (
+                                _run_interruption(  # noqa: E501
+                                    su,
+                                    q,
+                                    qe["path"],
+                                    iw,
+                                    d,
+                                    player,
+                                    session_map,
+                                    create_session,
+                                    audio_queue,
+                                    interrupt_audio=ii,
+                                    seed_session_map=seed_session_map,
+                                    seed_episode_map=seed_episode_map,
+                                    record_dir=record_dir,
+                                    voice=qe.get("voice", ""),
+                                )
+                            )
+                        )
+        else:
+            questions = suite["questions"]
+            if quick and len(questions) > 1:
+                questions = random.sample(questions, 1)
+            for question in questions:
+                q_entry = wav_map[question["id"]]
+                units.append(
+                    lambda q=question, qe=q_entry, su=suite: _run_single_turn(
+                        su,
+                        q,
+                        qe["path"],
+                        player,
+                        session_map,
+                        create_session,
+                        audio_queue,
+                        seed_session_map=seed_session_map,
+                        seed_episode_map=seed_episode_map,
+                        record_dir=record_dir,
+                        voice=qe.get("voice", ""),
+                    )
+                )
+    return units
+
+
+def _run_audio_noise_bed(
+    units: list[Callable[[], None]],
+    bed: NoiseBed,
+    labels: list[str],
+    snr_by: dict[str, float],
+    block_size: int,
+    audio_queue: queue.Queue[AudioFrame],
+    session_map: list[dict],
+    pause_ctrl: _PauseController,
+) -> None:
+    """Assign conditions (global round-robin), run as rotating blocks under the bed.
+
+    Global round-robin (continuous index over the flat unit list) keeps full-run
+    stratification while still spreading the few quick-mode units across all
+    conditions. Each block plays under one bed level so the level changes only
+    once per block; every session's entries are tagged with condition + SNR.
+    """
+    pools: dict[str, list[Callable[[], None]]] = {lab: [] for lab in labels}
+    for i, unit in enumerate(units):
+        pools[labels[i % len(labels)]].append(unit)
+
+    # Rotating-block schedule: cycle conditions, taking up to block_size each pass.
+    schedule: list[tuple[str, list[Callable[[], None]]]] = []
+    idx = {lab: 0 for lab in labels}
+    while any(idx[lab] < len(pools[lab]) for lab in labels):
+        for lab in labels:
+            chunk = pools[lab][idx[lab] : idx[lab] + block_size]
+            if chunk:
+                idx[lab] += len(chunk)
+                schedule.append((lab, chunk))
+
+    logger.info(
+        "Noise-bed: %d sessions across %s → %d blocks (size %d)",
+        len(units),
+        ", ".join(f"{lab}({len(pools[lab])})" for lab in labels),
+        len(schedule),
+        block_size,
+    )
+    try:
+        for lab, chunk in schedule:
+            if pause_ctrl.wait_if_paused():
+                break
+            bed.set_level(lab)
+            _drain_audio_queue(audio_queue)
+            logger.info("Noise block: %s (snr≈%.1f dB, %d sessions)", lab, snr_by[lab], len(chunk))
+            for unit in chunk:
+                if pause_ctrl.wait_if_paused():
+                    break
+                mark = len(session_map)
+                unit()
+                for entry in session_map[mark:]:
+                    entry["condition"] = lab
+                    entry["snr"] = snr_by[lab]
+    finally:
+        bed.stop()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1044,13 +1252,26 @@ def _run_multi_turn_suite(
 def main() -> None:
     parser = argparse.ArgumentParser(description="E2E evaluation runner")
     parser.add_argument("--questions", required=True, help="Path to questions JSON")
-    parser.add_argument("--device", default="default", help="ALSA device for question playback")
+    parser.add_argument(
+        "--device",
+        default=None,
+        help=f"ALSA device for question playback (default: {_DEFAULT_PLAYBACK_DEVICE}; "
+        "noise-bed mode prefers the calibrated device)",
+    )
     parser.add_argument("--output-dir", default="data/eval/results", help="Output directory")
     parser.add_argument("--wav-dir", default="data/eval/wav", help="Directory with question WAVs")
     parser.add_argument("--quick", action="store_true", help="Quick mode: 1 question per suite")
     parser.add_argument("--category", default=None, help="Only run suites of these categories (comma-separated)")
     parser.add_argument("--text", action="store_true", help="Run quality/memory suites in text mode")
     parser.add_argument("--no-beep", action="store_true", help="Disable the session-start identification beep")
+    parser.add_argument(
+        "--noise-bed",
+        action="store_true",
+        help="E2E acoustic-bed mode: play a continuous noise bed and distribute SNR conditions "
+        "across one run (requires prepare_noise_bed.py + calibrate_noise.py output)",
+    )
+    parser.add_argument("--bed-dir", default="data/eval/noise_bed", help="Noise-bed dir (calibration.json + bed_*.wav)")
+    parser.add_argument("--block-size", type=int, default=8, help="Sessions per rotating noise-condition block")
     args = parser.parse_args()
 
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1064,6 +1285,11 @@ def main() -> None:
     file_handler.setFormatter(logging.Formatter(log_format))
     logging.getLogger("voice_pipeline").setLevel(logging.DEBUG)
     logging.getLogger().addHandler(file_handler)
+
+    # 재현용으로 실행 명령과 파싱된 옵션을 로그에 남긴다 (device 등은 이후 단계에서
+    # 재해석되므로, 여기 기록은 사용자가 실제로 넘긴 값 그대로다).
+    logger.info("Command: %s", " ".join(sys.argv))
+    logger.info("Options: %s", json.dumps(vars(args), ensure_ascii=False, sort_keys=True, default=str))
 
     for entry in os.environ.get("LOG_LEVEL", "").split(","):
         entry = entry.strip()
@@ -1372,6 +1598,34 @@ def main() -> None:
         record_dir = str(output_dir / "recordings")
         Path(record_dir).mkdir(exist_ok=True)
 
+        bed_labels: list[str] = []
+        bed_master = ""
+        bed_gains: dict[str, float | None] = {}
+        bed_snr: dict[str, float] = {}
+        if args.noise_bed:
+            calib_path = Path(args.bed_dir) / "calibration.json"
+            if not calib_path.exists():
+                logger.error(
+                    "Noise-bed mode needs %s — run prepare_noise_bed.py + calibrate_noise.py first", calib_path
+                )
+                sys.exit(1)
+            bed_labels, bed_master, bed_gains, bed_snr, calib_device = _load_bed_conditions(args.bed_dir)
+            if args.device is None and calib_device:
+                args.device = calib_device  # bed + questions must share the dmix PCM
+            logger.info("Noise-bed: device=%s conditions=%s", args.device, bed_labels)
+
+        if args.device is None:
+            args.device = _DEFAULT_PLAYBACK_DEVICE
+
+        if args.noise_bed and _is_exclusive_device(args.device):
+            logger.error(
+                "Noise-bed mode needs a mixing (dmix) device, but got %r — a raw hw/plughw PCM "
+                "allows only one open, so the bed blocks question playback (device busy). "
+                "Omit --device to use the calibrated dmix device, or pass --device 'plug:dmix:...'.",
+                args.device,
+            )
+            sys.exit(1)
+
         beep_wav = None
         if not args.no_beep:
             beep_wav = str(output_dir / "beep.wav")
@@ -1390,7 +1644,31 @@ def main() -> None:
             logger.warning("No audio frame within 10s after AudioInput start")
 
         try:
-            for suite in audio_suites:
+            if args.noise_bed:
+                bed = NoiseBed(args.device, bed_master, bed_gains)
+                units = _collect_audio_units(
+                    audio_suites,
+                    wav_map,
+                    player,
+                    session_map,
+                    create_session,
+                    audio_queue,
+                    seed_session_map,
+                    seed_episode_map,
+                    record_dir,
+                    args.quick,
+                )
+                _run_audio_noise_bed(
+                    units,
+                    bed,
+                    bed_labels,
+                    bed_snr,
+                    args.block_size,
+                    audio_queue,
+                    session_map,
+                    pause_ctrl,
+                )
+            for suite in [] if args.noise_bed else audio_suites:
                 if pause_ctrl.wait_if_paused():
                     break
 

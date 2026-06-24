@@ -213,15 +213,14 @@ use-after-free 경합 회피) — 토크만 끄고 즉시 종료, 나머지는 O
 - **Free tier voice 제약 — 구형 premade는 API 불가**: Rachel(`21m00…`) 등 구형 premade voice는 라이브러리로 이관돼 Free tier에서 API 호출 시 402 `paid_plan_required`. 현행 default voice(Sarah/George/Daniel/Jessica 등)는 사용 가능 — 실호출로 확인. scoped API 키는 `voices_read` 권한이 없어 voice 목록 조회도 불가하므로, voice 교체 시 TTS 실호출로 검증해야 함. `pcm_24000`+`eleven_flash_v2_5`+`stream_with_timestamps` 조합은 Free tier에서 동작 확인됨.
 
 
-## ASR 배경 잡음 SNR 스윕 (MUSAN 디지털 사전 믹싱)
+## ASR 배경 잡음 — 음향 노이즈 베드 (스피커 동시 재생)
 
-- **디지털 사전 믹싱 채택, 별도 스피커 음향 동시 재생 기각**: eval의 목적이 WER-vs-SNR 곡선이라 *재현 가능하고 정확한* SNR이 핵심. 두 번째 스피커로 잡음을 동시 재생하면 룸 리버브·마이크 AGC까지 반영돼 더 현실적이지만 SNR을 정밀 통제할 수 없음. 변형 WAV를 사전 생성해 파일로 검수·재사용하는 쪽이 eval 성격에 맞음.
-- **디지털 SNR은 상한선 — 음향 경로가 방 잡음을 더함**: 스피커→마이크 재생이라 마이크에서의 실효 SNR = 디지털 SNR − 룸/마이크 floor. 높은 SNR(20dB)에서는 방 자체 잡음이 지배해 곡선이 평탄해질 수 있음. 조용한 방에서 돌리고, 디지털 SNR을 통제 변수로 삼아 **절대 WER이 아닌 레벨 간 상대 순위**로 해석.
-- **음성 레벨 고정, 잡음 floor만 가변 (SNR이 유일 독립 변수)**: 음성을 clean과 동일한 정규화 레벨(-20 dBFS)로 두고 잡음만 올림 — 음향 리그에서 음성-대-룸noise 비율이 모든 SNR에서 동일해야 주입 잡음의 효과만 분리됨. 합성 후 클리핑은 **피크 가드(>0.95면 합성 전체 감쇠)**로 처리하고 RMS 재정규화는 하지 않음: 재정규화하면 음성 재생 레벨이 SNR마다 달라져 통제가 깨짐. 피크 가드는 음성·잡음을 같은 배율로 줄여 SNR을 보존하며, 실측상 0dB·-20dBFS에서도 피크 0.48이라 발동조차 안 함.
-- **SNR 기준 RMS는 전체 클립이 아닌 유성 구간**: 선행/후행 무음을 포함하면 speech RMS가 희석돼 실효 SNR이 목표보다 높아짐. trim 패스와 동일한 peak 대비 임계로 유성 구간만 잡아 RMS 계산.
-- **변형은 `wav/noise/` 하위 폴더에 — normalize 패스 재진입 방지**: prepare_audio의 정규화/트림 패스가 `output_dir.glob("*.wav")`(비재귀)로 전체를 다시 정규화함. 변형을 같은 폴더에 두면 재실행 시 SNR이 파괴되므로, glob에 안 잡히는 하위 폴더에 격리. 변형 생성은 트림·정규화가 끝난 *최종* clean WAV를 입력으로 받도록 패스 순서 뒤에 배치.
-- **잡음 클립 선택은 (id+SNR) 시드로 결정론적**: 재실행 시 바이트 동일 출력 → eval 재현성. clip 선택과 crop offset을 같은 `random.Random(seed)`에서 뽑음(`Random(str)`은 sha512 기반이라 PYTHONHASHSEED 무관하게 결정론적).
-- **범위 = ASR 스위트 · MUSAN `noise`(앰비언트) · 영어**: 잡음이 VAP/턴 감지에 미치는 영향은 별개 연구라 turn-taking/interruption 스위트는 무잡음 유지. ASR 언어가 영어라 babble(타화자)은 다음 단계로 미룸 — 1차는 앰비언트 단일 카테고리로 SNR을 유일 축으로 둠. SNR 레벨 `[clean, 20, 15, 10, 5, 0]`은 clean~10dB가 정상~약한 잡음, 5/0dB가 스트레스.
+- **디지털 사전 믹싱 → 음향 베드로 선회 (디지털 경로 제거)**: 처음엔 깨끗한 질문 WAV에 MUSAN noise를 목표 SNR로 미리 섞어 굽는 디지털 방식을 썼다. 그러나 디지털 믹스는 *ASR만* 정확한 SNR로 스트레스할 뿐, 마이크·VAD·턴 감지 등 나머지 파이프라인은 무잡음 입력을 봐서 e2e 잡음 강건성을 못 본다. 둘째 스피커로 잡음을 연속 재생하는 음향 베드는 룸/마이크 경로를 그대로 통과해 전 단계가 현실 잡음 조건을 겪는다. 그래서 디지털 경로(`noise_mixer`, `prepare_audio --musan-dir`, run의 `snr_levels` 스윕, score `by_snr`)를 전부 제거하고 베드만 남김. SNR 정밀 통제를 포기하는 대신, 마이크 실측 캘리브로 *실효* SNR을 잡는다(아래).
+- **단일 마스터 + 조건별 gain 기록 (조건별 WAV 안 굽기)**: 베드 레벨은 `bed_master.wav` 하나에 곱하는 gain으로 표현하고, gain은 `calibration.json`에 조건별로 *기록*만 한다(NoiseBed가 재생 시점에 `master × gain`). 캘리브마다 `bed_<cond>.wav`를 새로 굽고 덮어쓰는 것보다 — 마스터 불변 + gain 한 숫자 기록이 재현성도 낫고(아티팩트가 안 흔들림) 레벨 조절도 한 줄 편집으로 끝난다. 런타임 스케일은 캐시 마스터에 1회 곱하는 비용이라 무시 가능.
+- **dmix 필수 — plughw/hw 독점 장치 금지**: 베드와 질문이 *한 카드에서 섞여야* 하므로 dmix PCM이 필수. `plughw:`/`hw:`는 한 번에 한 프로세스만 열 수 있어, 베드가 켜진 medium/loud 블록에서 질문 재생 aplay가 device busy로 줄줄이 실패한다(베드의 stderr는 DEVNULL이라 조용히 죽기도). 그래서 질문 재생 기본 장치를 dmix로, noise-bed 모드에서 비-dmix 장치면 시작 시 차단. `--device` 미지정 시 noise-bed는 calibration의 측정 장치를 자동 채택.
+- **SNR 재설정은 마이크 재측정 없이 가능**: 마이크 실측 상수(speech_rms S, bed_n_ref_rms N_ref, room_floor_rms)를 `calibration.json`에 저장하므로, SNR 목표만 바꾸면 `solve_gain`으로 gain을 오프라인 재계산할 수 있다(리그가 안 바뀌는 한 스피커·마이크 불필요). gain 1.0 = 마스터 원본(= 마이크에서 N_ref) 기준.
+- **베드 마스터는 오버레이로 정상(stationary)**: prepare_noise_bed가 여러 MUSAN noise를 끝이어붙이지(concat) 않고 겹쳐(overlay) 합산 — 세션이 루프 어디에 겹치든 실효 SNR이 목표 근처로 유지된다. 단일 음원 순차 재생은 순간 조용/트랜지언트 구간이 세션별 SNR을 흔든다.
+- **범위 = ASR 스위트 · MUSAN `noise`(앰비언트) · 영어**: 잡음이 VAP/턴 감지에 미치는 영향은 별개 연구라 turn-taking/interruption 스위트는 무잡음 유지. ASR 언어가 영어라 babble(타화자)은 다음 단계로 미룸 — 1차는 앰비언트 단일 카테고리.
 
 
 ## 질문 단위 e2e 드릴다운 (대시보드)
