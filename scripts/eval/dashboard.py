@@ -434,12 +434,11 @@ def _build_question_detail(turn: dict) -> str:
         lines.append(f'<span class="qd-k">품질</span>{chips}')
     secs.append(_qd_section("⑥ 응답·품질", lines))
 
-    # ⑦ call_records timeline + API issues
+    # ⑦ call_records timeline + API issues — one module.operation per line
     lines = []
     counts = sc.get("counts")
     if counts:
-        parts = " · ".join(f"{k} ×{v}" for k, v in counts.items())
-        lines.append(f'<span class="qd-mono">{parts}</span>')
+        lines += [f'<span class="qd-mono">{_esc(k)}</span> <span class="mute">×{v}</span>' for k, v in counts.items()]
     ci = turn.get("call_issues")
     if ci and (ci.get("retry_count") or ci.get("error_count")):
         bits = []
