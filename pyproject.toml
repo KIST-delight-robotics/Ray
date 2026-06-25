@@ -25,14 +25,11 @@ dependencies = [
 
 [tool.uv.sources]
 turngpt = { path = "external/TurnGPT", editable = true }
-vap = { path = "external/VoiceActivityProjection", editable = true }
 
 [project.optional-dependencies]
 models-pytorch = [
     "turngpt",
-    "vap",
     "maai>=0.1",
-    "torchaudio",
     "einops>=0.8",
     "omegaconf>=2.3",
     "pytorch-lightning>=2.0",
