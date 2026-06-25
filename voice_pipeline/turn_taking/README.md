@@ -4,44 +4,8 @@ Wraps external turn-taking models (VAP, TurnGPT) and fuses their outputs via `Tu
 
 ## External Dependencies
 
-### VAP (Voice Activity Projection)
-
-Repository: <https://github.com/ErikEkstedt/VoiceActivityProjection>
-
-#### Setup
-
-```bash
-git clone https://github.com/ErikEkstedt/VoiceActivityProjection.git external/VoiceActivityProjection
-uv pip install -e external/VoiceActivityProjection
-uv pip install einops omegaconf
-```
-
-#### Model File
-
-A pre-trained state_dict is included in the repo at `example/VAP_3mmz3t0u_50Hz_ad20s_134-epoch9-val_2.56.pt`. 다른 체크포인트를 쓰려면 `VAPWrapper._MODEL_PATH`를 인스턴스 생성 전 변경.
-
-#### CPC Checkpoint Caveat
-
-The VAP encoder uses a CPC (Contrastive Predictive Coding) component that may **auto-download** a checkpoint on first use if the expected file is missing. See `vap/encoder_components.py` lines 371–377. Ensure network access is available on first run, or pre-download the checkpoint.
-
-#### `VAPWrapper.__init__` 인자
-
-| 인자 | Default | 의미 |
-|------|---------|------|
-| `tts_sample_rate` | — | Robot(TTS) 출력 샘플레이트 (필수) |
-
-#### `VAPWrapper` 클래스 변수
-
-| 변수 | 값 | 의미 |
-|------|------|------|
-| `_DEFAULT_RESULT` | `VAPResult(0.0, 0.0, False)` | 초기/실패 시 반환값 |
-| `_MODEL_PATH` | `"external/.../VAP_3mmz3t0u_50Hz_ad20s_134-epoch9-val_2.56.pt"` | VAP state_dict `.pt` 파일 경로 |
-| `_CONTEXT_SEC` | `20.0` | 롤링 버퍼 길이 (초) |
-| `_STEP_SEC` | `0.1` | 추론 간격 (초) |
-| `_TT_TIME` | `0.5` | turn-taking 평균화 lookahead (초) |
-| `_DEVICE` | `"cpu"` | PyTorch 디바이스 (`"cpu"` / `"cuda"`) |
-| `_VAD_THRESHOLD` | `0.5` | `user_is_speaking` 임계값 |
-| `_VAP_FRAME_HZ` | `50` | VAP 체크포인트 내부 프레임 레이트 (Hz) |
+VAP는 MaAI(아래 "MaAI VAP")만 사용. 오리지널 VoiceActivityProjection은
+RPi 실시간 불가(torch ~1.2s/추론, `docs/vap_rpi_benchmark.md`)로 제거됨.
 
 ### TurnGPT
 
@@ -194,9 +158,7 @@ RTF: 4.16x (100ms budget). Budget exceeded: 0%.
 voice_pipeline/turn_taking/
 ├── __init__.py
 ├── exceptions.py       # TurnTakingError, VAPError, TurnGPTError, TurnDetectorError
-├── vap.py              # VAPWrapper(IVAP) — VoiceActivityProjection
-├── maai_vap.py         # MaAIVAPWrapper(IVAP) — MaAI (ONNX)
-├── async_vap.py        # AsyncVAP(IVAP) — background thread wrapper (10Hz)
+├── maai_vap.py         # MaAIVAPWrapper(IVAP) — MaAI ONNX + own inference thread (10Hz)
 ├── turngpt.py          # TurnGPTWrapper(ITurnGPT)
 ├── async_turngpt.py    # AsyncTurnGPT + SyncTurnGPTAdapter — background thread wrapper
 ├── turn_detector.py    # TurnDetector(ITurnDetector)

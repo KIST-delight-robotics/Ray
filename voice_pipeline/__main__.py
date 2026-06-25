@@ -58,7 +58,6 @@ from voice_pipeline.trace.tracked_tts import TrackedTTS
 from voice_pipeline.tts.factory import create_tts
 from voice_pipeline.tts.greeting_audio import ensure_greeting_audio
 from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT
-from voice_pipeline.turn_taking.async_vap import AsyncVAP
 from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
 from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
@@ -136,9 +135,10 @@ def main() -> None:
 
     # --- Process-level singletons ---
     asr = GoogleCloudASR(language_code=language_code)
-    llm = OpenAILLM(model="gpt-5.4", temperature=0.7, reasoning_effort="none", max_tokens=256, tools=["web_search"])
+    llm = OpenAILLM(
+        model="gpt-5.4-mini", temperature=0.7, reasoning_effort="none", max_tokens=256, tools=["web_search"]
+    )
     tts = create_tts()
-    vap = MaAIVAPWrapper(tts.output_sample_rate)
     turngpt = TurnGPTWrapper()
     bridge = CppBridge()
     silero_vad_model = load_silero_vad(onnx=True)
@@ -183,6 +183,10 @@ def main() -> None:
     memory_storage = SQLiteMemoryStorage(_DEFAULT_DB_PATH)
     trace_store = SQLiteTraceStore(_DEFAULT_DB_PATH)
     call_store = SQLiteCallStore(_DEFAULT_DB_PATH)
+    # VAP runs its own inference thread for the process lifetime; sessions
+    # rebind it via reset() + session_id rather than recreating it (model
+    # load + warmup is expensive).
+    vap = MaAIVAPWrapper(tts.output_sample_rate, call_store=call_store)
     retry_handler = OpenAIRetryHandler(call_store)
     logging.getLogger("openai._base_client").addHandler(retry_handler)
     tts = TrackedTTS(tts, call_store)
@@ -206,7 +210,7 @@ def main() -> None:
         _asound.snd_lib_error_set_handler(None)
 
     # --- Session factory ---
-    prev_async: list[AsyncVAP | AsyncTurnGPT] = []
+    prev_async: list[AsyncTurnGPT] = []
     shutdown_event = threading.Event()
 
     def session_factory() -> SessionComponents:
@@ -214,23 +218,23 @@ def main() -> None:
             wrapper.stop()
         prev_async.clear()
 
+        session_id = str(uuid.uuid4())
+        vap.session_id = session_id
         vap.reset()
         turngpt.reset()
         reset_vad()
 
-        session_id = str(uuid.uuid4())
         embedder.session_id = session_id
         tts.session_id = session_id
         retry_handler.session_id = session_id
 
-        async_vap = AsyncVAP(vap, call_store=call_store, session_id=session_id)
         async_turngpt = AsyncTurnGPT(turngpt, call_store=call_store, session_id=session_id)
-        prev_async.extend([async_vap, async_turngpt])
+        prev_async.append(async_turngpt)
 
         history = ConversationHistory(storage, token_counter)
         retriever = MemoryRetriever(memory_storage, vector_index, embedder)
         turn_detector = TurnDetector(
-            async_vap,
+            vap,
             async_turngpt,
             embedder,
             vad_fn=vad_fn,
@@ -398,6 +402,7 @@ def main() -> None:
         for wrapper in prev_async:
             wrapper.stop()
         prev_async.clear()
+        vap.stop()
         write_executor.shutdown(wait=True)
         executor.shutdown(wait=True)
         asr.stop()

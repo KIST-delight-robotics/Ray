@@ -89,7 +89,7 @@ def run_concurrent_benchmark(
         s = idx * spf
         pcm1 = numpy_to_pcm16(ch1[s : s + spf])
         pcm2 = numpy_to_pcm16(ch2[s : s + spf])
-        vap.feed_audio(pcm1, pcm2)
+        vap._infer(pcm1, pcm2)
     for i in range(warmup_tgpt_calls):
         tgpt.predict(all_inputs[i % n_inputs])
 
@@ -125,7 +125,7 @@ def run_concurrent_benchmark(
             pcm2 = numpy_to_pcm16(ch2[s : s + spf])
 
             t0 = time.perf_counter()
-            vap.feed_audio(pcm1, pcm2)
+            vap._infer(pcm1, pcm2)
             t1 = time.perf_counter()
 
             vap_latencies[i] = (t1 - t0) * 1000.0

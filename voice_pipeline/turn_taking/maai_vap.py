@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import struct
+import threading
 import time
 
 import numpy as np
@@ -26,21 +27,31 @@ except ImportError:
     torch = None  # type: ignore[assignment]
 
 from voice_pipeline.audio.constants import SAMPLE_RATE
-from voice_pipeline.core.interfaces import IVAP
-from voice_pipeline.core.types import AudioFrame, VAPResult
+from voice_pipeline.core.interfaces import IVAP, ICallStore
+from voice_pipeline.core.types import AudioFrame, CallRecord, VAPResult, utc_now_str
 from voice_pipeline.turn_taking.exceptions import VAPError
 
 logger = logging.getLogger("voice_pipeline.turn_taking.maai_vap")
 
 
 class MaAIVAPWrapper(IVAP):
-    """IVAP implementation using MaAI VAP with ONNX encoder.
+    """MaAI VAP (ONNX encoder + transformer) running on its own thread.
 
-    Internally stateful: maintains LSTM hidden states for the encoder
-    and KV-cache for the transformer across ``feed_audio`` calls.
+    Implements the command/query ``IVAP`` runtime: ``feed_audio`` buffers
+    audio (non-blocking) and a daemon thread drains the buffer at
+    ``_FRAME_RATE`` Hz, runs inference, and updates ``latest_result``.
+    Inference itself is internally stateful — LSTM hidden states for the
+    encoder and KV-cache for the transformer across frames.
+
+    Process-lifetime object: created once, reused across sessions via
+    ``reset()`` (clears model state + buffer) and the mutable ``session_id``
+    (re-stamps call records). ``stop()`` joins the thread at shutdown.
 
     Args:
         tts_sample_rate: Robot(TTS) 출력 샘플레이트. 리샘플링 기준.
+        call_store: Optional call store for per-inference latency records.
+            Records are buffered in memory and flushed on ``reset()``/``stop()``.
+        session_id: Session identifier stamped onto call records (mutable).
     """
 
     ENCODER_ONNX_PATH = "models/maai/encoder_10hz_5s.onnx"
@@ -70,6 +81,8 @@ class MaAIVAPWrapper(IVAP):
     def __init__(
         self,
         tts_sample_rate: int,
+        call_store: ICallStore | None = None,
+        session_id: str = "",
     ) -> None:
         # Snapshot class vars to instance attrs (safe for concurrent fixtures
         # where another instance may mutate class vars afterwards).
@@ -152,11 +165,28 @@ class MaAIVAPWrapper(IVAP):
         self._buf_x1 = np.zeros(self._FRAME_CTX_PADDING, dtype=np.float32)
         self._buf_x2 = np.zeros(self._FRAME_CTX_PADDING, dtype=np.float32)
         self._vap_cache: dict | None = None
-        self._cached_result = self._DEFAULT_RESULT
+        self._latest_result = self._DEFAULT_RESULT
+
+        # Async machinery: feed_audio buffers, a daemon thread drains and infers.
+        self._interval = 1.0 / self._frame_rate
+        self._buffer: list[tuple[AudioFrame, AudioFrame | None]] = []
+        self._buffer_lock = threading.Lock()
+        self._call_store = call_store
+        self.session_id = session_id
+        self._call_records: list[CallRecord] = []
+        self._stop_event = threading.Event()
+        # Serializes model-state access between the inference thread (_infer)
+        # and main-thread reset(); the model is reused for the process lifetime
+        # so reset can race an in-flight inference without this.
+        self._infer_lock = threading.Lock()
 
         # Warmup: pre-allocate ORT buffers / trigger torch.compile
         self._warmup()
         self.reset()
+
+        # Start the inference thread only after the model is ready.
+        self._thread = threading.Thread(target=self._run, daemon=True, name="maai-vap")
+        self._thread.start()
 
         mode = "onnx" if self._use_onnx_transformer else "pytorch"
         logger.info(
@@ -168,8 +198,23 @@ class MaAIVAPWrapper(IVAP):
             mode,
         )
 
-    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
-        """Feed one pipeline frame and return voice activity estimates."""
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> None:
+        """Buffer one pipeline frame (non-blocking). The thread runs inference."""
+        with self._buffer_lock:
+            self._buffer.append((user_audio, robot_audio))
+
+    @property
+    def latest_result(self) -> VAPResult:
+        """Most recent voice-activity estimate (non-consuming)."""
+        return self._latest_result
+
+    def _infer(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
+        """Run inference on one (possibly batch-drained) audio chunk.
+
+        Updates and returns ``latest_result``. Internal: called by the
+        inference thread; dev tools (bench/trace) may call it directly for
+        synchronous single-inference measurement.
+        """
         try:
             x1 = self._pcm_to_numpy(user_audio)
             if robot_audio is not None:
@@ -178,17 +223,29 @@ class MaAIVAPWrapper(IVAP):
             else:
                 x2 = np.zeros(len(x1), dtype=np.float32)
 
-            result = self._process_frame(x1, x2)
+            with self._infer_lock:
+                result = self._process_frame(x1, x2)
             if result is not None:
-                self._cached_result = result
-
-            return self._cached_result
+                self._latest_result = result
         except Exception:
-            logger.warning("Error in feed_audio, returning cached result", exc_info=True)
-            return self._cached_result
+            logger.warning("Error in VAP inference, keeping cached result", exc_info=True)
+        return self._latest_result
 
     def reset(self) -> None:
-        """Clear encoder state, KV cache, and audio buffers."""
+        """Clear model state, audio buffer, and pending records for a new turn.
+
+        Called at session start. Flushes the previous session's buffered call
+        records and clears the inference buffer, then resets model state under
+        ``_infer_lock`` so it cannot race an in-flight inference on the thread.
+        """
+        with self._buffer_lock:
+            self._buffer.clear()
+        self._flush_call_records()
+        with self._infer_lock:
+            self._reset_model_state()
+
+    def _reset_model_state(self) -> None:
+        """Clear encoder LSTM state, transformer KV cache, and audio buffers."""
         self._h1[:] = 0
         self._c1[:] = 0
         self._h2[:] = 0
@@ -204,7 +261,68 @@ class MaAIVAPWrapper(IVAP):
             # ONNX and PyTorch eager: safe to clear entirely
             self._vap_cache = None
 
-        self._cached_result = self._DEFAULT_RESULT
+        self._latest_result = self._DEFAULT_RESULT
+
+    def stop(self) -> None:
+        """Signal the inference thread to exit, wait, and flush call records."""
+        self._stop_event.set()
+        self._thread.join(timeout=2.0)
+        self._flush_call_records()
+
+    # ------------------------------------------------------------------
+    # Inference thread
+    # ------------------------------------------------------------------
+
+    def _drain_buffer(self) -> list[tuple[AudioFrame, AudioFrame | None]]:
+        with self._buffer_lock:
+            items = self._buffer[:]
+            self._buffer.clear()
+        return items
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            start = time.monotonic()
+
+            audio_pairs = self._drain_buffer()
+            if audio_pairs:
+                user_combined = b"".join(u for u, _ in audio_pairs)
+                robot_parts = [r for _, r in audio_pairs if r is not None]
+                robot_combined = b"".join(robot_parts) if robot_parts else None
+                self._infer(user_combined, robot_combined)
+
+            elapsed = time.monotonic() - start
+            remaining = self._interval - elapsed
+            if audio_pairs and self._call_store is not None:
+                status = "ok" if remaining > 0 else "overrun"
+                record = CallRecord(
+                    session_id=self.session_id,
+                    timestamp=utc_now_str(),
+                    module="vap",
+                    operation="feed_audio",
+                    model="maai-vap",
+                    elapsed_ms=elapsed * 1000,
+                    status=status,
+                    turn_index=self._call_store.current_turn_index,
+                )
+                with self._buffer_lock:
+                    self._call_records.append(record)
+
+            if remaining > 0:
+                self._stop_event.wait(remaining)
+
+    def _flush_call_records(self) -> None:
+        """Drain buffered call records to the store (safe across threads)."""
+        if not self._call_store:
+            return
+        with self._buffer_lock:
+            records = self._call_records[:]
+            self._call_records.clear()
+        for record in records:
+            try:
+                self._call_store.record(record)
+            except Exception:
+                logger.warning("Failed to flush VAP call records", exc_info=True)
+                return
 
     def _zero_pytorch_cache(self) -> None:
         """Zero PyTorch KV cache values, preserving tensor shapes.

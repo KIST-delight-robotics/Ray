@@ -72,7 +72,6 @@ from voice_pipeline.trace.tracked_embedder import TrackedEmbedder
 from voice_pipeline.trace.tracked_tts import TrackedTTS
 from voice_pipeline.tts.factory import create_tts
 from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT
-from voice_pipeline.turn_taking.async_vap import AsyncVAP
 from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
 from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
@@ -1411,13 +1410,13 @@ def main() -> None:
     executor = None
     audio_queue = None
     audio_input = None
-    prev_async: list[AsyncVAP | AsyncTurnGPT] = []
+    prev_async: list[AsyncTurnGPT] = []
 
     if needs_audio:
         asr = GoogleCloudASR(language_code=language_code)
         raw_tts = create_tts()  # 프로덕션 기본 vendor를 따라감
         tts = TrackedTTS(raw_tts, call_store)
-        vap = MaAIVAPWrapper(raw_tts.output_sample_rate)
+        vap = MaAIVAPWrapper(raw_tts.output_sample_rate, call_store=call_store)
         turngpt = TurnGPTWrapper()
         silero_vad_model = load_silero_vad(onnx=True)
         _vad_buf = bytearray()
@@ -1474,23 +1473,23 @@ def main() -> None:
             wrapper.stop()
         prev_async.clear()
 
+        session_id = str(uuid.uuid4())
+        vap.session_id = session_id
         vap.reset()
         turngpt.reset()
         reset_vad()
 
-        session_id = str(uuid.uuid4())
         tts.session_id = session_id
         retry_handler.session_id = session_id
         embedder.session_id = session_id
-        async_vap = AsyncVAP(vap, call_store=call_store, session_id=session_id)
         async_turngpt = AsyncTurnGPT(turngpt, call_store=call_store, session_id=session_id)
-        prev_async.extend([async_vap, async_turngpt])
+        prev_async.append(async_turngpt)
 
         ms = memory_storage if memory_enabled else None
         history = ConversationHistory(storage, token_counter)
         retriever = MemoryRetriever(memory_storage, vector_index, embedder) if memory_enabled else None
         turn_detector = TurnDetector(
-            async_vap,
+            vap,
             async_turngpt,
             embedder,
             vad_fn=vad_fn,
@@ -1765,6 +1764,8 @@ def main() -> None:
             for wrapper in prev_async:
                 wrapper.stop()
             prev_async.clear()
+            if vap is not None:
+                vap.stop()
             executor.shutdown(wait=False)
             asr.stop()
             led.close()

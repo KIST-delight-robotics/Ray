@@ -136,7 +136,8 @@ class TurnDetector(ITurnDetector):
         frame_count: int = 1,
     ) -> TurnDecision:
         """Process one pipeline frame and return a turn decision."""
-        vap_result = self._vap.feed_audio(user_audio, robot_audio)
+        self._vap.feed_audio(user_audio, robot_audio)
+        vap_result = self._vap.latest_result
 
         if self._vad_fn is not None:
             vad_score = self._vad_fn(user_audio)

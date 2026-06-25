@@ -249,9 +249,13 @@ class ScriptedASR(IASR):
 
 
 class FakeVAP(IVAP):
-    """Always returns robot-favoring probabilities for fast turn shift."""
+    """Always reports robot-favoring probabilities for fast turn shift."""
 
-    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> None:
+        pass
+
+    @property
+    def latest_result(self) -> VAPResult:
         return VAPResult(p_now=0.2, p_fut=0.2, user_is_speaking=False)
 
     def reset(self) -> None:
@@ -383,22 +387,30 @@ class ObservableLLM(ILLM):
 
 
 class ObservableVAP(IVAP):
-    """Wraps a real VAP and captures the latest result.
+    """Wraps a real VAP runtime and captures the latest result for monitoring.
 
-    ``last_result`` is updated on every ``feed_audio()`` call.
+    ``last_result`` snapshots ``latest_result`` on every ``feed_audio()`` call.
     """
 
     def __init__(self, real_vap: IVAP) -> None:
         self._real = real_vap
         self.last_result: VAPResult = VAPResult(p_now=0.5, p_fut=0.5, user_is_speaking=False)
 
-    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
-        result = self._real.feed_audio(user_audio, robot_audio)
-        self.last_result = result
-        return result
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> None:
+        self._real.feed_audio(user_audio, robot_audio)
+        self.last_result = self._real.latest_result
+
+    @property
+    def latest_result(self) -> VAPResult:
+        return self._real.latest_result
 
     def reset(self) -> None:
         self._real.reset()
+
+    def stop(self) -> None:
+        stop = getattr(self._real, "stop", None)
+        if stop is not None:
+            stop()
 
 
 # ---------------------------------------------------------------------------
@@ -569,8 +581,11 @@ class SandboxSetup:
     _tmpdir: tempfile.TemporaryDirectory[str] | None = field(default=None, repr=False)
 
     def cleanup(self) -> None:
-        """Shut down executor and clean up temp files."""
+        """Shut down executor, stop the VAP thread, and clean up temp files."""
         self.generator.shutdown()
+        stop = getattr(self.vap, "stop", None)
+        if stop is not None:
+            stop()
         if self._tmpdir is not None:
             self._tmpdir.cleanup()
 

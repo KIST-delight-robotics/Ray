@@ -4,7 +4,6 @@ Compares PyTorch / ONNX / quantized variants side-by-side with consistent
 settings. Uses production wrappers directly — no reimplemented inference logic.
 
 VAP variants:
-  vap-original     Original VAP (full PyTorch, ~1200ms on RPi — very slow)
   maai-pytorch     MaAI ONNX encoder + PyTorch transformer (eager)
   maai-compile     MaAI ONNX encoder + torch.compile transformer
   maai-full-onnx   MaAI full ONNX encoder + transformer (recommended)
@@ -45,7 +44,6 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper  # noqa: E402
-from voice_pipeline.turn_taking.vap import VAPWrapper  # noqa: E402
 
 _DEFAULT_TOKENIZER_PATH = "models/turngpt/tokenizer"
 
@@ -292,7 +290,7 @@ def get_rss_mb() -> float:
 # VAP variant factories
 # =====================================================================
 
-VAP_VARIANTS = ["vap-original", "maai-pytorch", "maai-compile", "maai-full-onnx"]
+VAP_VARIANTS = ["maai-pytorch", "maai-compile", "maai-full-onnx"]
 
 
 def create_vap_variant(
@@ -302,7 +300,6 @@ def create_vap_variant(
     pt_threads: int = 1,
     frame_rate: int = 10,
     context_len_sec: float = 5.0,
-    vap_model_path: str = "",
     encoder_onnx: str = "",
     transformer_onnx: str = "",
 ):
@@ -313,14 +310,6 @@ def create_vap_variant(
     from voice_pipeline.tts.openai_tts import OpenAITTS
 
     tts_sample_rate = OpenAITTS.OUTPUT_SAMPLE_RATE
-
-    if variant == "vap-original":
-        # Override class vars for tuning (VAP has no per-instance init args).
-        VAPWrapper._CONTEXT_SEC = context_len_sec
-        VAPWrapper._STEP_SEC = 1.0 / frame_rate
-        if vap_model_path:
-            VAPWrapper._MODEL_PATH = vap_model_path
-        return VAPWrapper(tts_sample_rate)
 
     # MaAI variants — override class vars (MaAIVAP has no per-instance init args beyond tts_sample_rate).
     MaAIVAPWrapper._FRAME_RATE = frame_rate
@@ -425,6 +414,10 @@ def run_vap_benchmark(
     load_time = time.perf_counter() - t_load
     print(f"    Loaded in {load_time:.1f}s")
 
+    # feed_audio is an async command (buffers for the wrapper's own thread);
+    # reach the internal _infer for synchronous single-inference measurement.
+    infer = wrapper._infer
+
     # Warmup with real audio to fill KV cache for steady-state measurement
     print(f"    Warmup ({warmup_frames} frames)...", end="", flush=True)
     for i in range(warmup_frames):
@@ -432,7 +425,7 @@ def run_vap_benchmark(
         s = idx * spf
         pcm1 = numpy_to_pcm16(ch1[s : s + spf])
         pcm2 = numpy_to_pcm16(ch2[s : s + spf])
-        wrapper.feed_audio(pcm1, pcm2)
+        infer(pcm1, pcm2)
     print(" done")
 
     wrapper.reset()
@@ -455,7 +448,7 @@ def run_vap_benchmark(
         pcm2 = numpy_to_pcm16(ch2[s : s + spf])
 
         t0 = time.perf_counter()
-        wrapper.feed_audio(pcm1, pcm2)
+        infer(pcm1, pcm2)
         t1 = time.perf_counter()
 
         latencies[i] = (t1 - t0) * 1000.0
@@ -769,12 +762,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="VAP context length in seconds (default: 5.0)",
     )
     vap_group.add_argument(
-        "--vap-model-path",
-        type=str,
-        default="",
-        help="Path to original VAP model state_dict (for vap-original variant)",
-    )
-    vap_group.add_argument(
         "--encoder-onnx",
         type=str,
         default=MaAIVAPWrapper.ENCODER_ONNX_PATH,
@@ -884,7 +871,6 @@ def main() -> None:
                     ort_threads=args.ort_threads,
                     pt_threads=args.pt_threads,
                     context_len_sec=args.context_len,
-                    vap_model_path=args.vap_model_path,
                     encoder_onnx=args.encoder_onnx,
                     transformer_onnx=args.transformer_onnx,
                 )
