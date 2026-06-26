@@ -22,10 +22,8 @@ Reuses the eval's real mic path (AudioInput) and plays through the same dmix
 device the run will use. Run on the rig with speaker + mic live.
 
 Usage:
-    uv run python scripts/eval/calibrate_noise.py \\
-        --device plug:dmix:CARD=DAC \\
-        --reference data/eval/wav/asr_001_alloy.wav \\
-        --targets medium=15,loud=7
+    uv run python scripts/eval/calibrate_noise.py                 # reference auto-picked from manifest
+    uv run python scripts/eval/calibrate_noise.py --targets medium=12,loud=4
 """
 
 from __future__ import annotations
@@ -141,16 +139,43 @@ def solve_gain(
     return applied, achievable, status
 
 
+def _resolve_reference(manifest_path: str) -> str:
+    """Pick a speech-level reference WAV from the prepare_audio manifest.
+
+    Prefers the first ASR question (any normalized question works — all share the
+    same target RMS); falls back to the first entry. Resolving from the manifest
+    avoids hardcoding a voice-specific filename that goes stale when voices change.
+    """
+    path = Path(manifest_path)
+    if not path.exists():
+        raise SystemExit(f"No --reference given and manifest not found: {path} (run prepare_audio.py first)")
+    manifest = json.loads(path.read_text())
+    if not manifest:
+        raise SystemExit(f"Manifest is empty: {path}")
+    asr_ids = sorted(k for k in manifest if k.startswith("asr_"))
+    key = asr_ids[0] if asr_ids else sorted(manifest)[0]
+    return manifest[key]["path"]
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Calibrate noise-bed levels to target SNRs")
     # dmix를 plug로 감싸 동시 재생(믹싱)+자동 리샘플. 중첩 PCM은 작은따옴표 필수 —
     # 'plug:dmix:CARD=DAC'는 ALSA 인자 파싱이 깨짐.
     p.add_argument("--device", default="plug:'dmix:CARD=DAC,DEV=0'", help="dmix playback device")
-    p.add_argument("--reference", required=True, help="Clean question WAV for the speech-level probe")
+    p.add_argument(
+        "--reference",
+        default=None,
+        help="Clean question WAV for the speech-level probe (default: first ASR WAV in --manifest)",
+    )
+    p.add_argument("--manifest", default="data/eval/wav/manifest.json", help="Used to auto-pick --reference")
     p.add_argument("--bed-master", default="data/eval/noise_bed/bed_master.wav")
     p.add_argument("--targets", default="medium=15,loud=7", help="cond=snr_db,cond=snr_db")
     p.add_argument("--out-dir", default="data/eval/noise_bed")
     args = p.parse_args()
+
+    if args.reference is None:
+        args.reference = _resolve_reference(args.manifest)
+        print(f"Reference (auto from manifest): {args.reference}")
 
     targets: dict[str, float] = {}
     for part in args.targets.split(","):

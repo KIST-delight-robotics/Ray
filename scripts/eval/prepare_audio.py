@@ -1,16 +1,19 @@
-"""Generate WAV files for eval questions using OpenAI TTS.
+"""Generate WAV files for eval questions using ElevenLabs TTS.
 
-Assigns voices via round-robin from VOICES. Multi-turn scenarios use
-one voice per scenario (all questions in the same scenario share a voice).
+Assigns voices via round-robin from VOICES — an age-diverse set (child,
+elderly M/F, young, middle-aged) so ASR is stressed across speaker types.
+Multi-turn scenarios use one voice per scenario (all questions in the same
+scenario share a voice). ElevenLabs library voices require a paid plan
+(ELEVENLABS_API_KEY); free-tier keys 402 on the professional/library voices.
 
 After generation, every WAV in the output directory is RMS-normalized —
-OpenAI TTS has no volume parameter and voices differ by up to ~19 dB
-(sage/coral are far quieter than nova/alloy), which skews ASR/VAD results.
+neither vendor exposes loudness normalization and voices differ in level
+(elderly/child library voices especially), which skews ASR/VAD results.
 
 Usage:
     uv run python scripts/eval/prepare_audio.py data/eval/questions.json
     uv run python scripts/eval/prepare_audio.py data/eval/questions.json --output-dir data/eval/wav
-    uv run python scripts/eval/prepare_audio.py data/eval/questions.json --speed 1.5 --force
+    uv run python scripts/eval/prepare_audio.py data/eval/questions.json --force
 """
 
 from __future__ import annotations
@@ -25,32 +28,31 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from voice_pipeline.tts.elevenlabs_tts import ElevenLabsTTS
 from voice_pipeline.tts.greeting_audio import synthesize_to_wav
-from voice_pipeline.tts.openai_tts import OpenAITTS
 
+# (manifest/파일명용 이름, ElevenLabs voice ID). 이름은 score.py by_voice 집계와
+# 파일명(`<id>_<name>.wav`)에 쓰임. 연령·성별·억양을 골고루 섞어 화자 다양성 확보.
 VOICES = [
-    "alloy",
-    "ash",
-    "ballad",
-    "coral",
-    "echo",
-    "fable",
-    "onyx",
-    "nova",
-    "sage",
-    "shimmer",
-    "verse",
-    "marin",
-    "cedar",
+    ("omar_j", "S7IsvAvEoDfui6GSZK3A"),  # 아동 남 (indian)
+    ("emma", "pPdl9cQBQq4p6mRkZy2Z"),  # 아동 여
+    ("grandfather_joe", "0lp4RIz96WD1RUtvEu3Q"),  # 노인 남 (british)
+    ("bill", "pqHfZKP75CvOlQylNhV4"),  # 노인 남 (american)
+    ("grandma_rachel", "0rEo3eAjssGDUCXHYENf"),  # 노인 여 (us southern)
+    ("beatrice", "kkPJzQOWz2Oz9cUaEaQd"),  # 노인 여 (british)
+    ("sarah", "EXAVITQu4vr4xnSDxMaL"),  # 젊은 여 (american)
+    ("charlie", "IKne3meq5aSn9XLyUdCD"),  # 젊은 남 (australian)
+    ("george", "JBFqnCBsd6RMkjVDRZzb"),  # 중년 남 (british)
+    ("alice", "Xb7hH8MSUJpSbSDYk0k2"),  # 중년 여 (british)
 ]
 
 
-def _get_tts(voice: str, cache: dict[str, OpenAITTS]) -> OpenAITTS:
-    if voice not in cache:
-        tts = OpenAITTS()
-        tts._VOICE = voice
-        cache[voice] = tts
-    return cache[voice]
+def _get_tts(voice_id: str, cache: dict[str, ElevenLabsTTS]) -> ElevenLabsTTS:
+    if voice_id not in cache:
+        tts = ElevenLabsTTS()
+        tts._VOICE_ID = voice_id
+        cache[voice_id] = tts
+    return cache[voice_id]
 
 
 _PEAK_CEILING = 0.95  # 정규화 후 샘플 절대값 상한 — 클리핑 방지
@@ -131,8 +133,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate eval question WAV files")
     parser.add_argument("questions", help="Path to questions JSON")
     parser.add_argument("--output-dir", default="data/eval/wav", help="Output directory")
-    parser.add_argument("--model", default="gpt-4o-mini-tts")
-    parser.add_argument("--speed", type=float, default=1.2)
     parser.add_argument("--force", action="store_true", help="Regenerate existing files")
     parser.add_argument(
         "--target-rms",
@@ -144,54 +144,51 @@ def main() -> None:
     parser.add_argument("--no-trim", action="store_true", help="Skip trailing-silence trim pass")
     args = parser.parse_args()
 
-    OpenAITTS._MODEL = args.model
-    OpenAITTS._SPEED = args.speed
-
     data = json.loads(Path(args.questions).read_text())
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    tts_cache: dict[str, OpenAITTS] = {}
+    tts_cache: dict[str, ElevenLabsTTS] = {}
     manifest: dict[str, dict[str, str]] = {}
     generated = 0
     total = 0
     voice_idx = 0
 
     print(f"Preparing question WAVs → {output_dir}")
-    print(f"  voices: {len(VOICES)} | speed: {args.speed}")
+    print(f"  voices: {len(VOICES)} (ElevenLabs)")
 
     for suite in data["suites"]:
         if suite.get("multi_turn"):
             for scenario in suite.get("scenarios", []):
-                voice = VOICES[voice_idx % len(VOICES)]
+                name, voice_id = VOICES[voice_idx % len(VOICES)]
                 voice_idx += 1
                 for q in scenario["questions"]:
                     total += 1
-                    wav_path = output_dir / f"{q['id']}_{voice}.wav"
-                    manifest[q["id"]] = {"path": str(wav_path), "voice": voice}
+                    wav_path = output_dir / f"{q['id']}_{name}.wav"
+                    manifest[q["id"]] = {"path": str(wav_path), "voice": name}
 
                     if wav_path.exists() and not args.force:
-                        print(f"  skip (exists): {q['id']} [{voice}]")
+                        print(f"  skip (exists): {q['id']} [{name}]")
                         continue
 
-                    print(f"  generating: {q['id']} [{voice}] — {q['text'][:60]}")
-                    synthesize_to_wav(_get_tts(voice, tts_cache), q["text"], wav_path)
+                    print(f"  generating: {q['id']} [{name}] — {q['text'][:60]}")
+                    synthesize_to_wav(_get_tts(voice_id, tts_cache), q["text"], wav_path)
                     generated += 1
                     print(f"    saved: {wav_path} ({wav_path.stat().st_size:,} bytes)")
         else:
             for q in suite.get("questions", []):
                 total += 1
-                voice = VOICES[voice_idx % len(VOICES)]
+                name, voice_id = VOICES[voice_idx % len(VOICES)]
                 voice_idx += 1
-                wav_path = output_dir / f"{q['id']}_{voice}.wav"
-                manifest[q["id"]] = {"path": str(wav_path), "voice": voice}
+                wav_path = output_dir / f"{q['id']}_{name}.wav"
+                manifest[q["id"]] = {"path": str(wav_path), "voice": name}
 
                 if wav_path.exists() and not args.force:
-                    print(f"  skip (exists): {q['id']} [{voice}]")
+                    print(f"  skip (exists): {q['id']} [{name}]")
                     continue
 
-                print(f"  generating: {q['id']} [{voice}] — {q['text'][:60]}")
-                synthesize_to_wav(_get_tts(voice, tts_cache), q["text"], wav_path)
+                print(f"  generating: {q['id']} [{name}] — {q['text'][:60]}")
+                synthesize_to_wav(_get_tts(voice_id, tts_cache), q["text"], wav_path)
                 generated += 1
                 print(f"    saved: {wav_path} ({wav_path.stat().st_size:,} bytes)")
 
