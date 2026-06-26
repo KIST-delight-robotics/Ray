@@ -70,7 +70,7 @@ Combines VAP and TurnGPT outputs with timing heuristics. No external dependencie
 | 인자 | Default | 의미 |
 |------|---------|------|
 | `vap` | — | VAP 모델 (`IVAP`). 세션마다 신규 `AsyncVAP` 주입 |
-| `turngpt` | — | TurnGPT 어댑터 (`AsyncTurnGPT` / `SyncTurnGPTAdapter`) |
+| `turngpt` | — | TurnGPT 어댑터 (`ThreadedTurnGPT` / `SyncTurnGPTAdapter`) |
 | `embedder` | — | 임베딩 공급자 (`IEmbedder`). prepare 유사도 게이트용 |
 
 #### `TurnDetector` 클래스 변수
@@ -112,13 +112,13 @@ Output: `models/maai/encoder_{frame_rate}hz.onnx`, `models/maai/transformer_{lan
 
 **Hybrid** (`_USE_ONNX_TRANSFORMER = False`): ONNX encoder + PyTorch transformer. Optional `torch.compile` via `_USE_TORCH_COMPILE` for ~22% speedup. Requires `maai` package and `torch`. 생성 전 class var 변경.
 
-#### `MaAIVAPWrapper.__init__` 인자
+#### `MaAIVAPModel.__init__` 인자
 
 | 인자 | Default | 의미 |
 |------|---------|------|
 | `tts_sample_rate` | — | Robot(TTS) 출력 샘플레이트 (필수) |
 
-#### `MaAIVAPWrapper` 클래스 변수
+#### `MaAIVAPModel` 클래스 변수
 
 | 변수 | 값 | 의미 |
 |------|------|------|
@@ -158,9 +158,10 @@ RTF: 4.16x (100ms budget). Budget exceeded: 0%.
 voice_pipeline/turn_taking/
 ├── __init__.py
 ├── exceptions.py       # TurnTakingError, VAPError, TurnGPTError, TurnDetectorError
-├── maai_vap.py         # MaAIVAPWrapper(IVAP) — MaAI ONNX + own inference thread (10Hz)
+├── maai_vap.py         # MaAIVAPModel — MaAI ONNX inference (synchronous)
+├── threaded_vap.py     # ThreadedVAP(IVAP) — runs a VAP model on a bg thread (10Hz)
 ├── turngpt.py          # TurnGPTWrapper(ITurnGPT)
-├── async_turngpt.py    # AsyncTurnGPT + SyncTurnGPTAdapter — background thread wrapper
+├── threaded_turngpt.py # ThreadedTurnGPT + SyncTurnGPTAdapter — bg thread wrapper
 ├── turn_detector.py    # TurnDetector(ITurnDetector)
 └── README.md
 

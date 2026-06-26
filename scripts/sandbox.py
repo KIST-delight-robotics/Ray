@@ -105,7 +105,7 @@ from voice_pipeline.memory.types import Episode, Profile
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.session_loop import SessionLoop
 from voice_pipeline.tts.openai_tts import OpenAITTS
-from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
+from voice_pipeline.turn_taking.threaded_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
 
 # ---------------------------------------------------------------------------
@@ -510,15 +510,16 @@ def create_vap(
     *,
     tts_sample_rate: int = OpenAITTS.OUTPUT_SAMPLE_RATE,
 ) -> IVAP:
-    """Create a real MaAI VAP (ONNX).
+    """Create a real MaAI VAP runtime (ThreadedVAP wrapping MaAIVAPModel).
 
     Requires ONNX model files at configured paths. Override tuning values
-    by setting class vars on ``MaAIVAPWrapper`` before calling (e.g.
-    ``MaAIVAPWrapper._FRAME_RATE = 20``).
+    by setting class vars on ``MaAIVAPModel`` before calling (e.g.
+    ``MaAIVAPModel._FRAME_RATE = 20``).
     """
-    from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
+    from voice_pipeline.turn_taking.maai_vap import MaAIVAPModel
+    from voice_pipeline.turn_taking.threaded_vap import ThreadedVAP
 
-    return MaAIVAPWrapper(tts_sample_rate)
+    return ThreadedVAP(MaAIVAPModel(tts_sample_rate))
 
 
 def create_turngpt() -> ITurnGPT:

@@ -8,8 +8,10 @@ from voice_pipeline.turn_taking.exceptions import (
 )
 
 __all__ = [
-    "AsyncTurnGPT",
+    "MaAIVAPModel",
     "SyncTurnGPTAdapter",
+    "ThreadedTurnGPT",
+    "ThreadedVAP",
     "TurnDetector",
     "TurnDetectorError",
     "TurnGPTError",
@@ -28,12 +30,20 @@ def __getattr__(name: str):  # noqa: N807
         from voice_pipeline.turn_taking.turn_detector import TurnDetector
 
         return TurnDetector
-    if name == "AsyncTurnGPT":
-        from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT
+    if name == "MaAIVAPModel":
+        from voice_pipeline.turn_taking.maai_vap import MaAIVAPModel
 
-        return AsyncTurnGPT
+        return MaAIVAPModel
+    if name == "ThreadedVAP":
+        from voice_pipeline.turn_taking.threaded_vap import ThreadedVAP
+
+        return ThreadedVAP
+    if name == "ThreadedTurnGPT":
+        from voice_pipeline.turn_taking.threaded_turngpt import ThreadedTurnGPT
+
+        return ThreadedTurnGPT
     if name == "SyncTurnGPTAdapter":
-        from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
+        from voice_pipeline.turn_taking.threaded_turngpt import SyncTurnGPTAdapter
 
         return SyncTurnGPTAdapter
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

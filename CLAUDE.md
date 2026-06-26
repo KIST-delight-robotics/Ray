@@ -50,9 +50,10 @@ voice_pipeline/
 │   └── exceptions.py
 │
 ├── turn_taking/
-│   ├── maai_vap.py            # MaAIVAPWrapper(IVAP) — MaAI ONNX + own inference thread
+│   ├── maai_vap.py            # MaAIVAPModel — MaAI ONNX inference (synchronous)
+│   ├── threaded_vap.py        # ThreadedVAP(IVAP) — runs a VAP model on a bg thread
 │   ├── turngpt.py             # TurnGPTWrapper(ITurnGPT)
-│   ├── async_turngpt.py       # AsyncTurnGPT — background thread wrapper
+│   ├── threaded_turngpt.py    # ThreadedTurnGPT + SyncTurnGPTAdapter — bg thread wrapper
 │   ├── turn_detector.py       # TurnDetector — combined turn decision
 │   └── exceptions.py
 │

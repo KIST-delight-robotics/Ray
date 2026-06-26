@@ -58,7 +58,7 @@ from voice_pipeline.memory.types import Episode
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.session_loop import SessionLoop
 from voice_pipeline.tts.openai_tts import OpenAITTS
-from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
+from voice_pipeline.turn_taking.threaded_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
 
 # ---------------------------------------------------------------------------

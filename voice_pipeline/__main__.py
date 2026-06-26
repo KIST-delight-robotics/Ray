@@ -57,8 +57,9 @@ from voice_pipeline.trace.tracked_embedder import TrackedEmbedder
 from voice_pipeline.trace.tracked_tts import TrackedTTS
 from voice_pipeline.tts.factory import create_tts
 from voice_pipeline.tts.greeting_audio import ensure_greeting_audio
-from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT
-from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
+from voice_pipeline.turn_taking.maai_vap import MaAIVAPModel
+from voice_pipeline.turn_taking.threaded_turngpt import ThreadedTurnGPT
+from voice_pipeline.turn_taking.threaded_vap import ThreadedVAP
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
 from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 from voice_pipeline.wakeword.wakeword import WakewordDetector
@@ -186,7 +187,7 @@ def main() -> None:
     # VAP runs its own inference thread for the process lifetime; sessions
     # rebind it via reset() + session_id rather than recreating it (model
     # load + warmup is expensive).
-    vap = MaAIVAPWrapper(tts.output_sample_rate, call_store=call_store)
+    vap = ThreadedVAP(MaAIVAPModel(tts.output_sample_rate), call_store=call_store)
     retry_handler = OpenAIRetryHandler(call_store)
     logging.getLogger("openai._base_client").addHandler(retry_handler)
     tts = TrackedTTS(tts, call_store)
@@ -210,13 +211,13 @@ def main() -> None:
         _asound.snd_lib_error_set_handler(None)
 
     # --- Session factory ---
-    prev_async: list[AsyncTurnGPT] = []
+    prev_threaded: list[ThreadedTurnGPT] = []
     shutdown_event = threading.Event()
 
     def session_factory() -> SessionComponents:
-        for wrapper in prev_async:
+        for wrapper in prev_threaded:
             wrapper.stop()
-        prev_async.clear()
+        prev_threaded.clear()
 
         session_id = str(uuid.uuid4())
         vap.session_id = session_id
@@ -228,14 +229,14 @@ def main() -> None:
         tts.session_id = session_id
         retry_handler.session_id = session_id
 
-        async_turngpt = AsyncTurnGPT(turngpt, call_store=call_store, session_id=session_id)
-        prev_async.append(async_turngpt)
+        threaded_turngpt = ThreadedTurnGPT(turngpt, call_store=call_store, session_id=session_id)
+        prev_threaded.append(threaded_turngpt)
 
         history = ConversationHistory(storage, token_counter)
         retriever = MemoryRetriever(memory_storage, vector_index, embedder)
         turn_detector = TurnDetector(
             vap,
-            async_turngpt,
+            threaded_turngpt,
             embedder,
             vad_fn=vad_fn,
             vad_reset_fn=reset_vad,
@@ -399,9 +400,9 @@ def main() -> None:
 
         audio_input.stop()
         bridge.disconnect()
-        for wrapper in prev_async:
+        for wrapper in prev_threaded:
             wrapper.stop()
-        prev_async.clear()
+        prev_threaded.clear()
         vap.stop()
         write_executor.shutdown(wait=True)
         executor.shutdown(wait=True)

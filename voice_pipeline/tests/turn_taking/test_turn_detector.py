@@ -13,7 +13,7 @@ import numpy as np
 from voice_pipeline.core.interfaces import IVAP, IEmbedder, ITurnGPT
 from voice_pipeline.core.types import TurnDecision, VAPResult
 from voice_pipeline.trace.trace_store import InMemoryCallStore
-from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
+from voice_pipeline.turn_taking.threaded_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector, _TurnState
 
 # ---------------------------------------------------------------------------

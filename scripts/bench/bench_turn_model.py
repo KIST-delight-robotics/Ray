@@ -43,7 +43,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper  # noqa: E402
+from voice_pipeline.turn_taking.maai_vap import MaAIVAPModel  # noqa: E402
 
 _DEFAULT_TOKENIZER_PATH = "models/turngpt/tokenizer"
 
@@ -312,27 +312,27 @@ def create_vap_variant(
     tts_sample_rate = OpenAITTS.OUTPUT_SAMPLE_RATE
 
     # MaAI variants — override class vars (MaAIVAP has no per-instance init args beyond tts_sample_rate).
-    MaAIVAPWrapper._FRAME_RATE = frame_rate
-    MaAIVAPWrapper._CONTEXT_LEN_SEC = context_len_sec
-    MaAIVAPWrapper._ORT_THREADS = ort_threads
-    MaAIVAPWrapper._PT_THREADS = pt_threads
+    MaAIVAPModel._FRAME_RATE = frame_rate
+    MaAIVAPModel._CONTEXT_LEN_SEC = context_len_sec
+    MaAIVAPModel._ORT_THREADS = ort_threads
+    MaAIVAPModel._PT_THREADS = pt_threads
     if encoder_onnx:
-        MaAIVAPWrapper.ENCODER_ONNX_PATH = encoder_onnx
+        MaAIVAPModel.ENCODER_ONNX_PATH = encoder_onnx
 
     if variant == "maai-pytorch":
-        MaAIVAPWrapper._USE_ONNX_TRANSFORMER = False
-        MaAIVAPWrapper._USE_TORCH_COMPILE = False
+        MaAIVAPModel._USE_ONNX_TRANSFORMER = False
+        MaAIVAPModel._USE_TORCH_COMPILE = False
     elif variant == "maai-compile":
-        MaAIVAPWrapper._USE_ONNX_TRANSFORMER = False
-        MaAIVAPWrapper._USE_TORCH_COMPILE = True
+        MaAIVAPModel._USE_ONNX_TRANSFORMER = False
+        MaAIVAPModel._USE_TORCH_COMPILE = True
     elif variant == "maai-full-onnx":
-        MaAIVAPWrapper._USE_ONNX_TRANSFORMER = True
+        MaAIVAPModel._USE_ONNX_TRANSFORMER = True
         if transformer_onnx:
-            MaAIVAPWrapper.TRANSFORMER_ONNX_PATH = transformer_onnx
+            MaAIVAPModel.TRANSFORMER_ONNX_PATH = transformer_onnx
     else:
         raise ValueError(f"Unknown VAP variant: {variant}")
 
-    return MaAIVAPWrapper(tts_sample_rate)
+    return MaAIVAPModel(tts_sample_rate)
 
 
 # =====================================================================
@@ -414,9 +414,9 @@ def run_vap_benchmark(
     load_time = time.perf_counter() - t_load
     print(f"    Loaded in {load_time:.1f}s")
 
-    # feed_audio is an async command (buffers for the wrapper's own thread);
-    # reach the internal _infer for synchronous single-inference measurement.
-    infer = wrapper._infer
+    # MaAIVAPModel.infer is synchronous (the threading lives in ThreadedVAP),
+    # so we can time single inferences directly.
+    infer = wrapper.infer
 
     # Warmup with real audio to fill KV cache for steady-state measurement
     print(f"    Warmup ({warmup_frames} frames)...", end="", flush=True)
@@ -764,14 +764,14 @@ def build_parser() -> argparse.ArgumentParser:
     vap_group.add_argument(
         "--encoder-onnx",
         type=str,
-        default=MaAIVAPWrapper.ENCODER_ONNX_PATH,
-        help=f"MaAI encoder ONNX path (default: {MaAIVAPWrapper.ENCODER_ONNX_PATH})",
+        default=MaAIVAPModel.ENCODER_ONNX_PATH,
+        help=f"MaAI encoder ONNX path (default: {MaAIVAPModel.ENCODER_ONNX_PATH})",
     )
     vap_group.add_argument(
         "--transformer-onnx",
         type=str,
-        default=MaAIVAPWrapper.TRANSFORMER_ONNX_PATH,
-        help=f"MaAI transformer ONNX path (default: {MaAIVAPWrapper.TRANSFORMER_ONNX_PATH})",
+        default=MaAIVAPModel.TRANSFORMER_ONNX_PATH,
+        help=f"MaAI transformer ONNX path (default: {MaAIVAPModel.TRANSFORMER_ONNX_PATH})",
     )
 
     # TurnGPT options
