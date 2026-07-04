@@ -95,11 +95,8 @@ voice_pipeline/
 │   ├── animations.py          # LED animation patterns
 │   └── exceptions.py
 │
-├── similarity/
-│   └── similarity.py          # Semantic similarity (embedding / difflib)
-│
 ├── embedding/
-│   └── embedder.py            # IEmbedder implementations + factory
+│   └── embedder.py            # IEmbedder implementations + factory (shared by memory & TurnDetector similarity)
 │
 ├── memory/
 │   ├── types.py               # Episode, Profile, MemoryReadResult data types
@@ -138,7 +135,10 @@ scripts/
 ├── tts_to_file.py         # TTS → WAV file utility
 ├── export_maai_onnx.py    # MaAI VAP ONNX export
 ├── bench/                 # Performance benchmarks
+├── eval/                  # E2E evaluation pipeline (audio prep, run, report, dashboard)
 └── hardware/              # Hardware integration checks (mic, LED, bridge)
+
+music_dance/               # Standalone music-sync LED+motor demo (Python analysis + C++ player)
 ```
 
 
