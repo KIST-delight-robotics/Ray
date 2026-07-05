@@ -301,9 +301,7 @@ SCENARIOS: list[tuple[str, list[tuple[str, str]], str]] = [
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prompt style benchmark")
     parser.add_argument("--prompt", type=str, default=None, help="Override system prompt")
-    parser.add_argument(
-        "--model", type=str, default=None, help="Override LLM model (default: config default)"
-    )
+    parser.add_argument("--model", type=str, default=None, help="Override LLM model (default: config default)")
     parser.add_argument(
         "--tools",
         type=str,
@@ -323,9 +321,7 @@ def main() -> None:
     all_scenarios = SCENARIOS + SCENARIOS_KO + SCENARIOS_TTS + SCENARIOS_SEARCH
     selected = all_scenarios
     if args.scenarios:
-        selected = [
-            s for s in all_scenarios if any(filt in s[0] for filt in args.scenarios)
-        ]
+        selected = [s for s in all_scenarios if any(filt in s[0] for filt in args.scenarios)]
         if not selected:
             print(f"No scenarios matched: {args.scenarios}")
             sys.exit(1)

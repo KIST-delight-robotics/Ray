@@ -293,10 +293,7 @@ def _build_judge_messages(suite_name: str, turns: list[dict], *, multi_turn: boo
             "Return a JSON object with: relevance, voice_appropriateness, "
             f"naturalness, {criterion_key}reasoning (one sentence in Korean)."
         )
-        parts = [
-            f"User: {t['input_text']}\nResponse: {t['response_text']}"
-            for t in turns
-        ]
+        parts = [f"User: {t['input_text']}\nResponse: {t['response_text']}" for t in turns]
         user = "Evaluate this multi-turn conversation as a whole:\n\n" + "\n\n".join(parts)
     else:
         system = (

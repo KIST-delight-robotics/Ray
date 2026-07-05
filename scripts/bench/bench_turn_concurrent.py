@@ -203,7 +203,10 @@ def run_concurrent_benchmark(
         timestamps=tgpt_timestamps[: tgpt_actual[0]],
     )
 
-    del vap, tgpt
+    # `del vap, tgpt`는 pyflakes가 워커 클로저의 참조를 unbound로 판정(F821)하므로
+    # None 재바인딩으로 동일하게 참조를 해제한다 (워커 스레드는 이미 join 완료).
+    vap = None
+    tgpt = None
     gc.collect()
 
     return ConcurrentResult(

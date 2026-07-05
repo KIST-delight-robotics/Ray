@@ -140,8 +140,7 @@ def main() -> int:
     )
     write_timeline(args.out, actual_fps, args.wav, led, motor)
     print(
-        f"[analyze] 완료: {args.out}  frames={len(led)}  fps={actual_fps:.2f}  "
-        f"dur={len(led) / actual_fps:.1f}s",
+        f"[analyze] 완료: {args.out}  frames={len(led)}  fps={actual_fps:.2f}  dur={len(led) / actual_fps:.1f}s",
         file=sys.stderr,
     )
     return 0

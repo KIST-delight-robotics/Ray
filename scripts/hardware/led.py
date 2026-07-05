@@ -5,6 +5,8 @@ Usage:
     uv run python scripts/hardware/led.py
 """
 
+import time
+
 from rpi5_ws2812.ws2812 import Color, WS2812SpiDriver
 
 BAR_COUNT = 8
@@ -41,8 +43,6 @@ strip.show()
 # strip.show()
 
 # 3초 후 모두 끄기
-import time
-
 time.sleep(3)
 strip.set_all_pixels(Color(0, 0, 0))
 strip.show()

@@ -430,7 +430,7 @@ def setup_memory(
     # Add episodes and compute embeddings.
     texts = [ep.text for ep in episodes]
     embeddings = embedder.embed_batch(texts)
-    for ep, emb in zip(episodes, embeddings):
+    for ep, emb in zip(episodes, embeddings, strict=False):
         eid = storage.add_episode(ep)
         if eid is not None:
             storage.update_episode_embedding(eid, emb)
