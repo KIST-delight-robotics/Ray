@@ -3,6 +3,14 @@
 진행 중인 작업의 결정 기록. 작업 완료 후 정리하여 `decisions.md`에 통합.
 
 
+## eval 개편 — evaluation 패키지 승격 + 배선 팩토리 추출
+
+- **배선 3중 사본 → `wiring.py` 단일화**: `__main__.py`와 eval `run.py`가 프로세스·세션 조립 ~150줄을 verbatim 복제하고 있었음 (vad_fn 클로저는 주석까지 동일, LLM 설정 상수도 두 벌). 프로덕션에 컴포넌트가 추가될 때 eval이 조용히 어긋나는 드리프트가 구조화된 상태. `build_components(db_path, led_enabled)` + `ProcessComponents.create_session(**session_loop_kwargs)`로 추출. eval 델타를 전수 조사한 결과 전부 **이미 존재하던 중립 파라미터**(스토어 DB 경로, LED off, SessionLoop 콜백/`skip_generation`/`record_path`)여서 프로덕션에 eval 전용 기능이 새로 들어갈 필요가 없었음 — "프로덕션엔 주입점만, eval 동작 금지" 규율을 CLAUDE.md에 명문화.
+- **eval 전용 기본값은 eval 쪽 `partial`로**: `disable_exit_keywords=True`는 eval 정책이므로 wiring 기본값이 아니라 run.py에서 `partial(components.create_session, disable_exit_keywords=True)`로 고정 — 주입점(파라미터)은 프로덕션에, 정책(값)은 소비자에.
+- **sandbox.py는 팩토리 미적용**: 의도적으로 컴포넌트를 대체(Observable/Stub/NoOp)하는 재현 하네스라, 팩토리에 태우면 컴포넌트마다 오버라이드 파라미터가 필요해져 규율이 무너짐. 실 그래프 재현이 목적이 아니므로 자체 조립 유지.
+- **`create_session`의 세션 인자는 `**kwargs` 통과**: SessionLoop 시그니처를 wiring에 복제하면 두 곳이 어긋날 수 있어(이번 작업의 원인 그 자체), 타입 명시 대신 통과를 선택 — 검증은 SessionLoop 생성자가 담당.
+
+
 ## 차후 고려
 
 - **eval text 모드 유실**: `--text`(quality/memory 스위트를 음성 단계 없이 LLM 직접 평가)가 참조하던 `voice_pipeline/text_session.py`(TextSession)가 저장소에 존재하지 않아(커밋 이력에도 없음 — 미push 유실 추정) 모드 전체를 제거함. 재도입하려면 TextSession 재구현 필요.

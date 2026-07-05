@@ -28,7 +28,8 @@ __main__.py (mode loop + DI)
 
 ```
 voice_pipeline/
-├── __main__.py                # Entry point, DI, mode loop (SLEEP/GREETING/ACTIVE/FAREWELL)
+├── __main__.py                # Entry point, mode loop (SLEEP/GREETING/ACTIVE/FAREWELL)
+├── wiring.py                  # Shared component graph assembly (build_components / create_session)
 ├── session_loop.py            # ACTIVE mode frame-driven conversation loop (SessionLoop)
 │
 ├── core/
@@ -174,7 +175,8 @@ Some modules (VAP, TurnGPT, Wakeword etc.) wrap externally cloned model reposito
 
 - **Interfaces**: `I` prefix (`IASR`, `ITTS`). All defined in `core/interfaces.py`. Inject via constructor using interface types.
 - **Vendor abstraction**: ASR, LLM, TTS are interface-backed. Impl selection via config.
-- **Dependency direction**: always `module → core`. Modules must not import each other directly. TurnDetector does not know about SpeechGenerator or ASR; `__main__.py` wires them.
+- **Dependency direction**: always `module → core`. Modules must not import each other directly. TurnDetector does not know about SpeechGenerator or ASR; `voice_pipeline/wiring.py` wires them.
+- **Entry-point wiring**: production (`__main__.py`) and eval (`evaluation/run.py`) share the component graph via `voice_pipeline/wiring.py` (`build_components()` + `ProcessComponents.create_session()`). Production code exposes only neutral injection points (paths, toggles, callbacks) — never eval-specific behavior or branches. Dependency direction: `evaluation → voice_pipeline`, never the reverse.
 - **Type hints** required. **Docstrings** required on interface methods.
 - **Configuration**: per-module class variables and constructor parameters. No centralized config object.
 - **Logging**: `voice_pipeline.*` namespace (`voice_pipeline.asr`, `voice_pipeline.session_loop`, etc.)

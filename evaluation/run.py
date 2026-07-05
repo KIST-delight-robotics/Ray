@@ -27,8 +27,8 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 # Suppress ALSA/JACK noise during PyAudio initialization.
@@ -41,42 +41,14 @@ try:
 except Exception:
     _asound = None
 
-import torch
-from silero_vad import load_silero_vad
 
 from evaluation.question_player import QuestionPlayer
-from voice_pipeline.asr.asr import GoogleCloudASR
-from voice_pipeline.audio.audio_input import AudioInput
-from voice_pipeline.audio.constants import SAMPLE_RATE
-from voice_pipeline.bridge.cpp_bridge import CppBridge
 from voice_pipeline.core.types import AudioFrame
-from voice_pipeline.embedding.embedder import create_embedder
-from voice_pipeline.generation.speech_generator import SpeechGenerator
-from voice_pipeline.history.conversation_history import ConversationHistory
-from voice_pipeline.history.storage_backend import create_storage_backend
-from voice_pipeline.led.led_controller import LEDController
-from voice_pipeline.llm.llm import OpenAILLM
-from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
-from voice_pipeline.llm.token_counter import create_token_counter
-from voice_pipeline.llm.tools import get_tools_token_cost
-from voice_pipeline.memory.retriever import MemoryRetriever
-from voice_pipeline.memory.storage import _DEFAULT_DIMENSION, SQLiteMemoryStorage
-from voice_pipeline.memory.vector_index import NumpyVectorIndex
-from voice_pipeline.session_loop import SessionComponents, SessionLoop
-from voice_pipeline.trace.openai_retry_handler import OpenAIRetryHandler
-from voice_pipeline.trace.trace_store import SQLiteCallStore, SQLiteTraceStore
-from voice_pipeline.trace.tracked_embedder import TrackedEmbedder
-from voice_pipeline.trace.tracked_tts import TrackedTTS
-from voice_pipeline.tts.factory import create_tts
-from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT
-from voice_pipeline.turn_taking.async_vap import AsyncVAP
-from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
-from voice_pipeline.turn_taking.turn_detector import TurnDetector
-from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
+from voice_pipeline.session_loop import SessionComponents
+from voice_pipeline.wiring import build_components
 
 logger = logging.getLogger("eval")
 
-_AUDIO_QUEUE_SIZE = 300
 _STARTUP_DELAY_SEC = 1.5
 _TURN_TIMEOUT_SEC = 60.0
 _TURN_DETECT_TIMEOUT_SEC = 10.0
@@ -925,29 +897,24 @@ def main() -> None:
         logger.error("Run prepare_audio.py first")
         sys.exit(1)
 
-    # --- Shared module initialization ---
-    language_code = "en-US"
+    # --- Component wiring: 프로덕션과 동일 그래프, 런별 격리 DB (voice_pipeline.wiring) ---
     eval_db = str(output_dir / "eval.db")
+    components = build_components(db_path=eval_db, led_enabled=False)
 
-    llm = OpenAILLM(
-        model="gpt-5.4",
-        temperature=0.7,
-        reasoning_effort="none",
-        max_tokens=256,
-        tools=["web_search"],
-    )
-    storage = create_storage_backend("sqlite", db_path=eval_db)
-    token_counter = create_token_counter(llm.model)
-    tools_token_cost = get_tools_token_cost(llm.tools)
+    if _asound is not None:
+        _asound.snd_lib_error_set_handler(None)
 
-    embedder = create_embedder(expected_dimension=_DEFAULT_DIMENSION)
-    memory_storage = SQLiteMemoryStorage(eval_db)
-    trace_store = SQLiteTraceStore(eval_db)
-    call_store = SQLiteCallStore(eval_db)
-    embedder = TrackedEmbedder(embedder, call_store)
-    retry_handler = OpenAIRetryHandler(call_store)
-    logging.getLogger("openai._base_client").addHandler(retry_handler)
-    vector_index = NumpyVectorIndex()
+    llm = components.llm
+    embedder = components.embedder
+    memory_storage = components.memory_storage
+    vector_index = components.vector_index
+    token_counter = components.token_counter
+    audio_queue = components.audio_queue
+    audio_input = components.audio_input
+    bridge = components.bridge
+    shutdown_event = components.shutdown_event
+    # eval 세션은 사용자 종료 키워드로 끝나면 안 됨 — eval 전용 기본값을 여기서 고정
+    create_session = partial(components.create_session, disable_exit_keywords=True)
 
     # --- Seed injection ---
     seed_session_map: dict[int, str] = {}
@@ -961,134 +928,6 @@ def main() -> None:
         for sid, episodes in eps_by_session.items():
             seed_episode_map[sid] = [ep.id for ep in episodes]
         logger.info("Seed injection complete: %d episodes total", sum(len(v) for v in seed_episode_map.values()))
-
-    # --- Audio module initialization ---
-    prev_async: list[AsyncVAP | AsyncTurnGPT] = []
-
-    asr = GoogleCloudASR(language_code=language_code)
-    raw_tts = create_tts()  # 프로덕션 기본 vendor를 따라감
-    tts = TrackedTTS(raw_tts, call_store)
-    vap = MaAIVAPWrapper(raw_tts.output_sample_rate)
-    turngpt = TurnGPTWrapper()
-    silero_vad_model = load_silero_vad(onnx=True)
-    _vad_buf = bytearray()
-    _vad_last_score = [0.0]
-    _vad_call_count = [0]
-    _VAD_INFER_INTERVAL = 3  # 3프레임(90ms)마다 추론, 사이는 캐시 반환
-    _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
-
-    def vad_fn(frame: AudioFrame) -> float:
-        _vad_buf.extend(frame)
-        _vad_call_count[0] += 1
-        if _vad_call_count[0] % _VAD_INFER_INTERVAL != 0:
-            return _vad_last_score[0]
-        while len(_vad_buf) >= _SILERO_CHUNK_BYTES:
-            chunk = bytes(_vad_buf[:_SILERO_CHUNK_BYTES])
-            del _vad_buf[:_SILERO_CHUNK_BYTES]
-            samples = torch.frombuffer(bytearray(chunk), dtype=torch.int16).float() / 32768.0
-            _vad_last_score[0] = silero_vad_model(samples, SAMPLE_RATE).item()
-        return _vad_last_score[0]
-
-    def reset_vad() -> None:
-        # Silero LSTM 상태는 이전 오디오 이력을 유지하며 자연 회복되지 않음 —
-        # 큰 발화 이력이 남으면 조용한 음성을 통째로 놓침. 세션 시작마다 초기화.
-        silero_vad_model.reset_states()
-        _vad_buf.clear()
-        _vad_last_score[0] = 0.0
-        _vad_call_count[0] = 0
-
-    bridge = CppBridge()
-    led = LEDController(enabled=False)
-    executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
-
-    audio_queue = queue.Queue(maxsize=_AUDIO_QUEUE_SIZE)
-    audio_input = AudioInput(audio_queue)
-
-    if _asound is not None:
-        _asound.snd_lib_error_set_handler(None)
-
-    # --- Audio session factory ---
-    shutdown_event = threading.Event()
-
-    def create_session(
-        *,
-        on_turn_complete: Callable[[float], None] | None = None,
-        on_turn_shift: Callable[[float, str], None] | None = None,
-        on_playback_started: Callable[[], None] | None = None,
-        on_generation_failed: Callable[[], None] | None = None,
-        on_cancel: Callable[[], None] | None = None,
-        memory_enabled: bool = True,
-        skip_generation: bool = False,
-        record_path: str | None = None,
-    ) -> SessionComponents:
-        for wrapper in prev_async:
-            wrapper.stop()
-        prev_async.clear()
-
-        vap.reset()
-        turngpt.reset()
-        reset_vad()
-
-        session_id = str(uuid.uuid4())
-        tts.session_id = session_id
-        retry_handler.session_id = session_id
-        embedder.session_id = session_id
-        async_vap = AsyncVAP(vap, call_store=call_store, session_id=session_id)
-        async_turngpt = AsyncTurnGPT(turngpt, call_store=call_store, session_id=session_id)
-        prev_async.extend([async_vap, async_turngpt])
-
-        ms = memory_storage if memory_enabled else None
-        history = ConversationHistory(storage, token_counter)
-        retriever = MemoryRetriever(memory_storage, vector_index, embedder) if memory_enabled else None
-        turn_detector = TurnDetector(
-            async_vap,
-            async_turngpt,
-            embedder,
-            vad_fn=vad_fn,
-            vad_reset_fn=reset_vad,
-            call_store=call_store,
-            session_id=session_id,
-        )
-        generator = SpeechGenerator(
-            llm,
-            tts,
-            history,
-            token_counter,
-            DEFAULT_SYSTEM_PROMPT,
-            executor,
-            tools_token_cost=tools_token_cost,
-            memory_storage=ms,
-            retriever=retriever,
-            session_id=session_id,
-        )
-        session_loop = SessionLoop(
-            asr=asr,
-            turn_detector=turn_detector,
-            speech_generator=generator,
-            cpp_bridge=bridge,
-            history=history,
-            led=led,
-            audio_queue=audio_queue,
-            tts_sample_rate=tts.output_sample_rate,
-            memory_storage=ms,
-            session_id=session_id,
-            token_counter=token_counter,
-            trace_store=trace_store,
-            shutdown_event=shutdown_event,
-            on_turn_complete=on_turn_complete,
-            on_turn_shift=on_turn_shift,
-            on_playback_started=on_playback_started,
-            on_generation_failed=on_generation_failed,
-            on_cancel=on_cancel,
-            disable_exit_keywords=True,
-            skip_generation=skip_generation,
-            record_path=record_path,
-        )
-        return SessionComponents(
-            session_loop=session_loop,
-            history=history,
-            session_id=session_id,
-        )
 
     # --- Signal handling & pause control ---
     def _handle_signal(*_: object) -> None:
@@ -1222,17 +1061,15 @@ def main() -> None:
         finally:
             audio_input.stop()
             bridge.disconnect()
-            for wrapper in prev_async:
-                wrapper.stop()
-            prev_async.clear()
-            executor.shutdown(wait=False)
-            asr.stop()
-            led.close()
+            components.stop_async()
+            components.executor.shutdown(wait=False)
+            components.asr.stop()
+            components.led.close()
 
     # --- Shared cleanup ---
     memory_storage.close()
-    trace_store.close()
-    call_store.close()
+    components.trace_store.close()
+    components.call_store.close()
 
     # --- Save session mapping ---
     finished_at = datetime.now().strftime(_TIMESTAMP_FORMAT)
@@ -1242,12 +1079,12 @@ def main() -> None:
         "llm_model": llm.model,
         "llm_temperature": llm.temperature,
         "writer_llm_model": "gpt-4o-mini",
-        "tts_model": raw_tts.model_name,
-        "tts_voice": raw_tts.voice_id,
-        "asr_model": asr._MODEL,
-        "asr_language": language_code,
-        "vap_model": type(vap).__name__,
-        "turngpt_model": type(turngpt).__name__,
+        "tts_model": components.raw_tts.model_name,
+        "tts_voice": components.raw_tts.voice_id,
+        "asr_model": components.asr._MODEL,
+        "asr_language": components.language_code,
+        "vap_model": type(components.vap).__name__,
+        "turngpt_model": type(components.turngpt).__name__,
         "vad_model": "silero_vad",
     }
     runner_config: dict = {
