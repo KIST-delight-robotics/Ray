@@ -8,22 +8,19 @@ OpenAI TTS has no volume parameter and voices differ by up to ~19 dB
 (sage/coral are far quieter than nova/alloy), which skews ASR/VAD results.
 
 Usage:
-    uv run python scripts/eval/prepare_audio.py data/eval/questions.json
-    uv run python scripts/eval/prepare_audio.py data/eval/questions.json --output-dir data/eval/wav
-    uv run python scripts/eval/prepare_audio.py data/eval/questions.json --speed 1.5 --force
+    uv run python -m evaluation.prepare_audio data/eval/questions.json
+    uv run python -m evaluation.prepare_audio data/eval/questions.json --output-dir data/eval/wav
+    uv run python -m evaluation.prepare_audio data/eval/questions.json --speed 1.5 --force
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import sys
 import wave
 from pathlib import Path
 
 import numpy as np
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from voice_pipeline.tts.greeting_audio import synthesize_to_wav
 from voice_pipeline.tts.openai_tts import OpenAITTS

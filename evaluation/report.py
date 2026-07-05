@@ -4,8 +4,8 @@ Joins session mapping with pipeline_traces and messages tables
 to produce a unified result JSON.
 
 Usage:
-    uv run python scripts/eval/report.py data/eval/results
-    uv run python scripts/eval/report.py data/eval/results --output report.json
+    uv run python -m evaluation.report data/eval/results
+    uv run python -m evaluation.report data/eval/results --output report.json
 """
 
 from __future__ import annotations

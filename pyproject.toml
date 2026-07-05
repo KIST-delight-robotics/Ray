@@ -51,7 +51,7 @@ dev = [
 ray = "voice_pipeline.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["voice_pipeline*"]
+include = ["voice_pipeline*", "evaluation*"]
 
 [tool.pytest.ini_options]
 testpaths = ["voice_pipeline/tests"]
@@ -78,8 +78,8 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "voice_pipeline/__main__.py" = ["E402"]
-"scripts/eval/run.py" = ["E402"]
-"scripts/eval/dashboard.py" = ["E501"]
+"evaluation/run.py" = ["E402"]
+"evaluation/dashboard.py" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["voice_pipeline"]
+known-first-party = ["voice_pipeline", "evaluation"]

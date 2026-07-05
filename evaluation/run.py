@@ -6,7 +6,7 @@ Actual turn data (ASR text, response, latency) is captured by the
 existing storage systems (trace_store, history, memory_storage).
 
 Usage:
-    uv run python scripts/eval/run.py \\
+    uv run python -m evaluation.run \\
         --questions data/eval/questions.json \\
         --device plughw:1,0 \\
         --output-dir data/eval/results
@@ -31,8 +31,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-
 # Suppress ALSA/JACK noise during PyAudio initialization.
 _alsa_error_handler = ctypes.CFUNCTYPE(
     None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p
@@ -44,9 +42,9 @@ except Exception:
     _asound = None
 
 import torch
-from question_player import QuestionPlayer
 from silero_vad import load_silero_vad
 
+from evaluation.question_player import QuestionPlayer
 from voice_pipeline.asr.asr import GoogleCloudASR
 from voice_pipeline.audio.audio_input import AudioInput
 from voice_pipeline.audio.constants import SAMPLE_RATE

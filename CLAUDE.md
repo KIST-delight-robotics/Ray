@@ -135,8 +135,9 @@ scripts/
 ├── tts_to_file.py         # TTS → WAV file utility
 ├── export_maai_onnx.py    # MaAI VAP ONNX export
 ├── bench/                 # Performance benchmarks
-├── eval/                  # E2E evaluation pipeline (audio prep, run, report, dashboard)
 └── hardware/              # Hardware integration checks (mic, LED, bridge)
+
+evaluation/                # E2E evaluation pipeline (audio prep, run, report, score, dashboard)
 
 music_dance/               # Standalone music-sync LED+motor demo (Python analysis + C++ player)
 ```
