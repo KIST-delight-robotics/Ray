@@ -295,187 +295,6 @@ class _PauseController:
 
 
 # ---------------------------------------------------------------------------
-# Text-mode execution
-# ---------------------------------------------------------------------------
-
-
-def _run_text_single_turn(suite, question, session_map, create_text_session, seed_episode_map, seed_session_map):
-    """Execute one single-turn eval question in text mode."""
-    is_memory = suite.get("category") == "memory"
-    session = create_text_session(
-        memory_enabled=suite.get("memory", False),
-        load_session_context=not is_memory,
-    )
-    try:
-        session.send(question["text"])
-    except Exception:
-        logger.error("Text session error for %s", question["id"], exc_info=True)
-        session_map.append(
-            {
-                "question_id": question["id"],
-                "session_id": session.session_id,
-                "suite_name": suite["name"],
-                "input_text": question["text"],
-                "asr_text": question["text"],
-                "success": False,
-                "error": "text_session_error",
-                "text_mode": True,
-                "retrieved_episodes": [],
-                "target_sessions": question.get("target_sessions", []),
-                "target_episode_ids": _resolve_target_episodes(
-                    question.get("target_sessions", []), seed_session_map, seed_episode_map
-                ),
-            }
-        )
-        session.close()
-        return
-
-    # Extract retrieved episodes from memory results
-    retrieved_episodes = []
-    if session.memory_results and session.memory_results[-1] is not None:
-        mr = session.memory_results[-1]
-        for ep, score in zip(mr.episodes, mr.scores, strict=False):
-            retrieved_episodes.append(
-                {
-                    "episode_id": ep.id,
-                    "text": ep.text,
-                    "score": round(score, 4),
-                    "timestamp": ep.timestamp,
-                    "session_id": ep.session_id,
-                }
-            )
-
-    target_episode_ids = _resolve_target_episodes(
-        question.get("target_sessions", []), seed_session_map, seed_episode_map
-    )
-
-    trace = session.traces[-1] if session.traces else None
-    latency = {}
-    if trace:
-        latency = {
-            "memory_ms": round(trace.memory_ms, 1),
-            "context_ms": round(trace.context_ms, 1),
-            "llm_ms": round(trace.llm_ms, 1),
-            "llm_ttft_ms": round(trace.llm_ttft_ms, 1),
-            "total_ms": round(trace.total_ms, 1),
-        }
-
-    session_map.append(
-        {
-            "question_id": question["id"],
-            "session_id": session.session_id,
-            "suite_name": suite["name"],
-            "input_text": question["text"],
-            "asr_text": question["text"],
-            "success": True,
-            "error": None,
-            "text_mode": True,
-            "latency": latency,
-            "retrieved_episodes": retrieved_episodes,
-            "target_sessions": question.get("target_sessions", []),
-            "target_episode_ids": target_episode_ids,
-        }
-    )
-    session.close()
-
-    logger.info("[OK] %s: %s", question["id"], question["text"][:60])
-
-
-def _run_text_multi_turn(suite, scenario, session_map, create_text_session, seed_episode_map, seed_session_map):
-    """Execute a multi-turn scenario in text mode (one session for all turns)."""
-    is_memory = suite.get("category") == "memory"
-    session = create_text_session(
-        memory_enabled=suite.get("memory", False),
-        load_session_context=not is_memory,
-    )
-    questions = scenario["questions"]
-
-    try:
-        for i, question in enumerate(questions):
-            try:
-                session.send(question["text"])
-            except Exception:
-                logger.error("Text session error at turn %d for %s", i, question["id"], exc_info=True)
-                session_map.append(
-                    {
-                        "question_id": question["id"],
-                        "scenario_id": scenario["id"],
-                        "session_id": session.session_id,
-                        "suite_name": suite["name"],
-                        "input_text": question["text"],
-                        "asr_text": question["text"],
-                        "success": False,
-                        "error": "text_session_error",
-                        "text_mode": True,
-                        "retrieved_episodes": [],
-                        "target_sessions": question.get("target_sessions", []),
-                        "target_episode_ids": _resolve_target_episodes(
-                            question.get("target_sessions", []), seed_session_map, seed_episode_map
-                        ),
-                    }
-                )
-                continue
-
-            # Extract retrieved episodes for this turn
-            retrieved_episodes = []
-            turn_idx = i  # memory_results index matches send() call order
-            if len(session.memory_results) > turn_idx and session.memory_results[turn_idx] is not None:
-                mr = session.memory_results[turn_idx]
-                for ep, score in zip(mr.episodes, mr.scores, strict=False):
-                    retrieved_episodes.append(
-                        {
-                            "episode_id": ep.id,
-                            "text": ep.text,
-                            "score": round(score, 4),
-                            "timestamp": ep.timestamp,
-                            "session_id": ep.session_id,
-                        }
-                    )
-
-            target_episode_ids = _resolve_target_episodes(
-                question.get("target_sessions", []), seed_session_map, seed_episode_map
-            )
-
-            trace = session.traces[turn_idx] if len(session.traces) > turn_idx else None
-            latency = {}
-            if trace:
-                latency = {
-                    "memory_ms": round(trace.memory_ms, 1),
-                    "context_ms": round(trace.context_ms, 1),
-                    "llm_ms": round(trace.llm_ms, 1),
-                    "llm_ttft_ms": round(trace.llm_ttft_ms, 1),
-                    "total_ms": round(trace.total_ms, 1),
-                }
-
-            session_map.append(
-                {
-                    "question_id": question["id"],
-                    "scenario_id": scenario["id"],
-                    "session_id": session.session_id,
-                    "suite_name": suite["name"],
-                    "input_text": question["text"],
-                    "asr_text": question["text"],
-                    "success": True,
-                    "error": None,
-                    "text_mode": True,
-                    "latency": latency,
-                    "retrieved_episodes": retrieved_episodes,
-                    "target_sessions": question.get("target_sessions", []),
-                    "target_episode_ids": target_episode_ids,
-                }
-            )
-    finally:
-        session.close()
-
-    logger.info(
-        "Scenario %s (%s): %d turns completed (text mode)",
-        scenario["id"],
-        suite["name"],
-        len(questions),
-    )
-
-
-# ---------------------------------------------------------------------------
 # Single-turn execution
 # ---------------------------------------------------------------------------
 
@@ -1047,7 +866,6 @@ def main() -> None:
     parser.add_argument("--wav-dir", default="data/eval/wav", help="Directory with question WAVs")
     parser.add_argument("--quick", action="store_true", help="Quick mode: 1 question per suite")
     parser.add_argument("--category", default=None, help="Only run suites of these categories (comma-separated)")
-    parser.add_argument("--text", action="store_true", help="Run quality/memory suites in text mode")
     parser.add_argument("--no-beep", action="store_true", help="Disable the session-start identification beep")
     args = parser.parse_args()
 
@@ -1080,11 +898,6 @@ def main() -> None:
         if seed_path.exists():
             seed_data = json.loads(seed_path.read_text())
 
-    # --- Classify suites into text vs audio ---
-    text_categories: set[str] = set()
-    if args.text:
-        text_categories = {"quality", "memory"}
-
     all_suites = [s for s in questions_data["suites"] if not s.get("category", "").startswith("_")]
     if args.category:
         selected = {c.strip() for c in args.category.split(",")}
@@ -1100,22 +913,17 @@ def main() -> None:
             logger.error("No suites matched categories: %s", ", ".join(sorted(selected)))
             sys.exit(1)
 
-    text_suites = [s for s in all_suites if s.get("category") in text_categories]
-    audio_suites = [s for s in all_suites if s.get("category") not in text_categories]
-    needs_audio = bool(audio_suites)
-
-    # --- WAV manifest check (audio suites only) ---
+    # --- WAV manifest check ---
     wav_map = _load_manifest(args.questions, args.wav_dir)
-    if needs_audio:
-        missing = []
-        for suite in audio_suites:
-            for q in _iter_questions(suite):
-                if q["id"] not in wav_map:
-                    missing.append(q["id"])
-        if missing:
-            logger.error("Missing WAV files for: %s", ", ".join(missing))
-            logger.error("Run prepare_audio.py first")
-            sys.exit(1)
+    missing = []
+    for suite in all_suites:
+        for q in _iter_questions(suite):
+            if q["id"] not in wav_map:
+                missing.append(q["id"])
+    if missing:
+        logger.error("Missing WAV files for: %s", ", ".join(missing))
+        logger.error("Run prepare_audio.py first")
+        sys.exit(1)
 
     # --- Shared module initialization ---
     language_code = "en-US"
@@ -1141,24 +949,6 @@ def main() -> None:
     logging.getLogger("openai._base_client").addHandler(retry_handler)
     vector_index = NumpyVectorIndex()
 
-    # --- Text session factory ---
-    def create_text_session(*, memory_enabled: bool = True, load_session_context: bool = True):
-        from voice_pipeline.text_session import TextSession
-
-        ms = memory_storage if memory_enabled else None
-        retriever = MemoryRetriever(memory_storage, vector_index, embedder) if memory_enabled else None
-        history = ConversationHistory(storage, token_counter)
-        return TextSession(
-            llm=llm,
-            history=history,
-            token_counter=token_counter,
-            system_prompt=DEFAULT_SYSTEM_PROMPT,
-            tools_token_cost=tools_token_cost,
-            memory_storage=ms,
-            retriever=retriever,
-            load_session_context=load_session_context,
-        )
-
     # --- Seed injection ---
     seed_session_map: dict[int, str] = {}
     seed_episode_map: dict[str, list[int]] = {}
@@ -1172,61 +962,50 @@ def main() -> None:
             seed_episode_map[sid] = [ep.id for ep in episodes]
         logger.info("Seed injection complete: %d episodes total", sum(len(v) for v in seed_episode_map.values()))
 
-    # --- Audio module initialization (only if needed) ---
-    asr = None
-    raw_tts = None
-    tts = None
-    vap = None
-    turngpt = None
-    bridge = None
-    led = None
-    executor = None
-    audio_queue = None
-    audio_input = None
+    # --- Audio module initialization ---
     prev_async: list[AsyncVAP | AsyncTurnGPT] = []
 
-    if needs_audio:
-        asr = GoogleCloudASR(language_code=language_code)
-        raw_tts = create_tts()  # 프로덕션 기본 vendor를 따라감
-        tts = TrackedTTS(raw_tts, call_store)
-        vap = MaAIVAPWrapper(raw_tts.output_sample_rate)
-        turngpt = TurnGPTWrapper()
-        silero_vad_model = load_silero_vad(onnx=True)
-        _vad_buf = bytearray()
-        _vad_last_score = [0.0]
-        _vad_call_count = [0]
-        _VAD_INFER_INTERVAL = 3  # 3프레임(90ms)마다 추론, 사이는 캐시 반환
-        _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
+    asr = GoogleCloudASR(language_code=language_code)
+    raw_tts = create_tts()  # 프로덕션 기본 vendor를 따라감
+    tts = TrackedTTS(raw_tts, call_store)
+    vap = MaAIVAPWrapper(raw_tts.output_sample_rate)
+    turngpt = TurnGPTWrapper()
+    silero_vad_model = load_silero_vad(onnx=True)
+    _vad_buf = bytearray()
+    _vad_last_score = [0.0]
+    _vad_call_count = [0]
+    _VAD_INFER_INTERVAL = 3  # 3프레임(90ms)마다 추론, 사이는 캐시 반환
+    _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
 
-        def vad_fn(frame: AudioFrame) -> float:
-            _vad_buf.extend(frame)
-            _vad_call_count[0] += 1
-            if _vad_call_count[0] % _VAD_INFER_INTERVAL != 0:
-                return _vad_last_score[0]
-            while len(_vad_buf) >= _SILERO_CHUNK_BYTES:
-                chunk = bytes(_vad_buf[:_SILERO_CHUNK_BYTES])
-                del _vad_buf[:_SILERO_CHUNK_BYTES]
-                samples = torch.frombuffer(bytearray(chunk), dtype=torch.int16).float() / 32768.0
-                _vad_last_score[0] = silero_vad_model(samples, SAMPLE_RATE).item()
+    def vad_fn(frame: AudioFrame) -> float:
+        _vad_buf.extend(frame)
+        _vad_call_count[0] += 1
+        if _vad_call_count[0] % _VAD_INFER_INTERVAL != 0:
             return _vad_last_score[0]
+        while len(_vad_buf) >= _SILERO_CHUNK_BYTES:
+            chunk = bytes(_vad_buf[:_SILERO_CHUNK_BYTES])
+            del _vad_buf[:_SILERO_CHUNK_BYTES]
+            samples = torch.frombuffer(bytearray(chunk), dtype=torch.int16).float() / 32768.0
+            _vad_last_score[0] = silero_vad_model(samples, SAMPLE_RATE).item()
+        return _vad_last_score[0]
 
-        def reset_vad() -> None:
-            # Silero LSTM 상태는 이전 오디오 이력을 유지하며 자연 회복되지 않음 —
-            # 큰 발화 이력이 남으면 조용한 음성을 통째로 놓침. 세션 시작마다 초기화.
-            silero_vad_model.reset_states()
-            _vad_buf.clear()
-            _vad_last_score[0] = 0.0
-            _vad_call_count[0] = 0
+    def reset_vad() -> None:
+        # Silero LSTM 상태는 이전 오디오 이력을 유지하며 자연 회복되지 않음 —
+        # 큰 발화 이력이 남으면 조용한 음성을 통째로 놓침. 세션 시작마다 초기화.
+        silero_vad_model.reset_states()
+        _vad_buf.clear()
+        _vad_last_score[0] = 0.0
+        _vad_call_count[0] = 0
 
-        bridge = CppBridge()
-        led = LEDController(enabled=False)
-        executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
+    bridge = CppBridge()
+    led = LEDController(enabled=False)
+    executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
 
-        audio_queue = queue.Queue(maxsize=_AUDIO_QUEUE_SIZE)
-        audio_input = AudioInput(audio_queue)
+    audio_queue = queue.Queue(maxsize=_AUDIO_QUEUE_SIZE)
+    audio_input = AudioInput(audio_queue)
 
-        if _asound is not None:
-            _asound.snd_lib_error_set_handler(None)
+    if _asound is not None:
+        _asound.snd_lib_error_set_handler(None)
 
     # --- Audio session factory ---
     shutdown_event = threading.Event()
@@ -1324,49 +1103,10 @@ def main() -> None:
     session_map: list[dict] = []
     started_at = datetime.now().strftime(_TIMESTAMP_FORMAT)
 
-    total_suites = len(text_suites) + len(audio_suites)
-    logger.info("Eval starting — %d suites (%d text, %d audio)", total_suites, len(text_suites), len(audio_suites))
+    logger.info("Eval starting — %d suites", len(all_suites))
 
-    # --- Run text suites ---
-    for suite in text_suites:
-        if pause_ctrl.wait_if_paused():
-            break
-
-        if suite.get("multi_turn"):
-            scenarios = suite.get("scenarios", [])
-            if args.quick and len(scenarios) > 1:
-                scenarios = random.sample(scenarios, 1)
-            logger.info(
-                "Suite [text]: %s (%d/%d scenarios)",
-                suite["name"],
-                len(scenarios),
-                len(suite.get("scenarios", [])),
-            )
-            for scenario in scenarios:
-                if pause_ctrl.wait_if_paused():
-                    break
-                _run_text_multi_turn(
-                    suite, scenario, session_map, create_text_session, seed_episode_map, seed_session_map
-                )
-        else:
-            questions = suite.get("questions", [])
-            if args.quick and len(questions) > 1:
-                questions = random.sample(questions, 1)
-            logger.info(
-                "Suite [text]: %s (%d/%d questions)",
-                suite["name"],
-                len(questions),
-                len(suite.get("questions", [])),
-            )
-            for question in questions:
-                if pause_ctrl.wait_if_paused():
-                    break
-                _run_text_single_turn(
-                    suite, question, session_map, create_text_session, seed_episode_map, seed_session_map
-                )
-
-    # --- Run audio suites ---
-    if audio_suites and needs_audio:
+    # --- Run suites ---
+    if all_suites:
         record_dir = str(output_dir / "recordings")
         Path(record_dir).mkdir(exist_ok=True)
 
@@ -1388,7 +1128,7 @@ def main() -> None:
             logger.warning("No audio frame within 10s after AudioInput start")
 
         try:
-            for suite in audio_suites:
+            for suite in all_suites:
                 if pause_ctrl.wait_if_paused():
                     break
 
@@ -1502,17 +1242,16 @@ def main() -> None:
         "llm_model": llm.model,
         "llm_temperature": llm.temperature,
         "writer_llm_model": "gpt-4o-mini",
-        "tts_model": raw_tts.model_name if raw_tts else None,
-        "tts_voice": raw_tts.voice_id if raw_tts else None,
-        "asr_model": asr._MODEL if asr else None,
+        "tts_model": raw_tts.model_name,
+        "tts_voice": raw_tts.voice_id,
+        "asr_model": asr._MODEL,
         "asr_language": language_code,
-        "vap_model": type(vap).__name__ if vap else None,
-        "turngpt_model": type(turngpt).__name__ if turngpt else None,
-        "vad_model": "silero_vad" if needs_audio else None,
+        "vap_model": type(vap).__name__,
+        "turngpt_model": type(turngpt).__name__,
+        "vad_model": "silero_vad",
     }
     runner_config: dict = {
         "quick": args.quick,
-        "text": args.text,
         "category": args.category,
         "suites": [s["name"] for s in all_suites],
         "question_count": sum(len(list(_iter_questions(s))) for s in all_suites),
@@ -1546,9 +1285,9 @@ def main() -> None:
     )
 
     # --- Report & Score & Dashboard ---
-    from dashboard import build_html
-    from report import build_report, print_summary
-    from score import print_scores, score_report
+    from evaluation.dashboard import build_html
+    from evaluation.report import build_report, print_summary
+    from evaluation.score import print_scores, score_report
 
     report = build_report(output_dir)
     report_path = output_dir / "report.json"

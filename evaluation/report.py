@@ -271,7 +271,6 @@ def build_report(results_dir: Path) -> dict:
             "interrupt_audio",
             "interrupt_delay_sec",
             "interrupt_played",
-            "text_mode",
             "turn_shift_reason",
             "expect_wait",
             "retrieved_episodes",
