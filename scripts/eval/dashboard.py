@@ -349,7 +349,7 @@ def _build_question_detail(turn: dict) -> str:
         lines.append(
             f'<span class="qd-k">WER</span>{score["wer"]:.3f} '
             f'<span class="mute">(S{score["substitutions"]} D{score["deletions"]} '
-            f'I{score["insertions"]} / {score["ref_words"]}w)</span>'
+            f"I{score['insertions']} / {score['ref_words']}w)</span>"
         )
     secs.append(_qd_section("① ASR", lines))
 
@@ -364,13 +364,13 @@ def _build_question_detail(turn: dict) -> str:
         lines.append(f'<span class="qd-k">전환 취소</span>{turn["cancelled_turn_shifts"]}회')
     vap = sc.get("vap")
     if vap:
-        extra = f' · overrun {vap["overrun"]}' if vap.get("overrun") else ""
+        extra = f" · overrun {vap['overrun']}" if vap.get("overrun") else ""
         lines.append(
             f'<span class="qd-k">vap</span>{vap["count"]} frames · avg {vap["avg_ms"]}ms · max {vap["max_ms"]}ms{extra}'
         )
     tg = sc.get("turngpt")
     if tg:
-        extra = f' · slow {tg["slow"]}' if tg.get("slow") else ""
+        extra = f" · slow {tg['slow']}" if tg.get("slow") else ""
         lines.append(f'<span class="qd-k">turngpt</span>{tg["count"]} calls · avg {tg["avg_ms"]}ms{extra}')
     secs.append(_qd_section("② 턴 감지", lines))
 
@@ -383,14 +383,14 @@ def _build_question_detail(turn: dict) -> str:
             prev = e.get("prev_text") or ""
             new = e.get("new_text") or ""
             if new.startswith(prev):
-                added = new[len(prev):].lstrip()
+                added = new[len(prev) :].lstrip()
                 delta = f'<span class="mute">+</span> {_esc(added)}' if added else ""
             else:
                 delta = f'<span class="mute">{_esc(prev)} → {_esc(new)}</span>'
             tail = f" {delta}" if delta else ""
             lines.append(
                 f'<span class="qd-mono">{e.get("similarity", 0):.3f} vs {e.get("threshold", 0):.2f} → '
-                f'<b>{_esc(str(e.get("decision", "?")))}</b></span>{tail}'
+                f"<b>{_esc(str(e.get('decision', '?')))}</b></span>{tail}"
             )
         secs.append(_qd_section(f"③ Prepare gate ({len(events)})", lines))
 
@@ -398,7 +398,7 @@ def _build_question_detail(turn: dict) -> str:
     lines = []
     if turn.get("outcome"):
         spec = turn.get("speculative_attempts")
-        spec_str = f' · speculative {spec}' if spec else ""
+        spec_str = f" · speculative {spec}" if spec else ""
         lines.append(f'<span class="qd-k">outcome</span>{_esc(str(turn["outcome"]))}{spec_str}')
     lat = turn.get("latency", {})
     for col in _QD_LATENCY_ORDER:
@@ -443,9 +443,9 @@ def _build_question_detail(turn: dict) -> str:
     if ci and (ci.get("retry_count") or ci.get("error_count")):
         bits = []
         if ci.get("retry_count"):
-            bits.append(f'재시도 {ci["retry_count"]}')
+            bits.append(f"재시도 {ci['retry_count']}")
         if ci.get("error_count"):
-            bits.append(f'API 오류 {ci["error_count"]}')
+            bits.append(f"API 오류 {ci['error_count']}")
         lines.append(f'<span class="qd-k">issues</span><span class="bad">{" · ".join(bits)}</span>')
     if lines:
         secs.append(_qd_section("⑦ call_records", lines))
@@ -494,6 +494,7 @@ def _build_overview(scored: dict) -> str:
     duration_str = ""
     try:
         from datetime import datetime as _dt
+
         fmt = "%Y-%m-%d %H:%M:%S"
         dt_start = _dt.strptime(started, fmt)
         dt_end = _dt.strptime(finished, fmt)
@@ -513,7 +514,9 @@ def _build_overview(scored: dict) -> str:
     p.append('<div class="panel">')
     p.append('<div class="kv-group-title">실행</div>')
     p.append('<div class="kv-grid lg">')
-    p.append(f'<span class="kv-key">시각</span><span class="kv-val">{_esc(started)} — {_esc(finished)}{duration_str}</span>')
+    p.append(
+        f'<span class="kv-key">시각</span><span class="kv-val">{_esc(started)} — {_esc(finished)}{duration_str}</span>'
+    )
     p.append(f'<span class="kv-key">결과</span><span class="kv-val">{total}턴 실행</span>')
 
     suites = runner.get("suites", [])
@@ -534,13 +537,13 @@ def _build_overview(scored: dict) -> str:
         cat_parts = []
         for cat_label, (count, is_text) in cat_counts.items():
             text_mark = " (Text)" if is_text else ""
-            cat_parts.append(f'{cat_label}{text_mark} {count}')
+            cat_parts.append(f"{cat_label}{text_mark} {count}")
         p.append(f'<span class="kv-key">범위</span><span class="kv-val">{" · ".join(cat_parts)}</span>')
 
     if runner.get("quick"):
         p.append('<span class="kv-key">모드</span><span class="kv-val">Quick (샘플링)</span>')
 
-    p.append('</div></div>')
+    p.append("</div></div>")
 
     # Pipeline config panel
     p.append('<div class="panel">')
@@ -550,26 +553,36 @@ def _build_overview(scored: dict) -> str:
         if pipeline.get("llm_model"):
             temp = pipeline.get("llm_temperature", "")
             temp_str = f", temp={temp}" if temp != "" else ""
-            p.append(f'<span class="kv-key">LLM</span><span class="kv-val">{_esc(pipeline["llm_model"])}{temp_str}</span>')
+            p.append(
+                f'<span class="kv-key">LLM</span><span class="kv-val">{_esc(pipeline["llm_model"])}{temp_str}</span>'
+            )
         if pipeline.get("writer_llm_model"):
-            p.append(f'<span class="kv-key">Writer LLM</span><span class="kv-val">{_esc(pipeline["writer_llm_model"])}</span>')
+            p.append(
+                f'<span class="kv-key">Writer LLM</span><span class="kv-val">{_esc(pipeline["writer_llm_model"])}</span>'
+            )
         if pipeline.get("tts_model"):
             voice = pipeline.get("tts_voice", "")
             voice_str = f", {voice}" if voice else ""
-            p.append(f'<span class="kv-key">TTS</span><span class="kv-val">{_esc(pipeline["tts_model"])}{voice_str}</span>')
+            p.append(
+                f'<span class="kv-key">TTS</span><span class="kv-val">{_esc(pipeline["tts_model"])}{voice_str}</span>'
+            )
         if pipeline.get("asr_model"):
             lang = pipeline.get("asr_language", "")
             lang_str = f" ({lang})" if lang else ""
-            p.append(f'<span class="kv-key">ASR</span><span class="kv-val">{_esc(pipeline["asr_model"])}{lang_str}</span>')
+            p.append(
+                f'<span class="kv-key">ASR</span><span class="kv-val">{_esc(pipeline["asr_model"])}{lang_str}</span>'
+            )
         if pipeline.get("vap_model"):
             p.append(f'<span class="kv-key">VAP</span><span class="kv-val">{_esc(pipeline["vap_model"])}</span>')
         if pipeline.get("turngpt_model"):
-            p.append(f'<span class="kv-key">TurnGPT</span><span class="kv-val">{_esc(pipeline["turngpt_model"])}</span>')
+            p.append(
+                f'<span class="kv-key">TurnGPT</span><span class="kv-val">{_esc(pipeline["turngpt_model"])}</span>'
+            )
         if pipeline.get("vad_model"):
             p.append(f'<span class="kv-key">VAD</span><span class="kv-val">{_esc(pipeline["vad_model"])}</span>')
-    p.append('</div></div>')
+    p.append("</div></div>")
 
-    p.append('</div>')
+    p.append("</div>")
 
     # --- Summary cards ---
     p.append('<div class="cards">')
@@ -636,7 +649,6 @@ def _build_overview(scored: dict) -> str:
     return "\n".join(p)
 
 
-_CATEGORY_ORDER = ["asr", "tt", "int", "lq", "mem"]
 _CATEGORY_LABELS = {
     "asr": "ASR",
     "tt": "Turn-taking",
@@ -650,6 +662,22 @@ def _turn_category(suite_name: str) -> str:
     return suite_name.split("_")[0]
 
 
+def _order_keys(scored: dict) -> tuple[dict[str, int], dict[str, int]]:
+    """Suite / question ordering ranks derived from questions.json.
+
+    `suite_descriptions` and `question_texts` in the run config are built by
+    iterating questions.json in order, so their key order is the canonical
+    suite / question sequence. Every dashboard listing and grouping sorts by
+    these ranks so the displayed order matches questions.json — independent of
+    playback order, which the acoustic-bed scheduler may reorder into SNR
+    blocks. Unknown ids sort last.
+    """
+    cfg = scored.get("config", {})
+    suite_rank = {name: i for i, name in enumerate(cfg.get("suite_descriptions", {}))}
+    q_rank = {qid: i for i, qid in enumerate(cfg.get("question_texts", {}))}
+    return suite_rank, q_rank
+
+
 def _get_suite_desc(scored: dict, suite_name: str) -> str:
     return scored.get("config", {}).get("suite_descriptions", {}).get(suite_name, "")
 
@@ -660,6 +688,8 @@ def _build_asr(scored: dict) -> str:
 
     if not asr_turns:
         return '<div class="empty">ASR 데이터 없음</div>'
+
+    suite_rank, q_rank = _order_keys(scored)
 
     from itertools import groupby
 
@@ -704,13 +734,13 @@ def _build_asr(scored: dict) -> str:
         '<div style="display:flex;align-items:center;gap:16px;padding:3px 0;font-size:11px;color:#86868b;border-bottom:1px solid #e5e7eb;margin-bottom:4px">'
         '<span style="min-width:180px">Suite</span>'
         '<span style="min-width:120px">설명</span>'
-        '<span>완벽 인식</span>'
-        '</div>'
+        "<span>완벽 인식</span>"
+        "</div>"
     )
 
     # ASR suites: per-suite with description
     if asr_cat_turns:
-        sorted_asr = sorted(asr_cat_turns, key=lambda t: t["suite_name"])
+        sorted_asr = sorted(asr_cat_turns, key=lambda t: suite_rank.get(t["suite_name"], 10**6))
         for suite_name, group in groupby(sorted_asr, key=lambda t: t["suite_name"]):
             suite_turns = list(group)
             perfect = sum(1 for t in suite_turns if t["asr_score"]["wer"] == 0)
@@ -722,16 +752,15 @@ def _build_asr(scored: dict) -> str:
                 f'<span style="font-weight:500;min-width:180px">{suite_name}</span>'
                 f'<span class="mute" style="min-width:120px">{_esc(desc)}</span>'
                 f'<span class="tag {tag_cls}">{perfect}/{len(suite_turns)}</span>'
-                f'</div>'
+                f"</div>"
             )
 
     # Other categories: grouped, compact line
     if other_turns:
-        p.append('<div style="margin-top:10px;padding-top:10px;border-top:1px solid #e5e7eb;font-size:14px;display:flex;gap:20px;flex-wrap:wrap">')
-        sorted_other = sorted(other_turns, key=lambda t: (
-            _CATEGORY_ORDER.index(_turn_category(t["suite_name"]))
-            if _turn_category(t["suite_name"]) in _CATEGORY_ORDER else 99
-        ))
+        p.append(
+            '<div style="margin-top:10px;padding-top:10px;border-top:1px solid #e5e7eb;font-size:14px;display:flex;gap:20px;flex-wrap:wrap">'
+        )
+        sorted_other = sorted(other_turns, key=lambda t: suite_rank.get(t["suite_name"], 10**6))
         for cat, group in groupby(sorted_other, key=lambda t: _turn_category(t["suite_name"])):
             cat_turns = list(group)
             cat_label = _CATEGORY_LABELS.get(cat, cat)
@@ -752,8 +781,8 @@ def _build_asr(scored: dict) -> str:
             '<div style="display:flex;align-items:center;gap:16px;padding:3px 0;font-size:11px;color:#86868b;border-bottom:1px solid #e5e7eb;margin-bottom:4px">'
             '<span style="min-width:100px">Voice</span>'
             '<span style="min-width:80px">평균 WER</span>'
-            '<span>완벽 인식</span>'
-            '</div>'
+            "<span>완벽 인식</span>"
+            "</div>"
         )
         for voice, stats in by_voice.items():
             v_wer = stats.get("mean_wer", 0)
@@ -767,16 +796,12 @@ def _build_asr(scored: dict) -> str:
                 f'<span style="font-weight:500;min-width:100px">{_esc(voice)}</span>'
                 f'<span class="{v_cls}" style="min-width:80px">{v_wer:.1%}</span>'
                 f'<span class="tag {tag_cls}">{v_perfect}/{v_total}</span>'
-                f'</div>'
+                f"</div>"
             )
         p.append("</div>")
 
-    # --- Per-question results: category > suite ---
-    all_sorted = sorted(asr_turns, key=lambda t: (
-        _CATEGORY_ORDER.index(_turn_category(t["suite_name"]))
-        if _turn_category(t["suite_name"]) in _CATEGORY_ORDER else 99,
-        t["suite_name"],
-    ))
+    # --- Per-question results: questions.json order (category > suite > question) ---
+    all_sorted = sorted(asr_turns, key=lambda t: q_rank.get(t["question_id"], 10**6))
 
     current_cat = None
     current_suite = None
@@ -810,15 +835,15 @@ def _build_asr(scored: dict) -> str:
 
         p.append('<div class="item">')
         p.append(
-            f'<div class="item-header">'
-            f'<span class="item-id">{t["question_id"]}</span>'
-            f'{voice_tag}'
-            f'{_wer_tag(wer)}'
-            f'</div>'
+            f'<div class="item-header"><span class="item-id">{t["question_id"]}</span>{voice_tag}{_wer_tag(wer)}</div>'
         )
         p.append('<div class="item-body">')
-        p.append(f'<div class="item-row"><span class="item-label mute">원본</span><span class="item-text">{_esc(t["input_text"])}</span></div>')
-        p.append(f'<div class="item-row"><span class="item-label mute">인식</span><span class="item-text">{_esc(asr_text)}</span></div>')
+        p.append(
+            f'<div class="item-row"><span class="item-label mute">원본</span><span class="item-text">{_esc(t["input_text"])}</span></div>'
+        )
+        p.append(
+            f'<div class="item-row"><span class="item-label mute">인식</span><span class="item-text">{_esc(asr_text)}</span></div>'
+        )
         if has_diff:
             p.append(
                 f'<div class="item-row"><span class="item-label mute">시스템</span>'
@@ -893,7 +918,9 @@ def _build_histogram(values: list[float], stats: dict) -> str:
         by = margin_t + chart_h - bar_h
         svg.append(f'<rect x="{bx}" y="{by}" width="{bar_w}" height="{bar_h}" fill="#0071e3" opacity="0.6" rx="2"/>')
         if c > 0:
-            svg.append(f'<text x="{bx + bar_w/2}" y="{by - 2}" font-size="9" fill="#1d1d1f" text-anchor="middle">{c}</text>')
+            svg.append(
+                f'<text x="{bx + bar_w / 2}" y="{by - 2}" font-size="9" fill="#1d1d1f" text-anchor="middle">{c}</text>'
+            )
 
     # X-axis labels
     label_interval = max(1, n_bins // 8)
@@ -904,12 +931,16 @@ def _build_histogram(values: list[float], stats: dict) -> str:
 
     # Median marker
     mx = x_val(median)
-    svg.append(f'<line x1="{mx}" y1="{margin_t - 2}" x2="{mx}" y2="{margin_t + chart_h}" stroke="#0071e3" stroke-width="1.5" stroke-dasharray="3,2"/>')
+    svg.append(
+        f'<line x1="{mx}" y1="{margin_t - 2}" x2="{mx}" y2="{margin_t + chart_h}" stroke="#0071e3" stroke-width="1.5" stroke-dasharray="3,2"/>'
+    )
 
     # P95 marker
     if p95 > median:
         px = x_val(p95)
-        svg.append(f'<line x1="{px}" y1="{margin_t - 2}" x2="{px}" y2="{margin_t + chart_h}" stroke="#d97706" stroke-width="1.5" stroke-dasharray="2,2"/>')
+        svg.append(
+            f'<line x1="{px}" y1="{margin_t - 2}" x2="{px}" y2="{margin_t + chart_h}" stroke="#d97706" stroke-width="1.5" stroke-dasharray="2,2"/>'
+        )
 
     svg.append("</svg>")
     return "\n".join(svg)
@@ -920,14 +951,33 @@ def _build_turn_taking(scored: dict) -> str:
     latency = scores.get("latency", {})
     turns = scored.get("turns", [])
 
-    tt_turns = [t for t in turns if t.get("latency", {}).get("turn_shift_to_playback_ms") or t.get("turn_detection_delay_ms") is not None]
-    failed_turns = [t for t in turns if t.get("error") in ("no_response", "no_recognition", "no_turn_shift", "early_turn_shift", "late_turn_shift", "premature_turn_shift", "generation_failed")]
+    tt_turns = [
+        t
+        for t in turns
+        if t.get("latency", {}).get("turn_shift_to_playback_ms") or t.get("turn_detection_delay_ms") is not None
+    ]
+    failed_turns = [
+        t
+        for t in turns
+        if t.get("error")
+        in (
+            "no_response",
+            "no_recognition",
+            "no_turn_shift",
+            "early_turn_shift",
+            "late_turn_shift",
+            "premature_turn_shift",
+            "generation_failed",
+        )
+    ]
     tt_ids = {id(t) for t in tt_turns}
     failed_only = [t for t in failed_turns if id(t) not in tt_ids]
     all_tt_turns = tt_turns + failed_only
 
     if not all_tt_turns and not latency:
         return '<div class="empty">턴테이킹 데이터 없음 (text mode에서는 수집되지 않음)</div>'
+
+    suite_rank, q_rank = _order_keys(scored)
 
     from itertools import groupby
 
@@ -942,9 +992,13 @@ def _build_turn_taking(scored: dict) -> str:
         '<div class="tabs" style="position:static;background:transparent;'
         'border-bottom:1px solid #d2d2d7;padding:0;margin-bottom:16px">'
     )
-    p.append(f'<div class="sub-tab active" data-subtarget="tt-latency" style="{sub_tab_style}">레이턴시 — 턴 감지·응답 속도</div>')
-    p.append(f'<div class="sub-tab" data-subtarget="tt-gate" style="{sub_tab_style}">Prepare 게이트 — 유사도 skip 판정</div>')
-    p.append('</div>')
+    p.append(
+        f'<div class="sub-tab active" data-subtarget="tt-latency" style="{sub_tab_style}">레이턴시 — 턴 감지·응답 속도</div>'
+    )
+    p.append(
+        f'<div class="sub-tab" data-subtarget="tt-gate" style="{sub_tab_style}">Prepare 게이트 — 유사도 skip 판정</div>'
+    )
+    p.append("</div>")
 
     # ============================================================
     # Sub-tab: Latency
@@ -1017,14 +1071,18 @@ def _build_turn_taking(scored: dict) -> str:
         p.append("</div>")
 
     # --- Suite summary + Latency side by side ---
-    suite_sorted = sorted(all_tt_turns, key=lambda t: t.get("suite_name", ""))
+    suite_sorted = sorted(all_tt_turns, key=lambda t: suite_rank.get(t.get("suite_name", ""), 10**6))
     suite_groups = []
     for suite_name, group in groupby(suite_sorted, key=lambda t: t.get("suite_name", "")):
         suite_turns = list(group)
         success = sum(1 for t in suite_turns if not t.get("error"))
         total_s = len(suite_turns)
-        lats = [t["latency"]["turn_shift_to_playback_ms"] for t in suite_turns if t.get("latency", {}).get("turn_shift_to_playback_ms")]
-        med = sorted(lats)[len(lats)//2] if lats else None
+        lats = [
+            t["latency"]["turn_shift_to_playback_ms"]
+            for t in suite_turns
+            if t.get("latency", {}).get("turn_shift_to_playback_ms")
+        ]
+        med = sorted(lats)[len(lats) // 2] if lats else None
         cat = _turn_category(suite_name)
         suite_groups.append((suite_name, success, total_s, med, cat))
 
@@ -1043,8 +1101,8 @@ def _build_turn_taking(scored: dict) -> str:
         '<span style="min-width:180px">Suite</span>'
         '<span style="min-width:120px">설명</span>'
         '<span style="min-width:60px">성공</span>'
-        '<span>응답 중위값</span>'
-        '</div>'
+        "<span>응답 중위값</span>"
+        "</div>"
     )
 
     if tt_suites:
@@ -1058,16 +1116,17 @@ def _build_turn_taking(scored: dict) -> str:
                 f'<span style="font-weight:500;min-width:180px">{suite_name}</span>'
                 f'<span class="mute" style="min-width:120px">{_esc(desc)}</span>'
                 f'<span style="min-width:60px"><span class="tag {tag_cls}">{success}/{total_s}</span></span>'
-                f'{med_str}'
-                f'</div>'
+                f"{med_str}"
+                f"</div>"
             )
     if other_suites:
         # Group by category
         from itertools import groupby as _gb
-        other_sorted = sorted(other_suites, key=lambda x: (
-            _CATEGORY_ORDER.index(x[4]) if x[4] in _CATEGORY_ORDER else 99
-        ))
-        p.append('<div style="margin-top:10px;padding-top:10px;border-top:1px solid #e5e7eb;font-size:14px;display:flex;gap:20px;flex-wrap:wrap">')
+
+        other_sorted = sorted(other_suites, key=lambda x: suite_rank.get(x[0], 10**6))
+        p.append(
+            '<div style="margin-top:10px;padding-top:10px;border-top:1px solid #e5e7eb;font-size:14px;display:flex;gap:20px;flex-wrap:wrap">'
+        )
         for cat, grp in _gb(other_sorted, key=lambda x: x[4]):
             items = list(grp)
             cat_label = _CATEGORY_LABELS.get(cat, cat)
@@ -1078,7 +1137,9 @@ def _build_turn_taking(scored: dict) -> str:
             all_ok = total_success == total_all
             tag_cls = "tag-ok" if all_ok else "tag-warn"
             med_str = f' <span class="mono mute">{avg_med:.0f}ms</span>' if avg_med else ""
-            p.append(f'<span>{cat_label} <span class="tag {tag_cls}">{total_success}/{total_all}</span>{med_str}</span>')
+            p.append(
+                f'<span>{cat_label} <span class="tag {tag_cls}">{total_success}/{total_all}</span>{med_str}</span>'
+            )
         p.append("</div>")
     p.append("</div>")
 
@@ -1114,8 +1175,8 @@ def _build_turn_taking(scored: dict) -> str:
                 f'<span style="font-weight:600;font-size:13px;min-width:100px">{label}</span>'
                 f'<span class="mono" style="font-size:14px">{stats["median_ms"]:.0f}ms</span>'
                 f'<span class="mute" style="font-size:12px">P95 {stats["p95_ms"]:.0f}ms · '
-                f'{stats["min_ms"]:.0f}–{stats["max_ms"]:.0f}ms</span>'
-                f'</div>'
+                f"{stats['min_ms']:.0f}–{stats['max_ms']:.0f}ms</span>"
+                f"</div>"
             )
             p.append(_build_histogram(values, stats))
             p.append("</div>")
@@ -1130,8 +1191,8 @@ def _build_turn_taking(scored: dict) -> str:
                 f'<span style="font-weight:600;font-size:13px;min-width:100px">{label}</span>'
                 f'<span class="mono" style="font-size:14px">{stats["median_ms"]:.0f}ms</span>'
                 f'<span class="mute" style="font-size:12px">P95 {stats["p95_ms"]:.0f}ms · '
-                f'{stats["min_ms"]:.0f}–{stats["max_ms"]:.0f}ms</span>'
-                f'</div>'
+                f"{stats['min_ms']:.0f}–{stats['max_ms']:.0f}ms</span>"
+                f"</div>"
             )
 
         p.append("</div>")
@@ -1142,11 +1203,7 @@ def _build_turn_taking(scored: dict) -> str:
 
     # --- Per-question results ---
     if all_tt_turns:
-        sorted_tt = sorted(all_tt_turns, key=lambda t: (
-            _CATEGORY_ORDER.index(_turn_category(t["suite_name"]))
-            if _turn_category(t["suite_name"]) in _CATEGORY_ORDER else 99,
-            t["suite_name"],
-        ))
+        sorted_tt = sorted(all_tt_turns, key=lambda t: q_rank.get(t["question_id"], 10**6))
 
         p.append('<div class="section">')
         p.append('<div class="section-title">개별 결과</div>')
@@ -1212,14 +1269,18 @@ def _build_turn_taking(scored: dict) -> str:
             if tts_ttfc:
                 c = _lat_color_muted(tts_ttfc, 1200, 2000)
                 lat_chips.append(f'<span style="color:{c}">TTS {tts_ttfc:.0f}ms</span>')
-            lat_str = '<span class="mono" style="font-size:11px">' + " · ".join(lat_chips) + '</span>' if lat_chips else ""
+            lat_str = (
+                '<span class="mono" style="font-size:11px">' + " · ".join(lat_chips) + "</span>" if lat_chips else ""
+            )
 
             p.append('<div class="item" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px">')
 
             # Left column
-            p.append('<div>')
+            p.append("<div>")
             # Line 1: original text (bold) + ID & latency (small, inline)
-            p.append(f'<div style="font-size:14px"><span style="font-weight:600">{_esc(t.get("input_text", ""))}</span></div>')
+            p.append(
+                f'<div style="font-size:14px"><span style="font-weight:600">{_esc(t.get("input_text", ""))}</span></div>'
+            )
             p.append(f'<div style="margin-top:2px"><span class="mute" style="font-size:11px">{t["question_id"]}</span>')
             if error:
                 p.append(f' <span class="mute" style="font-size:11px">|</span> {_error_tag(error)}')
@@ -1234,14 +1295,18 @@ def _build_turn_taking(scored: dict) -> str:
                 p.append(f' <span class="mute" style="font-size:11px">|</span> {_call_issues_tag(call_issues)}')
             if lat_str:
                 p.append(f' <span class="mute" style="font-size:11px">|</span> {lat_str}')
-            p.append('</div></div>')
+            p.append("</div></div>")
 
             # Right column: asr text + system diff
-            p.append('<div>')
-            p.append(f'<div class="item-row"><span class="item-label mute">인식</span><span class="item-text">{_esc(asr_text)}</span></div>')
+            p.append("<div>")
+            p.append(
+                f'<div class="item-row"><span class="item-label mute">인식</span><span class="item-text">{_esc(asr_text)}</span></div>'
+            )
             if has_asr_diff:
-                p.append(f'<div class="item-row"><span class="item-label mute">시스템</span><span class="item-text diff-mark">{_esc(sys_text)}</span></div>')
-            p.append('</div>')
+                p.append(
+                    f'<div class="item-row"><span class="item-label mute">시스템</span><span class="item-text diff-mark">{_esc(sys_text)}</span></div>'
+                )
+            p.append("</div>")
 
             p.append("</div>")
             p.append(_detail_block(t))
@@ -1275,7 +1340,8 @@ def _build_prepare_gate(scored: dict) -> str:
     scores = scored.get("scores", {})
     gate = scores.get("prepare_gate", {})
     turns = scored.get("turns", [])
-    judged_turns = [t for t in turns if "gate_judge" in t]
+    _, q_rank = _order_keys(scored)
+    judged_turns = sorted((t for t in turns if "gate_judge" in t), key=lambda t: q_rank.get(t["question_id"], 10**6))
     event_turns = [t for t in turns if t.get("similarity_events")]
 
     if not gate and not judged_turns and not event_turns:
@@ -1357,7 +1423,9 @@ def _build_prepare_gate(scored: dict) -> str:
                 continue
             color, label = _GATE_DECISION_META[decision]
             p.append('<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">')
-            p.append(f'<span style="font-size:12px;min-width:260px;color:{color};font-weight:500">{label} <span class="mute">({len(sims)})</span></span>')
+            p.append(
+                f'<span style="font-size:12px;min-width:260px;color:{color};font-weight:500">{label} <span class="mute">({len(sims)})</span></span>'
+            )
             p.append('<div style="position:relative;flex:1;height:18px;background:#f9fafb;border-radius:4px">')
             p.append(
                 f'<div style="position:absolute;left:{_pct(thresh):.1f}%;top:0;bottom:0;'
@@ -1368,7 +1436,7 @@ def _build_prepare_gate(scored: dict) -> str:
                 border = "border:2px solid #991b1b;" if is_harmful else ""
                 p.append(
                     f'<div title="{s:.3f}" style="position:absolute;left:{_pct(s):.1f}%;top:50%;'
-                    f'transform:translate(-50%,-50%);width:8px;height:8px;border-radius:50%;'
+                    f"transform:translate(-50%,-50%);width:8px;height:8px;border-radius:50%;"
                     f'background:{color};opacity:0.8;{border}"></div>'
                 )
             p.append("</div></div>")
@@ -1378,7 +1446,7 @@ def _build_prepare_gate(scored: dict) -> str:
             f'<span style="position:absolute;left:{_pct(thresh):.1f}%;transform:translateX(-50%);'
             f'color:#c47a7a">threshold {thresh}</span>'
             f'<span style="position:absolute;right:0">1.00</span>'
-            f'</div>'
+            f"</div>"
         )
         p.append("</div>")
 
@@ -1409,12 +1477,22 @@ def _build_prepare_gate(scored: dict) -> str:
                 f'<div class="item-header"><span class="item-id">{t["question_id"]}</span> '
                 f'<span class="mute" style="font-size:11px">{t.get("suite_name", "")}</span> {tag}'
                 + (f" {_error_tag(t['error'])}" if t.get("error") else "")
-                + (f' <span class="mute" style="font-size:11px">|</span> <span style="font-size:11px">{chips_str}</span>' if chips_str else "")
+                + (
+                    f' <span class="mute" style="font-size:11px">|</span> <span style="font-size:11px">{chips_str}</span>'
+                    if chips_str
+                    else ""
+                )
                 + "</div>"
             )
-            p.append(f'<div class="item-row"><span class="item-label mute">시스템</span><span class="item-text diff-mark">{_esc(t.get("system_text") or "")}</span></div>')
-            p.append(f'<div class="item-row"><span class="item-label mute">인식</span><span class="item-text">{_esc(t.get("asr_text") or "")}</span></div>')
-            p.append(f'<div class="item-row"><span class="item-label mute">응답</span><span class="item-text mute">{_esc((t.get("response_text") or "")[:200])}</span></div>')
+            p.append(
+                f'<div class="item-row"><span class="item-label mute">시스템</span><span class="item-text diff-mark">{_esc(t.get("system_text") or "")}</span></div>'
+            )
+            p.append(
+                f'<div class="item-row"><span class="item-label mute">인식</span><span class="item-text">{_esc(t.get("asr_text") or "")}</span></div>'
+            )
+            p.append(
+                f'<div class="item-row"><span class="item-label mute">응답</span><span class="item-text mute">{_esc((t.get("response_text") or "")[:200])}</span></div>'
+            )
             if gj.get("reasoning"):
                 p.append(f'<div class="reasoning">{_esc(gj["reasoning"])}</div>')
             p.append("</div>")
@@ -1437,6 +1515,8 @@ def _build_interruption(scored: dict) -> str:
 
     if not int_turns and not interruption:
         return '<div class="empty">인터럽션 데이터 없음</div>'
+
+    _, q_rank = _order_keys(scored)
 
     p = []
 
@@ -1481,8 +1561,8 @@ def _build_interruption(scored: dict) -> str:
                 '<div style="display:flex;align-items:center;gap:16px;padding:3px 0;font-size:11px;color:#86868b;border-bottom:1px solid #e5e7eb;margin-bottom:4px">'
                 '<span style="min-width:50px">Delay</span>'
                 '<span style="min-width:80px">감지율</span>'
-                '<span>결과 분포</span>'
-                '</div>'
+                "<span>결과 분포</span>"
+                "</div>"
             )
             for delay_str, b in by_delay.items():
                 testable = b.get("testable", 0)
@@ -1509,8 +1589,8 @@ def _build_interruption(scored: dict) -> str:
                     f'<div style="display:flex;align-items:center;gap:16px;padding:3px 0;font-size:14px">'
                     f'<span style="font-weight:500;min-width:50px">{delay_str}초</span>'
                     f'<span style="min-width:80px">{rate_str}</span>'
-                    f'<span>{" ".join(dist_parts)}</span>'
-                    f'</div>'
+                    f"<span>{' '.join(dist_parts)}</span>"
+                    f"</div>"
                 )
         p.append("</div>")
 
@@ -1524,10 +1604,10 @@ def _build_interruption(scored: dict) -> str:
                 '<div style="display:flex;align-items:center;gap:16px;padding:3px 0;font-size:11px;color:#86868b;border-bottom:1px solid #e5e7eb;margin-bottom:4px">'
                 '<span style="min-width:160px">메시지</span>'
                 '<span style="min-width:80px">감지율</span>'
-                '<span>결과 분포</span>'
-                '</div>'
+                "<span>결과 분포</span>"
+                "</div>"
             )
-            audio_sorted = sorted(int_turns, key=lambda t: t.get("interrupt_audio", ""))
+            audio_sorted = sorted(int_turns, key=lambda t: q_rank.get(t.get("interrupt_audio", ""), 10**6))
             for audio_id, grp in _gb2(audio_sorted, key=lambda t: t.get("interrupt_audio", "")):
                 audio_turns = list(grp)
                 audio_text = _get_question_text(scored, audio_id)
@@ -1558,16 +1638,23 @@ def _build_interruption(scored: dict) -> str:
                     f'<div style="display:flex;align-items:center;gap:16px;padding:3px 0;font-size:14px">'
                     f'<span style="font-weight:500;min-width:160px">{label}</span>'
                     f'<span style="min-width:80px">{rate_str}</span>'
-                    f'<span>{" ".join(dist_parts)}</span>'
-                    f'</div>'
+                    f"<span>{' '.join(dist_parts)}</span>"
+                    f"</div>"
                 )
         p.append("</div>")
 
         p.append("</div>")
 
-    # --- Per-question: grouped by delay > interrupt audio ---
+    # --- Per-question: grouped by delay > interrupt audio (questions.json order within) ---
     if int_turns:
-        sorted_int = sorted(int_turns, key=lambda t: (t.get("interrupt_delay_sec", 0), t.get("interrupt_audio", "")))
+        sorted_int = sorted(
+            int_turns,
+            key=lambda t: (
+                t.get("interrupt_delay_sec", 0),
+                q_rank.get(t.get("interrupt_audio", ""), 10**6),
+                q_rank.get(t["question_id"], 10**6),
+            ),
+        )
 
         p.append('<div class="section">')
         p.append('<div class="section-title">개별 결과</div>')
@@ -1600,31 +1687,35 @@ def _build_interruption(scored: dict) -> str:
 
             lat_chips = []
             if int_lat_ms and int_lat_ms > 0:
-                lat_chips.append(f'감지 지연 {int_lat_ms:.0f}ms')
-            lat_str = ' · '.join(lat_chips)
+                lat_chips.append(f"감지 지연 {int_lat_ms:.0f}ms")
+            lat_str = " · ".join(lat_chips)
 
             p.append('<div class="item" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px">')
 
             # Left: question + metadata
-            p.append('<div>')
+            p.append("<div>")
             p.append('<div style="display:flex;align-items:center;gap:12px">')
             p.append(f'<span style="font-weight:600;font-size:14px">{q_text}</span>')
-            p.append(f'{_outcome_tag(outcome)}')
+            p.append(f"{_outcome_tag(outcome)}")
             if not played:
                 p.append('<span class="tag tag-mute">미재생</span>')
-            p.append('</div>')
+            p.append("</div>")
             p.append('<div style="margin-top:2px">')
             p.append(f'<span class="mute" style="font-size:11px">{t["question_id"]}</span>')
             if lat_str:
-                p.append(f' <span class="mute" style="font-size:11px">|</span> <span class="mono mute" style="font-size:11px">{lat_str}</span>')
-            p.append('</div>')
-            p.append('</div>')
+                p.append(
+                    f' <span class="mute" style="font-size:11px">|</span> <span class="mono mute" style="font-size:11px">{lat_str}</span>'
+                )
+            p.append("</div>")
+            p.append("</div>")
 
             # Right: truncated response
-            p.append('<div>')
+            p.append("<div>")
             if outcome == "truncated" and response_text:
-                p.append(f'<div class="item-row"><span class="item-label mute">응답</span><span class="item-text">{_esc(response_text)}</span></div>')
-            p.append('</div>')
+                p.append(
+                    f'<div class="item-row"><span class="item-label mute">응답</span><span class="item-text">{_esc(response_text)}</span></div>'
+                )
+            p.append("</div>")
 
             p.append("</div>")
             p.append(_detail_block(t))
@@ -1642,6 +1733,8 @@ def _build_quality(scored: dict) -> str:
 
     if not quality_turns:
         return '<div class="empty">응답 품질 데이터 없음</div>'
+
+    suite_rank, q_rank = _order_keys(scored)
 
     from itertools import groupby
 
@@ -1690,10 +1783,10 @@ def _build_quality(scored: dict) -> str:
             '<span style="min-width:180px">Suite</span>'
             '<span style="min-width:120px">설명</span>'
             '<span style="min-width:50px">점수</span>'
-            '<span>고유 기준</span>'
-            '</div>'
+            "<span>고유 기준</span>"
+            "</div>"
         )
-        for suite, stats in by_suite.items():
+        for suite, stats in sorted(by_suite.items(), key=lambda kv: suite_rank.get(kv[0], 10**6)):
             s_mean = stats.get("mean_score", 0)
             desc = _get_suite_desc(scored, suite)
             criterion = _SUITE_CRITERION.get(suite, "")
@@ -1704,7 +1797,7 @@ def _build_quality(scored: dict) -> str:
                 f'<span class="mute" style="min-width:120px">{_esc(desc)}</span>'
                 f'<span style="min-width:50px">{_score_chip(s_mean)}</span>'
                 f'<span class="mute" style="font-size:12px">{criterion_label}</span>'
-                f'</div>'
+                f"</div>"
             )
         p.append("</div>")
 
@@ -1712,17 +1805,25 @@ def _build_quality(scored: dict) -> str:
     p.append('<div class="panel">')
     p.append('<div class="section-title">평가 기준</div>')
     p.append('<div style="font-size:13px;line-height:1.8">')
-    p.append('<div><span style="font-weight:600">관련성</span> <span class="mute">— 질문의 핵심 의도에 맞는 응답인가</span></div>')
-    p.append('<div><span style="font-weight:600">음성 적합성</span> <span class="mute">— 음성으로 듣기에 적절한 길이와 구조인가</span></div>')
-    p.append('<div><span style="font-weight:600">자연스러움</span> <span class="mute">— 사람과 대화하는 듯 자연스러운 어투인가</span></div>')
-    p.append('<div><span style="font-weight:600">고유 기준</span> <span class="mute">— suite별로 다른 핵심 평가 항목 (정확성, 공감, 맥락 유지 등)</span></div>')
-    p.append('</div>')
+    p.append(
+        '<div><span style="font-weight:600">관련성</span> <span class="mute">— 질문의 핵심 의도에 맞는 응답인가</span></div>'
+    )
+    p.append(
+        '<div><span style="font-weight:600">음성 적합성</span> <span class="mute">— 음성으로 듣기에 적절한 길이와 구조인가</span></div>'
+    )
+    p.append(
+        '<div><span style="font-weight:600">자연스러움</span> <span class="mute">— 사람과 대화하는 듯 자연스러운 어투인가</span></div>'
+    )
+    p.append(
+        '<div><span style="font-weight:600">고유 기준</span> <span class="mute">— suite별로 다른 핵심 평가 항목 (정확성, 공감, 맥락 유지 등)</span></div>'
+    )
+    p.append("</div>")
     p.append("</div>")
 
     p.append("</div>")
 
-    # --- Per-question by suite (main view) ---
-    sorted_turns = sorted(quality_turns, key=lambda t: t["suite_name"])
+    # --- Per-question by suite (main view), questions.json order ---
+    sorted_turns = sorted(quality_turns, key=lambda t: q_rank.get(t["question_id"], 10**6))
     for suite_name, group in groupby(sorted_turns, key=lambda t: t["suite_name"]):
         suite_turns = list(group)
         s_stats = by_suite.get(suite_name, {})
@@ -1734,24 +1835,28 @@ def _build_quality(scored: dict) -> str:
         p.append('<div class="suite-group">')
         p.append(
             f'<div class="suite-header">{suite_name}{desc_str} '
-            f'{_score_chip(s_mean)} '
+            f"{_score_chip(s_mean)} "
             f'<span class="mute">({len(suite_turns)}건)</span></div>'
         )
 
         if is_multi:
-            scenario_sorted = sorted(suite_turns, key=lambda t: (t.get("scenario_id", ""), t.get("question_id", "")))
+            scenario_sorted = sorted(suite_turns, key=lambda t: q_rank.get(t["question_id"], 10**6))
             for scenario_id, sc_group in groupby(scenario_sorted, key=lambda t: t.get("scenario_id", "")):
                 sc_turns = list(sc_group)
 
                 p.append('<div class="item" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px">')
 
                 # Left: interleaved question/response
-                p.append('<div>')
+                p.append("<div>")
                 for t in sc_turns:
-                    p.append(f'<div class="item-row"><span class="item-label mute">질문</span><span class="item-text">{_esc(t.get("input_text", ""))}</span></div>')
+                    p.append(
+                        f'<div class="item-row"><span class="item-label mute">질문</span><span class="item-text">{_esc(t.get("input_text", ""))}</span></div>'
+                    )
                     if t.get("response_text"):
-                        p.append(f'<div class="item-row"><span class="item-label mute">응답</span><span class="item-text">{_esc(t["response_text"])}</span></div>')
-                p.append('</div>')
+                        p.append(
+                            f'<div class="item-row"><span class="item-label mute">응답</span><span class="item-text">{_esc(t["response_text"])}</span></div>'
+                        )
+                p.append("</div>")
 
                 # Right: scores + reasoning
                 all_scores: dict[str, list[float]] = {}
@@ -1762,22 +1867,24 @@ def _build_quality(scored: dict) -> str:
                     if t.get("quality_reasoning"):
                         all_reasoning.append(t["quality_reasoning"])
 
-                p.append('<div>')
+                p.append("<div>")
                 if all_scores:
                     avg_scores = {k: sum(vs) / len(vs) for k, vs in all_scores.items()}
                     p.append('<div class="item-scores">')
-                    p.append(f'<span class="mute" style="font-size:11px">{scenario_id}</span> <span class="mute" style="font-size:11px">|</span> ')
+                    p.append(
+                        f'<span class="mute" style="font-size:11px">{scenario_id}</span> <span class="mute" style="font-size:11px">|</span> '
+                    )
                     for k, v in avg_scores.items():
                         label = _CRITERION_LABELS.get(k, k)
                         p.append(f'{_score_chip(v)} <span class="mute" style="font-size:10px">{label}</span>')
                     p.append("</div>")
                 if all_reasoning:
                     p.append(f'<div class="reasoning">{_esc(all_reasoning[-1])}</div>')
-                p.append('</div>')
+                p.append("</div>")
 
                 p.append("</div>")
                 for t in sc_turns:
-                    p.append(_detail_block(t, f'단계 상세 — {t["question_id"]}'))
+                    p.append(_detail_block(t, f"단계 상세 — {t['question_id']}"))
         else:
             for t in suite_turns:
                 qs = t.get("quality_scores", {})
@@ -1786,22 +1893,28 @@ def _build_quality(scored: dict) -> str:
                 p.append('<div class="item" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px">')
 
                 # Left: question + response
-                p.append('<div>')
-                p.append(f'<div class="item-row"><span class="item-label mute">질문</span><span class="item-text">{_esc(t.get("input_text", ""))}</span></div>')
-                p.append(f'<div class="item-row"><span class="item-label mute">응답</span><span class="item-text">{_esc(t.get("response_text", ""))}</span></div>')
-                p.append('</div>')
+                p.append("<div>")
+                p.append(
+                    f'<div class="item-row"><span class="item-label mute">질문</span><span class="item-text">{_esc(t.get("input_text", ""))}</span></div>'
+                )
+                p.append(
+                    f'<div class="item-row"><span class="item-label mute">응답</span><span class="item-text">{_esc(t.get("response_text", ""))}</span></div>'
+                )
+                p.append("</div>")
 
                 # Right: scores + reasoning
-                p.append('<div>')
+                p.append("<div>")
                 p.append('<div class="item-scores">')
-                p.append(f'<span class="mute" style="font-size:11px">{t["question_id"]}</span> <span class="mute" style="font-size:11px">|</span> ')
+                p.append(
+                    f'<span class="mute" style="font-size:11px">{t["question_id"]}</span> <span class="mute" style="font-size:11px">|</span> '
+                )
                 for k, v in qs.items():
                     label = _CRITERION_LABELS.get(k, k)
                     p.append(f'{_score_chip(v)} <span class="mute" style="font-size:10px">{label}</span>')
                 p.append("</div>")
                 if reasoning:
                     p.append(f'<div class="reasoning">{_esc(reasoning)}</div>')
-                p.append('</div>')
+                p.append("</div>")
 
                 p.append("</div>")
                 p.append(_detail_block(t))
@@ -1820,6 +1933,8 @@ def _build_memory(scored: dict) -> str:
     if not memory_turns and not memory:
         return '<div class="empty">장기기억 데이터 없음</div>'
 
+    suite_rank, q_rank = _order_keys(scored)
+
     writer = memory.get("writer", {})
     recall = memory.get("retriever_recall", {})
     mem_quality = memory.get("quality", {})
@@ -1827,10 +1942,16 @@ def _build_memory(scored: dict) -> str:
     p = []
 
     # --- Sub-tabs ---
-    p.append('<div class="tabs" style="position:static;background:transparent;border-bottom:1px solid #d2d2d7;padding:0;margin-bottom:16px">')
-    p.append('<div class="sub-tab active" data-subtarget="mem-writer" style="padding:8px 16px;font-size:12px;font-weight:500;color:#86868b;cursor:pointer;border-bottom:2px solid transparent">Writer — 기억 추출</div>')
-    p.append('<div class="sub-tab" data-subtarget="mem-retriever" style="padding:8px 16px;font-size:12px;font-weight:500;color:#86868b;cursor:pointer;border-bottom:2px solid transparent">Retriever · Quality — 검색 및 활용</div>')
-    p.append('</div>')
+    p.append(
+        '<div class="tabs" style="position:static;background:transparent;border-bottom:1px solid #d2d2d7;padding:0;margin-bottom:16px">'
+    )
+    p.append(
+        '<div class="sub-tab active" data-subtarget="mem-writer" style="padding:8px 16px;font-size:12px;font-weight:500;color:#86868b;cursor:pointer;border-bottom:2px solid transparent">Writer — 기억 추출</div>'
+    )
+    p.append(
+        '<div class="sub-tab" data-subtarget="mem-retriever" style="padding:8px 16px;font-size:12px;font-weight:500;color:#86868b;cursor:pointer;border-bottom:2px solid transparent">Retriever · Quality — 검색 및 활용</div>'
+    )
+    p.append("</div>")
 
     # ============================================================
     # Sub-tab: Writer
@@ -1871,7 +1992,7 @@ def _build_memory(scored: dict) -> str:
                 v = s.get(k, 0)
                 p.append(f'{_score_chip(v)} <span class="mute" style="font-size:10px">{k}</span> ')
             p.append(f'<span class="mute">{s.get("episode_count", 0)} episodes</span>')
-            p.append('</div>')
+            p.append("</div>")
 
             if s.get("reasoning"):
                 p.append(f'<div class="reasoning">{_esc(s["reasoning"])}</div>')
@@ -1879,37 +2000,49 @@ def _build_memory(scored: dict) -> str:
             utts = s.get("utterances", [])
             eps = s.get("episodes", [])
             if utts or eps:
-                p.append('<div class="collapsible-toggle mute" style="margin-top:6px;font-size:12px">Seed 대화 · 추출된 에피소드</div>')
+                p.append(
+                    '<div class="collapsible-toggle mute" style="margin-top:6px;font-size:12px">Seed 대화 · 추출된 에피소드</div>'
+                )
                 p.append('<div class="collapsible-body" style="margin-top:4px">')
                 p.append('<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">')
 
                 if utts:
                     p.append('<div style="background:#f9fafb;border-radius:6px;padding:10px 12px">')
-                    p.append('<div style="font-size:11px;font-weight:600;color:#86868b;margin-bottom:6px">Seed 대화</div>')
+                    p.append(
+                        '<div style="font-size:11px;font-weight:600;color:#86868b;margin-bottom:6px">Seed 대화</div>'
+                    )
                     for u in utts:
                         if u["role"] == "user":
-                            p.append(f'<div style="font-size:12px;padding:4px 0;font-weight:500;display:flex;gap:6px"><span class="mute" style="min-width:52px;flex-shrink:0">사용자</span><span>{_esc(u["text"])}</span></div>')
+                            p.append(
+                                f'<div style="font-size:12px;padding:4px 0;font-weight:500;display:flex;gap:6px"><span class="mute" style="min-width:52px;flex-shrink:0">사용자</span><span>{_esc(u["text"])}</span></div>'
+                            )
                         else:
-                            p.append(f'<div style="font-size:12px;padding:4px 0 8px;color:#6b7280;border-bottom:1px solid #e5e7eb;margin-bottom:4px;display:flex;gap:6px"><span class="mute" style="min-width:52px;flex-shrink:0">봇</span><span>{_esc(u["text"])}</span></div>')
-                    p.append('</div>')
+                            p.append(
+                                f'<div style="font-size:12px;padding:4px 0 8px;color:#6b7280;border-bottom:1px solid #e5e7eb;margin-bottom:4px;display:flex;gap:6px"><span class="mute" style="min-width:52px;flex-shrink:0">봇</span><span>{_esc(u["text"])}</span></div>'
+                            )
+                    p.append("</div>")
                 else:
-                    p.append('<div></div>')
+                    p.append("<div></div>")
 
                 if eps:
                     p.append('<div style="background:#f9fafb;border-radius:6px;padding:10px 12px">')
-                    p.append('<div style="font-size:11px;font-weight:600;color:#86868b;margin-bottom:6px">추출된 에피소드</div>')
+                    p.append(
+                        '<div style="font-size:11px;font-weight:600;color:#86868b;margin-bottom:6px">추출된 에피소드</div>'
+                    )
                     for ep in eps:
-                        p.append(f'<div style="font-size:12px;padding:5px 0 5px 10px;margin-bottom:4px;border-left:2px solid #86868b">{_esc(ep["text"])}</div>')
-                    p.append('</div>')
+                        p.append(
+                            f'<div style="font-size:12px;padding:5px 0 5px 10px;margin-bottom:4px;border-left:2px solid #86868b">{_esc(ep["text"])}</div>'
+                        )
+                    p.append("</div>")
                 else:
-                    p.append('<div></div>')
+                    p.append("<div></div>")
 
-                p.append('</div>')
-                p.append('</div>')
+                p.append("</div>")
+                p.append("</div>")
 
             p.append("</div>")
 
-    p.append('</div>')
+    p.append("</div>")
 
     # ============================================================
     # Sub-tab: Retriever & Quality
@@ -1924,8 +2057,7 @@ def _build_memory(scored: dict) -> str:
         r = recall["mean_recall"]
         cls = _score_cls(r, 0.7, 0.4)
         p.append(
-            f'<div class="card"><div class="card-label">Recall</div>'
-            f'<div class="card-value {cls}">{r:.0%}</div></div>'
+            f'<div class="card"><div class="card-label">Recall</div><div class="card-value {cls}">{r:.0%}</div></div>'
         )
     if mem_quality:
         if mem_quality.get("mean_precision") is not None:
@@ -1949,10 +2081,6 @@ def _build_memory(scored: dict) -> str:
 
     p.append('<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">')
 
-    _MEM_SUITE_ORDER = [
-        "mem_recall", "mem_profile", "mem_update",
-        "mem_no_hallucination", "mem_relevance", "mem_multi_session",
-    ]
     _MEM_SUITE_DETAIL = {
         "mem_recall": "단일 사실을 정확히 기억하는지 확인",
         "mem_profile": "특정 주제에 대해 여러 세션의 정보를 종합",
@@ -1965,47 +2093,54 @@ def _build_memory(scored: dict) -> str:
     p.append('<div class="panel">')
     p.append('<div class="section-title">Suite별 요약</div>')
     if scored_mem_turns:
-        p.append('<table>')
-        p.append('<tr><th>Suite</th><th>테스트 내용</th><th>질문 수</th></tr>')
+        p.append("<table>")
+        p.append("<tr><th>Suite</th><th>테스트 내용</th><th>질문 수</th></tr>")
         suite_map: dict[str, list] = {}
         for t in scored_mem_turns:
             suite_map.setdefault(t["suite_name"], []).append(t)
-        for suite_name in _MEM_SUITE_ORDER:
-            if suite_name not in suite_map:
-                continue
+        for suite_name in sorted(suite_map, key=lambda s: suite_rank.get(s, 10**6)):
             suite_turns = suite_map[suite_name]
             desc = _get_suite_desc(scored, suite_name)
             detail = _MEM_SUITE_DETAIL.get(suite_name, "")
             p.append(
                 f'<tr><td style="font-weight:500">{desc}</td>'
                 f'<td class="mute">{_esc(detail)}</td>'
-                f'<td>{len(suite_turns)}</td></tr>'
+                f"<td>{len(suite_turns)}</td></tr>"
             )
-        p.append('</table>')
+        p.append("</table>")
     p.append("</div>")
 
     p.append('<div class="panel">')
     p.append('<div class="section-title">평가 기준</div>')
     p.append('<div style="font-size:13px;line-height:1.8">')
     p.append('<div style="font-size:11px;font-weight:600;color:#86868b;margin-bottom:2px">검색 (자동 계산)</div>')
-    p.append('<div><span style="font-weight:600">Recall</span> <span class="mute">— 찾아야 할 에피소드 중 실제로 찾은 비율</span></div>')
-    p.append('<div><span style="font-weight:600">Precision</span> <span class="mute">— 검색된 에피소드 중 관련 있는 비율</span></div>')
+    p.append(
+        '<div><span style="font-weight:600">Recall</span> <span class="mute">— 찾아야 할 에피소드 중 실제로 찾은 비율</span></div>'
+    )
+    p.append(
+        '<div><span style="font-weight:600">Precision</span> <span class="mute">— 검색된 에피소드 중 관련 있는 비율</span></div>'
+    )
     p.append('<div style="font-size:11px;font-weight:600;color:#86868b;margin:8px 0 2px">활용 (LLM Judge)</div>')
-    p.append('<div><span style="font-weight:600">응답 관련성</span> <span class="mute">— 질문에 맞는 응답인가</span></div>')
-    p.append('<div><span style="font-weight:600">메모리 적절성</span> <span class="mute">— 기억을 자연스럽게 활용하는가</span></div>')
-    p.append('<div><span style="font-weight:600">사실 정확성</span> <span class="mute">— 에피소드와 일치하는 응답인가</span></div>')
-    p.append('<div><span style="font-weight:600">자연스러움</span> <span class="mute">— 대화체로 자연스러운가</span></div>')
-    p.append('</div>')
+    p.append(
+        '<div><span style="font-weight:600">응답 관련성</span> <span class="mute">— 질문에 맞는 응답인가</span></div>'
+    )
+    p.append(
+        '<div><span style="font-weight:600">메모리 적절성</span> <span class="mute">— 기억을 자연스럽게 활용하는가</span></div>'
+    )
+    p.append(
+        '<div><span style="font-weight:600">사실 정확성</span> <span class="mute">— 에피소드와 일치하는 응답인가</span></div>'
+    )
+    p.append(
+        '<div><span style="font-weight:600">자연스러움</span> <span class="mute">— 대화체로 자연스러운가</span></div>'
+    )
+    p.append("</div>")
     p.append("</div>")
 
     p.append("</div>")
 
     # Per-probe results
     if scored_mem_turns:
-        def _mem_sort_key(t):
-            s = t["suite_name"]
-            return _MEM_SUITE_ORDER.index(s) if s in _MEM_SUITE_ORDER else 99
-        sorted_mem = sorted(scored_mem_turns, key=_mem_sort_key)
+        sorted_mem = sorted(scored_mem_turns, key=lambda t: q_rank.get(t["question_id"], 10**6))
         for suite_name, group in groupby(sorted_mem, key=lambda t: t["suite_name"]):
             suite_turns = list(group)
             desc = _get_suite_desc(scored, suite_name)
@@ -2022,16 +2157,22 @@ def _build_memory(scored: dict) -> str:
                 p.append('<div class="item" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px">')
 
                 # Left: question + response
-                p.append('<div>')
-                p.append(f'<div class="item-row"><span class="item-label mute">질문</span><span class="item-text">{_esc(t.get("input_text", ""))}</span></div>')
+                p.append("<div>")
+                p.append(
+                    f'<div class="item-row"><span class="item-label mute">질문</span><span class="item-text">{_esc(t.get("input_text", ""))}</span></div>'
+                )
                 if t.get("response_text"):
-                    p.append(f'<div class="item-row"><span class="item-label mute">응답</span><span class="item-text">{_esc(t["response_text"])}</span></div>')
-                p.append('</div>')
+                    p.append(
+                        f'<div class="item-row"><span class="item-label mute">응답</span><span class="item-text">{_esc(t["response_text"])}</span></div>'
+                    )
+                p.append("</div>")
 
                 # Right: scores + reasoning
-                p.append('<div>')
+                p.append("<div>")
                 p.append('<div class="item-scores">')
-                p.append(f'<span class="mute" style="font-size:11px">{t["question_id"]}</span> <span class="mute" style="font-size:11px">|</span> ')
+                p.append(
+                    f'<span class="mute" style="font-size:11px">{t["question_id"]}</span> <span class="mute" style="font-size:11px">|</span> '
+                )
                 if rc is not None:
                     cls = _score_cls(rc, 0.7, 0.4)
                     p.append(f'<span class="mono {cls}" style="font-size:11px">recall {rc:.0%}</span> ')
@@ -2045,7 +2186,7 @@ def _build_memory(scored: dict) -> str:
                 if reasoning:
                     p.append(f'<div class="reasoning">{_esc(reasoning)}</div>')
 
-                p.append('</div>')
+                p.append("</div>")
 
                 # Collapsible: retrieved episodes + missed targets (full width within the grid)
                 retrieved = t.get("retrieved_episodes", [])
@@ -2061,29 +2202,41 @@ def _build_memory(scored: dict) -> str:
                 if retrieved or missed_ids:
                     label_parts = []
                     if retrieved:
-                        label_parts.append(f'검색 {len(retrieved)}')
+                        label_parts.append(f"검색 {len(retrieved)}")
                     if missed_ids:
-                        label_parts.append(f'미검색 {len(missed_ids)}')
-                    p.append(f'<div style="grid-column:1/-1"><div class="collapsible-toggle mute" style="margin-top:4px;font-size:11px">에피소드 ({" · ".join(label_parts)})</div>')
+                        label_parts.append(f"미검색 {len(missed_ids)}")
+                    p.append(
+                        f'<div style="grid-column:1/-1"><div class="collapsible-toggle mute" style="margin-top:4px;font-size:11px">에피소드 ({" · ".join(label_parts)})</div>'
+                    )
                     p.append('<div class="collapsible-body" style="margin-top:4px">')
 
                     if retrieved:
-                        p.append('<div style="background:#f9fafb;border-radius:6px;padding:8px 10px;margin-bottom:4px">')
+                        p.append(
+                            '<div style="background:#f9fafb;border-radius:6px;padding:8px 10px;margin-bottom:4px">'
+                        )
                         for ep in retrieved:
                             if isinstance(ep, dict):
                                 ep_text = ep.get("text", str(ep))
                                 eid = ep.get("episode_id") or ep.get("id")
                                 score = ep.get("score")
-                                score_str = f' <span class="mono mute" style="font-size:10px">{score:.4f}</span>' if score else ""
+                                score_str = (
+                                    f' <span class="mono mute" style="font-size:10px">{score:.4f}</span>'
+                                    if score
+                                    else ""
+                                )
                                 is_target = eid in target_ids
                             else:
                                 ep_text = str(ep)
                                 score_str = ""
                                 is_target = False
                             border_color = "#248a3d" if is_target else "#86868b"
-                            target_mark = ' <span class="tag tag-ok" style="font-size:9px">target</span>' if is_target else ""
-                            p.append(f'<div style="font-size:12px;padding:4px 0 4px 10px;margin-bottom:3px;border-left:2px solid {border_color}">{_esc(ep_text)}{score_str}{target_mark}</div>')
-                        p.append('</div>')
+                            target_mark = (
+                                ' <span class="tag tag-ok" style="font-size:9px">target</span>' if is_target else ""
+                            )
+                            p.append(
+                                f'<div style="font-size:12px;padding:4px 0 4px 10px;margin-bottom:3px;border-left:2px solid {border_color}">{_esc(ep_text)}{score_str}{target_mark}</div>'
+                            )
+                        p.append("</div>")
 
                     if missed_ids:
                         # Build episode text lookup from writer data
@@ -2093,20 +2246,24 @@ def _build_memory(scored: dict) -> str:
                                 ep_texts[ep["id"]] = ep["text"]
 
                         p.append('<div style="background:#fef2f2;border-radius:6px;padding:8px 10px">')
-                        p.append('<div style="font-size:11px;font-weight:600;color:#991b1b;margin-bottom:4px">미검색 target 에피소드</div>')
+                        p.append(
+                            '<div style="font-size:11px;font-weight:600;color:#991b1b;margin-bottom:4px">미검색 target 에피소드</div>'
+                        )
                         for mid in sorted(missed_ids):
                             ep_text = ep_texts.get(mid, f"episode {mid}")
-                            p.append(f'<div style="font-size:12px;padding:4px 0 4px 10px;margin-bottom:3px;border-left:2px solid #dc2626">{_esc(ep_text)}</div>')
-                        p.append('</div>')
+                            p.append(
+                                f'<div style="font-size:12px;padding:4px 0 4px 10px;margin-bottom:3px;border-left:2px solid #dc2626">{_esc(ep_text)}</div>'
+                            )
+                        p.append("</div>")
 
-                    p.append('</div></div>')
+                    p.append("</div></div>")
 
                 p.append("</div>")
                 p.append(_detail_block(t))
 
             p.append("</div>")
 
-    p.append('</div>')
+    p.append("</div>")
 
     return "\n".join(p)
 

@@ -232,6 +232,16 @@ use-after-free 경합 회피) — 토크만 끄고 즉시 종료, 나머지는 O
 - **`call_issues` 세션→턴 단위로 정확화**: turn_index 컬럼이 생기며 재시도/오류를 턴별로 귀속(기존엔 세션 합계를 모든 턴에 붙임). 렌더(`_call_issues_tag`)는 무변경, 키(`retry_count`/`error_count`) 유지.
 
 
+## Eval 순서 정합 — questions.json 단일 기준
+
+- **대시보드 표시 순서 = questions.json**: 탭마다 제각각이던 정렬(suite_name 알파벳순, 카테고리 인덱스, scenario_id 등)을 config의 `suite_descriptions`/`question_texts` 키 순서(= questions.json 순회 순서)에서 유도한 rank로 통일. `turns` 배열(재생 순서)을 기준으로 삼지 않은 이유: noise-bed 스케줄러가 재생 순서를 조건 블록으로 재배치하기 때문.
+- **노이즈 스케줄 = 전역 rotating block → category별 조건 블록**: 기존 전역 rotating block(8세션 단위)은 재생이 suite 경계를 넘나들어 사람이 실행을 지켜볼 때 경과 파악이 어려웠다. 검토해 보니 전역 방식의 실익은 전환 횟수 최소화 정도뿐 — 조건 풀이 원래 나열 순서를 보존해 거시 흐름은 어차피 questions.json 순서라 suite-시간 상관도 끊어주지 않았다. category별 블록은 블록이 커서(3~21세션) 전환이 오히려 더 적고(15회), 실행이 "asr: quiet→medium→loud → turn_taking: …"으로 읽힌다. suite별 블록 안은 3문항짜리 lq/mem suite가 1문항 블록으로 무너지고 quick 모드(스위트당 1문항)에서 성립 불가라 기각.
+- **배정은 불변 (전역 연속 round-robin)**: 조건 배정은 기존과 동일한 flat index `i % N` 유지 — suite×조건 셀 구성이 기존 스케줄과 완전히 같음을 시뮬레이션으로 확인(나머지 분배도 suite마다 다른 조건으로 자연 분산). 바뀐 것은 재생 묶음뿐이라 과거 실행과 통계적으로 비교 가능.
+- **시작 조건은 category마다 회전**: 항상 quiet부터 돌면 "quiet은 늘 category 초반"이라는 조건-시간 상관이 생겨, category 인덱스만큼 오프셋을 밀어 상쇄(asr: q→m→l, tt: m→l→q, …).
+- **set_level 후 settle 1초**: 레벨 전환은 aplay 프로세스 재시작이라 스피커 출력이 안정될 때까지 짧은 창이 있고, 블록 첫 세션이 라벨과 다른 실효 SNR에서 시작할 수 있다. 전환 후 1초 대기 → 마이크 큐 drain 순서로 방지.
+- **기존 특성 (이번 변경과 무관)**: interruption suite는 유닛 나열이 delay→audio→question 순이라 질문↔조건이 1:1로 고정된다(int_q_001은 항상 quiet 등). 배정 로직이 동일하므로 이전 스케줄에서도 같았음 — 문제 시 질문 수나 나열 순서 조정으로 해소.
+
+
 ## 차후 고려
 
 - **SimilarityConfig/MemoryConfig 임베딩 필드 중복**: 양쪽 config에 model, use_onnx 등이 중복 존재. 공유 EmbeddingConfig 추출 여부는 실제 사용 패턴 보고 판단.

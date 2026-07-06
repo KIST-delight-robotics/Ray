@@ -85,6 +85,7 @@ _TURN_TIMEOUT_SEC = 60.0
 _TURN_DETECT_TIMEOUT_SEC = 10.0
 _WATCHDOG_POLL_SEC = 0.1  # 감지 워치독 폴링 주기
 _BEEP_SETTLE_SEC = 0.2  # 비프음이 마이크 큐에 다 들어온 뒤 drain하기 위한 대기
+_BED_SETTLE_SEC = 1.0  # 노이즈 레벨 전환(aplay 재시작) 후 스피커 출력이 안정될 때까지의 대기
 _TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 # 질문 재생 기본 장치 — ALSA "default"는 로봇 응답 전용이라 질문 재생엔 안 씀.
 # dmix PCM이라 노이즈 베드와 질문을 한 카드에서 섞을 수 있고, 단일 스트림도 정상 동작.
@@ -1093,16 +1094,16 @@ def _collect_audio_units(
     seed_episode_map: dict[str, list[int]],
     record_dir: str,
     quick: bool,
-) -> list[Callable[[], None]]:
-    """Build deferred per-session thunks for noise-bed scheduling.
+) -> list[tuple[str, Callable[[], None]]]:
+    """Build deferred (category, thunk) pairs for noise-bed scheduling.
 
     Each thunk runs exactly one session (single-turn question, multi-turn
     scenario, or one interruption combo) via the existing runners, so the bed
-    scheduler can reorder them into condition blocks. Quick mode samples down
-    the same way the normal loop does. ASR questions play their clean WAV —
-    the acoustic bed supplies the noise.
+    scheduler can regroup them into per-category condition blocks. Quick mode
+    samples down the same way the normal loop does. ASR questions play their
+    clean WAV — the acoustic bed supplies the noise.
     """
-    units: list[Callable[[], None]] = []
+    units: list[tuple[str, Callable[[], None]]] = []
     for suite in audio_suites:
         if suite.get("multi_turn"):
             scenarios = suite["scenarios"]
@@ -1110,17 +1111,20 @@ def _collect_audio_units(
                 scenarios = random.sample(scenarios, 1)
             for scenario in scenarios:
                 units.append(
-                    lambda sc=scenario, su=suite: _run_multi_turn_suite(
-                        su,
-                        sc,
-                        wav_map,
-                        player,
-                        session_map,
-                        create_session,
-                        audio_queue,
-                        seed_session_map=seed_session_map,
-                        seed_episode_map=seed_episode_map,
-                        record_dir=record_dir,
+                    (
+                        suite["category"],
+                        lambda sc=scenario, su=suite: _run_multi_turn_suite(
+                            su,
+                            sc,
+                            wav_map,
+                            player,
+                            session_map,
+                            create_session,
+                            audio_queue,
+                            seed_session_map=seed_session_map,
+                            seed_episode_map=seed_episode_map,
+                            record_dir=record_dir,
+                        ),
                     )
                 )
         elif suite.get("category") == "interruption":
@@ -1144,23 +1148,26 @@ def _collect_audio_units(
                     for question in questions:
                         q_entry = wav_map[question["id"]]
                         units.append(
-                            lambda q=question, qe=q_entry, su=suite, iw=interrupt_wav, d=delay, ii=int_id: (
-                                _run_interruption(  # noqa: E501
-                                    su,
-                                    q,
-                                    qe["path"],
-                                    iw,
-                                    d,
-                                    player,
-                                    session_map,
-                                    create_session,
-                                    audio_queue,
-                                    interrupt_audio=ii,
-                                    seed_session_map=seed_session_map,
-                                    seed_episode_map=seed_episode_map,
-                                    record_dir=record_dir,
-                                    voice=qe.get("voice", ""),
-                                )
+                            (
+                                suite["category"],
+                                lambda q=question, qe=q_entry, su=suite, iw=interrupt_wav, d=delay, ii=int_id: (
+                                    _run_interruption(  # noqa: E501
+                                        su,
+                                        q,
+                                        qe["path"],
+                                        iw,
+                                        d,
+                                        player,
+                                        session_map,
+                                        create_session,
+                                        audio_queue,
+                                        interrupt_audio=ii,
+                                        seed_session_map=seed_session_map,
+                                        seed_episode_map=seed_episode_map,
+                                        record_dir=record_dir,
+                                        voice=qe.get("voice", ""),
+                                    )
+                                ),
                             )
                         )
         else:
@@ -1170,68 +1177,86 @@ def _collect_audio_units(
             for question in questions:
                 q_entry = wav_map[question["id"]]
                 units.append(
-                    lambda q=question, qe=q_entry, su=suite: _run_single_turn(
-                        su,
-                        q,
-                        qe["path"],
-                        player,
-                        session_map,
-                        create_session,
-                        audio_queue,
-                        seed_session_map=seed_session_map,
-                        seed_episode_map=seed_episode_map,
-                        record_dir=record_dir,
-                        voice=qe.get("voice", ""),
+                    (
+                        suite["category"],
+                        lambda q=question, qe=q_entry, su=suite: _run_single_turn(
+                            su,
+                            q,
+                            qe["path"],
+                            player,
+                            session_map,
+                            create_session,
+                            audio_queue,
+                            seed_session_map=seed_session_map,
+                            seed_episode_map=seed_episode_map,
+                            record_dir=record_dir,
+                            voice=qe.get("voice", ""),
+                        ),
                     )
                 )
     return units
 
 
 def _run_audio_noise_bed(
-    units: list[Callable[[], None]],
+    units: list[tuple[str, Callable[[], None]]],
     bed: NoiseBed,
     labels: list[str],
     snr_by: dict[str, float],
-    block_size: int,
     audio_queue: queue.Queue[AudioFrame],
     session_map: list[dict],
     pause_ctrl: _PauseController,
 ) -> None:
-    """Assign conditions (global round-robin), run as rotating blocks under the bed.
+    """Assign conditions (global round-robin), play as per-category condition blocks.
 
-    Global round-robin (continuous index over the flat unit list) keeps full-run
-    stratification while still spreading the few quick-mode units across all
-    conditions. Each block plays under one bed level so the level changes only
-    once per block; every session's entries are tagged with condition + SNR.
+    Assignment stays a continuous index over the flat unit list — full-run
+    stratification (suite×condition cells) and quick-mode spreading are
+    unchanged. Playback groups each category's units by condition so the run
+    reads in questions.json category order ("asr: quiet→medium→loud, then
+    turn_taking: …"); the starting condition rotates per category so no
+    condition always plays first within its category (time-drift
+    counterbalance). Every session's entries are tagged with condition + SNR.
     """
-    pools: dict[str, list[Callable[[], None]]] = {lab: [] for lab in labels}
-    for i, unit in enumerate(units):
-        pools[labels[i % len(labels)]].append(unit)
+    # Condition assignment: global continuous round-robin over the flat list.
+    pools: dict[str, dict[str, list[Callable[[], None]]]] = {}
+    cat_order: list[str] = []
+    for i, (cat, unit) in enumerate(units):
+        if cat not in pools:
+            pools[cat] = {lab: [] for lab in labels}
+            cat_order.append(cat)
+        pools[cat][labels[i % len(labels)]].append(unit)
 
-    # Rotating-block schedule: cycle conditions, taking up to block_size each pass.
-    schedule: list[tuple[str, list[Callable[[], None]]]] = []
-    idx = {lab: 0 for lab in labels}
-    while any(idx[lab] < len(pools[lab]) for lab in labels):
-        for lab in labels:
-            chunk = pools[lab][idx[lab] : idx[lab] + block_size]
-            if chunk:
-                idx[lab] += len(chunk)
-                schedule.append((lab, chunk))
+    schedule: list[tuple[str, str, list[Callable[[], None]]]] = []
+    for ci, cat in enumerate(cat_order):
+        offset = ci % len(labels)
+        for lab in labels[offset:] + labels[:offset]:
+            if pools[cat][lab]:
+                schedule.append((cat, lab, pools[cat][lab]))
 
     logger.info(
-        "Noise-bed: %d sessions across %s → %d blocks (size %d)",
+        "Noise-bed: %d sessions, %d categories (%s) → %d blocks",
         len(units),
-        ", ".join(f"{lab}({len(pools[lab])})" for lab in labels),
+        len(cat_order),
+        ", ".join(cat_order),
         len(schedule),
-        block_size,
     )
     try:
-        for lab, chunk in schedule:
+        for bi, (cat, lab, chunk) in enumerate(schedule, 1):
             if pause_ctrl.wait_if_paused():
                 break
             bed.set_level(lab)
+            # Let the new level actually reach the speaker before the block's
+            # first session, then discard mic frames from the transition.
+            time.sleep(_BED_SETTLE_SEC)
             _drain_audio_queue(audio_queue)
-            logger.info("Noise block: %s (snr≈%.1f dB, %d sessions)", lab, snr_by[lab], len(chunk))
+            logger.info(
+                "Noise block %d/%d: %s / %s (snr≈%.1f dB, %d sessions)",
+                bi,
+                len(schedule),
+                cat,
+                lab,
+                snr_by[lab],
+                len(chunk),
+            )
             for unit in chunk:
                 if pause_ctrl.wait_if_paused():
                     break
@@ -1271,7 +1296,6 @@ def main() -> None:
         "across one run (requires prepare_noise_bed.py + calibrate_noise.py output)",
     )
     parser.add_argument("--bed-dir", default="data/eval/noise_bed", help="Noise-bed dir (calibration.json + bed_*.wav)")
-    parser.add_argument("--block-size", type=int, default=8, help="Sessions per rotating noise-condition block")
     args = parser.parse_args()
 
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1663,7 +1687,6 @@ def main() -> None:
                     bed,
                     bed_labels,
                     bed_snr,
-                    args.block_size,
                     audio_queue,
                     session_map,
                     pause_ctrl,
