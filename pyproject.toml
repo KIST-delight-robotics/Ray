@@ -25,14 +25,11 @@ dependencies = [
 
 [tool.uv.sources]
 turngpt = { path = "external/TurnGPT", editable = true }
-vap = { path = "external/VoiceActivityProjection", editable = true }
 
 [project.optional-dependencies]
 models-pytorch = [
     "turngpt",
-    "vap",
     "maai>=0.1",
-    "torchaudio",
     "einops>=0.8",
     "omegaconf>=2.3",
     "pytorch-lightning>=2.0",
@@ -78,6 +75,7 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 "voice_pipeline/__main__.py" = ["E402"]
 "evaluation/run.py" = ["E402"]
+"evaluation/calibrate_noise.py" = ["E402"]
 "evaluation/dashboard.py" = ["E501"]
 "scripts/bench/*" = ["E501"]
 

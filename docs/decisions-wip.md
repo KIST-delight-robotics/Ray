@@ -11,6 +11,26 @@
 - **`create_session`의 세션 인자는 `**kwargs` 통과**: SessionLoop 시그니처를 wiring에 복제하면 두 곳이 어긋날 수 있어(이번 작업의 원인 그 자체), 타입 명시 대신 통과를 선택 — 검증은 SessionLoop 생성자가 담당.
 
 
+## ASR 배경 잡음 — 음향 노이즈 베드 (스피커 동시 재생)
+
+- **디지털 사전 믹싱 → 음향 베드로 선회 (디지털 경로 제거)**: 처음엔 깨끗한 질문 WAV에 MUSAN noise를 목표 SNR로 미리 섞어 굽는 디지털 방식을 썼다. 그러나 디지털 믹스는 *ASR만* 정확한 SNR로 스트레스할 뿐, 마이크·VAD·턴 감지 등 나머지 파이프라인은 무잡음 입력을 봐서 e2e 잡음 강건성을 못 본다. 둘째 스피커로 잡음을 연속 재생하는 음향 베드는 룸/마이크 경로를 그대로 통과해 전 단계가 현실 잡음 조건을 겪는다. 그래서 디지털 경로(`noise_mixer`, `prepare_audio --musan-dir`, run의 `snr_levels` 스윕, score `by_snr`)를 전부 제거하고 베드만 남김. SNR 정밀 통제를 포기하는 대신, 마이크 실측 캘리브로 *실효* SNR을 잡는다(아래).
+- **단일 마스터 + 조건별 gain 기록 (조건별 WAV 안 굽기)**: 베드 레벨은 `bed_master.wav` 하나에 곱하는 gain으로 표현하고, gain은 `calibration.json`에 조건별로 *기록*만 한다(NoiseBed가 재생 시점에 `master × gain`). 캘리브마다 `bed_<cond>.wav`를 새로 굽고 덮어쓰는 것보다 — 마스터 불변 + gain 한 숫자 기록이 재현성도 낫고(아티팩트가 안 흔들림) 레벨 조절도 한 줄 편집으로 끝난다. 런타임 스케일은 캐시 마스터에 1회 곱하는 비용이라 무시 가능.
+- **dmix 필수 — plughw/hw 독점 장치 금지**: 베드와 질문이 *한 카드에서 섞여야* 하므로 dmix PCM이 필수. `plughw:`/`hw:`는 한 번에 한 프로세스만 열 수 있어, 베드가 켜진 medium/loud 블록에서 질문 재생 aplay가 device busy로 줄줄이 실패한다(베드의 stderr는 DEVNULL이라 조용히 죽기도). 그래서 질문 재생 기본 장치를 dmix로, noise-bed 모드에서 비-dmix 장치면 시작 시 차단. `--device` 미지정 시 noise-bed는 calibration의 측정 장치를 자동 채택.
+- **SNR 재설정은 마이크 재측정 없이 가능**: 마이크 실측 상수(speech_rms S, bed_n_ref_rms N_ref, room_floor_rms)를 `calibration.json`에 저장하므로, SNR 목표만 바꾸면 `solve_gain`으로 gain을 오프라인 재계산할 수 있다(리그가 안 바뀌는 한 스피커·마이크 불필요). gain 1.0 = 마스터 원본(= 마이크에서 N_ref) 기준.
+- **베드 마스터는 오버레이로 정상(stationary)**: prepare_noise_bed가 여러 MUSAN noise를 끝이어붙이지(concat) 않고 겹쳐(overlay) 합산 — 세션이 루프 어디에 겹치든 실효 SNR이 목표 근처로 유지된다. 단일 음원 순차 재생은 순간 조용/트랜지언트 구간이 세션별 SNR을 흔든다.
+- **범위 = ASR 스위트 · MUSAN `noise`(앰비언트) · 영어**: 잡음이 VAP/턴 감지에 미치는 영향은 별개 연구라 turn-taking/interruption 스위트는 무잡음 유지. ASR 언어가 영어라 babble(타화자)은 다음 단계로 미룸 — 1차는 앰비언트 단일 카테고리.
+
+
+## Eval 순서 정합 — questions.json 단일 기준
+
+- **대시보드 표시 순서 = questions.json**: 탭마다 제각각이던 정렬(suite_name 알파벳순, 카테고리 인덱스, scenario_id 등)을 config의 `suite_descriptions`/`question_texts` 키 순서(= questions.json 순회 순서)에서 유도한 rank로 통일. `turns` 배열(재생 순서)을 기준으로 삼지 않은 이유: noise-bed 스케줄러가 재생 순서를 조건 블록으로 재배치하기 때문.
+- **노이즈 스케줄 = 전역 rotating block → category별 조건 블록**: 기존 전역 rotating block(8세션 단위)은 재생이 suite 경계를 넘나들어 사람이 실행을 지켜볼 때 경과 파악이 어려웠다. 검토해 보니 전역 방식의 실익은 전환 횟수 최소화 정도뿐 — 조건 풀이 원래 나열 순서를 보존해 거시 흐름은 어차피 questions.json 순서라 suite-시간 상관도 끊어주지 않았다. category별 블록은 블록이 커서(3~21세션) 전환이 오히려 더 적고(15회), 실행이 "asr: quiet→medium→loud → turn_taking: …"으로 읽힌다. suite별 블록 안은 3문항짜리 lq/mem suite가 1문항 블록으로 무너지고 quick 모드(스위트당 1문항)에서 성립 불가라 기각.
+- **배정은 불변 (전역 연속 round-robin)**: 조건 배정은 기존과 동일한 flat index `i % N` 유지 — suite×조건 셀 구성이 기존 스케줄과 완전히 같음을 시뮬레이션으로 확인(나머지 분배도 suite마다 다른 조건으로 자연 분산). 바뀐 것은 재생 묶음뿐이라 과거 실행과 통계적으로 비교 가능.
+- **시작 조건은 category마다 회전**: 항상 quiet부터 돌면 "quiet은 늘 category 초반"이라는 조건-시간 상관이 생겨, category 인덱스만큼 오프셋을 밀어 상쇄(asr: q→m→l, tt: m→l→q, …).
+- **set_level 후 settle 1초**: 레벨 전환은 aplay 프로세스 재시작이라 스피커 출력이 안정될 때까지 짧은 창이 있고, 블록 첫 세션이 라벨과 다른 실효 SNR에서 시작할 수 있다. 전환 후 1초 대기 → 마이크 큐 drain 순서로 방지.
+- **기존 특성 (이번 변경과 무관)**: interruption suite는 유닛 나열이 delay→audio→question 순이라 질문↔조건이 1:1로 고정된다(int_q_001은 항상 quiet 등). 배정 로직이 동일하므로 이전 스케줄에서도 같았음 — 문제 시 질문 수나 나열 순서 조정으로 해소.
+
+
 ## 차후 고려
 
 - **eval text 모드 유실**: `--text`(quality/memory 스위트를 음성 단계 없이 LLM 직접 평가)가 참조하던 `voice_pipeline/text_session.py`(TextSession)가 저장소에 존재하지 않아(커밋 이력에도 없음 — 미push 유실 추정) 모드 전체를 제거함. 재도입하려면 TextSession 재구현 필요.

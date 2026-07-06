@@ -256,7 +256,8 @@ def main() -> None:
 
         audio_input.stop()
         bridge.disconnect()
-        components.stop_async()
+        components.stop_threaded()
+        components.vap.stop()
         write_executor.shutdown(wait=True)
         components.executor.shutdown(wait=True)
         components.asr.stop()

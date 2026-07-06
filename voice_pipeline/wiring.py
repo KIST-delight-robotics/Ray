@@ -47,9 +47,9 @@ from voice_pipeline.trace.trace_store import SQLiteCallStore, SQLiteTraceStore
 from voice_pipeline.trace.tracked_embedder import TrackedEmbedder
 from voice_pipeline.trace.tracked_tts import TrackedTTS
 from voice_pipeline.tts.factory import create_tts
-from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT
-from voice_pipeline.turn_taking.async_vap import AsyncVAP
-from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
+from voice_pipeline.turn_taking.maai_vap import MaAIVAPModel
+from voice_pipeline.turn_taking.threaded_turngpt import ThreadedTurnGPT
+from voice_pipeline.turn_taking.threaded_vap import ThreadedVAP
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
 from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
 
@@ -73,7 +73,7 @@ class ProcessComponents:
     llm: OpenAILLM
     raw_tts: ITTS
     tts: TrackedTTS
-    vap: MaAIVAPWrapper
+    vap: ThreadedVAP
     turngpt: TurnGPTWrapper
     silero_vad_model: Any
     vad_fn: Callable[[AudioFrame], float]
@@ -93,13 +93,17 @@ class ProcessComponents:
     audio_queue: queue.Queue[AudioFrame]
     audio_input: AudioInput
     shutdown_event: threading.Event
-    _prev_async: list[AsyncVAP | AsyncTurnGPT] = field(default_factory=list)
+    _prev_threaded: list[ThreadedTurnGPT] = field(default_factory=list)
 
-    def stop_async(self) -> None:
-        """Stop the previous session's async model wrapper threads."""
-        for wrapper in self._prev_async:
+    def stop_threaded(self) -> None:
+        """Stop the previous session's threaded TurnGPT wrapper.
+
+        VAP 스레드는 프로세스 수명이라 여기서 멈추지 않는다 — 프로세스 종료 시
+        엔트리포인트가 ``vap.stop()``을 직접 호출한다.
+        """
+        for wrapper in self._prev_threaded:
             wrapper.stop()
-        self._prev_async.clear()
+        self._prev_threaded.clear()
 
     def create_session(self, *, memory_enabled: bool = True, **session_loop_kwargs: Any) -> SessionComponents:
         """Assemble a fresh per-session component graph.
@@ -113,27 +117,28 @@ class ProcessComponents:
         Returns:
             SessionLoop과 세션 단위 컴포넌트를 담은 :class:`SessionComponents`.
         """
-        self.stop_async()
+        self.stop_threaded()
 
+        session_id = str(uuid.uuid4())
+        # VAP 스레드는 프로세스 수명 — 세션마다 재생성 대신 session_id 리바인드 + reset.
+        self.vap.session_id = session_id
         self.vap.reset()
         self.turngpt.reset()
         self.reset_vad()
 
-        session_id = str(uuid.uuid4())
         self.embedder.session_id = session_id
         self.tts.session_id = session_id
         self.retry_handler.session_id = session_id
 
-        async_vap = AsyncVAP(self.vap, call_store=self.call_store, session_id=session_id)
-        async_turngpt = AsyncTurnGPT(self.turngpt, call_store=self.call_store, session_id=session_id)
-        self._prev_async.extend([async_vap, async_turngpt])
+        threaded_turngpt = ThreadedTurnGPT(self.turngpt, call_store=self.call_store, session_id=session_id)
+        self._prev_threaded.append(threaded_turngpt)
 
         history = ConversationHistory(self.storage, self.token_counter)
         memory_storage = self.memory_storage if memory_enabled else None
         retriever = MemoryRetriever(self.memory_storage, self.vector_index, self.embedder) if memory_enabled else None
         turn_detector = TurnDetector(
-            async_vap,
-            async_turngpt,
+            self.vap,
+            threaded_turngpt,
             self.embedder,
             vad_fn=self.vad_fn,
             vad_reset_fn=self.reset_vad,
@@ -191,9 +196,10 @@ def build_components(
         등 수명 시작은 호출자가 수행한다.
     """
     asr = GoogleCloudASR(language_code=language_code)
-    llm = OpenAILLM(model="gpt-5.4", temperature=0.7, reasoning_effort="none", max_tokens=256, tools=["web_search"])
+    llm = OpenAILLM(
+        model="gpt-5.4-mini", temperature=0.7, reasoning_effort="none", max_tokens=256, tools=["web_search"]
+    )
     raw_tts = create_tts()
-    vap = MaAIVAPWrapper(raw_tts.output_sample_rate)
     turngpt = TurnGPTWrapper()
     bridge = CppBridge()
 
@@ -235,6 +241,10 @@ def build_components(
     memory_storage = SQLiteMemoryStorage(db_path)
     trace_store = SQLiteTraceStore(db_path)
     call_store = SQLiteCallStore(db_path)
+    # VAP runs its own inference thread for the process lifetime; sessions
+    # rebind it via reset() + session_id rather than recreating it (model
+    # load + warmup is expensive).
+    vap = ThreadedVAP(MaAIVAPModel(raw_tts.output_sample_rate), call_store=call_store)
     retry_handler = OpenAIRetryHandler(call_store)
     logging.getLogger("openai._base_client").addHandler(retry_handler)
     tts = TrackedTTS(raw_tts, call_store)

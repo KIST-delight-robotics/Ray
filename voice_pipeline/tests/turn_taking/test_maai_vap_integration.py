@@ -1,4 +1,4 @@
-"""Integration tests for MaAIVAPWrapper with real MaAI model.
+"""Integration tests for MaAIVAPModel with real MaAI model.
 
 Tests both full ONNX and PyTorch transformer fallback modes through the
 IVAP interface, verifying that outputs are numerically equivalent.
@@ -22,7 +22,7 @@ from voice_pipeline.core.types import VAPResult
 from voice_pipeline.tts.openai_tts import OpenAITTS
 
 if TYPE_CHECKING:
-    from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
+    from voice_pipeline.turn_taking.maai_vap import MaAIVAPModel
 
 pytestmark = pytest.mark.requires_model
 
@@ -54,33 +54,33 @@ def _pcm_robot(n_samples: int = 720, amplitude: int = 5000) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def _make_wrapper(*, use_onnx: bool) -> MaAIVAPWrapper:
-    """Construct MaAIVAPWrapper with class-var overrides for test scenario.
+def _make_wrapper(*, use_onnx: bool) -> MaAIVAPModel:
+    """Construct MaAIVAPModel with class-var overrides for test scenario.
 
     Class vars are mutated just before instantiation; `__init__` snapshots
     them to instance attrs so the value here is bound to this wrapper even
     if a later call mutates class vars differently.
     """
-    from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper
+    from voice_pipeline.turn_taking.maai_vap import MaAIVAPModel
 
-    MaAIVAPWrapper._FRAME_RATE = 10
-    MaAIVAPWrapper._CONTEXT_LEN_SEC = 5.0
-    MaAIVAPWrapper._ORT_THREADS = 1
-    MaAIVAPWrapper._PT_THREADS = 1
-    MaAIVAPWrapper._USE_ONNX_TRANSFORMER = use_onnx
-    MaAIVAPWrapper._USE_TORCH_COMPILE = False
-    return MaAIVAPWrapper(OpenAITTS.OUTPUT_SAMPLE_RATE)
+    MaAIVAPModel._FRAME_RATE = 10
+    MaAIVAPModel._CONTEXT_LEN_SEC = 5.0
+    MaAIVAPModel._ORT_THREADS = 1
+    MaAIVAPModel._PT_THREADS = 1
+    MaAIVAPModel._USE_ONNX_TRANSFORMER = use_onnx
+    MaAIVAPModel._USE_TORCH_COMPILE = False
+    return MaAIVAPModel(OpenAITTS.OUTPUT_SAMPLE_RATE)
 
 
 @pytest.fixture(scope="module")
 def onnx_wrapper():
-    """MaAIVAPWrapper with ONNX encoder + ONNX transformer."""
+    """MaAIVAPModel with ONNX encoder + ONNX transformer."""
     return _make_wrapper(use_onnx=True)
 
 
 @pytest.fixture(scope="module")
 def pytorch_wrapper():
-    """MaAIVAPWrapper with ONNX encoder + PyTorch transformer."""
+    """MaAIVAPModel with ONNX encoder + PyTorch transformer."""
     return _make_wrapper(use_onnx=False)
 
 
@@ -99,7 +99,7 @@ class TestBasicOperation:
     """Verify wrapper loads and produces valid VAPResult."""
 
     def test_silence_returns_result(self, onnx_wrapper):
-        result = onnx_wrapper.feed_audio(_pcm_silence())
+        result = onnx_wrapper.infer(_pcm_silence())
         assert isinstance(result, VAPResult)
         assert 0.0 <= result.p_now <= 1.0
         assert 0.0 <= result.p_fut <= 1.0
@@ -107,14 +107,14 @@ class TestBasicOperation:
 
     def test_inference_triggers_after_step(self, onnx_wrapper):
         frame = _pcm_tone()
-        results = [onnx_wrapper.feed_audio(frame) for _ in range(20)]
+        results = [onnx_wrapper.infer(frame) for _ in range(20)]
         has_inference = any(r.p_now != 0.0 or r.p_fut != 0.0 for r in results)
         assert has_inference, "Expected at least one non-zero inference result"
 
     def test_values_in_valid_range(self, onnx_wrapper):
         frame = _pcm_tone()
         for _ in range(20):
-            result = onnx_wrapper.feed_audio(frame)
+            result = onnx_wrapper.infer(frame)
         assert 0.0 <= result.p_now <= 1.0
         assert 0.0 <= result.p_fut <= 1.0
 
@@ -127,13 +127,13 @@ class TestBasicOperation:
 class TestStereoInput:
     def test_robot_audio_accepted(self, onnx_wrapper):
         for _ in range(20):
-            result = onnx_wrapper.feed_audio(_pcm_tone(), _pcm_robot())
+            result = onnx_wrapper.infer(_pcm_tone(), _pcm_robot())
         assert isinstance(result, VAPResult)
         assert 0.0 <= result.p_now <= 1.0
 
     def test_stereo_produces_valid_results(self, onnx_wrapper):
         for _ in range(20):
-            result = onnx_wrapper.feed_audio(_pcm_tone(), _pcm_robot())
+            result = onnx_wrapper.infer(_pcm_tone(), _pcm_robot())
         assert 0.0 <= result.p_now <= 1.0
         assert 0.0 <= result.p_fut <= 1.0
 
@@ -146,17 +146,17 @@ class TestStereoInput:
 class TestReset:
     def test_reset_returns_default(self, onnx_wrapper):
         for _ in range(20):
-            onnx_wrapper.feed_audio(_pcm_tone())
+            onnx_wrapper.infer(_pcm_tone())
         onnx_wrapper.reset()
-        result = onnx_wrapper.feed_audio(_pcm_silence())
+        result = onnx_wrapper.infer(_pcm_silence())
         assert result == VAPResult(0.0, 0.0, False)
 
     def test_reset_allows_fresh_inference(self, onnx_wrapper):
         for _ in range(20):
-            onnx_wrapper.feed_audio(_pcm_tone())
+            onnx_wrapper.infer(_pcm_tone())
         onnx_wrapper.reset()
         for _ in range(20):
-            result = onnx_wrapper.feed_audio(_pcm_tone())
+            result = onnx_wrapper.infer(_pcm_tone())
         assert result.p_now != 0.0 or result.p_fut != 0.0
 
 
@@ -170,28 +170,28 @@ class TestTurnCycle:
         frame = _pcm_tone()
 
         for _ in range(20):
-            onnx_wrapper.feed_audio(frame)
-        turn1 = onnx_wrapper.feed_audio(frame)
+            onnx_wrapper.infer(frame)
+        turn1 = onnx_wrapper.infer(frame)
 
         onnx_wrapper.reset()
 
         for _ in range(20):
-            onnx_wrapper.feed_audio(frame)
-        turn2 = onnx_wrapper.feed_audio(frame)
+            onnx_wrapper.infer(frame)
+        turn2 = onnx_wrapper.infer(frame)
 
         assert turn1.p_now != 0.0 or turn1.p_fut != 0.0
         assert turn2.p_now != 0.0 or turn2.p_fut != 0.0
 
     def test_silence_then_speech(self, onnx_wrapper):
         for _ in range(20):
-            onnx_wrapper.feed_audio(_pcm_silence())
-        silence_result = onnx_wrapper.feed_audio(_pcm_silence())
+            onnx_wrapper.infer(_pcm_silence())
+        silence_result = onnx_wrapper.infer(_pcm_silence())
 
         onnx_wrapper.reset()
 
         for _ in range(20):
-            onnx_wrapper.feed_audio(_pcm_tone())
-        speech_result = onnx_wrapper.feed_audio(_pcm_tone())
+            onnx_wrapper.infer(_pcm_tone())
+        speech_result = onnx_wrapper.infer(_pcm_tone())
 
         assert isinstance(silence_result, VAPResult)
         assert isinstance(speech_result, VAPResult)
@@ -207,15 +207,15 @@ class TestOnnxPytorchEquivalence:
 
     def test_silence_equivalence(self, onnx_wrapper, pytorch_wrapper):
         frame = _pcm_silence()
-        r_onnx = onnx_wrapper.feed_audio(frame)
-        r_pt = pytorch_wrapper.feed_audio(frame)
+        r_onnx = onnx_wrapper.infer(frame)
+        r_pt = pytorch_wrapper.infer(frame)
         assert r_onnx == r_pt
 
     def test_speech_equivalence(self, onnx_wrapper, pytorch_wrapper):
         frame = _pcm_tone()
         for _ in range(20):
-            r_onnx = onnx_wrapper.feed_audio(frame)
-            r_pt = pytorch_wrapper.feed_audio(frame)
+            r_onnx = onnx_wrapper.infer(frame)
+            r_pt = pytorch_wrapper.infer(frame)
 
         assert abs(r_onnx.p_now - r_pt.p_now) < 1e-4, f"p_now mismatch: onnx={r_onnx.p_now}, pt={r_pt.p_now}"
         assert abs(r_onnx.p_fut - r_pt.p_fut) < 1e-4, f"p_fut mismatch: onnx={r_onnx.p_fut}, pt={r_pt.p_fut}"
@@ -225,8 +225,8 @@ class TestOnnxPytorchEquivalence:
         user = _pcm_tone()
         robot = _pcm_robot()
         for _ in range(20):
-            r_onnx = onnx_wrapper.feed_audio(user, robot)
-            r_pt = pytorch_wrapper.feed_audio(user, robot)
+            r_onnx = onnx_wrapper.infer(user, robot)
+            r_pt = pytorch_wrapper.infer(user, robot)
 
         assert abs(r_onnx.p_now - r_pt.p_now) < 1e-4
         assert abs(r_onnx.p_fut - r_pt.p_fut) < 1e-4
@@ -236,15 +236,15 @@ class TestOnnxPytorchEquivalence:
         frame = _pcm_tone()
 
         for _ in range(20):
-            onnx_wrapper.feed_audio(frame)
-            pytorch_wrapper.feed_audio(frame)
+            onnx_wrapper.infer(frame)
+            pytorch_wrapper.infer(frame)
 
         onnx_wrapper.reset()
         pytorch_wrapper.reset()
 
         for _ in range(20):
-            r_onnx = onnx_wrapper.feed_audio(frame)
-            r_pt = pytorch_wrapper.feed_audio(frame)
+            r_onnx = onnx_wrapper.infer(frame)
+            r_pt = pytorch_wrapper.infer(frame)
 
         assert abs(r_onnx.p_now - r_pt.p_now) < 1e-4
         assert abs(r_onnx.p_fut - r_pt.p_fut) < 1e-4
@@ -261,13 +261,13 @@ class TestPyTorchMode:
     def test_inference_produces_result(self, pytorch_wrapper):
         frame = _pcm_tone()
         for _ in range(20):
-            result = pytorch_wrapper.feed_audio(frame)
+            result = pytorch_wrapper.infer(frame)
         assert 0.0 <= result.p_now <= 1.0
         assert 0.0 <= result.p_fut <= 1.0
 
     def test_reset_clears_state(self, pytorch_wrapper):
         for _ in range(20):
-            pytorch_wrapper.feed_audio(_pcm_tone())
+            pytorch_wrapper.infer(_pcm_tone())
         pytorch_wrapper.reset()
-        result = pytorch_wrapper.feed_audio(_pcm_silence())
+        result = pytorch_wrapper.infer(_pcm_silence())
         assert result == VAPResult(0.0, 0.0, False)

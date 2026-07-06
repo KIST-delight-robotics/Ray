@@ -21,7 +21,7 @@ import numpy as np
 from voice_pipeline.audio.constants import FRAME_DURATION_MS
 from voice_pipeline.core.interfaces import IVAP, ICallStore, IEmbedder, ITurnDetector
 from voice_pipeline.core.types import AudioFrame, CallRecord, TurnDecision, VAPResult, utc_now_str
-from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT, SyncTurnGPTAdapter
+from voice_pipeline.turn_taking.threaded_turngpt import SyncTurnGPTAdapter, ThreadedTurnGPT
 
 logger = logging.getLogger("voice_pipeline.turn_taking")
 
@@ -87,7 +87,7 @@ class TurnDetector(ITurnDetector):
     def __init__(
         self,
         vap: IVAP,
-        turngpt: AsyncTurnGPT | SyncTurnGPTAdapter,
+        turngpt: ThreadedTurnGPT | SyncTurnGPTAdapter,
         embedder: IEmbedder,
         vad_fn: Callable[[AudioFrame], float] | None = None,
         vad_reset_fn: Callable[[], None] | None = None,
@@ -136,7 +136,8 @@ class TurnDetector(ITurnDetector):
         frame_count: int = 1,
     ) -> TurnDecision:
         """Process one pipeline frame and return a turn decision."""
-        vap_result = self._vap.feed_audio(user_audio, robot_audio)
+        self._vap.feed_audio(user_audio, robot_audio)
+        vap_result = self._vap.latest_result
 
         if self._vad_fn is not None:
             vad_score = self._vad_fn(user_audio)

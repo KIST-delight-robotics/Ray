@@ -13,7 +13,7 @@ import numpy as np
 from voice_pipeline.core.interfaces import IVAP, IEmbedder, ITurnGPT
 from voice_pipeline.core.types import TurnDecision, VAPResult
 from voice_pipeline.trace.trace_store import InMemoryCallStore
-from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
+from voice_pipeline.turn_taking.threaded_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector, _TurnState
 
 # ---------------------------------------------------------------------------
@@ -59,10 +59,20 @@ def _make_detector(
     mock_turngpt = MagicMock(spec=ITurnGPT)
 
     if vap_results:
-        mock_vap.feed_audio.side_effect = vap_results
+        # TurnDetector reads latest_result after each feed_audio; advance the
+        # sequence on feed_audio so frame i sees vap_results[i] (last value
+        # held once exhausted).
+        _seq = iter(vap_results)
+
+        def _advance(*_args, **_kwargs):
+            nxt = next(_seq, None)
+            if nxt is not None:
+                mock_vap.latest_result = nxt
+
+        mock_vap.feed_audio.side_effect = _advance
     else:
         # Default: no speech, neutral probabilities
-        mock_vap.feed_audio.return_value = VAPResult(0.5, 0.5, False)
+        mock_vap.latest_result = VAPResult(0.5, 0.5, False)
 
     mock_turngpt.predict.return_value = turngpt_prob
 
@@ -239,7 +249,7 @@ class TestTurnShiftPrepareDefer:
     def test_defers_to_prepare_on_pending_change(self):
         """A meaningful unprepared ASR change at turn_shift -> prepare, not shift."""
         detector, mock_vap, _ = _make_detector(embedder=_make_embedder_mock(similarity=0.3))
-        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, False)  # robot-favor, silent
+        mock_vap.latest_result = VAPResult(0.2, 0.2, False)  # robot-favor, silent
         detector._silence_elapsed_sec = 3.0  # turn_shift_ready via low-prob timeout
         detector._prev_asr_text = "completely different text"  # avoid resetting timers this frame
         detector._last_prepare_text = "old text"
@@ -253,7 +263,7 @@ class TestTurnShiftPrepareDefer:
     def test_shifts_when_no_pending_change(self):
         """Text settled (no pending change) at turn_shift -> turn_shift fires."""
         detector, mock_vap, _ = _make_detector()
-        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, False)
+        mock_vap.latest_result = VAPResult(0.2, 0.2, False)
         detector._silence_elapsed_sec = 3.0
         detector._prev_asr_text = "hello"
         detector._last_prepare_text = "hello"
@@ -266,7 +276,7 @@ class TestTurnShiftPrepareDefer:
     def test_fresh_dissimilar_change_preempts_shift(self):
         """발화 조건(turngpt/0.2s 스로틀) 미충족인 신규 변화도 turn_shift 직전에는 prepare가 선점."""
         detector, mock_vap, _ = _make_detector(embedder=_make_embedder_mock(similarity=0.3))
-        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, False)
+        mock_vap.latest_result = VAPResult(0.2, 0.2, False)
         detector._silence_elapsed_sec = 3.0  # turn_shift 조건 충족 (turngpt_3.0)
         detector._prev_asr_text = "is there"
         detector._last_prepare_text = "is"
@@ -282,7 +292,7 @@ class TestTurnShiftPrepareDefer:
         """유사한 신규 변화는 skip을 기록하고 같은 프레임에서 shift가 진행된다."""
         store = InMemoryCallStore()
         mock_vap = MagicMock(spec=IVAP)
-        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, False)
+        mock_vap.latest_result = VAPResult(0.2, 0.2, False)
         mock_turngpt = MagicMock(spec=ITurnGPT)
         mock_turngpt.predict.return_value = 0.0
         detector = TurnDetector(
@@ -318,7 +328,7 @@ class TestPendingCancel:
         detector, mock_vap, _ = _make_detector()
         detector._turn_state = _TurnState.PENDING
         detector._last_prepare_text = "hello"
-        mock_vap.feed_audio.return_value = VAPResult(0.8, 0.8, True)
+        mock_vap.latest_result = VAPResult(0.8, 0.8, True)
 
         decision = detector.process_frame(FRAME, "hello")
         assert decision.cancel
@@ -330,7 +340,7 @@ class TestPendingCancel:
         detector._turn_state = _TurnState.PENDING
         detector._last_prepare_text = "hello"
         # speaking, but VAP probs don't cross the user-favor threshold → ASR path
-        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, True)
+        mock_vap.latest_result = VAPResult(0.2, 0.2, True)
 
         decision = detector.process_frame(FRAME, "hello tell me more about it")
         assert decision.cancel
@@ -341,7 +351,7 @@ class TestPendingCancel:
         detector, mock_vap, _ = _make_detector(embedder=_make_embedder_mock(similarity=0.95))
         detector._turn_state = _TurnState.PENDING
         detector._last_prepare_text = "hello"
-        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, True)
+        mock_vap.latest_result = VAPResult(0.2, 0.2, True)
 
         decision = detector.process_frame(FRAME, "hello.")
         assert not decision.cancel
@@ -353,7 +363,7 @@ class TestPendingCancel:
         detector._turn_state = _TurnState.PENDING
         detector._last_prepare_text = "hello"
         detector._prev_asr_text = "hello"
-        mock_vap.feed_audio.return_value = VAPResult(0.2, 0.2, False)
+        mock_vap.latest_result = VAPResult(0.2, 0.2, False)
 
         decision = detector.process_frame(FRAME, "hello")
         assert decision == TurnDecision.none()
@@ -365,7 +375,7 @@ class TestPendingCancel:
         detector._turn_state = _TurnState.PENDING
         detector._last_prepare_text = "hello"
         detector._prev_asr_text = "hello"
-        mock_vap.feed_audio.return_value = VAPResult(0.8, 0.8, False)
+        mock_vap.latest_result = VAPResult(0.8, 0.8, False)
 
         decision = detector.process_frame(FRAME, "hello")
         assert not decision.cancel
@@ -430,7 +440,7 @@ class TestInterruptWithRobotAudio:
         """Both p_now and p_fut favor user + speaking -> interrupt."""
         detector, mock_vap, _ = _make_detector()
         detector._turn_state = _TurnState.ROBOT_TURN
-        mock_vap.feed_audio.return_value = VAPResult(0.8, 0.8, True)
+        mock_vap.latest_result = VAPResult(0.8, 0.8, True)
 
         decision = detector.process_frame(FRAME, "", ROBOT_FRAME)
         assert decision.interrupt
@@ -439,7 +449,7 @@ class TestInterruptWithRobotAudio:
         """user_is_speaking=False -> no interrupt even if p_now/p_fut favor user."""
         detector, mock_vap, _ = _make_detector()
         detector._turn_state = _TurnState.ROBOT_TURN
-        mock_vap.feed_audio.return_value = VAPResult(0.8, 0.8, False)
+        mock_vap.latest_result = VAPResult(0.8, 0.8, False)
 
         decision = detector.process_frame(FRAME, "", ROBOT_FRAME)
         assert decision == TurnDecision.none()
@@ -448,7 +458,7 @@ class TestInterruptWithRobotAudio:
         """p_now favors user, p_fut favors robot -> backchannel, no interrupt."""
         detector, mock_vap, _ = _make_detector()
         detector._turn_state = _TurnState.ROBOT_TURN
-        mock_vap.feed_audio.return_value = VAPResult(0.8, 0.2, True)
+        mock_vap.latest_result = VAPResult(0.8, 0.2, True)
 
         decision = detector.process_frame(FRAME, "", ROBOT_FRAME)
         assert decision == TurnDecision.none()
@@ -468,7 +478,7 @@ class TestInterruptWithoutRobotAudio:
         """
         detector, mock_vap, _ = _make_detector()
         detector._turn_state = _TurnState.ROBOT_TURN
-        mock_vap.feed_audio.return_value = VAPResult(0.3, 0.3, True)
+        mock_vap.latest_result = VAPResult(0.3, 0.3, True)
 
         decision = detector.process_frame(FRAME, "", None)
         assert decision == TurnDecision.none()
@@ -477,7 +487,7 @@ class TestInterruptWithoutRobotAudio:
         """In ROBOT_TURN without robot_audio, no speech -> no interrupt."""
         detector, mock_vap, _ = _make_detector()
         detector._turn_state = _TurnState.ROBOT_TURN
-        mock_vap.feed_audio.return_value = VAPResult(0.3, 0.3, False)
+        mock_vap.latest_result = VAPResult(0.3, 0.3, False)
 
         decision = detector.process_frame(FRAME, "", None)
         assert decision == TurnDecision.none()
@@ -582,7 +592,7 @@ class TestPrepareSimilarityGate:
 class TestVADResetOnCommit:
     def _make_detector_with_reset(self, reset_fn) -> TurnDetector:
         mock_vap = MagicMock(spec=IVAP)
-        mock_vap.feed_audio.return_value = VAPResult(0.5, 0.5, False)
+        mock_vap.latest_result = VAPResult(0.5, 0.5, False)
         mock_turngpt = MagicMock(spec=ITurnGPT)
         mock_turngpt.predict.return_value = 0.0
         return TurnDetector(
@@ -638,7 +648,7 @@ class TestSimilarityGateRecording:
     ) -> tuple[TurnDetector, InMemoryCallStore]:
         store = InMemoryCallStore()
         mock_vap = MagicMock(spec=IVAP)
-        mock_vap.feed_audio.return_value = vap_result
+        mock_vap.latest_result = vap_result
         mock_turngpt = MagicMock(spec=ITurnGPT)
         mock_turngpt.predict.return_value = turngpt_prob
         detector = TurnDetector(

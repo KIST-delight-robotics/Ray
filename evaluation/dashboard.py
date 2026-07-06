@@ -644,7 +644,6 @@ def _build_overview(scored: dict) -> str:
     return "\n".join(p)
 
 
-_CATEGORY_ORDER = ["asr", "tt", "int", "lq", "mem"]
 _CATEGORY_LABELS = {
     "asr": "ASR",
     "tt": "Turn-taking",
@@ -658,6 +657,22 @@ def _turn_category(suite_name: str) -> str:
     return suite_name.split("_")[0]
 
 
+def _order_keys(scored: dict) -> tuple[dict[str, int], dict[str, int]]:
+    """Suite / question ordering ranks derived from questions.json.
+
+    `suite_descriptions` and `question_texts` in the run config are built by
+    iterating questions.json in order, so their key order is the canonical
+    suite / question sequence. Every dashboard listing and grouping sorts by
+    these ranks so the displayed order matches questions.json — independent of
+    playback order, which the acoustic-bed scheduler may reorder into SNR
+    blocks. Unknown ids sort last.
+    """
+    cfg = scored.get("config", {})
+    suite_rank = {name: i for i, name in enumerate(cfg.get("suite_descriptions", {}))}
+    q_rank = {qid: i for i, qid in enumerate(cfg.get("question_texts", {}))}
+    return suite_rank, q_rank
+
+
 def _get_suite_desc(scored: dict, suite_name: str) -> str:
     return scored.get("config", {}).get("suite_descriptions", {}).get(suite_name, "")
 
@@ -668,6 +683,8 @@ def _build_asr(scored: dict) -> str:
 
     if not asr_turns:
         return '<div class="empty">ASR 데이터 없음</div>'
+
+    suite_rank, q_rank = _order_keys(scored)
 
     from itertools import groupby
 
@@ -718,7 +735,7 @@ def _build_asr(scored: dict) -> str:
 
     # ASR suites: per-suite with description
     if asr_cat_turns:
-        sorted_asr = sorted(asr_cat_turns, key=lambda t: t["suite_name"])
+        sorted_asr = sorted(asr_cat_turns, key=lambda t: suite_rank.get(t["suite_name"], 10**6))
         for suite_name, group in groupby(sorted_asr, key=lambda t: t["suite_name"]):
             suite_turns = list(group)
             perfect = sum(1 for t in suite_turns if t["asr_score"]["wer"] == 0)
@@ -738,14 +755,7 @@ def _build_asr(scored: dict) -> str:
         p.append(
             '<div style="margin-top:10px;padding-top:10px;border-top:1px solid #e5e7eb;font-size:14px;display:flex;gap:20px;flex-wrap:wrap">'
         )
-        sorted_other = sorted(
-            other_turns,
-            key=lambda t: (
-                _CATEGORY_ORDER.index(_turn_category(t["suite_name"]))
-                if _turn_category(t["suite_name"]) in _CATEGORY_ORDER
-                else 99
-            ),
-        )
+        sorted_other = sorted(other_turns, key=lambda t: suite_rank.get(t["suite_name"], 10**6))
         for cat, group in groupby(sorted_other, key=lambda t: _turn_category(t["suite_name"])):
             cat_turns = list(group)
             cat_label = _CATEGORY_LABELS.get(cat, cat)
@@ -785,16 +795,8 @@ def _build_asr(scored: dict) -> str:
             )
         p.append("</div>")
 
-    # --- Per-question results: category > suite ---
-    all_sorted = sorted(
-        asr_turns,
-        key=lambda t: (
-            _CATEGORY_ORDER.index(_turn_category(t["suite_name"]))
-            if _turn_category(t["suite_name"]) in _CATEGORY_ORDER
-            else 99,
-            t["suite_name"],
-        ),
-    )
+    # --- Per-question results: questions.json order (category > suite > question) ---
+    all_sorted = sorted(asr_turns, key=lambda t: q_rank.get(t["question_id"], 10**6))
 
     current_cat = None
     current_suite = None
@@ -970,6 +972,8 @@ def _build_turn_taking(scored: dict) -> str:
     if not all_tt_turns and not latency:
         return '<div class="empty">턴테이킹 데이터 없음 (text mode에서는 수집되지 않음)</div>'
 
+    suite_rank, q_rank = _order_keys(scored)
+
     from itertools import groupby
 
     p = []
@@ -1062,7 +1066,7 @@ def _build_turn_taking(scored: dict) -> str:
         p.append("</div>")
 
     # --- Suite summary + Latency side by side ---
-    suite_sorted = sorted(all_tt_turns, key=lambda t: t.get("suite_name", ""))
+    suite_sorted = sorted(all_tt_turns, key=lambda t: suite_rank.get(t.get("suite_name", ""), 10**6))
     suite_groups = []
     for suite_name, group in groupby(suite_sorted, key=lambda t: t.get("suite_name", "")):
         suite_turns = list(group)
@@ -1114,9 +1118,7 @@ def _build_turn_taking(scored: dict) -> str:
         # Group by category
         from itertools import groupby as _gb
 
-        other_sorted = sorted(
-            other_suites, key=lambda x: _CATEGORY_ORDER.index(x[4]) if x[4] in _CATEGORY_ORDER else 99
-        )
+        other_sorted = sorted(other_suites, key=lambda x: suite_rank.get(x[0], 10**6))
         p.append(
             '<div style="margin-top:10px;padding-top:10px;border-top:1px solid #e5e7eb;font-size:14px;display:flex;gap:20px;flex-wrap:wrap">'
         )
@@ -1196,15 +1198,7 @@ def _build_turn_taking(scored: dict) -> str:
 
     # --- Per-question results ---
     if all_tt_turns:
-        sorted_tt = sorted(
-            all_tt_turns,
-            key=lambda t: (
-                _CATEGORY_ORDER.index(_turn_category(t["suite_name"]))
-                if _turn_category(t["suite_name"]) in _CATEGORY_ORDER
-                else 99,
-                t["suite_name"],
-            ),
-        )
+        sorted_tt = sorted(all_tt_turns, key=lambda t: q_rank.get(t["question_id"], 10**6))
 
         p.append('<div class="section">')
         p.append('<div class="section-title">개별 결과</div>')
@@ -1341,7 +1335,8 @@ def _build_prepare_gate(scored: dict) -> str:
     scores = scored.get("scores", {})
     gate = scores.get("prepare_gate", {})
     turns = scored.get("turns", [])
-    judged_turns = [t for t in turns if "gate_judge" in t]
+    _, q_rank = _order_keys(scored)
+    judged_turns = sorted((t for t in turns if "gate_judge" in t), key=lambda t: q_rank.get(t["question_id"], 10**6))
     event_turns = [t for t in turns if t.get("similarity_events")]
 
     if not gate and not judged_turns and not event_turns:
@@ -1516,6 +1511,8 @@ def _build_interruption(scored: dict) -> str:
     if not int_turns and not interruption:
         return '<div class="empty">인터럽션 데이터 없음</div>'
 
+    _, q_rank = _order_keys(scored)
+
     p = []
 
     # --- Description ---
@@ -1605,7 +1602,7 @@ def _build_interruption(scored: dict) -> str:
                 "<span>결과 분포</span>"
                 "</div>"
             )
-            audio_sorted = sorted(int_turns, key=lambda t: t.get("interrupt_audio", ""))
+            audio_sorted = sorted(int_turns, key=lambda t: q_rank.get(t.get("interrupt_audio", ""), 10**6))
             for audio_id, grp in _gb2(audio_sorted, key=lambda t: t.get("interrupt_audio", "")):
                 audio_turns = list(grp)
                 audio_text = _get_question_text(scored, audio_id)
@@ -1643,9 +1640,16 @@ def _build_interruption(scored: dict) -> str:
 
         p.append("</div>")
 
-    # --- Per-question: grouped by delay > interrupt audio ---
+    # --- Per-question: grouped by delay > interrupt audio (questions.json order within) ---
     if int_turns:
-        sorted_int = sorted(int_turns, key=lambda t: (t.get("interrupt_delay_sec", 0), t.get("interrupt_audio", "")))
+        sorted_int = sorted(
+            int_turns,
+            key=lambda t: (
+                t.get("interrupt_delay_sec", 0),
+                q_rank.get(t.get("interrupt_audio", ""), 10**6),
+                q_rank.get(t["question_id"], 10**6),
+            ),
+        )
 
         p.append('<div class="section">')
         p.append('<div class="section-title">개별 결과</div>')
@@ -1725,6 +1729,8 @@ def _build_quality(scored: dict) -> str:
     if not quality_turns:
         return '<div class="empty">응답 품질 데이터 없음</div>'
 
+    suite_rank, q_rank = _order_keys(scored)
+
     from itertools import groupby
 
     p = []
@@ -1775,7 +1781,7 @@ def _build_quality(scored: dict) -> str:
             "<span>고유 기준</span>"
             "</div>"
         )
-        for suite, stats in by_suite.items():
+        for suite, stats in sorted(by_suite.items(), key=lambda kv: suite_rank.get(kv[0], 10**6)):
             s_mean = stats.get("mean_score", 0)
             desc = _get_suite_desc(scored, suite)
             criterion = _SUITE_CRITERION.get(suite, "")
@@ -1811,8 +1817,8 @@ def _build_quality(scored: dict) -> str:
 
     p.append("</div>")
 
-    # --- Per-question by suite (main view) ---
-    sorted_turns = sorted(quality_turns, key=lambda t: t["suite_name"])
+    # --- Per-question by suite (main view), questions.json order ---
+    sorted_turns = sorted(quality_turns, key=lambda t: q_rank.get(t["question_id"], 10**6))
     for suite_name, group in groupby(sorted_turns, key=lambda t: t["suite_name"]):
         suite_turns = list(group)
         s_stats = by_suite.get(suite_name, {})
@@ -1829,7 +1835,7 @@ def _build_quality(scored: dict) -> str:
         )
 
         if is_multi:
-            scenario_sorted = sorted(suite_turns, key=lambda t: (t.get("scenario_id", ""), t.get("question_id", "")))
+            scenario_sorted = sorted(suite_turns, key=lambda t: q_rank.get(t["question_id"], 10**6))
             for scenario_id, sc_group in groupby(scenario_sorted, key=lambda t: t.get("scenario_id", "")):
                 sc_turns = list(sc_group)
 
@@ -1921,6 +1927,8 @@ def _build_memory(scored: dict) -> str:
 
     if not memory_turns and not memory:
         return '<div class="empty">장기기억 데이터 없음</div>'
+
+    suite_rank, q_rank = _order_keys(scored)
 
     writer = memory.get("writer", {})
     recall = memory.get("retriever_recall", {})
@@ -2068,14 +2076,6 @@ def _build_memory(scored: dict) -> str:
 
     p.append('<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">')
 
-    _MEM_SUITE_ORDER = [
-        "mem_recall",
-        "mem_profile",
-        "mem_update",
-        "mem_no_hallucination",
-        "mem_relevance",
-        "mem_multi_session",
-    ]
     _MEM_SUITE_DETAIL = {
         "mem_recall": "단일 사실을 정확히 기억하는지 확인",
         "mem_profile": "특정 주제에 대해 여러 세션의 정보를 종합",
@@ -2093,9 +2093,7 @@ def _build_memory(scored: dict) -> str:
         suite_map: dict[str, list] = {}
         for t in scored_mem_turns:
             suite_map.setdefault(t["suite_name"], []).append(t)
-        for suite_name in _MEM_SUITE_ORDER:
-            if suite_name not in suite_map:
-                continue
+        for suite_name in sorted(suite_map, key=lambda s: suite_rank.get(s, 10**6)):
             suite_turns = suite_map[suite_name]
             desc = _get_suite_desc(scored, suite_name)
             detail = _MEM_SUITE_DETAIL.get(suite_name, "")
@@ -2137,12 +2135,7 @@ def _build_memory(scored: dict) -> str:
 
     # Per-probe results
     if scored_mem_turns:
-
-        def _mem_sort_key(t):
-            s = t["suite_name"]
-            return _MEM_SUITE_ORDER.index(s) if s in _MEM_SUITE_ORDER else 99
-
-        sorted_mem = sorted(scored_mem_turns, key=_mem_sort_key)
+        sorted_mem = sorted(scored_mem_turns, key=lambda t: q_rank.get(t["question_id"], 10**6))
         for suite_name, group in groupby(sorted_mem, key=lambda t: t["suite_name"]):
             suite_turns = list(group)
             desc = _get_suite_desc(scored, suite_name)

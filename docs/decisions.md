@@ -71,9 +71,10 @@
 - **SLEEP 진입 리셋은 wakeword 모듈 책임**: wakeword는 인식 사이클 종료마다 자체 리셋해 SLEEP *중* 오염은 자가 회복되지만, ACTIVE→SLEEP 잔류 오염은 "발화가 threshold를 넘어야 리셋 발동" 구조라 조용한 호출에 회복 기회가 없음(미감지→리셋 불발 순환). `WakewordDetector.reset()` 공개 메서드를 `__main__`의 SLEEP 전환 3곳에서 호출 — wakeword의 `_pre_buffer`/`_vad_buffer` 잔류 오디오(STT에 묵은 청크 전송 문제)까지 모듈 내부에서 함께 정리.
 
 
-## Async Thread Separation (VAP, TurnGPT)
+## Threaded Model Wrappers (VAP, TurnGPT)
 
-- **별도 스레드 필요 이유**: RPi 5 worst case VAP 24ms + TurnGPT 30ms = 54ms, 30ms frame budget 초과. ONNX Runtime이 GIL 해제하므로 별도 스레드에서 진정한 병렬성 확보.
+- **별도 스레드 필요 이유**: RPi 5 worst case VAP 24ms + TurnGPT 30ms = 54ms, 30ms frame budget 초과. ONNX Runtime이 GIL 해제하므로 별도 스레드에서 진정한 병렬성 확보. (구현: `ThreadedVAP`/`ThreadedTurnGPT` — 구 `Async*` 명칭에서 개명, 원본 VoiceActivityProjection 래퍼는 RPi 비현실적이라 제거하고 MaAI 단일화.)
+- **VAP 스레드는 프로세스 수명, TurnGPT 래퍼는 세션 수명**: ThreadedVAP는 모델 로드+워밍업이 비싸 세션마다 재생성하지 않고 `session_id` 리바인드 + `reset()`으로 재사용, 프로세스 종료 시 `stop()`. ThreadedTurnGPT는 세션마다 새로 생성.
 - **1-frame TurnGPT delay 허용**: `process_frame()`에서 poll 후 submit. Frame N의 submit 결과는 Frame N+1에서 poll. 30ms 지연은 500ms+ 단위의 turn-taking 판단에 무시 가능.
 
 
@@ -190,4 +191,4 @@
 - **asr_text ≠ system_text가 곧 게이트 skip의 흔적**: `system_text`(messages의 user 메시지)는 `_begin_streaming`이 기록한 generator의 prepare 입력이고, `asr_text`는 turn shift 시점의 최종 ASR 텍스트. 두 값이 (정규화 후) 다른 경로는 유사도 게이트의 skip/keep뿐이라, 별도 계측 없이 이 차이만으로 judge 후보를 선별 가능.
 - **질문 단위 e2e 드릴다운 = 기존 대시보드 인라인 펼침**: 카테고리 통계만으론 한 질문의 전 단계(ASR→턴감지→게이트→생성→TTS)가 어떻게 맞물렸는지 볼 수 없음. 질문은 이미 각 탭에 나열되므로 그 자리에서 펼치는 게 탭 이동 0회로 맥락 유지에 최적 — 전용 탭(질문 목록 중복)·CLI 승격(비시각·단건)은 기각. 기존 `.collapsible-toggle/.collapsible-body` JS 재사용.
 - **드릴다운 데이터 경로 = report.py 사전 집계, dashboard는 scored.json만**: dashboard는 `f(scored.json)` 순수 함수 유지(자족적·공유 용이). report.py가 call_records를 turn_index로 묶어 턴별 `stage_calls`를 첨부, eval.db 직접 조회는 계약을 깨고 두 소스를 요구해 기각. vap 원시 프레임은 요약만(count/avg/max) — scored.json 폭증 방지. `call_issues`는 turn_index 도입으로 세션→턴 단위로 정확화.
-- **배경 잡음 주입 = 질문 오디오와 분리된 별도 재생, 사전 믹싱 폐기**: MUSAN 디지털 사전 믹싱(질문 WAV에 SNR별 잡음을 미리 합성)을 구현까지 했다가 제거. 이유: 턴테이킹 감지에서 SNR이 의미 있으려면 질문 발화가 *끝난 뒤*(침묵 기반 턴 판정이 일어나는 구간)에도 잡음이 지속되어야 하는데, 질문 WAV에 믹싱하면 질문이 끝나는 순간 잡음도 끊겨 정작 판정 구간이 무잡음이 됨. 현재는 잡음을 질문 오디오와 분리해 같은 스피커로 별도 재생 (eval 코드 밖 운영 — 재생 자동화 코드 없음). 정밀한 디지털 SNR 통제는 포기하는 트레이드오프.
+- **배경 잡음 주입 = 음향 노이즈 베드, 디지털 사전 믹싱 폐기**: MUSAN을 질문 WAV에 미리 합성하는 디지털 방식을 구현까지 했다가 제거. 디지털 믹스는 *ASR만* 정확한 SNR로 스트레스할 뿐 — 질문이 끝나는 순간 잡음도 끊겨, 마이크·VAD·침묵 기반 턴 판정 등 나머지 단계는 무잡음 조건이 됨. 현재는 연속 노이즈 베드를 dmix로 질문과 같은 카드에서 동시 재생(`--noise-bed`, `evaluation/noise_bed.py`)하고, 디지털 SNR 정밀 통제 대신 마이크 실측 캘리브레이션으로 실효 SNR을 잡음 (상세 결정은 decisions-wip의 노이즈 베드 항목 참조).

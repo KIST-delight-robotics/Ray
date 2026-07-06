@@ -33,7 +33,7 @@ from bench_turn_model import (  # noqa: E402
     numpy_to_pcm16,
 )
 
-from voice_pipeline.turn_taking.maai_vap import MaAIVAPWrapper  # noqa: E402
+from voice_pipeline.turn_taking.maai_vap import MaAIVAPModel  # noqa: E402
 
 
 @dataclass
@@ -70,9 +70,9 @@ def run_concurrent_benchmark(
     print("  Loading VAP (maai-full-onnx)...")
     from voice_pipeline.tts.openai_tts import OpenAITTS
 
-    MaAIVAPWrapper._FRAME_RATE = vap_frame_rate
-    MaAIVAPWrapper._ORT_THREADS = vap_ort_threads
-    vap = MaAIVAPWrapper(OpenAITTS.OUTPUT_SAMPLE_RATE)
+    MaAIVAPModel._FRAME_RATE = vap_frame_rate
+    MaAIVAPModel._ORT_THREADS = vap_ort_threads
+    vap = MaAIVAPModel(OpenAITTS.OUTPUT_SAMPLE_RATE)
 
     print("  Loading TurnGPT (onnx-int8)...")
     TurnGPTWrapper._ONNX_THREADS = tgpt_onnx_threads  # scripts: 직접 class var 재할당 허용
@@ -89,7 +89,7 @@ def run_concurrent_benchmark(
         s = idx * spf
         pcm1 = numpy_to_pcm16(ch1[s : s + spf])
         pcm2 = numpy_to_pcm16(ch2[s : s + spf])
-        vap.feed_audio(pcm1, pcm2)
+        vap.infer(pcm1, pcm2)
     for i in range(warmup_tgpt_calls):
         tgpt.predict(all_inputs[i % n_inputs])
 
@@ -125,7 +125,7 @@ def run_concurrent_benchmark(
             pcm2 = numpy_to_pcm16(ch2[s : s + spf])
 
             t0 = time.perf_counter()
-            vap.feed_audio(pcm1, pcm2)
+            vap.infer(pcm1, pcm2)
             t1 = time.perf_counter()
 
             vap_latencies[i] = (t1 - t0) * 1000.0

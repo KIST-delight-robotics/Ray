@@ -1,10 +1,16 @@
-"""MaAI VAP wrapper with ONNX encoder and transformer.
+"""MaAI VAP inference model (ONNX encoder + transformer).
 
 Loads pre-exported ONNX files for both encoder and transformer by default.
 Toggle ``_USE_ONNX_TRANSFORMER = False`` (class var) for PyTorch fallback
 via MaAI (requires ``maai`` package).
 
 Optimal RPi 5 config: ort_threads=1 (single-threaded).
+
+Pure synchronous inference: ``infer(user, robot)`` returns a ``VAPResult``.
+Background scheduling (buffering, the inference thread, the pipeline-facing
+``IVAP`` runtime) lives in ``ThreadedVAP`` (``threaded_vap.py``), which holds
+an instance of this model. This class is not thread-safe; ``ThreadedVAP``
+serializes access.
 
 External dependency: ``maai`` package (cloned at ``external/MaAI/``),
 only required when using PyTorch transformer fallback.
@@ -26,18 +32,23 @@ except ImportError:
     torch = None  # type: ignore[assignment]
 
 from voice_pipeline.audio.constants import SAMPLE_RATE
-from voice_pipeline.core.interfaces import IVAP
 from voice_pipeline.core.types import AudioFrame, VAPResult
 from voice_pipeline.turn_taking.exceptions import VAPError
 
 logger = logging.getLogger("voice_pipeline.turn_taking.maai_vap")
 
 
-class MaAIVAPWrapper(IVAP):
-    """IVAP implementation using MaAI VAP with ONNX encoder.
+class MaAIVAPModel:
+    """MaAI VAP inference (ONNX encoder + transformer), synchronous.
 
-    Internally stateful: maintains LSTM hidden states for the encoder
-    and KV-cache for the transformer across ``feed_audio`` calls.
+    ``infer(user, robot)`` runs one frame through the encoder + transformer
+    and returns the voice-activity estimate. Internally stateful — LSTM
+    hidden states for the encoder and KV-cache for the transformer carry
+    across calls; ``reset()`` clears them for a new turn.
+
+    Not thread-safe. Use ``ThreadedVAP`` for the pipeline (it owns the
+    inference thread and serializes access). Dev tools (bench/trace) call
+    ``infer`` directly on a single thread.
 
     Args:
         tts_sample_rate: Robot(TTS) 출력 샘플레이트. 리샘플링 기준.
@@ -152,7 +163,7 @@ class MaAIVAPWrapper(IVAP):
         self._buf_x1 = np.zeros(self._FRAME_CTX_PADDING, dtype=np.float32)
         self._buf_x2 = np.zeros(self._FRAME_CTX_PADDING, dtype=np.float32)
         self._vap_cache: dict | None = None
-        self._cached_result = self._DEFAULT_RESULT
+        self._last_result = self._DEFAULT_RESULT
 
         # Warmup: pre-allocate ORT buffers / trigger torch.compile
         self._warmup()
@@ -160,7 +171,7 @@ class MaAIVAPWrapper(IVAP):
 
         mode = "onnx" if self._use_onnx_transformer else "pytorch"
         logger.info(
-            "MaAIVAPWrapper initialized: frame_rate=%d, context=%.1fs, ort_threads=%d, pt_threads=%d, transformer=%s",
+            "MaAIVAPModel initialized: frame_rate=%d, context=%.1fs, ort_threads=%d, pt_threads=%d, transformer=%s",
             self._frame_rate,
             self._CONTEXT_LEN_SEC,
             self._ORT_THREADS,
@@ -168,8 +179,13 @@ class MaAIVAPWrapper(IVAP):
             mode,
         )
 
-    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
-        """Feed one pipeline frame and return voice activity estimates."""
+    def infer(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
+        """Run inference on one (possibly batch-drained) audio chunk.
+
+        Returns the latest voice-activity estimate. When the internal frame
+        buffer has not yet accumulated a full inference window, returns the
+        previous result (so callers always get a valid ``VAPResult``).
+        """
         try:
             x1 = self._pcm_to_numpy(user_audio)
             if robot_audio is not None:
@@ -180,15 +196,13 @@ class MaAIVAPWrapper(IVAP):
 
             result = self._process_frame(x1, x2)
             if result is not None:
-                self._cached_result = result
-
-            return self._cached_result
+                self._last_result = result
         except Exception:
-            logger.warning("Error in feed_audio, returning cached result", exc_info=True)
-            return self._cached_result
+            logger.warning("Error in VAP inference, keeping cached result", exc_info=True)
+        return self._last_result
 
     def reset(self) -> None:
-        """Clear encoder state, KV cache, and audio buffers."""
+        """Clear encoder LSTM state, transformer KV cache, and audio buffers."""
         self._h1[:] = 0
         self._c1[:] = 0
         self._h2[:] = 0
@@ -204,7 +218,7 @@ class MaAIVAPWrapper(IVAP):
             # ONNX and PyTorch eager: safe to clear entirely
             self._vap_cache = None
 
-        self._cached_result = self._DEFAULT_RESULT
+        self._last_result = self._DEFAULT_RESULT
 
     def _zero_pytorch_cache(self) -> None:
         """Zero PyTorch KV cache values, preserving tensor shapes.

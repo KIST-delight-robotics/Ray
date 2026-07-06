@@ -519,33 +519,40 @@ class ILEDController(ABC):
 
 
 class IVAP(ABC):
-    """Voice Activity Projection model wrapper.
+    """Voice Activity Projection — pipeline-facing runtime contract.
 
-    Maintains a rolling stereo audio buffer and runs periodic inference
-    to estimate current/future voice activity probabilities.
-
-    Returns cached result when no new inference is due.
+    Command/query separated: ``feed_audio`` only ingests audio (a command),
+    and the latest voice-activity estimate is read separately via
+    ``latest_result`` (a query). Implementations run inference on their own
+    schedule (e.g. a background thread); ``latest_result`` returns the most
+    recent estimate, repeatable and non-consuming.
     """
 
     @abstractmethod
-    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
-        """Feed pipeline audio and return voice activity estimates.
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> None:
+        """Ingest one pipeline frame of audio (non-blocking command).
 
         Args:
             user_audio: PCM audio at pipeline rate (16kHz). One or more
                 concatenated 30ms frames when batch-draining.
             robot_audio: PCM audio at TTS output sample rate (24kHz).
                 Length should match user_audio duration. None when the
-                robot is not speaking. Wrapper resamples internally
+                robot is not speaking. Implementation resamples internally
                 to 16kHz.
+        """
 
-        Returns:
-            VAPResult with p_now, p_fut, and user_is_speaking.
+    @property
+    @abstractmethod
+    def latest_result(self) -> VAPResult:
+        """Most recent voice-activity estimate (non-consuming query).
+
+        Returns the default ``VAPResult(0, 0, False)`` before the first
+        inference completes.
         """
 
     @abstractmethod
     def reset(self) -> None:
-        """Clear the rolling buffer and internal state for a new turn."""
+        """Clear buffered audio and internal state for a new turn."""
 
 
 # ---------------------------------------------------------------------------

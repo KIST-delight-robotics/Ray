@@ -17,8 +17,7 @@ from voice_pipeline.session_loop import SessionComponents
 from voice_pipeline.wiring import ProcessComponents
 
 _SESSION_CLASSES = [
-    "AsyncVAP",
-    "AsyncTurnGPT",
+    "ThreadedTurnGPT",
     "ConversationHistory",
     "MemoryRetriever",
     "TurnDetector",
@@ -86,6 +85,7 @@ class TestCreateSession:
         assert comps.tts.session_id == result.session_id
         assert comps.embedder.session_id == result.session_id
         assert comps.retry_handler.session_id == result.session_id
+        assert comps.vap.session_id == result.session_id
 
     def test_models_reset_before_assembly(self, session_mocks):
         comps = _make_components()
@@ -95,6 +95,14 @@ class TestCreateSession:
         comps.vap.reset.assert_called_once()
         comps.turngpt.reset.assert_called_once()
         comps.reset_vad.assert_called_once()
+
+    def test_vap_reused_not_recreated(self, session_mocks):
+        comps = _make_components()
+
+        comps.create_session()
+
+        kwargs = session_mocks["TurnDetector"].call_args.args
+        assert kwargs[0] is comps.vap
 
     def test_session_loop_kwargs_pass_through(self, session_mocks):
         comps = _make_components()
@@ -131,12 +139,13 @@ class TestCreateSession:
         assert session_mocks["SessionLoop"].call_args.kwargs["memory_storage"] is None
         assert session_mocks["SpeechGenerator"].call_args.kwargs["retriever"] is None
 
-    def test_previous_async_wrappers_stopped_on_next_session(self, session_mocks):
+    def test_previous_threaded_turngpt_stopped_on_next_session(self, session_mocks):
+        session_mocks["ThreadedTurnGPT"].side_effect = lambda *a, **k: MagicMock()
         comps = _make_components()
 
         comps.create_session()
-        first_vap = comps._prev_async[0]
+        first_turngpt = comps._prev_threaded[0]
         comps.create_session()
 
-        first_vap.stop.assert_called_once()
-        assert len(comps._prev_async) == 2
+        first_turngpt.stop.assert_called_once()
+        assert len(comps._prev_threaded) == 1

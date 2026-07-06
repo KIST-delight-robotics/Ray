@@ -1,4 +1,4 @@
-"""Async TurnGPT — runs TurnGPT inference on a dedicated background thread.
+"""Threaded TurnGPT — runs TurnGPT inference on a dedicated background thread.
 
 Provides a submit/poll interface instead of the synchronous ITurnGPT.predict().
 A SyncTurnGPTAdapter is also provided for unit tests that use mock ITurnGPT.
@@ -16,8 +16,8 @@ from voice_pipeline.core.types import CallRecord, utc_now_str
 logger = logging.getLogger("voice_pipeline.turn_taking")
 
 
-class AsyncTurnGPT:
-    """Async TurnGPT wrapper with submit/poll pattern.
+class ThreadedTurnGPT:
+    """Threaded TurnGPT wrapper with submit/poll pattern.
 
     ``submit()`` enqueues text for background inference (fire-and-forget).
     ``poll_result()`` returns the latest result or None.
@@ -48,7 +48,7 @@ class AsyncTurnGPT:
         self._call_store = call_store
         self._session_id = session_id
         self._call_records: list[CallRecord] = []
-        self._thread = threading.Thread(target=self._run, daemon=True, name="async-turngpt")
+        self._thread = threading.Thread(target=self._run, daemon=True, name="threaded-turngpt")
         self._thread.start()
 
     def submit(self, dialog_text: str) -> None:
