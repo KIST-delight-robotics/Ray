@@ -21,6 +21,7 @@ from voice_pipeline.core.types import (
     CallRecord,
     CppEvent,
     GeneratorState,
+    HistorySummarySnapshot,
     HistoryTurn,
     LEDState,
     LLMMetrics,
@@ -262,6 +263,43 @@ class IConversationHistory(ABC):
 
         With write-through, individual messages are already persisted.
         """
+
+
+# ---------------------------------------------------------------------------
+# HistorySummarizer
+# ---------------------------------------------------------------------------
+
+
+class IHistorySummarizer(ABC):
+    """Rolling in-session summarizer of older conversation turns.
+
+    Maintains a background-generated summary that ContextBuilder shows in
+    place of the turns it covers. A context-view concern only — raw history
+    in storage is never modified (MemoryWriter still sees the full transcript).
+    """
+
+    @abstractmethod
+    def snapshot(self) -> HistorySummarySnapshot | None:
+        """Return the current summary snapshot, or None if none exists yet.
+
+        Thread-safe. The snapshot is immutable; turns with turn_id greater
+        than ``through_turn_id`` must still be sent verbatim.
+        """
+
+    @abstractmethod
+    def maybe_schedule(self, turns: list[HistoryTurn]) -> None:
+        """Kick off a background summarization when the trigger condition holds.
+
+        Non-blocking. No-op when usage is below the trigger threshold, a
+        summarization is already in flight, or close() was called.
+
+        Args:
+            turns: Full turn list from IConversationHistory.get_turns().
+        """
+
+    @abstractmethod
+    def close(self) -> None:
+        """Reject further scheduling and discard any in-flight result."""
 
 
 # ---------------------------------------------------------------------------

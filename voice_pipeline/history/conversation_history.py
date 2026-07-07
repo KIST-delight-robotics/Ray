@@ -220,6 +220,7 @@ class ConversationHistory(IConversationHistory):
                 HistoryTurn(
                     items=tuple(item for item, _ in groups[tid]),
                     token_count=sum(tc for _, tc in groups[tid]),
+                    turn_id=tid,
                 )
                 for tid in sorted_turn_ids
             ]

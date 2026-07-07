@@ -23,6 +23,7 @@ _SESSION_CLASSES = [
     "TurnDetector",
     "SpeechGenerator",
     "SessionLoop",
+    "HistorySummarizer",
 ]
 
 
@@ -31,6 +32,7 @@ def _make_components() -> ProcessComponents:
         language_code="en-US",
         asr=MagicMock(),
         llm=MagicMock(),
+        summary_llm=MagicMock(),
         raw_tts=MagicMock(),
         tts=MagicMock(output_sample_rate=24000),
         vap=MagicMock(),
@@ -43,7 +45,6 @@ def _make_components() -> ProcessComponents:
         storage=MagicMock(),
         executor=MagicMock(),
         token_counter=MagicMock(return_value=1),
-        tools_token_cost=294,
         embedder=MagicMock(),
         memory_storage=MagicMock(),
         trace_store=MagicMock(),
@@ -149,3 +150,22 @@ class TestCreateSession:
 
         first_turngpt.stop.assert_called_once()
         assert len(comps._prev_threaded) == 1
+
+    def test_summarizer_injected_into_speech_generator(self, session_mocks):
+        comps = _make_components()
+
+        comps.create_session()
+
+        summarizer = session_mocks["HistorySummarizer"].return_value
+        assert session_mocks["SpeechGenerator"].call_args.kwargs["summarizer"] is summarizer
+
+    def test_previous_summarizer_closed_on_next_session(self, session_mocks):
+        session_mocks["HistorySummarizer"].side_effect = lambda *a, **k: MagicMock()
+        comps = _make_components()
+
+        comps.create_session()
+        first_summarizer = comps._prev_summarizers[0]
+        comps.create_session()
+
+        first_summarizer.close.assert_called_once()
+        assert len(comps._prev_summarizers) == 1

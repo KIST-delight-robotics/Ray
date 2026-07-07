@@ -500,10 +500,31 @@ class HistoryTurn:
     Attributes:
         items: Message dicts in Responses API input format.
         token_count: Pre-computed total token count for all items.
+        turn_id: Monotonically increasing turn identifier within the session.
     """
 
     items: tuple[dict[str, Any], ...]
     token_count: int
+    turn_id: int
+
+
+@dataclass(frozen=True)
+class HistorySummarySnapshot:
+    """Immutable view of the rolling in-session history summary.
+
+    Produced by IHistorySummarizer and consumed by ContextBuilder in place
+    of the turns it covers. Raw history in storage is never modified.
+
+    Attributes:
+        block_text: Formatted developer-message content (header included).
+        token_count: Pre-counted tokens of ``block_text``.
+        through_turn_id: Last turn_id covered by this summary. Turns with
+            a greater turn_id are still live and sent verbatim.
+    """
+
+    block_text: str
+    token_count: int
+    through_turn_id: int
 
 
 # ---------------------------------------------------------------------------

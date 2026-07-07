@@ -1,13 +1,20 @@
-"""LLM context assembly with 4-block priority-based token budgeting.
+"""LLM context assembly with fixed per-block token budgets.
 
 Block layout (optimised for prefix caching — stable blocks first):
 
-  1. System prompt  (instructions, static)
-  2. Profile        (developer msg, session-level fixed)
-  3. Prev sessions  (developer msgs, session-level fixed)
-  4. History turns   (user/assistant, grows within session)
-  5. Current user    (user msg, varies per call)
-  6. Memory          (developer msg, varies per call — placed last)
+  1. System prompt   (instructions, static)
+  2. Profile         (developer msg, session-level fixed)
+  3. Prev sessions   (developer msgs, session-level fixed)
+  4. History summary (developer msg, swaps only when the rolling summary updates)
+  5. History turns   (user/assistant, grows within session)
+  6. Current user    (user msg, varies per call)
+  7. Memory          (developer msg, varies per call — placed last)
+
+Each block has its own independent budget; there is no shared global budget.
+History (summary block + live turns) gets a fixed ``_MAX_HISTORY_TOKENS``.
+When usage approaches it, the injected IHistorySummarizer folds older turns
+into a rolling summary in the background; until the swap lands, overflow is
+handled by dropping the oldest live turns from the view (fallback).
 """
 
 from __future__ import annotations
@@ -21,7 +28,7 @@ from voice_pipeline.context.formatters import (
     format_raw_transcript_block,
     format_session_summary_block,
 )
-from voice_pipeline.core.interfaces import IConversationHistory, IMemoryStorage
+from voice_pipeline.core.interfaces import IConversationHistory, IHistorySummarizer, IMemoryStorage
 from voice_pipeline.core.types import TokenCounter
 
 if TYPE_CHECKING:
@@ -29,31 +36,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("voice_pipeline.context")
 
-# API framing overhead (empirically measured for OpenAI Responses API):
-# - Base: fixed overhead per request (internal structure)
-# - Per-message: role markers, separators per message
-_BASE_OVERHEAD_TOKENS = 5
+# Per-message API framing overhead (role markers, separators — empirically
+# measured for the OpenAI Responses API).
 _PER_MESSAGE_OVERHEAD_TOKENS = 3
 
 
 class ContextBuilder:
-    """Assembles LLM context with 4-block priority-based token budgeting.
+    """Assembles LLM context with fixed per-block token budgets.
 
     Session-level data (profiles, previous session summaries) is injected
     at construction and pre-formatted.  Per-turn memory results are passed
     to ``build()``.
 
-    Token budget allocation order:
-      1. Base overhead + tool definitions
-      2. System prompt  (Block 1)
-      3. Profile block  (Block 2, capped at ``_MAX_PROFILE_TOKENS``)
-      4. Prev sessions  (Block 3 front, capped at ``_MAX_PREV_SESSION_TOKENS``)
-      5. Memory block   (Block 4, **dedicated** ``_MAX_MEMORY_TOKENS``)
-      6. Current user message
-      7. Current session history  (remainder, reverse-chronological atomic)
+    Per-block budgets (independent — no shared global budget):
+      - System prompt / current user message: always included, uncapped.
+      - Profile: capped at ``_MAX_PROFILE_TOKENS`` (skip if over).
+      - Prev sessions: capped at ``_MAX_PREV_SESSION_TOKENS`` (oldest kept first).
+      - Memory: capped at ``_MAX_MEMORY_TOKENS`` (lowest-salience dropped).
+      - History (summary block + live turns): fixed ``_MAX_HISTORY_TOKENS``,
+        reverse-chronological atomic fill, oldest dropped on overflow.
     """
 
-    _MAX_CONTEXT_TOKENS = 4096  # LLM 입력 전체 토큰 예산 (모든 블록 합산 상한)
+    _MAX_HISTORY_TOKENS = 8192  # 현재 세션 히스토리 전용 고정 예산 (요약 블록 포함)
     _MAX_MEMORY_TOKENS = 512  # retrieved memory 블록 전용 예산 (초과 시 낮은 salience 순 drop)
     _MAX_PROFILE_TOKENS = 256  # profile 블록 전용 예산 (초과 시 블록 skip)
     _MAX_PREV_SESSION_TOKENS = 512  # previous session summary 블록 전용 예산 (초과 시 오래된 순 drop)
@@ -64,17 +68,17 @@ class ContextBuilder:
         history: IConversationHistory,
         system_prompt: str,
         token_counter: TokenCounter,
-        tools_token_cost: int = 0,
         profiles: list[Profile] | None = None,
         session_summaries: list[str] | None = None,
         *,
         memory_storage: IMemoryStorage | None = None,
         session_id: str | None = None,
+        summarizer: IHistorySummarizer | None = None,
     ) -> None:
         self._history = history
         self._system_prompt = system_prompt
         self._token_counter = token_counter
-        self._tools_token_cost = tools_token_cost
+        self._summarizer = summarizer
 
         # Load session context if storage is provided
         self.exclude_session_ids: set[str] = set()
@@ -102,96 +106,94 @@ class ContextBuilder:
     ) -> list[dict[str, Any]]:
         """Build the message list for an LLM call.
 
-        Token budget allocation:
-          1. Reserve fixed overhead (base + tool definitions).
-          2. Reserve system prompt.
-          3. Reserve profile block (capped).
-          4. Reserve previous session summaries (capped, oldest dropped first).
-          5. Reserve memory block (dedicated budget, capped).
-          6. Reserve current user message.
-          7. Fill remaining budget with history turns (most recent first).
+        Assembly order (each block against its own budget):
+          1. System prompt (always).
+          2. Profile block (capped).
+          3. Previous session summaries (capped, oldest kept first).
+          4. History: rolling summary block + live turns within
+             ``_MAX_HISTORY_TOKENS`` (most recent first, oldest dropped).
+          5. Current user message (always).
+          6. Memory block (capped, placed last for prefix caching).
+
+        Also schedules a background history summarization when usage
+        crosses the summarizer's trigger threshold.
         """
-        budget = self._MAX_CONTEXT_TOKENS
-
-        # 1. Fixed overhead
-        budget -= _BASE_OVERHEAD_TOKENS + self._tools_token_cost
-
         messages: list[dict[str, Any]] = []
 
-        # 2. System prompt (Block 1)
+        # 1. System prompt (Block 1)
         if self._system_prompt:
             messages.append({"role": "system", "content": self._system_prompt})
-            budget -= self._token_counter(self._system_prompt) + _PER_MESSAGE_OVERHEAD_TOKENS
 
-        # 3. Profile (Block 2) — capped at _MAX_PROFILE_TOKENS
-        if self._profile_text and self._profile_tokens <= self._MAX_PROFILE_TOKENS and self._profile_tokens <= budget:
+        # 2. Profile (Block 2) — capped at _MAX_PROFILE_TOKENS
+        if self._profile_text and self._profile_tokens <= self._MAX_PROFILE_TOKENS:
             messages.append({"role": "developer", "content": self._profile_text})
-            budget -= self._profile_tokens
 
-        # 4. Previous session summaries (Block 3 front) — capped total
-        summary_budget = min(self._MAX_PREV_SESSION_TOKENS, budget)
+        # 3. Previous session summaries (Block 3) — capped total
         summary_spent = 0
-        summary_msgs_to_add: list[dict[str, Any]] = []
         for text, cost in self._summary_msgs:
-            if summary_spent + cost > summary_budget:
+            if summary_spent + cost > self._MAX_PREV_SESSION_TOKENS:
                 break
-            summary_msgs_to_add.append({"role": "developer", "content": text})
+            messages.append({"role": "developer", "content": text})
             summary_spent += cost
-        messages.extend(summary_msgs_to_add)
-        budget -= summary_spent
 
-        # 5. Memory (Block 4) — dedicated budget, truncate episodes to fit
-        memory_text = ""
-        memory_cost = 0
-        if memory_result and memory_result.episodes:
-            memory_text = format_memory_block(memory_result)
-            memory_cost = self._token_counter(memory_text) + _PER_MESSAGE_OVERHEAD_TOKENS
-            # If over cap, drop lowest-salience episodes (from tail) until it fits
-            max_mem = self._MAX_MEMORY_TOKENS
-            if memory_cost > max_mem:
-                from voice_pipeline.memory.types import MemoryReadResult
-
-                eps = list(memory_result.episodes)
-                scores = list(memory_result.scores)
-                idx_map = dict(memory_result.index_to_id)
-                while eps and memory_cost > max_mem:
-                    eps.pop()
-                    scores.pop()
-                    idx_map.pop(len(eps) + 1, None)
-                    trimmed = MemoryReadResult(eps, scores, idx_map)
-                    memory_text = format_memory_block(trimmed)
-                    memory_cost = self._token_counter(memory_text) + _PER_MESSAGE_OVERHEAD_TOKENS if memory_text else 0
-                if not memory_text:
-                    memory_cost = 0
-        budget -= memory_cost  # reserve even before history fill
-
-        # 6. Current user message
-        user_msg: dict[str, Any] = {"role": "user", "content": current_text}
-        budget -= self._token_counter(current_text) + _PER_MESSAGE_OVERHEAD_TOKENS
-
-        # 7. History turns (fill remainder, reverse chronological, atomic)
+        # 4. History — fixed budget shared by the summary block and live turns
+        snapshot = self._summarizer.snapshot() if self._summarizer is not None else None
         turns = self._history.get_turns()
+        history_budget = self._MAX_HISTORY_TOKENS
+        watermark = -1
+        if snapshot is not None:
+            watermark = snapshot.through_turn_id
+            history_budget -= snapshot.token_count + _PER_MESSAGE_OVERHEAD_TOKENS
+            messages.append({"role": "developer", "content": snapshot.block_text})
+
+        live_turns = [t for t in turns if t.turn_id > watermark]
         selected: list[list[dict[str, Any]]] = []
-        for turn in reversed(turns):
+        for turn in reversed(live_turns):
             turn_cost = turn.token_count + len(turn.items) * _PER_MESSAGE_OVERHEAD_TOKENS
-            if turn_cost > budget:
+            if turn_cost > history_budget:
                 break
             selected.append(list(turn.items))
-            budget -= turn_cost
+            history_budget -= turn_cost
 
         # Flatten history in chronological order
         selected.reverse()
         for turn_items in selected:
             messages.extend(turn_items)
 
-        # Current user message
-        messages.append(user_msg)
+        # 5. Current user message (always included)
+        messages.append({"role": "user", "content": current_text})
 
-        # Memory block last (for prefix caching — varies per call)
+        # 6. Memory block last (for prefix caching — varies per call)
+        memory_text = self._build_memory_text(memory_result)
         if memory_text:
             messages.append({"role": "developer", "content": memory_text})
 
+        if self._summarizer is not None:
+            self._summarizer.maybe_schedule(turns)
+
         return messages
+
+    def _build_memory_text(self, memory_result: MemoryReadResult | None) -> str:
+        """Format the memory block, trimming lowest-salience episodes to fit the cap."""
+        if not memory_result or not memory_result.episodes:
+            return ""
+        memory_text = format_memory_block(memory_result)
+        memory_cost = self._token_counter(memory_text) + _PER_MESSAGE_OVERHEAD_TOKENS
+        if memory_cost <= self._MAX_MEMORY_TOKENS:
+            return memory_text
+
+        from voice_pipeline.memory.types import MemoryReadResult as _MemoryReadResult
+
+        eps = list(memory_result.episodes)
+        scores = list(memory_result.scores)
+        idx_map = dict(memory_result.index_to_id)
+        while eps and memory_cost > self._MAX_MEMORY_TOKENS:
+            eps.pop()
+            scores.pop()
+            idx_map.pop(len(eps) + 1, None)
+            memory_text = format_memory_block(_MemoryReadResult(eps, scores, idx_map))
+            memory_cost = self._token_counter(memory_text) + _PER_MESSAGE_OVERHEAD_TOKENS if memory_text else 0
+        return memory_text
 
     def _load_session_context(
         self,

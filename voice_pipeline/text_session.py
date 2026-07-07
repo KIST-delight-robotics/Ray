@@ -82,7 +82,6 @@ class TextSession:
         history: IConversationHistory,
         token_counter: TokenCounter,
         system_prompt: str,
-        tools_token_cost: int = 0,
         memory_storage: IMemoryStorage | None = None,
         retriever: IMemoryRetriever | None = None,
         session_id: str | None = None,
@@ -103,7 +102,6 @@ class TextSession:
                 history,
                 system_prompt,
                 token_counter,
-                tools_token_cost=tools_token_cost,
                 memory_storage=memory_storage,
                 session_id=self._session_id,
             )
@@ -113,7 +111,6 @@ class TextSession:
                 history,
                 system_prompt,
                 token_counter,
-                tools_token_cost=tools_token_cost,
                 profiles=profiles,
             )
         self._exclude_session_ids = self._context_builder.exclude_session_ids | {self._session_id}

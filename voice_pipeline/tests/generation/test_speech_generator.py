@@ -895,8 +895,8 @@ class TestMemoryIntegration:
 
         history = MagicMock(spec=IConversationHistory)
         history.get_turns.return_value = [
-            HistoryTurn(items=({"role": "user", "content": "prev question"},), token_count=2),
-            HistoryTurn(items=({"role": "assistant", "content": "prev answer"},), token_count=2),
+            HistoryTurn(items=({"role": "user", "content": "prev question"},), token_count=2, turn_id=0),
+            HistoryTurn(items=({"role": "assistant", "content": "prev answer"},), token_count=2, turn_id=1),
         ]
 
         gen = SpeechGenerator(

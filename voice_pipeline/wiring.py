@@ -27,6 +27,8 @@ from voice_pipeline.asr.asr import GoogleCloudASR
 from voice_pipeline.audio.audio_input import AudioInput
 from voice_pipeline.audio.constants import SAMPLE_RATE
 from voice_pipeline.bridge.cpp_bridge import CppBridge
+from voice_pipeline.context.context_builder import ContextBuilder
+from voice_pipeline.context.history_summarizer import HistorySummarizer
 from voice_pipeline.core.interfaces import ITTS, IStorageBackend
 from voice_pipeline.core.types import AudioFrame
 from voice_pipeline.embedding.embedder import create_embedder
@@ -37,7 +39,6 @@ from voice_pipeline.led.led_controller import LEDController
 from voice_pipeline.llm.llm import OpenAILLM
 from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
 from voice_pipeline.llm.token_counter import TokenCounter, create_token_counter
-from voice_pipeline.llm.tools import get_tools_token_cost
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DB_PATH, _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
@@ -72,6 +73,7 @@ class ProcessComponents:
     language_code: str
     asr: GoogleCloudASR
     llm: OpenAILLM
+    summary_llm: OpenAILLM
     raw_tts: ITTS
     tts: TrackedTTS
     vap: ThreadedVAP
@@ -84,7 +86,6 @@ class ProcessComponents:
     storage: IStorageBackend
     executor: ThreadPoolExecutor
     token_counter: TokenCounter
-    tools_token_cost: int
     embedder: TrackedEmbedder
     memory_storage: SQLiteMemoryStorage
     trace_store: SQLiteTraceStore
@@ -95,9 +96,10 @@ class ProcessComponents:
     audio_input: AudioInput
     shutdown_event: threading.Event
     _prev_threaded: list[ThreadedTurnGPT] = field(default_factory=list)
+    _prev_summarizers: list[HistorySummarizer] = field(default_factory=list)
 
     def stop_threaded(self) -> None:
-        """Stop the previous session's threaded TurnGPT wrapper.
+        """Stop the previous session's threaded TurnGPT wrapper and summarizer.
 
         VAP 스레드는 프로세스 수명이라 여기서 멈추지 않는다 — 프로세스 종료 시
         엔트리포인트가 ``vap.stop()``을 직접 호출한다.
@@ -105,6 +107,9 @@ class ProcessComponents:
         for wrapper in self._prev_threaded:
             wrapper.stop()
         self._prev_threaded.clear()
+        for summarizer in self._prev_summarizers:
+            summarizer.close()
+        self._prev_summarizers.clear()
 
     def create_session(self, *, memory_enabled: bool = True, **session_loop_kwargs: Any) -> SessionComponents:
         """Assemble a fresh per-session component graph.
@@ -146,6 +151,15 @@ class ProcessComponents:
             call_store=self.call_store,
             session_id=session_id,
         )
+        summarizer = HistorySummarizer(
+            self.summary_llm,
+            self.token_counter,
+            ContextBuilder._MAX_HISTORY_TOKENS,
+            call_store=self.call_store,
+            session_id=session_id,
+        )
+        self._prev_summarizers.append(summarizer)
+
         generator = SpeechGenerator(
             self.llm,
             self.tts,
@@ -153,10 +167,10 @@ class ProcessComponents:
             self.token_counter,
             DEFAULT_SYSTEM_PROMPT,
             self.executor,
-            tools_token_cost=self.tools_token_cost,
             memory_storage=memory_storage,
             retriever=retriever,
             session_id=session_id,
+            summarizer=summarizer,
         )
         session_loop = SessionLoop(
             asr=self.asr,
@@ -195,7 +209,6 @@ class ProcessComponents:
             history=history,
             token_counter=self.token_counter,
             system_prompt=DEFAULT_SYSTEM_PROMPT,
-            tools_token_cost=self.tools_token_cost,
             memory_storage=memory_storage,
             retriever=retriever,
             load_session_context=load_session_context,
@@ -224,6 +237,14 @@ def build_components(
     asr = GoogleCloudASR(language_code=language_code)
     llm = OpenAILLM(
         model="gpt-5.4-mini", temperature=0.7, reasoning_effort="none", max_tokens=256, tools=["web_search"]
+    )
+    # 히스토리 롤링 요약 전용 LLM — 도구 없음, 하드 캡은 summarizer 상수와 동기화.
+    summary_llm = OpenAILLM(
+        model="gpt-5.4-mini",
+        temperature=0.3,
+        reasoning_effort="none",
+        max_tokens=HistorySummarizer._HARD_CAP_TOKENS,
+        tools=[],
     )
     raw_tts = create_tts()
     turngpt = TurnGPTWrapper()
@@ -262,7 +283,6 @@ def build_components(
     storage = create_storage_backend("sqlite", db_path=db_path)
     executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
     token_counter = create_token_counter(llm.model)
-    tools_token_cost = get_tools_token_cost(llm.tools)
 
     memory_storage = SQLiteMemoryStorage(db_path)
     trace_store = SQLiteTraceStore(db_path)
@@ -288,6 +308,7 @@ def build_components(
         language_code=language_code,
         asr=asr,
         llm=llm,
+        summary_llm=summary_llm,
         raw_tts=raw_tts,
         tts=tts,
         vap=vap,
@@ -300,7 +321,6 @@ def build_components(
         storage=storage,
         executor=executor,
         token_counter=token_counter,
-        tools_token_cost=tools_token_cost,
         embedder=embedder,
         memory_storage=memory_storage,
         trace_store=trace_store,
