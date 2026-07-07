@@ -521,18 +521,23 @@ def _build_overview(scored: dict) -> str:
 
     suites = runner.get("suites", [])
     if suites:
-        cat_counts: dict[str, int] = {}
+        text_mode = runner.get("text", False)
+
+        cat_counts: dict[str, tuple[int, bool]] = {}
         turns = scored.get("turns", [])
         for s_name in suites:
             s_turns = [t for t in turns if t.get("suite_name") == s_name]
             cat = s_name.split("_")[0]
             cat_map = {"asr": "ASR", "tt": "Turn-taking", "int": "Interruption", "lq": "Quality", "mem": "Memory"}
             cat_label = cat_map.get(cat, cat)
-            cat_counts[cat_label] = cat_counts.get(cat_label, 0) + len(s_turns)
+            is_text = s_name.startswith(("lq_", "mem_")) and text_mode
+            prev_count, prev_text = cat_counts.get(cat_label, (0, False))
+            cat_counts[cat_label] = (prev_count + len(s_turns), prev_text or is_text)
 
         cat_parts = []
-        for cat_label, count in cat_counts.items():
-            cat_parts.append(f"{cat_label} {count}")
+        for cat_label, (count, is_text) in cat_counts.items():
+            text_mark = " (Text)" if is_text else ""
+            cat_parts.append(f"{cat_label}{text_mark} {count}")
         p.append(f'<span class="kv-key">범위</span><span class="kv-val">{" · ".join(cat_parts)}</span>')
 
     if runner.get("quick"):
@@ -679,7 +684,7 @@ def _get_suite_desc(scored: dict, suite_name: str) -> str:
 
 def _build_asr(scored: dict) -> str:
     turns = scored.get("turns", [])
-    asr_turns = [t for t in turns if "asr_score" in t]
+    asr_turns = [t for t in turns if "asr_score" in t and not t.get("text_mode")]
 
     if not asr_turns:
         return '<div class="empty">ASR 데이터 없음</div>'

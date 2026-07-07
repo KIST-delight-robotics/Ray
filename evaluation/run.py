@@ -271,6 +271,187 @@ class _PauseController:
 
 
 # ---------------------------------------------------------------------------
+# Text-mode execution
+# ---------------------------------------------------------------------------
+
+
+def _run_text_single_turn(suite, question, session_map, create_text_session, seed_episode_map, seed_session_map):
+    """Execute one single-turn eval question in text mode."""
+    is_memory = suite.get("category") == "memory"
+    session = create_text_session(
+        memory_enabled=suite.get("memory", False),
+        load_session_context=not is_memory,
+    )
+    try:
+        session.send(question["text"])
+    except Exception:
+        logger.error("Text session error for %s", question["id"], exc_info=True)
+        session_map.append(
+            {
+                "question_id": question["id"],
+                "session_id": session.session_id,
+                "suite_name": suite["name"],
+                "input_text": question["text"],
+                "asr_text": question["text"],
+                "success": False,
+                "error": "text_session_error",
+                "text_mode": True,
+                "retrieved_episodes": [],
+                "target_sessions": question.get("target_sessions", []),
+                "target_episode_ids": _resolve_target_episodes(
+                    question.get("target_sessions", []), seed_session_map, seed_episode_map
+                ),
+            }
+        )
+        session.close()
+        return
+
+    # Extract retrieved episodes from memory results
+    retrieved_episodes = []
+    if session.memory_results and session.memory_results[-1] is not None:
+        mr = session.memory_results[-1]
+        for ep, score in zip(mr.episodes, mr.scores, strict=False):
+            retrieved_episodes.append(
+                {
+                    "episode_id": ep.id,
+                    "text": ep.text,
+                    "score": round(score, 4),
+                    "timestamp": ep.timestamp,
+                    "session_id": ep.session_id,
+                }
+            )
+
+    target_episode_ids = _resolve_target_episodes(
+        question.get("target_sessions", []), seed_session_map, seed_episode_map
+    )
+
+    trace = session.traces[-1] if session.traces else None
+    latency = {}
+    if trace:
+        latency = {
+            "memory_ms": round(trace.memory_ms, 1),
+            "context_ms": round(trace.context_ms, 1),
+            "llm_ms": round(trace.llm_ms, 1),
+            "llm_ttft_ms": round(trace.llm_ttft_ms, 1),
+            "total_ms": round(trace.total_ms, 1),
+        }
+
+    session_map.append(
+        {
+            "question_id": question["id"],
+            "session_id": session.session_id,
+            "suite_name": suite["name"],
+            "input_text": question["text"],
+            "asr_text": question["text"],
+            "success": True,
+            "error": None,
+            "text_mode": True,
+            "latency": latency,
+            "retrieved_episodes": retrieved_episodes,
+            "target_sessions": question.get("target_sessions", []),
+            "target_episode_ids": target_episode_ids,
+        }
+    )
+    session.close()
+
+    logger.info("[OK] %s: %s", question["id"], question["text"][:60])
+
+
+def _run_text_multi_turn(suite, scenario, session_map, create_text_session, seed_episode_map, seed_session_map):
+    """Execute a multi-turn scenario in text mode (one session for all turns)."""
+    is_memory = suite.get("category") == "memory"
+    session = create_text_session(
+        memory_enabled=suite.get("memory", False),
+        load_session_context=not is_memory,
+    )
+    questions = scenario["questions"]
+
+    try:
+        for i, question in enumerate(questions):
+            try:
+                session.send(question["text"])
+            except Exception:
+                logger.error("Text session error at turn %d for %s", i, question["id"], exc_info=True)
+                session_map.append(
+                    {
+                        "question_id": question["id"],
+                        "scenario_id": scenario["id"],
+                        "session_id": session.session_id,
+                        "suite_name": suite["name"],
+                        "input_text": question["text"],
+                        "asr_text": question["text"],
+                        "success": False,
+                        "error": "text_session_error",
+                        "text_mode": True,
+                        "retrieved_episodes": [],
+                        "target_sessions": question.get("target_sessions", []),
+                        "target_episode_ids": _resolve_target_episodes(
+                            question.get("target_sessions", []), seed_session_map, seed_episode_map
+                        ),
+                    }
+                )
+                continue
+
+            # Extract retrieved episodes for this turn
+            retrieved_episodes = []
+            turn_idx = i  # memory_results index matches send() call order
+            if len(session.memory_results) > turn_idx and session.memory_results[turn_idx] is not None:
+                mr = session.memory_results[turn_idx]
+                for ep, score in zip(mr.episodes, mr.scores, strict=False):
+                    retrieved_episodes.append(
+                        {
+                            "episode_id": ep.id,
+                            "text": ep.text,
+                            "score": round(score, 4),
+                            "timestamp": ep.timestamp,
+                            "session_id": ep.session_id,
+                        }
+                    )
+
+            target_episode_ids = _resolve_target_episodes(
+                question.get("target_sessions", []), seed_session_map, seed_episode_map
+            )
+
+            trace = session.traces[turn_idx] if len(session.traces) > turn_idx else None
+            latency = {}
+            if trace:
+                latency = {
+                    "memory_ms": round(trace.memory_ms, 1),
+                    "context_ms": round(trace.context_ms, 1),
+                    "llm_ms": round(trace.llm_ms, 1),
+                    "llm_ttft_ms": round(trace.llm_ttft_ms, 1),
+                    "total_ms": round(trace.total_ms, 1),
+                }
+
+            session_map.append(
+                {
+                    "question_id": question["id"],
+                    "scenario_id": scenario["id"],
+                    "session_id": session.session_id,
+                    "suite_name": suite["name"],
+                    "input_text": question["text"],
+                    "asr_text": question["text"],
+                    "success": True,
+                    "error": None,
+                    "text_mode": True,
+                    "latency": latency,
+                    "retrieved_episodes": retrieved_episodes,
+                    "target_sessions": question.get("target_sessions", []),
+                    "target_episode_ids": target_episode_ids,
+                }
+            )
+    finally:
+        session.close()
+
+    logger.info(
+        "Scenario %s (%s): %d turns completed (text mode)",
+        scenario["id"],
+        suite["name"],
+        len(questions),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Single-turn execution
 # ---------------------------------------------------------------------------
 
@@ -1075,6 +1256,11 @@ def main() -> None:
     parser.add_argument("--wav-dir", default="data/eval/wav", help="Directory with question WAVs")
     parser.add_argument("--quick", action="store_true", help="Quick mode: 1 question per suite")
     parser.add_argument("--category", default=None, help="Only run suites of these categories (comma-separated)")
+    parser.add_argument(
+        "--text",
+        action="store_true",
+        help="Run quality/memory suites in text mode (skip audio/turn-taking, LLM only)",
+    )
     parser.add_argument("--no-beep", action="store_true", help="Disable the session-start identification beep")
     parser.add_argument(
         "--noise-bed",
@@ -1134,10 +1320,15 @@ def main() -> None:
             logger.error("No suites matched categories: %s", ", ".join(sorted(selected)))
             sys.exit(1)
 
-    # --- WAV manifest check ---
+    # --- Classify suites into text vs audio ---
+    text_categories: set[str] = {"quality", "memory"} if args.text else set()
+    text_suites = [s for s in all_suites if s.get("category") in text_categories]
+    audio_suites = [s for s in all_suites if s.get("category") not in text_categories]
+
+    # --- WAV manifest check (audio suites only) ---
     wav_map = _load_manifest(args.questions, args.wav_dir)
     missing = []
-    for suite in all_suites:
+    for suite in audio_suites:
         for q in _iter_questions(suite):
             if q["id"] not in wav_map:
                 missing.append(q["id"])
@@ -1164,6 +1355,7 @@ def main() -> None:
     shutdown_event = components.shutdown_event
     # eval 세션은 사용자 종료 키워드로 끝나면 안 됨 — eval 전용 기본값을 여기서 고정
     create_session = partial(components.create_session, disable_exit_keywords=True)
+    create_text_session = components.create_text_session
 
     # --- Seed injection ---
     seed_session_map: dict[int, str] = {}
@@ -1191,10 +1383,48 @@ def main() -> None:
     session_map: list[dict] = []
     started_at = datetime.now().strftime(_TIMESTAMP_FORMAT)
 
-    logger.info("Eval starting — %d suites", len(all_suites))
+    logger.info("Eval starting — %d suites (%d text, %d audio)", len(all_suites), len(text_suites), len(audio_suites))
 
-    # --- Run suites ---
-    if all_suites:
+    # --- Run text suites ---
+    for suite in text_suites:
+        if pause_ctrl.wait_if_paused():
+            break
+
+        if suite.get("multi_turn"):
+            scenarios = suite.get("scenarios", [])
+            if args.quick and len(scenarios) > 1:
+                scenarios = random.sample(scenarios, 1)
+            logger.info(
+                "Suite [text]: %s (%d/%d scenarios)",
+                suite["name"],
+                len(scenarios),
+                len(suite.get("scenarios", [])),
+            )
+            for scenario in scenarios:
+                if pause_ctrl.wait_if_paused():
+                    break
+                _run_text_multi_turn(
+                    suite, scenario, session_map, create_text_session, seed_episode_map, seed_session_map
+                )
+        else:
+            questions = suite.get("questions", [])
+            if args.quick and len(questions) > 1:
+                questions = random.sample(questions, 1)
+            logger.info(
+                "Suite [text]: %s (%d/%d questions)",
+                suite["name"],
+                len(questions),
+                len(suite.get("questions", [])),
+            )
+            for question in questions:
+                if pause_ctrl.wait_if_paused():
+                    break
+                _run_text_single_turn(
+                    suite, question, session_map, create_text_session, seed_episode_map, seed_session_map
+                )
+
+    # --- Run audio suites ---
+    if audio_suites:
         record_dir = str(output_dir / "recordings")
         Path(record_dir).mkdir(exist_ok=True)
 
@@ -1247,7 +1477,7 @@ def main() -> None:
             if args.noise_bed:
                 bed = NoiseBed(args.device, bed_master, bed_gains)
                 units = _collect_audio_units(
-                    all_suites,
+                    audio_suites,
                     wav_map,
                     player,
                     session_map,
@@ -1267,7 +1497,7 @@ def main() -> None:
                     session_map,
                     pause_ctrl,
                 )
-            for suite in [] if args.noise_bed else all_suites:
+            for suite in [] if args.noise_bed else audio_suites:
                 if pause_ctrl.wait_if_paused():
                     break
 
@@ -1361,13 +1591,13 @@ def main() -> None:
         finally:
             audio_input.stop()
             bridge.disconnect()
-            components.stop_threaded()
-            components.vap.stop()
-            components.executor.shutdown(wait=False)
-            components.asr.stop()
-            components.led.close()
 
-    # --- Shared cleanup ---
+    # --- Shared cleanup (text-only 실행에서도 컴포넌트 스레드/클라이언트 정리) ---
+    components.stop_threaded()
+    components.vap.stop()
+    components.executor.shutdown(wait=False)
+    components.asr.stop()
+    components.led.close()
     memory_storage.close()
     components.trace_store.close()
     components.call_store.close()
@@ -1390,6 +1620,7 @@ def main() -> None:
     }
     runner_config: dict = {
         "quick": args.quick,
+        "text": args.text,
         "category": args.category,
         "suites": [s["name"] for s in all_suites],
         "question_count": sum(len(list(_iter_questions(s))) for s in all_suites),

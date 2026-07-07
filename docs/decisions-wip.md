@@ -38,9 +38,16 @@
 - **유예시간 없이 PENDING 전체에서 평가**: 자연 경계는 commit(begin_streaming). VAD 침묵 중 ASR 텍스트가 새로 생기는 경우는 사실상 늦은 final뿐이고, 주변 발화로 인한 오취소는 기존에도 VAD-speaking 경로로 가능했던 리스크라 새로 생기는 게 아님. 오취소 비용도 되감기 후 turn_shift 재발화(~1초 지연)로 낮음. 소음 환경에서 오취소가 관찰되면 그때 유예창 도입 검토.
 
 
+## eval --text 모드 복원 — TextSession은 유실이 아니었음
+
+- **"유실" 판정 정정**: `--text` 모드 제거(ea3d831)의 근거였던 "text_session.py 저장소 부재"는 오판 — 파일이 로봇 작업 기기의 워킹 트리에 untracked로 존재했다(285줄 완본). 현재 코드베이스 API와 시그니처 대조 + fake LLM 스모크로 **무수정 동작**을 확인하고 그대로 커밋. "재구현 필요" 아님.
+- **조립은 wiring으로**: 구 run.py의 `create_text_session` 팩토리(컴포넌트 수동 조립)를 되살리는 대신 `ProcessComponents.create_text_session()`으로 wiring에 배치 — `create_session()`과 대칭이고 "조립은 wiring 한 곳" 규율 유지. TextSession도 voice_pipeline 소속이라 의존 방향 문제없음.
+- **text-only 실행도 전체 그래프를 빌드**: 구 코드는 `needs_audio` 분기로 텍스트 전용 실행 시 오디오 컴포넌트(VAP·TTS·AudioInput 등) 초기화를 건너뛰었지만, 복원판은 `build_components()`를 그대로 사용 — 시작이 ~10초 무거워지는 대신 wiring에 조건부 조립 분기를 넣지 않는다(중립 주입점 규율). 컴포넌트 정리(stop_threaded/vap.stop/executor/asr/led)는 오디오 블록 finally에서 공용 정리로 이동해 text-only 경로에서도 실행.
+- **대시보드 (Text) 마커 조건 단순화**: 구 코드의 `... if text_mode else s_name.startswith("mem_")`는 --text 아닐 때도 mem을 (Text)로 표기하는 낡은 분기(memory가 텍스트 전용이던 시절 잔재)라, `--text && (lq_|mem_)`일 때만 표기하도록 정리.
+
+
 ## 차후 고려
 
-- **eval text 모드 유실**: `--text`(quality/memory 스위트를 음성 단계 없이 LLM 직접 평가)가 참조하던 `voice_pipeline/text_session.py`(TextSession)가 저장소에 존재하지 않아(커밋 이력에도 없음 — 미push 유실 추정) 모드 전체를 제거함. 재도입하려면 TextSession 재구현 필요.
 - **음악 댄스 메인 로봇 통합**: `music_dance/`는 현재 독립 실행(시리얼 포트 단독 점유). 메인 로봇의 한 모드로 통합 시 분석 코어(analyzer/timeline) 재사용 전제. 실시간(마이크) 입력이 필요해지면 HPSS(lookahead 필요) 재설계.
 - **TurnDetector 유사도 임베딩 캐싱**: `_text_similarity` 호출 패턴에서 한쪽 텍스트(`_last_prepare_text`)가 반복됨. 한쪽 임베딩을 캐싱하면 추론 비용 절반 가능.
 - **임베딩 실패 복구**: 배치 임베딩 실패 시 에피소드가 `embedding=None`으로 저장되고(warning만) 재생성/백필 메커니즘 없음 — 해당 에피소드는 벡터 검색에서 영구 제외 (`load_all_embeddings`가 `embedding IS NOT NULL`만 로드).

@@ -42,6 +42,7 @@ from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DB_PATH, _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.session_loop import SessionComponents, SessionLoop
+from voice_pipeline.text_session import TextSession
 from voice_pipeline.trace.openai_retry_handler import OpenAIRetryHandler
 from voice_pipeline.trace.trace_store import SQLiteCallStore, SQLiteTraceStore
 from voice_pipeline.trace.tracked_embedder import TrackedEmbedder
@@ -174,6 +175,31 @@ class ProcessComponents:
             **session_loop_kwargs,
         )
         return SessionComponents(session_loop=session_loop, history=history, session_id=session_id)
+
+    def create_text_session(self, *, memory_enabled: bool = True, load_session_context: bool = True) -> TextSession:
+        """Assemble a text-only conversation session (no audio/TTS/turn-taking).
+
+        Args:
+            memory_enabled: False면 memory storage/retriever 없이 조립.
+            load_session_context: ContextBuilder의 이전 세션 요약 로드 여부.
+                메모리 평가처럼 시드만으로 맥락을 구성할 때 False.
+
+        Returns:
+            독립 대화 세션을 나타내는 :class:`TextSession`.
+        """
+        history = ConversationHistory(self.storage, self.token_counter)
+        memory_storage = self.memory_storage if memory_enabled else None
+        retriever = MemoryRetriever(self.memory_storage, self.vector_index, self.embedder) if memory_enabled else None
+        return TextSession(
+            llm=self.llm,
+            history=history,
+            token_counter=self.token_counter,
+            system_prompt=DEFAULT_SYSTEM_PROMPT,
+            tools_token_cost=self.tools_token_cost,
+            memory_storage=memory_storage,
+            retriever=retriever,
+            load_session_context=load_session_context,
+        )
 
 
 def build_components(
