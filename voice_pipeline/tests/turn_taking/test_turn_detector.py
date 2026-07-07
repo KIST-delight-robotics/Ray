@@ -370,7 +370,7 @@ class TestPendingCancel:
         assert detector._turn_state is _TurnState.PENDING
 
     def test_not_speaking_no_cancel_even_user_favor(self):
-        """Gate: user-favor VAP but user NOT speaking -> no cancel (thrash guard)."""
+        """VAP path gate: user-favor VAP but user NOT speaking -> no cancel (thrash guard)."""
         detector, mock_vap, _ = _make_detector()
         detector._turn_state = _TurnState.PENDING
         detector._last_prepare_text = "hello"
@@ -380,6 +380,20 @@ class TestPendingCancel:
         decision = detector.process_frame(FRAME, "hello")
         assert not decision.cancel
         assert detector._turn_state is _TurnState.PENDING
+
+    def test_dissimilar_asr_cancels_even_when_not_speaking(self):
+        """ASR path has no speaking gate: a late dissimilar final after VAD
+        silence (the very condition that fired turn_shift) must still cancel —
+        ASR text is evidence of speech that already happened."""
+        detector, mock_vap, _ = _make_detector(embedder=_make_embedder_mock(similarity=0.3))
+        detector._turn_state = _TurnState.PENDING
+        detector._last_prepare_text = "you"
+        detector._prev_asr_text = "you"
+        mock_vap.latest_result = VAPResult(0.2, 0.2, False)
+
+        decision = detector.process_frame(FRAME, "goodbye")
+        assert decision.cancel
+        assert detector._turn_state is _TurnState.USER_TURN
 
 
 # ---------------------------------------------------------------------------

@@ -31,11 +31,17 @@
 - **기존 특성 (이번 변경과 무관)**: interruption suite는 유닛 나열이 delay→audio→question 순이라 질문↔조건이 1:1로 고정된다(int_q_001은 항상 quiet 등). 배정 로직이 동일하므로 이전 스케줄에서도 같았음 — 문제 시 질문 수나 나열 순서 조정으로 해소.
 
 
+## PENDING cancel — ASR 유사도 경로의 user_is_speaking 전제 제거
+
+- **실측 계기**: "goodbye" 발화를 ASR이 'you'로 중간 인식 → TurnGPT가 그 시점에 turn_shift → 326ms 뒤 최종 텍스트 'goodbye' 도착. 커밋까지 1.6초 이상 남아 취소 창이 열려 있었지만, `_process_pending` 진입부의 `user_is_speaking=False` 조기 반환이 유사도 검사 실행 자체를 차단 → 'you'에 대한 응답 재생 + exit 키워드('goodbye') 미감지. (기존 차후 고려 "VAD 단일 실패가 안전장치 전체를 무력화" 항목의 해소.)
+- **두 cancel 경로는 신호의 시제가 다름 — 가드를 경로별로 분리**: VAP user-favor는 "지금 발화권을 잡고 있다"는 현재형 신호라 `user_is_speaking` 전제가 정합적 (VAD 침묵 + VAP 예측만으로 취소는 과격) → 가드 유지. ASR 텍스트 변경은 이미 일어난 발화가 늦게 처리된 과거형 증거 → 전제 제거. turn_shift 자체가 VAD 침묵을 조건으로 발화되므로, 수백 ms 늦는 ASR final은 이 게이트에 구조적으로 항상 걸렸다 (증거 도착 시각과 사건 시각의 혼동).
+- **유예시간 없이 PENDING 전체에서 평가**: 자연 경계는 commit(begin_streaming). VAD 침묵 중 ASR 텍스트가 새로 생기는 경우는 사실상 늦은 final뿐이고, 주변 발화로 인한 오취소는 기존에도 VAD-speaking 경로로 가능했던 리스크라 새로 생기는 게 아님. 오취소 비용도 되감기 후 turn_shift 재발화(~1초 지연)로 낮음. 소음 환경에서 오취소가 관찰되면 그때 유예창 도입 검토.
+
+
 ## 차후 고려
 
 - **eval text 모드 유실**: `--text`(quality/memory 스위트를 음성 단계 없이 LLM 직접 평가)가 참조하던 `voice_pipeline/text_session.py`(TextSession)가 저장소에 존재하지 않아(커밋 이력에도 없음 — 미push 유실 추정) 모드 전체를 제거함. 재도입하려면 TextSession 재구현 필요.
 - **음악 댄스 메인 로봇 통합**: `music_dance/`는 현재 독립 실행(시리얼 포트 단독 점유). 메인 로봇의 한 모드로 통합 시 분석 코어(analyzer/timeline) 재사용 전제. 실시간(마이크) 입력이 필요해지면 HPSS(lookahead 필요) 재설계.
-- **VAD 단일 실패가 안전장치 전체를 무력화**: `user_is_speaking=False`가 PENDING의 cancel 두 경로(VAP user-favor, ASR 비유사)를 모두 전제 단계에서 차단 — VAP p_now=0.89·ASR 대폭 변화에도 cancel 불가 사례 실측. ASR 텍스트 갱신을 발화 증거로 쓰는 보강은 별도 검토 과제.
 - **TurnDetector 유사도 임베딩 캐싱**: `_text_similarity` 호출 패턴에서 한쪽 텍스트(`_last_prepare_text`)가 반복됨. 한쪽 임베딩을 캐싱하면 추론 비용 절반 가능.
 - **임베딩 실패 복구**: 배치 임베딩 실패 시 에피소드가 `embedding=None`으로 저장되고(warning만) 재생성/백필 메커니즘 없음 — 해당 에피소드는 벡터 검색에서 영구 제외 (`load_all_embeddings`가 `embedding IS NOT NULL`만 로드).
 - **프로필 서브토픽 중복**: `(topic, sub_topic)` 정확 일치 매칭뿐이라 LLM이 유사 서브토픽을 다른 이름으로 생성 가능 (movie vs movies). merge 프롬프트가 기존 슬롯 전체를 보여주지 않아 유사 슬롯이 신규 APPEND로 빠질 가능성.

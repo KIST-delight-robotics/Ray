@@ -361,19 +361,24 @@ class TurnDetector(ITurnDetector):
         """Cancel detection during the tentative PENDING window.
 
         The user reclaiming the floor means the turn_shift was premature →
-        cancel. ``user_is_speaking`` is a prerequisite (mirrors interrupt) —
-        the user must actually be speaking — then one of two signals confirms
-        the reclaim:
+        cancel. Two signals, gated differently:
         - VAP: p_now/p_fut both favor the user (immediate; each VAP result
-          already integrates ~100ms, so no sustain is needed).
+          already integrates ~100ms, so no sustain is needed). 현재형 신호라
+          ``user_is_speaking``이 전제 (interrupt와 동일) — VAD가 침묵인데
+          VAP 예측만으로 취소하는 것을 막는다.
         - ASR: new text dissimilar to the last prepared text — the basis of
           the (speculative) response (a finalization stays similar, ignored).
+          과거형 증거라 ``user_is_speaking`` 무관하게 평가: ASR 결과는 실제
+          오디오보다 수백 ms 늦게 도착하므로, 응답을 무효화하는 텍스트는
+          대개 VAD가 이미 침묵을 보고한 뒤(바로 그 조건으로 turn_shift가
+          발화된 뒤)에 온다.
         On cancel, rewind to USER_TURN with per-frame state preserved.
         """
-        if not user_is_speaking:
-            return TurnDecision.none()
-
-        if vap_result.p_now > self._INTERRUPT_USER_THRESHOLD and vap_result.p_fut > self._INTERRUPT_USER_THRESHOLD:
+        if (
+            user_is_speaking
+            and vap_result.p_now > self._INTERRUPT_USER_THRESHOLD
+            and vap_result.p_fut > self._INTERRUPT_USER_THRESHOLD
+        ):
             logger.info("CANCEL (vap): p_now=%.2f p_fut=%.2f", vap_result.p_now, vap_result.p_fut)
             self._turn_state = _TurnState.USER_TURN
             return TurnDecision(cancel=True)
