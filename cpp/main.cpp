@@ -1149,7 +1149,6 @@ void generate_motion(int channels, int samplerate) {
                 deliverSegment = connectTwoSegments(prevSegment, deliverSegment, 3, 3, 3);
                 prevSegment = deliverSegment;
             } else {
-                std::cout << "Idle motion 사용 중..." << std::endl;
                 deliverSegment = IdleMotionManager::getInstance().getNextSegment(
                     energy.size(), cfg_robot.control_motor_rpy_ratio
                 );
