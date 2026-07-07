@@ -27,6 +27,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from pathlib import Path
 
 from voice_pipeline.bridge.cpp_bridge import CppBridge
 from voice_pipeline.core.types import AudioFrame, CppEventType, LEDState, SystemMode
@@ -38,6 +39,14 @@ from voice_pipeline.wiring import build_components
 
 logger = logging.getLogger("voice_pipeline")
 
+# C++ 쪽 런타임 로그(logs/pos4_audio, logs/motion)와 같은 목적별 하위 폴더 관례를 따른다.
+_LOG_DIR = Path("logs/pipeline")
+_LOG_FORMAT = "%(asctime)s %(name)-40s %(levelname)-7s %(message)s"
+# 콘솔에 INFO를 그대로 내보낼 "대화 서사" 로거 (정확히 일치해야 통과).
+# 모드 전환(voice_pipeline), 대화 흐름(session_loop: ASR/LLM/INTERRUPT 등),
+# SLEEP 중 청취 피드백(wakeword: STT result)만 — 나머지 모듈의 INFO/DEBUG는 파일에만 남는다.
+_CONSOLE_NARRATIVE = {"voice_pipeline", "voice_pipeline.session_loop", "voice_pipeline.wakeword"}
+
 _GREETING_TIMEOUT_SEC = 10.0
 _FAREWELL_TIMEOUT_SEC = 10.0
 _FRAME_TIMEOUT_SEC = 0.1
@@ -48,6 +57,33 @@ _TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _setup_logging() -> None:
+    """파일 = 전체 시간순 기록, 콘솔 = 대화 서사 + 경고 이상.
+
+    파일 핸들러는 레벨 제한이 없어 LOG_LEVEL로 낮춘 모듈의 DEBUG까지 전부
+    저장된다. 콘솔은 INFO 중 _CONSOLE_NARRATIVE 로거만 통과시키므로, 모듈
+    진단을 실시간으로 보려면 로그 파일을 tail 하면 된다.
+    """
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = _LOG_DIR / f"{datetime.now():%Y%m%d_%H%M%S}.log"
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.addFilter(lambda r: r.levelno >= logging.WARNING or r.name in _CONSOLE_NARRATIVE)
+    console.setFormatter(logging.Formatter(_LOG_FORMAT))
+
+    logging.basicConfig(level=logging.INFO, handlers=[file_handler, console])
+    logger.info("Log file: %s", log_path)
+
+    for entry in os.environ.get("LOG_LEVEL", "").split(","):
+        entry = entry.strip()
+        if "=" in entry:
+            name, level = entry.split("=", 1)
+            logging.getLogger(name.strip()).setLevel(level.strip().upper())
 
 
 def _flush_bridge_events(bridge: CppBridge) -> None:
@@ -93,15 +129,7 @@ def _wait_playback(
 
 def main() -> None:
     """Launch the voice pipeline."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(name)-40s %(levelname)-7s %(message)s",
-    )
-    for entry in os.environ.get("LOG_LEVEL", "").split(","):
-        entry = entry.strip()
-        if "=" in entry:
-            name, level = entry.split("=", 1)
-            logging.getLogger(name.strip()).setLevel(level.strip().upper())
+    _setup_logging()
 
     # --- Shared component graph (production defaults: data/ray.db, LED via env) ---
     components = build_components()
