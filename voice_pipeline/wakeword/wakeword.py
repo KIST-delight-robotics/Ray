@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import audioop
 import collections
 import enum
 import logging
+import os
 import re
 import struct
 
@@ -23,6 +25,8 @@ from voice_pipeline.core.types import AudioFrame
 from voice_pipeline.wakeword.exceptions import WakewordError
 
 logger = logging.getLogger("voice_pipeline.wakeword")
+
+_VAD_DEBUG = os.environ.get("WAKEWORD_VAD_DEBUG") == "1"  # [임시] VAD 점수 실시간 로그
 
 
 class _State(enum.Enum):
@@ -174,6 +178,16 @@ class WakewordDetector(IWakewordDetector):
                 logger.warning("VAD inference failed, resetting", exc_info=True)
                 self._reset()
                 break
+            if _VAD_DEBUG:  # [임시 진단] WAKEWORD_VAD_DEBUG=1 일 때만
+                self._dbg_n = getattr(self, "_dbg_n", 0) + 1
+                self._dbg_max = max(getattr(self, "_dbg_max", 0.0), prob)
+                self._dbg_rms = max(getattr(self, "_dbg_rms", 0), audioop.rms(chunk_bytes, 2))
+                if self._dbg_n % 33 == 0:
+                    logger.info(
+                        "[VAD diag] max_prob=%.3f max_rms=%d (thr=%.2f)",
+                        self._dbg_max, self._dbg_rms, self._VAD_THRESHOLD,
+                    )
+                    self._dbg_max, self._dbg_rms = 0.0, 0
             self._process_vad(prob, chunk_bytes)
 
         result = self._detected

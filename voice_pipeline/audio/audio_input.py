@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import array
 import logging
+import os
 import queue
 import threading
 
@@ -28,7 +29,7 @@ class AudioInput(IAudioInput):
     """
 
     _THREAD_JOIN_TIMEOUT_SEC = 2.0  # 캡처 스레드 종료 대기 (초)
-    _DEVICE_INDEX: int | None = None  # PyAudio 입력 디바이스 인덱스. None은 시스템 기본 장치
+    _DEVICE_INDEX: int | None = 1  # PyAudio 입력 디바이스 인덱스. None은 시스템 기본 장치
     _CAPTURE_CHANNELS: int | None = 6  # 디바이스에서 캡처할 채널 수. None은 mono (ReSpeaker Flex 6ch는 6)
     _EXTRACT_CHANNEL = 0  # 다중 채널 캡처 시 mono 추출에 사용할 채널 인덱스 (0-based)
 
@@ -39,6 +40,16 @@ class AudioInput(IAudioInput):
             audio_queue: 캡처된 오디오 프레임을 push할 공유 큐.
         """
         self._queue = audio_queue
+
+        # Per-machine overrides — PyAudio device indices differ across hosts, so
+        # allow selecting the mic without editing code. Env wins over the class
+        # default; unset keeps the default. "none"/"default" → system default device.
+        device_env = os.environ.get("RAY_AUDIO_DEVICE_INDEX", "").strip()
+        if device_env:
+            self._DEVICE_INDEX = None if device_env.lower() in ("none", "default") else int(device_env)
+        channels_env = os.environ.get("RAY_AUDIO_CAPTURE_CHANNELS", "").strip()
+        if channels_env:
+            self._CAPTURE_CHANNELS = None if channels_env.lower() in ("none", "mono") else int(channels_env)
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
