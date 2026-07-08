@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+<title>입 모션 궤적 생성 — 단계별 계산 시각화</title>
+<style>
+  * { box-sizing: border-box; }
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#30363d; --txt:#e6edf3; --dim:#8b949e;
+    --prev:#6e40c9; --curr:#1f6feb; --future:#3fb950;
+    --inc:#1f6feb; --dec:#db6d28; --peak:#f85149; --val:#2ea043; --stb:#6e7681; --unk:#484f58;
+    --hi:#f0b429; --raise:#bc8cff;
+  }
+  body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:18px;}
+  h1{font-size:19px;margin:0 0 4px;}
+  .sub{color:var(--dim);font-size:13px;margin-bottom:14px;}
+  .legend{display:flex;flex-wrap:wrap;gap:10px;font-size:12px;margin-bottom:12px;}
+  .legend span{display:inline-flex;align-items:center;gap:5px;}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block;}
+  .controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin-bottom:14px;}
+  button{background:#21262d;color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:7px 13px;font-size:13px;cursor:pointer;}
+  button:hover{background:#30363d;}
+  button.primary{background:var(--curr);border-color:var(--curr);font-weight:600;}
+  input[type=range]{flex:1;min-width:160px;}
+  .phasebar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;}
+  .phasebar div{font-size:11px;padding:4px 9px;border-radius:20px;border:1px solid var(--line);color:var(--dim);}
+  .phasebar div.on{background:var(--curr);border-color:var(--curr);color:#fff;font-weight:600;}
+  .scroll{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:10px 0;}
+  .row{display:flex;align-items:stretch;min-width:max-content;}
+  .rlabel{position:sticky;left:0;z-index:3;width:92px;min-width:92px;background:var(--panel);
+    display:flex;align-items:center;justify-content:flex-end;padding:0 10px;font-size:11px;color:var(--dim);
+    border-right:1px solid var(--line);}
+  .cell{width:48px;min-width:48px;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;
+    padding:2px 0;position:relative;}
+  .ix{font-size:10px;color:var(--dim);}
+  .ix b{color:var(--txt);}
+  .tlab{font-size:9px;color:var(--dim);line-height:1.2;text-align:center;}
+  .barbox{height:54px;display:flex;align-items:flex-end;}
+  .bar{width:20px;border-radius:3px 3px 0 0;background:#30363d;transition:height .25s,background .2s;}
+  .val{font-size:10px;margin-top:2px;font-variant-numeric:tabular-nums;color:var(--txt);}
+  .hidden .bar{height:0!important;}
+  .hidden .val{visibility:hidden;}
+  .cell.win{background:rgba(240,180,41,.10);}
+  .cell.focus{background:rgba(240,180,41,.22);outline:1px solid var(--hi);outline-offset:-1px;border-radius:6px;}
+  .cell.raised .bar{background:var(--raise);}
+  .cell.corrected .bar{background:var(--peak);}
+  .chip{font-size:10px;font-weight:700;border-radius:5px;padding:3px 0;width:34px;text-align:center;color:#fff;}
+  .chip.c1{background:var(--inc);} .chip.c2{background:var(--dec);} .chip.c3{background:var(--peak);}
+  .chip.c4{background:var(--val);} .chip.c0{background:var(--stb);} .chip.c5{background:var(--unk);}
+  .chip.none{background:transparent;color:var(--dim);}
+  .secbar{display:flex;min-width:max-content;margin:2px 0 0 92px;}
+  .seccell{width:48px;min-width:48px;height:4px;}
+  .panel{display:grid;grid-template-columns:330px 1fr;gap:14px;margin-top:14px;}
+  @media(max-width:760px){.panel{grid-template-columns:1fr;}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;}
+  .card h3{margin:0 0 8px;font-size:13px;color:var(--hi);}
+  .explain{font-size:13.5px;line-height:1.6;}
+  .explain b{color:#fff;}
+  .math{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;background:#0d1117;border:1px solid var(--line);
+    border-radius:7px;padding:9px 11px;margin-top:9px;white-space:pre-wrap;color:#d2dae3;}
+  canvas{width:100%;height:210px;display:block;background:#0d1117;border-radius:7px;border:1px solid var(--line);}
+  .small{font-size:11px;color:var(--dim);margin-top:6px;}
+  .kbd{font-family:monospace;background:#21262d;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:11px;}
+</style>
+
+<h1>👄 입 모션 궤적 생성 — 단계별 계산</h1>
+<div class="sub">한 사이클(360ms)의 배열 계산을 실제 식 그대로 애니메이션합니다. <span class="kbd">←</span>/<span class="kbd">→</span> 로 한 스텝씩, <span class="kbd">Space</span> 재생.</div>
+
+<div class="legend">
+  <span><i class="dot" style="background:var(--prev)"></i>prev(이전 꼬리 4)</span>
+  <span><i class="dot" style="background:var(--curr)"></i>현재 9 (출력)</span>
+  <span><i class="dot" style="background:var(--future)"></i>미래 9 (lookahead)</span>
+  <span><i class="dot" style="background:var(--raise)"></i>MA3로 끌어올림</span>
+  <span><i class="dot" style="background:var(--peak)"></i>보정됨/PEAK</span>
+  <span><i class="dot" style="background:var(--inc)"></i>INC</span>
+  <span><i class="dot" style="background:var(--dec)"></i>DEC</span>
+  <span><i class="dot" style="background:var(--val)"></i>VALLEY</span>
+</div>
+
+<div class="controls">
+  <button id="reset">⟲ 처음</button>
+  <button id="prev">◀ 이전</button>
+  <button id="play" class="primary">▶ 재생</button>
+  <button id="next">다음 ▶</button>
+  <input type="range" id="scrub" min="0" value="0">
+  <span id="fcount" class="small"></span>
+</div>
+
+<div class="phasebar" id="phasebar"></div>
+
+<div class="scroll" id="scroll"></div>
+
+<div class="panel">
+  <div class="card">
+    <h3 id="ptitle">단계 설명</h3>
+    <div class="explain" id="explain"></div>
+    <div class="math" id="math"></div>
+  </div>
+  <div class="card">
+    <h3 id="ctitle">계산 시각화</h3>
+    <canvas id="cv" width="700" height="210"></canvas>
+    <div class="small" id="cnote"></div>
+  </div>
+</div>
+
+<script>
+// ============= 데이터 (예시 입력) =============
+const PREV  = [0.06,0.05,0.07,0.09];
+const CURR  = [0.10,0.15,0.30,0.55,0.40,0.12,0.08,0.20,0.35];
+const FUT   = [0.50,0.30,0.10,0.05,0.04,0.06,0.10,0.08,0.05];
+const ext_raw = [...PREV,...CURR,...FUT];      // 22
+const N = ext_raw.length;                      // 22
+const HALF=4, WIN=9, FS=9;
+const MIN_OPEN=0.52, PEAK_TRIG=0.18, PROM_TH=0.09;
+const C_STB=0,C_INC=1,C_DEC=2,C_PEAK=3,C_VAL=4,C_UNK=5;
+const CNAME={0:'=',1:'↑',2:'↓',3:'▲',4:'▼',5:'?'};
+const CFULL={0:'STABLE',1:'INCREASE',2:'DECREASE',3:'PEAK',4:'VALLEY',5:'UNKNOWN'};
+
+// ============= cubic 최소제곱 fit + classify (C++ 포팅) =============
+const XS=[-4,-3,-2,-1,0,1,2,3,4];
+function basis(x){return [x*x*x,x*x,x,1];}
+function fitCubic(ys){ // ys length 9 → [c3,c2,c1,c0]
+  const ATA=[[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]], ATy=[0,0,0,0];
+  for(let k=0;k<9;k++){const a=basis(XS[k]);
+    for(let i=0;i<4;i++){ATy[i]+=a[i]*ys[k];for(let j=0;j<4;j++)ATA[i][j]+=a[i]*a[j];}}
+  // gaussian solve 4x4
+  const M=ATA.map((r,i)=>[...r,ATy[i]]);
+  for(let col=0;col<4;col++){let piv=col;for(let r=col+1;r<4;r++)if(Math.abs(M[r][col])>Math.abs(M[piv][col]))piv=r;
+    [M[col],M[piv]]=[M[piv],M[col]];const d=M[col][col];for(let j=col;j<=4;j++)M[col][j]/=d;
+    for(let r=0;r<4;r++)if(r!==col){const f=M[r][col];for(let j=col;j<=4;j++)M[r][j]-=f*M[col][j];}}
+  return [M[0][4],M[1][4],M[2][4],M[3][4]];
+}
+function polyval(c,x){return ((c[0]*x+c[1])*x+c[2])*x+c[3];}
+function classify(c){
+  const pq=[];for(let i=0;i<=FS;i++)pq.push(polyval(c,i));
+  const sgn=[];for(let i=0;i<FS;i++){const d=pq[i+1]-pq[i];sgn.push(d>0?1:d<0?-1:0);}
+  if(sgn.every(v=>v===0))return{cls:C_STB,peakRel:-1,peakPred:NaN};
+  const t=[...sgn];for(let i=1;i<t.length;i++)if(t[i]===0)t[i]=t[i-1];
+  for(let i=t.length-2;i>=0;i--)if(t[i]===0)t[i]=t[i+1];for(let i=0;i<t.length;i++)if(t[i]===0)t[i]=1;
+  if(t.every(v=>v===1))return{cls:C_INC,peakRel:-1,peakPred:NaN};
+  if(t.every(v=>v===-1))return{cls:C_DEC,peakRel:-1,peakPred:NaN};
+  const ch=[];for(let i=0;i<t.length-1;i++)if(t[i+1]!==t[i])ch.push(i);
+  if(ch.length===1){const j=ch[0];
+    if(t[j]===1&&t[j+1]===-1)return{cls:C_PEAK,peakRel:j+1,peakPred:pq[j+1]};
+    if(t[j]===-1&&t[j+1]===1)return{cls:C_VAL,peakRel:-1,peakPred:NaN};}
+  return{cls:C_UNK,peakRel:-1,peakPred:NaN};
+}
+
+// ============= 모델 사전계산 =============
+// [3] MA3
+const peak_apply=[...ext_raw];
+for(let i=1;i<N-1;i++){const ma=(ext_raw[i-1]+ext_raw[i]+ext_raw[i+1])/3;peak_apply[i]=Math.max(ext_raw[i],ma);}
+const raised=ext_raw.map((v,i)=>i>0&&i<N-1&&peak_apply[i]>v+1e-9);
+
+// [4] SG: a0 + class (p=4..17)
+const a0=Array(N).fill(null), cinfo=Array(N).fill(null), coeffs=Array(N).fill(null);
+for(let p=HALF;p<=N-HALF-1;p++){const ys=peak_apply.slice(p-HALF,p+HALF+1);const c=fitCubic(ys);
+  coeffs[p]=c;a0[p]=c[3];cinfo[p]=classify(c);}
+
+// 현재 9 (ext idx 4..12 → c 0..8)
+const a0base=[],clsC=[],peakPredC=[];
+for(let c=0;c<9;c++){const p=4+c;a0base.push(Math.max(a0[p]||0,0));clsC.push(cinfo[p].cls);peakPredC.push(cinfo[p].peakPred);}
+
+// [5] valley 추적 + prominence
+const prom=Array(9).fill(NaN); const valStateNote=[];
+let vActive=false,vMin=NaN,lastVal=NaN;
+for(let c=0;c<9;c++){const cl=clsC[c];
+  if(cl===C_VAL){if(!vActive){vActive=true;vMin=a0base[c];}else if(a0base[c]<vMin)vMin=a0base[c];}
+  else{if(vActive){lastVal=vMin;vActive=false;vMin=NaN;}}
+  prom[c]=isFinite(lastVal)?a0base[c]-lastVal:NaN;
+  valStateNote[c]={vActive,vMin,lastVal};}
+
+// is_first_class3
+const isFirst=Array(9).fill(false);{let prev=false;for(let c=0;c<9;c++){const now=clsC[c]===C_PEAK;isFirst[c]=now&&!prev;prev=now;}}
+
+// [6] gate + correction
+const gate=Array(9).fill(null); const output=[...a0base]; const corrected=Array(9).fill(false);
+let nextAllowed=-1;
+for(let c=0;c<9;c++){
+  if(!isFirst[c]){gate[c]={cand:false};continue;}
+  let g={cand:true,steps:[]};
+  if(c<nextAllowed){g.accept=false;g.reason='throttle (직전 peak 구간 안)';gate[c]=g;continue;}
+  const pr=prom[c];
+  if(!isFinite(pr)||pr<=PROM_TH){g.accept=false;g.reason='prominence '+(isFinite(pr)?pr.toFixed(2):'NaN')+' ≤ '+PROM_TH;gate[c]=g;continue;}
+  const pp=peakPredC[c];
+  if(!(pp>PEAK_TRIG)){g.accept=false;g.reason='예측 peak '+(isFinite(pp)?pp.toFixed(2):'NaN')+' ≤ '+PEAK_TRIG;gate[c]=g;continue;}
+  const cb=Math.max(0,pp);
+  if(cb>=MIN_OPEN){g.accept=false;g.reason='이미 열림 ('+cb.toFixed(2)+' ≥ '+MIN_OPEN+')';gate[c]=g;continue;}
+  // accept
+  g.accept=true;g.reason='채택! scale='+(MIN_OPEN/cb).toFixed(2);g.prom=pr;g.pp=pp;
+  const center=Math.min(8,Math.max(0,c+Math.round(cinfo[4+c].peakRel||0)));
+  for(let k=Math.max(0,center-3);k<=center;k++){const t=(k-(center-3))/3;const al=t*t*(3-2*t);
+    output[k]=Math.max(output[k],a0base[k]*(1-al)+MIN_OPEN*al);corrected[k]=true;}
+  output[center]=Math.max(output[center],MIN_OPEN);corrected[center]=true;
+  nextAllowed=center+3+1;
+  gate[c]=g;
+}
+
+// ============= 프레임 시퀀스 =============
+const PHASES=['① 입력 조립','② MA3 골메우기','③ SG fit (평활+외삽)','④ valley·prominence','⑤ peak 게이트·보정','✓ 출력'];
+const frames=[];
+[0,1,2].forEach(k=>frames.push({ph:0,k}));            // assemble
+for(let i=1;i<N-1;i++)frames.push({ph:1,k:i});         // MA3
+for(let p=HALF;p<=N-HALF-1;p++)frames.push({ph:2,k:p});// SG
+for(let c=0;c<9;c++)frames.push({ph:3,k:c});           // prom
+for(let c=0;c<9;c++)frames.push({ph:4,k:c});           // gate
+frames.push({ph:5,k:0});                               // done
+const F=frames.length;
+
+// ============= DOM =============
+const scroll=document.getElementById('scroll');
+function secOf(i){return i<4?'prev':i<13?'curr':'future';}
+function timeLab(i){const fr=i-4;if(i<4)return (fr*40)+'';const ms=fr*40;return ms+'~'+(ms+40);}
+const ROWS=[
+  {id:'idx',label:'index'},
+  {id:'raw',label:'ext_raw'},
+  {id:'ma',label:'peak_apply\n(MA3)'},
+  {id:'a0',label:'ext_a0\n(평활)'},
+  {id:'cls',label:'class\n(외삽)'},
+  {id:'out',label:'output\n(보정후)'},
+];
+const cellRef={};
+ROWS.forEach(r=>{
+  const row=document.createElement('div');row.className='row';
+  const lab=document.createElement('div');lab.className='rlabel';lab.textContent=r.label.replace(/\\n/g,' ');
+  lab.style.whiteSpace='pre-line';lab.textContent=r.label;row.appendChild(lab);
+  cellRef[r.id]=[];
+  for(let i=0;i<N;i++){
+    const c=document.createElement('div');c.className='cell';
+    if(r.id==='idx'){
+      const sec=secOf(i);const col=sec==='prev'?'var(--prev)':sec==='curr'?'var(--curr)':'var(--future)';
+      c.innerHTML='<div class="ix"><b>'+i+'</b></div><div class="tlab" style="color:'+col+'">f'+(i-4)+'<br>'+timeLab(i)+'</div>';
+    } else if(r.id==='cls'){
+      c.innerHTML='<div class="chip none">·</div>';
+    } else {
+      c.innerHTML='<div class="barbox"><div class="bar"></div></div><div class="val"></div>';
+    }
+    row.appendChild(c);cellRef[r.id].push(c);
+  }
+  scroll.appendChild(row);
+});
+// phase bar
+const pbar=document.getElementById('phasebar');
+PHASES.forEach((p,i)=>{const d=document.createElement('div');d.textContent=p;d.id='ph'+i;pbar.appendChild(d);});
+
+const MAXV=0.62;
+function setBar(id,i,val,extraCls){
+  const cell=cellRef[id][i];const bar=cell.querySelector('.bar');const v=cell.querySelector('.val');
+  if(val==null||isNaN(val)){cell.classList.add('hidden');bar.style.height='0';v.textContent='';return;}
+  cell.classList.remove('hidden');
+  bar.style.height=Math.max(2,Math.min(54,val/MAXV*54))+'px';
+  v.textContent=val.toFixed(2);
+}
+function setClass(i,cls){
+  const chip=cellRef.cls[i].querySelector('.chip');
+  if(cls==null){chip.className='chip none';chip.textContent='·';return;}
+  chip.className='chip c'+cls;chip.textContent=CNAME[cls];
+}
+
+// ============= 렌더 =============
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+function render(fi){
+  const fr=frames[fi];const ph=fr.ph;
+  // phase bar
+  PHASES.forEach((p,i)=>document.getElementById('ph'+i).className=(i===ph?'on':''));
+  document.getElementById('fcount').textContent='step '+(fi+1)+' / '+F;
+
+  // reveal counts
+  const showPrev = ph>0 || fr.k>=0;
+  const showCurr = ph>0 || fr.k>=1;
+  const showFut  = ph>0 || fr.k>=2;
+  const maDone = ph<1?0:(ph===1?fr.k:N-2);     // interior indices 1..maDone computed
+  const sgDone = ph<2?3:(ph===2?fr.k:N-HALF-1);// p up to sgDone
+  const promDone = ph<3?-1:(ph===3?fr.k:8);
+  const gateDone = ph<4?-1:(ph===4?fr.k:8);
+  const showOut = ph>=4;
+
+  // clear focus/win
+  document.querySelectorAll('.cell').forEach(c=>c.classList.remove('win','focus','raised','corrected'));
+
+  for(let i=0;i<N;i++){
+    const sec=secOf(i);
+    const vis = sec==='prev'?showPrev:sec==='curr'?showCurr:showFut;
+    // ext_raw
+    setBar('raw',i, vis?ext_raw[i]:null);
+    // peak_apply
+    let maShow = (i===0||i===N-1)? (ph>=1) : (i<=maDone);
+    setBar('ma',i, maShow?peak_apply[i]:null);
+    if(maShow && raised[i]) cellRef.ma[i].classList.add('raised');
+    // a0
+    const a0Show = (i>=HALF && i<=N-HALF-1 && i<=sgDone);
+    setBar('a0',i, a0Show?a0[i]:null);
+    // class
+    setClass(i, a0Show? cinfo[i].cls : null);
+    // output (current only)
+    if(i>=4 && i<=12){const c=i-4; const oShow = showOut && gateDone>=c;
+      setBar('out',i, oShow?output[c]:null);
+      if(oShow && corrected[c]) cellRef.out[i].classList.add('corrected');
+    } else { setBar('out',i,null); }
+  }
+
+  // focus + window highlight
+  let win=[],focus=-1;
+  if(ph===1){focus=fr.k;win=[fr.k-1,fr.k,fr.k+1];}
+  else if(ph===2){focus=fr.k;for(let d=-HALF;d<=HALF;d++)win.push(fr.k+d);}
+  else if(ph===3||ph===4){focus=4+fr.k;}
+  win.forEach(i=>{if(i>=0&&i<N)cellRef.ma[i].classList.add('win');});
+  if(focus>=0){['raw','ma','a0','cls','out'].forEach(id=>{if(cellRef[id][focus])cellRef[id][focus].classList.add('focus');});}
+
+  renderExplain(fr);
+  renderCanvas(fr);
+}
+
+function renderExplain(fr){
+  const ph=fr.ph;const T=document.getElementById('ptitle'),E=document.getElementById('explain'),M=document.getElementById('math');
+  if(ph===0){
+    T.textContent='① 입력 배열 조립';
+    const parts=['이전 사이클 꼬리 <b>prev(4)</b>','현재 <b>peak_curr(9)</b>','미래 <b>peak_future(9)</b>'];
+    E.innerHTML='40ms마다 절댓값 최대(max-abs) 1개씩 뽑은 값을 이어붙여 길이 22의 <b>ext_raw</b>를 만듭니다.<br><br>지금: '+parts[fr.k]+' 채움.';
+    M.textContent='ext_raw = prev[4] + curr[9] + future[9]   (총 22칸)\n좌표: idx4 = 현재 0ms,  idx12 = 360ms,  idx13~21 = 미래';
+  } else if(ph===1){
+    const i=fr.k;
+    T.textContent='② MA3 — 골(dip) 메우기';
+    E.innerHTML='이동평균이 아니라 <b>max(원본, 3점평균)</b> 입니다. 인접 3칸 평균과 비교해 <b>더 큰 값</b>만 취해, 봉우리는 보존하고 골만 끌어올립니다.';
+    const a=ext_raw[i-1],b=ext_raw[i],c=ext_raw[i+1],ma=(a+b+c)/3,r=Math.max(b,ma);
+    M.textContent='i='+i+'\n3점평균 = ('+a.toFixed(2)+'+'+b.toFixed(2)+'+'+c.toFixed(2)+')/3 = '+ma.toFixed(3)+
+      '\npeak_apply['+i+'] = max(원본 '+b.toFixed(2)+', 평균 '+ma.toFixed(3)+') = '+r.toFixed(3)+
+      (r>b+1e-9?'   ← 끌어올림 ↑':'   ← 원본 유지');
+  } else if(ph===2){
+    const p=fr.k;const ci=cinfo[p];
+    T.textContent='③ SG fit — 평활 & 외삽 동시 산출';
+    E.innerHTML='점 p의 ±4 (9칸)으로 <b>cubic 1개를 fit</b>. 같은 곡선에서<br>• <b>평활</b> = p(0) = 곡선의 현재값(궤적)<br>• <b>외삽</b> = p(0..9) 모양 → class 예측';
+    M.textContent='p='+p+'  창 = peak_apply['+(p-4)+'..'+(p+4)+']\n'+
+      'cubic: '+coeffs[p].map(v=>v.toFixed(3)).join(', ')+'  [c3,c2,c1,c0]\n'+
+      'ext_a0['+p+'] = p(0) = '+a0[p].toFixed(3)+'   (평활/궤적)\n'+
+      'class = '+CFULL[ci.cls]+(ci.cls===C_PEAK?'  (peak_rel='+ci.peakRel+', 예측='+ci.peakPred.toFixed(2)+')':'')+'   (외삽/예측)';
+  } else if(ph===3){
+    const c=fr.k;const p=4+c;const st=valStateNote[c];
+    T.textContent='④ valley 추적 → prominence';
+    E.innerHTML='class(외삽)로 valley 구간을 추적해 <b>최저 a0</b>를 저장하고, 평활 a0와 결합해 prominence를 구합니다.<br><b>prominence = 현재 a0 − 직전 완료 valley 최소</b> (단방향).';
+    M.textContent='c='+c+' (idx'+p+')  class='+CFULL[clsC[c]]+'\n'+
+      'a0_base = '+a0base[c].toFixed(3)+'\n'+
+      '직전 valley 최소 = '+(isFinite(st.lastVal)?st.lastVal.toFixed(3):'아직 없음(NaN)')+'\n'+
+      'prominence = '+(isFinite(prom[c])?prom[c].toFixed(3):'NaN');
+  } else if(ph===4){
+    const c=fr.k;const g=gate[c];
+    T.textContent='⑤ peak 게이트 + 보정';
+    let body='';
+    if(!g.cand) body='이 점은 <b>연속 PEAK 첫 점이 아님</b> → 후보 아님, 통과.';
+    else body='후보(연속 PEAK 첫 점). 게이트 순서대로 검사:<br><b>throttle → prominence>'+PROM_TH+' → 예측peak>'+PEAK_TRIG+' → 현재<'+MIN_OPEN+'</b>';
+    E.innerHTML=body;
+    M.textContent='c='+c+'  is_first_class3='+isFirst[c]+
+      (g.cand?('\n판정: '+(g.accept?'✅ ':'❌ ')+g.reason):'  → skip')+
+      (g.accept?'\n→ center를 min_open('+MIN_OPEN+') 이상으로 강제 + 좌측 ramp 보정\n→ next_allowed = center+4 (후속 억제)':'');
+  } else {
+    T.textContent='✓ 최종 출력';
+    E.innerHTML='보정이 반영된 <b>output(현재 9)</b> 이 완성. 빨간 막대 = 보정으로 끌어올려진 칸.<br>이후 <b>calculate_mouth()</b> 로 모터 개구량으로 변환되어 큐에 push → 다음 사이클 반복.';
+    M.textContent='output = '+output.map(v=>v.toFixed(2)).join(', ')+
+      '\n보정칸 c = '+corrected.map((v,i)=>v?i:null).filter(v=>v!==null).join(',');
+  }
+}
+
+// ===== canvas: MA3 막대비교 / SG 곡선+외삽 =====
+function renderCanvas(fr){
+  const W=cv.width,H=cv.height;ctx.clearRect(0,0,W,H);
+  const CT=document.getElementById('ctitle'),NOTE=document.getElementById('cnote');
+  if(fr.ph===2){
+    CT.textContent='SG cubic 곡선 + 외삽 (점 p='+fr.k+')';
+    const p=fr.k,c=coeffs[p],ys=peak_apply.slice(p-4,p+4+1),ci=cinfo[p];
+    const padL=42,padR=20,padT=14,padB=26;const x0=-4,x1=9;
+    let maxY=0.6;ys.forEach(v=>maxY=Math.max(maxY,v));for(let i=0;i<=9;i++)maxY=Math.max(maxY,polyval(c,i));
+    const X=x=>padL+(x-x0)/(x1-x0)*(W-padL-padR);
+    const Y=y=>H-padB-(y/maxY)*(H-padT-padB);
+    // grid x=0 line
+    ctx.strokeStyle='#30363d';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(X(0),padT);ctx.lineTo(X(0),H-padB);ctx.stroke();
+    ctx.fillStyle='#8b949e';ctx.font='11px monospace';
+    ctx.fillText('x=0 (지금)',X(0)+4,padT+10);
+    ctx.fillText('창 끝 x=4',X(4)-4,H-padB+16);
+    // axis baseline
+    ctx.strokeStyle='#30363d';ctx.beginPath();ctx.moveTo(padL,H-padB);ctx.lineTo(W-padR,H-padB);ctx.stroke();
+    // fitted curve (solid, x=-4..4)
+    ctx.strokeStyle='#58a6ff';ctx.lineWidth=2;ctx.beginPath();
+    for(let x=-4;x<=4;x+=0.1){const xx=X(x),yy=Y(polyval(c,x));x===-4?ctx.moveTo(xx,yy):ctx.lineTo(xx,yy);}ctx.stroke();
+    // extrapolation (dashed, x=0..9)
+    ctx.strokeStyle='#f0b429';ctx.setLineDash([5,4]);ctx.beginPath();
+    for(let x=0;x<=9;x+=0.1){const xx=X(x),yy=Y(polyval(c,x));x===0?ctx.moveTo(xx,yy):ctx.lineTo(xx,yy);}ctx.stroke();ctx.setLineDash([]);
+    // data points
+    ctx.fillStyle='#c9d1d9';for(let k=0;k<9;k++){ctx.beginPath();ctx.arc(X(XS[k]),Y(ys[k]),3,0,7);ctx.fill();}
+    // forward predicted samples p(1..9)
+    ctx.fillStyle='#f0b429';for(let i=1;i<=9;i++){ctx.beginPath();ctx.arc(X(i),Y(polyval(c,i)),2.5,0,7);ctx.fill();}
+    // p(0) big
+    ctx.fillStyle='#2ea043';ctx.beginPath();ctx.arc(X(0),Y(polyval(c,0)),5,0,7);ctx.fill();
+    ctx.fillStyle='#2ea043';ctx.fillText('a0=p(0)='+a0[p].toFixed(2),X(0)+8,Y(polyval(c,0))-6);
+    NOTE.innerHTML='파란 실선 = fit된 cubic(데이터 범위), 노란 점선 = <b>외삽(미래 예측)</b>, 초록점 = 평활값 p(0), 노란점 = p(1..9). → class <b>'+CFULL[ci.cls]+'</b>';
+  } else if(fr.ph===1){
+    CT.textContent='MA3 비교 (i='+fr.k+')';
+    const i=fr.k,a=ext_raw[i-1],b=ext_raw[i],c=ext_raw[i+1],ma=(a+b+c)/3,r=Math.max(b,ma);
+    const items=[['raw[i-1]',a,'#30363d'],['raw[i]',b,'#58a6ff'],['raw[i+1]',c,'#30363d'],['3pt 평균',ma,'#8b949e'],['결과 max',r,r>b+1e-9?'#bc8cff':'#58a6ff']];
+    const bw=90,gap=24,baseY=H-40,maxY=0.6;
+    items.forEach((it,k)=>{const x=30+k*(bw+gap);const h=it[1]/maxY*(H-90);
+      ctx.fillStyle=it[2];ctx.fillRect(x,baseY-h,bw,h);
+      ctx.fillStyle='#e6edf3';ctx.font='12px monospace';ctx.fillText(it[1].toFixed(3),x+14,baseY-h-6);
+      ctx.fillStyle='#8b949e';ctx.font='10px sans-serif';ctx.fillText(it[0],x+6,baseY+16);});
+    NOTE.innerHTML=r>b+1e-9?'평균이 더 큼 → <b>골을 평균까지 끌어올림</b> (보라).':'원본이 더 큼 → <b>그대로 유지</b> (봉우리 보존).';
+  } else {
+    CT.textContent='계산 시각화';
+    // draw a0 line + class chips overview
+    const padL=30,padR=15,padB=30,padT=15;const maxY=0.62;
+    const X=i=>padL+i/8*(W-padL-padR),Y=y=>H-padB-(y/maxY)*(H-padT-padB);
+    ctx.strokeStyle='#30363d';ctx.beginPath();ctx.moveTo(padL,H-padB);ctx.lineTo(W-padR,H-padB);ctx.stroke();
+    if(fr.ph>=4){ctx.strokeStyle='#f85149';ctx.setLineDash([4,3]);ctx.beginPath();
+      ctx.moveTo(padL,Y(MIN_OPEN));ctx.lineTo(W-padR,Y(MIN_OPEN));ctx.stroke();ctx.setLineDash([]);
+      ctx.fillStyle='#f85149';ctx.font='10px monospace';ctx.fillText('min_open '+MIN_OPEN,W-padR-90,Y(MIN_OPEN)-4);}
+    // a0base line
+    ctx.strokeStyle='#58a6ff';ctx.lineWidth=2;ctx.beginPath();
+    a0base.forEach((v,i)=>{i===0?ctx.moveTo(X(i),Y(v)):ctx.lineTo(X(i),Y(v));});ctx.stroke();
+    // output line if available
+    if(fr.ph>=4){ctx.strokeStyle='#2ea043';ctx.lineWidth=2;ctx.beginPath();
+      output.forEach((v,i)=>{i===0?ctx.moveTo(X(i),Y(v)):ctx.lineTo(X(i),Y(v));});ctx.stroke();}
+    // points + class color
+    const COL={0:'#6e7681',1:'#1f6feb',2:'#db6d28',3:'#f85149',4:'#2ea043',5:'#484f58'};
+    a0base.forEach((v,i)=>{ctx.fillStyle=COL[clsC[i]];ctx.beginPath();ctx.arc(X(i),Y(v),4,0,7);ctx.fill();
+      ctx.fillStyle='#8b949e';ctx.font='9px sans-serif';ctx.fillText('c'+i,X(i)-5,H-padB+14);});
+    const foc=fr.ph<=4?fr.k:-1;
+    if(foc>=0&&foc<9){ctx.strokeStyle='#f0b429';ctx.lineWidth=2;ctx.beginPath();ctx.arc(X(foc),Y(a0base[foc]),8,0,7);ctx.stroke();}
+    NOTE.innerHTML='파란선 = 평활 a0(궤적 베이스), 점 색 = class. '+(fr.ph>=4?'초록선 = 보정 후 output.':'');
+  }
+}
+
+// ============= 컨트롤 =============
+let cur=0,timer=null;
+const scrub=document.getElementById('scrub');scrub.max=F-1;
+function go(i){cur=Math.max(0,Math.min(F-1,i));scrub.value=cur;render(cur);}
+document.getElementById('next').onclick=()=>go(cur+1);
+document.getElementById('prev').onclick=()=>go(cur-1);
+document.getElementById('reset').onclick=()=>{stop();go(0);};
+scrub.oninput=()=>go(+scrub.value);
+const playBtn=document.getElementById('play');
+function play(){if(timer)return;playBtn.textContent='⏸ 일시정지';playBtn.classList.remove('primary');
+  timer=setInterval(()=>{if(cur>=F-1){stop();return;}go(cur+1);},650);}
+function stop(){if(timer){clearInterval(timer);timer=null;}playBtn.textContent='▶ 재생';playBtn.classList.add('primary');}
+playBtn.onclick=()=>{timer?stop():play();};
+document.addEventListener('keydown',e=>{
+  if(e.key==='ArrowRight'){stop();go(cur+1);}
+  else if(e.key==='ArrowLeft'){stop();go(cur-1);}
+  else if(e.key===' '){e.preventDefault();timer?stop():play();}});
+go(0);
+</script>
+
+</body>
+</html>
