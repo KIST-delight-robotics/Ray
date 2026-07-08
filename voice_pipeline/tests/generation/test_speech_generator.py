@@ -14,6 +14,7 @@ from voice_pipeline.core.interfaces import (
     ITTS,
     IConversationHistory,
     IMemoryRetriever,
+    IToolExecutor,
 )
 from voice_pipeline.core.types import (
     GeneratorState,
@@ -21,6 +22,7 @@ from voice_pipeline.core.types import (
     LLMResult,
     LLMStream,
     ResponseData,
+    ToolCall,
     TTSStream,
     WordTimestamp,
 )
@@ -100,6 +102,7 @@ def _make_generator(
     tts_timestamps: tuple[WordTimestamp, ...] = (),
     retriever: MagicMock | None = None,
     session_id: str | None = None,
+    tool_executor: MagicMock | None = None,
 ) -> tuple[SpeechGenerator, dict[str, MagicMock]]:
     """Create a SpeechGenerator with mock dependencies."""
     llm = MagicMock(spec=ILLM)
@@ -124,6 +127,7 @@ def _make_generator(
         system_prompt="test",
         retriever=retriever,
         session_id=session_id,
+        tool_executor=tool_executor,
     )
     return gen, {"llm": llm, "tts": tts, "history": history}
 
@@ -1343,4 +1347,63 @@ class TestFullModeRegression:
 
         data = gen.get_response_data()
         assert data.text == "Hello there!"
+        gen.shutdown()
+
+
+class TestToolExecution:
+    """Tool calls: speculative runs are voided; final runs execute + speak follow-up."""
+
+    @staticmethod
+    def _tool_call_result(text: str = "") -> LLMResult:
+        return LLMResult(
+            text=text,
+            tool_calls=(ToolCall(call_id="c1", name="control_light", arguments='{"action": "off"}'),),
+        )
+
+    def _make_tool_executor(self) -> MagicMock:
+        executor = MagicMock(spec=IToolExecutor)
+        executor.resolve.return_value = [
+            {"type": "function_call", "call_id": "c1", "name": "control_light", "arguments": '{"action": "off"}'},
+            {"type": "function_call_output", "call_id": "c1", "output": "The light is now off."},
+        ]
+        return executor
+
+    def test_speculative_run_with_tool_calls_is_voided(self) -> None:
+        """final=False + tool_calls → no side effects, run voided back to IDLE."""
+        executor = self._make_tool_executor()
+        gen, mocks = _make_generator(tool_executor=executor)
+        mocks["llm"].generate.return_value = _make_llm_stream([], result=self._tool_call_result())
+
+        gen.prepare("turn off the light", final=False)
+
+        # Voided run clears input_text and returns to IDLE without tool execution.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if gen.state == GeneratorState.IDLE and gen.input_text == "":
+                break
+            time.sleep(0.01)
+        assert gen.state == GeneratorState.IDLE
+        assert gen.input_text == ""
+        executor.resolve.assert_not_called()
+        assert not gen.stream_done
+        gen.shutdown()
+
+    def test_final_run_with_tool_calls_executes_and_speaks_followup(self) -> None:
+        """final=True + tool_calls → tools execute once, follow-up text is spoken."""
+        executor = self._make_tool_executor()
+        gen, mocks = _make_generator(tool_executor=executor)
+        first = _make_llm_stream([], result=self._tool_call_result())
+        followup = _make_llm_stream(["Okay, I turned the light off."])
+        mocks["llm"].generate.side_effect = [first, followup]
+
+        gen.prepare("turn off the light")
+        _wait_for_stream_done(gen)
+        _drain_audio(gen)
+
+        executor.resolve.assert_called_once()
+        data = gen.get_response_data()
+        assert data.text == "Okay, I turned the light off."
+        # Follow-up turn must disable tools (tools=[]) to avoid a second call.
+        followup_kwargs = mocks["llm"].generate.call_args_list[1]
+        assert followup_kwargs.kwargs.get("tools") == []
         gen.shutdown()

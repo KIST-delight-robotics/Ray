@@ -36,6 +36,7 @@ from voice_pipeline.asr.asr import GoogleCloudASR
 from voice_pipeline.audio.audio_input import AudioInput
 from voice_pipeline.audio.constants import SAMPLE_RATE
 from voice_pipeline.bridge.cpp_bridge import CppBridge
+from voice_pipeline.core.interfaces import ILightControl
 from voice_pipeline.core.types import AudioFrame, CppEventType, LEDState, SystemMode
 from voice_pipeline.embedding.embedder import create_embedder
 from voice_pipeline.generation.speech_generator import SpeechGenerator
@@ -45,6 +46,7 @@ from voice_pipeline.led.led_controller import LEDController
 from voice_pipeline.llm.llm import OpenAILLM
 from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
 from voice_pipeline.llm.token_counter import create_token_counter
+from voice_pipeline.llm.tool_executor import ToolExecutor
 from voice_pipeline.llm.tools import get_tools_token_cost
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DB_PATH, _DEFAULT_DIMENSION, SQLiteMemoryStorage
@@ -115,6 +117,35 @@ def _wait_playback(
         time.sleep(min(_POLL_INTERVAL_SEC, remaining))
 
 
+def _create_matter_light() -> ILightControl | None:
+    """Build the Matter light controller adapted to ILightControl.
+
+    Returns None if the light stack is unavailable (missing package, no
+    chip-tool, bad config) so the robot still starts and ``control_light``
+    simply reports the light is unavailable.
+    """
+    try:
+        from matter_platform_led import MatterLedController
+
+        controller = MatterLedController.from_config()
+    except Exception:
+        logger.warning("Matter light unavailable — control_light will report it as offline", exc_info=True)
+        return None
+
+    class _MatterLightAdapter(ILightControl):
+        def on(self) -> None:
+            controller.on()
+
+        def off(self) -> None:
+            controller.off()
+
+        def toggle(self) -> None:
+            controller.toggle()
+
+    logger.info("control_light enabled via MatterLedController")
+    return _MatterLightAdapter()
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -136,7 +167,13 @@ def main() -> None:
 
     # --- Process-level singletons ---
     asr = GoogleCloudASR(language_code=language_code)
-    llm = OpenAILLM(model="gpt-5.4", temperature=0.7, reasoning_effort="none", max_tokens=256, tools=["web_search"])
+    llm = OpenAILLM(
+        model="gpt-5.4",
+        temperature=0.7,
+        reasoning_effort="none",
+        max_tokens=256,
+        tools=["web_search", "control_light"],
+    )
     tts = create_tts()
     vap = MaAIVAPWrapper(tts.output_sample_rate)
     turngpt = TurnGPTWrapper()
@@ -177,6 +214,13 @@ def main() -> None:
     executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
     token_counter = create_token_counter(llm.model)
     tools_token_cost = get_tools_token_cost(llm.tools)
+
+    # Matter light control for the `control_light` LLM tool. MatterLedController
+    # (on/off/toggle) is the external smart-home stack; here at the composition
+    # root we adapt it to the pipeline's ILightControl and hand it to the
+    # ToolExecutor. If the light stack is unavailable, the tool degrades to a
+    # spoken "not available" instead of crashing the robot.
+    tool_executor = ToolExecutor(light=_create_matter_light())
 
     # --- Memory system ---
     embedder = create_embedder(expected_dimension=_DEFAULT_DIMENSION)
@@ -249,6 +293,7 @@ def main() -> None:
             memory_storage=memory_storage,
             retriever=retriever,
             session_id=session_id,
+            tool_executor=tool_executor,
         )
         session_loop = SessionLoop(
             asr=asr,

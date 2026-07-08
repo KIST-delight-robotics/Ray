@@ -34,6 +34,27 @@ _TOOL_REGISTRY: dict[str, _ToolEntry] = {
         definition={"type": "web_search"},
         token_cost=294,
     ),
+    # Custom function tool: executed locally by IToolExecutor (see tool_executor.py).
+    "control_light": _ToolEntry(
+        definition={
+            "type": "function",
+            "name": "control_light",
+            "description": "Turn the room light on or off, or toggle it. Use when the user asks to control the light.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["on", "off", "toggle"],
+                        "description": "What to do with the light.",
+                    }
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        },
+        token_cost=75,  # approximate; measure via API input_tokens diff if precision needed
+    ),
 }
 
 

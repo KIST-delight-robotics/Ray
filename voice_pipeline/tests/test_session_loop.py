@@ -268,6 +268,27 @@ class TestAwaitingResponse:
 
         assert orch._phase is Phase.LISTENING
 
+    def test_awaiting_voided_speculative_reprepares_final(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Voided speculative run (IDLE in AWAITING) re-prepares as final exactly once."""
+        orch, mocks = _make_session_loop(monkeypatch)
+        orch._start_session()
+        orch._phase = Phase.AWAITING
+        orch._turn_shift_asr_text = "turn off the light"
+        orch._final_prepare_issued = False
+        mocks["generator"].state = GeneratorState.IDLE
+
+        orch._audio_queue = _audio_queue_with()
+        orch._run_frame()
+
+        mocks["generator"].prepare.assert_called_once_with("turn off the light")
+        assert orch._final_prepare_issued is True
+        assert orch._phase is Phase.AWAITING
+
+        # Second frame while still IDLE (mock never transitions) must NOT re-prepare again.
+        orch._audio_queue = _audio_queue_with()
+        orch._run_frame()
+        mocks["generator"].prepare.assert_called_once()
+
     def test_awaiting_generator_failed_skips_turn(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Generator FAILED during awaiting skips turn and resets turn_detector."""
         orch, mocks = _make_session_loop(monkeypatch)
@@ -300,7 +321,7 @@ class TestPrepare:
         orch._audio_queue = q
         orch._run_frame()
 
-        mocks["generator"].prepare.assert_called_once_with("how are you")
+        mocks["generator"].prepare.assert_called_once_with("how are you", final=False)
 
 
 # ---------------------------------------------------------------------------

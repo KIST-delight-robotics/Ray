@@ -27,6 +27,7 @@ from voice_pipeline.core.types import (
     LLMStream,
     PipelineTrace,
     ResponseData,
+    ToolCall,
     TTSStream,
     TurnDecision,
     VAPResult,
@@ -341,6 +342,53 @@ class ILLM(ABC):
         Returns:
             LLMStream yielding text chunks. After full iteration,
             .result provides LLMResult with text, tool_calls, metrics.
+        """
+
+
+# ---------------------------------------------------------------------------
+# Tool execution (LLM function tools with local side effects)
+# ---------------------------------------------------------------------------
+
+
+class ILightControl(ABC):
+    """Minimal on/off/toggle control over an external light.
+
+    Decouples the pipeline from any specific smart-home stack (Matter, etc.).
+    The concrete controller is adapted to this interface at wiring time.
+    """
+
+    @abstractmethod
+    def on(self) -> None:
+        """Turn the light on."""
+
+    @abstractmethod
+    def off(self) -> None:
+        """Turn the light off."""
+
+    @abstractmethod
+    def toggle(self) -> None:
+        """Toggle the light."""
+
+
+class IToolExecutor(ABC):
+    """Executes LLM function-tool calls and returns follow-up message items.
+
+    Runs the side effect (e.g. turning a light off) and returns the
+    ``function_call`` + ``function_call_output`` items to append to the
+    message history so the LLM can produce a spoken confirmation on a
+    follow-up turn.
+    """
+
+    @abstractmethod
+    def resolve(self, tool_calls: tuple[ToolCall, ...]) -> list[dict[str, Any]]:
+        """Execute the given tool calls.
+
+        Args:
+            tool_calls: Tool calls requested by the LLM.
+
+        Returns:
+            Message items (``function_call`` and ``function_call_output``)
+            to append before the follow-up LLM turn. Empty if nothing ran.
         """
 
 
@@ -710,7 +758,7 @@ class ISpeechGenerator(ABC):
         """
 
     @abstractmethod
-    def prepare(self, current_text: str) -> None:
+    def prepare(self, current_text: str, final: bool = True) -> None:
         """Start background generation for the given user text.
 
         If already PREPARING or STREAMING, cancels the current run and restarts.
@@ -719,6 +767,11 @@ class ISpeechGenerator(ABC):
         Args:
             current_text: Current ASR transcription to generate a
                 response for.
+            final: ``True`` when the user turn is confirmed (turn_shift).
+                ``False`` for speculative runs while the user may still be
+                speaking — tool side effects (e.g. light control) must NOT
+                execute; such a run is voided (state returns to IDLE) so the
+                confirmed turn re-runs it exactly once.
         """
 
     @abstractmethod

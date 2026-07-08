@@ -9,7 +9,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from voice_pipeline.context.context_builder import ContextBuilder
 from voice_pipeline.context.formatters import parse_citation_tag, strip_urls
@@ -20,6 +20,7 @@ from voice_pipeline.core.interfaces import (
     IMemoryRetriever,
     IMemoryStorage,
     ISpeechGenerator,
+    IToolExecutor,
 )
 from voice_pipeline.core.types import (
     GeneratorState,
@@ -74,6 +75,7 @@ class SpeechGenerator(ISpeechGenerator):
         memory_storage: IMemoryStorage | None = None,
         retriever: IMemoryRetriever | None = None,
         session_id: str | None = None,
+        tool_executor: IToolExecutor | None = None,
     ) -> None:
         """Initialize the SpeechGenerator.
 
@@ -91,6 +93,8 @@ class SpeechGenerator(ISpeechGenerator):
                 retriever에 전달. ``None``이면 메모리 사용 안 함.
             retriever: 메모리 retriever. ``None``이면 메모리 검색 안 함.
             session_id: 현재 세션 ID. context 로딩 및 retriever 제외용.
+            tool_executor: LLM 함수도구 실행기 (예: 조명 제어). ``None``이면
+                도구 호출을 무시하고 기존 동작 유지.
         """
         self._context_builder = ContextBuilder(
             history,
@@ -102,6 +106,7 @@ class SpeechGenerator(ISpeechGenerator):
         )
         self._llm = llm
         self._tts = tts
+        self._tool_executor = tool_executor
 
         # Memory integration (all optional)
         self._retriever = retriever
@@ -151,7 +156,7 @@ class SpeechGenerator(ISpeechGenerator):
 
     # -- Public methods ------------------------------------------------------
 
-    def prepare(self, current_text: str) -> None:
+    def prepare(self, current_text: str, final: bool = True) -> None:
         with self._lock:
             # Cancel previous run
             self._cancel_event.set()
@@ -176,8 +181,8 @@ class SpeechGenerator(ISpeechGenerator):
                 prepare_ts=time.monotonic(),
             )
 
-        logger.debug("prepare(%r) → PREPARING [run=%d]", current_text[:60], run_id)
-        self._executor.submit(self._run_pipeline, current_text, run_id, cancel_event, audio_queue)
+        logger.debug("prepare(%r, final=%s) → PREPARING [run=%d]", current_text[:60], final, run_id)
+        self._executor.submit(self._run_pipeline, current_text, run_id, cancel_event, audio_queue, final)
 
     def cancel(self) -> None:
         with self._lock:
@@ -291,17 +296,61 @@ class SpeechGenerator(ISpeechGenerator):
                 cited_ids.append(db_id)
         return cited_ids
 
+    def _resolve_tool_followup(
+        self,
+        messages: list[dict[str, Any]],
+        first_result: Any,
+        cancel_event: threading.Event,
+    ) -> LLMStream | None:
+        """Run any tool calls from *first_result* and start a follow-up LLM turn.
+
+        The follow-up turn (tools disabled) produces the spoken confirmation and
+        is what gets streamed to TTS. Returns None when there is nothing to run,
+        leaving the original single-pass behaviour untouched.
+        """
+        if self._tool_executor is None or not first_result.tool_calls:
+            return None
+        if cancel_event.is_set():
+            return None
+        tool_items = self._tool_executor.resolve(first_result.tool_calls)
+        if not tool_items:
+            return None
+        logger.debug("executed %d tool call(s), running follow-up turn", len(first_result.tool_calls))
+        followup_messages = [*messages, *tool_items]
+        # tools=[] disables tools on the follow-up so it answers with text, not another call.
+        return self._llm.generate(followup_messages, tools=[])
+
+    def _void_speculative_tool_run(self, run_id: int) -> bool:
+        """Void a speculative run whose LLM requested tool side effects.
+
+        Tools (e.g. light control) are irreversible, so they must not fire
+        while the turn is unconfirmed. Returning the generator to IDLE lets
+        SessionLoop re-prepare with ``final=True`` once the turn is confirmed,
+        executing the tools exactly once.
+
+        Returns True if the run was voided (caller must abort the pipeline).
+        """
+        with self._lock:
+            if run_id != self._run_id:
+                return True  # superseded anyway — abort without touching state
+            logger.info("speculative run requested tool calls — voided until turn_shift [run=%d]", run_id)
+            self._state = GeneratorState.IDLE
+            self._input_text = ""
+            self._trace = None
+        return True
+
     def _run_pipeline(
         self,
         current_text: str,
         run_id: int,
         cancel_event: threading.Event,
         audio_queue: queue.Queue[bytes],
+        final: bool,
     ) -> None:
         if self._PIPELINE_MODE == "sentence":
-            self._run_pipeline_sentence(current_text, run_id, cancel_event, audio_queue)
+            self._run_pipeline_sentence(current_text, run_id, cancel_event, audio_queue, final)
         else:
-            self._run_pipeline_full(current_text, run_id, cancel_event, audio_queue)
+            self._run_pipeline_full(current_text, run_id, cancel_event, audio_queue, final)
 
     def _run_pipeline_full(
         self,
@@ -309,6 +358,7 @@ class SpeechGenerator(ISpeechGenerator):
         run_id: int,
         cancel_event: threading.Event,
         audio_queue: queue.Queue[bytes],
+        final: bool,
     ) -> None:
         try:
             t0 = time.monotonic()
@@ -359,20 +409,43 @@ class SpeechGenerator(ISpeechGenerator):
                 raise
 
             full_text = "".join(text_chunks)
+            llm_result = llm_stream.result
+            metrics_list: list[LLMMetrics] = []
+            if llm_result.metrics is not None:
+                metrics_list.append(llm_result.metrics)
+
+            # 3b. Speculative runs must not execute tool side effects — void the
+            # run; the confirmed turn (final=True) will re-run and execute once.
+            if not final and self._tool_executor is not None and llm_result.tool_calls:
+                self._void_speculative_tool_run(run_id)
+                return
+
+            # 3c. If the LLM requested tools, run them and speak the follow-up turn instead.
+            followup = self._resolve_tool_followup(messages, llm_result, cancel_event)
+            if followup is not None:
+                followup_chunks: list[str] = []
+                try:
+                    for chunk in followup:
+                        if cancel_event.is_set():
+                            followup.close()
+                            return
+                        followup_chunks.append(chunk)
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        followup.close()
+                    raise
+                full_text = "".join(followup_chunks)
+                if followup.result.metrics is not None:
+                    metrics_list.append(followup.result.metrics)
+
             t_llm = time.monotonic()
 
             if trace is not None:
                 trace.llm_done_ts = t_llm
+                if metrics_list:
+                    trace.llm_ttft_ms = float(metrics_list[0].ttft_ms)
 
             logger.debug("LLM done (%.1fs) [run=%d]: %r", t_llm - t0, run_id, full_text)
-
-            # 3a. Collect LLM metrics and build turn_items
-            metrics_list: list[LLMMetrics] = []
-            llm_result = llm_stream.result
-            if llm_result.metrics is not None:
-                metrics_list.append(llm_result.metrics)
-                if trace is not None:
-                    trace.llm_ttft_ms = float(llm_result.metrics.ttft_ms)
 
             # 4. Strip citation tag + URLs
             clean_text, cited_indices = parse_citation_tag(full_text)
@@ -487,6 +560,7 @@ class SpeechGenerator(ISpeechGenerator):
         run_id: int,
         cancel_event: threading.Event,
         audio_queue: queue.Queue[bytes],
+        final: bool,
     ) -> None:
         from voice_pipeline.generation.sentence_detector import SentenceDetector
 
@@ -579,21 +653,54 @@ class SpeechGenerator(ISpeechGenerator):
                     llm_stream.close()
                 raise
 
+            metrics_list: list[LLMMetrics] = []
+            if llm_stream.result.metrics is not None:
+                metrics_list.append(llm_stream.result.metrics)
+
+            # Speculative runs must not execute tool side effects — void the
+            # run; the confirmed turn (final=True) will re-run and execute once.
+            if not final and self._tool_executor is not None and llm_stream.result.tool_calls:
+                self._void_speculative_tool_run(run_id)
+                return
+
+            # If the LLM requested tools, run them and stream the follow-up turn
+            # (spoken confirmation) through the same sentence → TTS machinery.
+            followup = self._resolve_tool_followup(messages, llm_stream.result, cancel_event)
+            if followup is not None:
+                try:
+                    for chunk in followup:
+                        if cancel_event.is_set():
+                            followup.close()
+                            return
+                        if llm_first and trace is not None:
+                            trace.llm_first_token_ts = time.monotonic()
+                            llm_first = False
+                        text_chunks.append(chunk)
+                        for sentence in detector.feed(chunk):
+                            if cancel_event.is_set():
+                                followup.close()
+                                return
+                            sentence = strip_urls(sentence)
+                            if not sentence:
+                                continue
+                            future = tts_executor.submit(self._tts.synthesize, sentence)
+                            future_queue.put((sentence, future))
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        followup.close()
+                    raise
+                if followup.result.metrics is not None:
+                    metrics_list.append(followup.result.metrics)
+
             full_text = "".join(text_chunks)
             t_llm = time.monotonic()
 
             if trace is not None:
                 trace.llm_done_ts = t_llm
+                if metrics_list:
+                    trace.llm_ttft_ms = float(metrics_list[0].ttft_ms)
 
             logger.debug("LLM done (%.1fs) [run=%d]: %r", t_llm - t0, run_id, full_text)
-
-            # Collect LLM metrics
-            metrics_list: list[LLMMetrics] = []
-            llm_result = llm_stream.result
-            if llm_result.metrics is not None:
-                metrics_list.append(llm_result.metrics)
-                if trace is not None:
-                    trace.llm_ttft_ms = float(llm_result.metrics.ttft_ms)
 
             # 4. Flush remaining buffer + parse citation tag
             cited_indices: list[int] = []

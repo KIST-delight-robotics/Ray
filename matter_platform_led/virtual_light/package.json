@@ -1,0 +1,17 @@
+{
+  "name": "virtual_light",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node light.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@matter/examples": "^0.15.6",
+    "@matter/main": "^0.17.4"
+  },
+  "type": "module"
+}

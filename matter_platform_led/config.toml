@@ -1,0 +1,35 @@
+# Matter LED 제어 설정
+# --------------------------------------------------------------------------
+# 하드웨어가 없는 동안엔 backend="mock" 으로 두고 CLI 로 신호 경로를 검증한다.
+# 실제 WiFi Matter 전구가 준비되면 backend="chip_tool" 로 바꾸고 아래
+# [device]/[wifi]/[chip_tool] 값을 채운 뒤 `commission` 을 한 번 실행한다.
+# --------------------------------------------------------------------------
+
+# 컨트롤러 백엔드: "mock"(하드웨어 없이 검증) | "chip_tool"(실기기)
+backend = "chip_tool"
+
+[device]
+# 커미셔닝 시 이 기기에 부여할 노드 ID. 이후 모든 명령이 이 값으로 기기를 지칭한다.
+node_id = "0x60"
+# On/Off 클러스터가 있는 엔드포인트. 단일 조명은 보통 1.
+endpoint_id = 1
+# 기기 라벨/QR 에 적힌 11자리 수동 페어링 코드 또는 QR payload (예: "MT:...").
+pairing_code = "34970112332"
+
+[wifi]
+# WiFi Matter 전구를 BLE 로 커미셔닝할 때 전구에 전달할 자격증명.
+# ssid 를 비워두면 "온-네트워크 커미셔닝"(전구가 이미 IP 망에 있음)으로 간주한다.
+ssid = ""
+password = ""
+
+[chip_tool]
+# chip-tool 실행 파일. snap 설치 시 그냥 "chip-tool".
+bin = "chip-tool"
+# 시판 인증기기 attestation 검증용 PAA 인증서 디렉터리.
+# 예: "/home/delight/connectedhomeip/credentials/production/paa-root-certs/"
+# 비워두면 --paa-trust-store-path 를 넘기지 않는다.
+paa_trust_store_path = ""
+# 개발용: attestation 검증 우회 (실제 배포에는 권장하지 않음).
+bypass_attestation = true
+# chip-tool 명령 하나당 타임아웃(초). 첫 커미셔닝은 오래 걸릴 수 있으니 넉넉히.
+command_timeout_sec = 30.0

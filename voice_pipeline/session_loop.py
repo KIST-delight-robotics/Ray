@@ -167,6 +167,7 @@ class SessionLoop:
         self._turn_shift_reason: str | None = None
         self._begin_streaming_time = 0.0
         self._speculative_attempts = 0
+        self._final_prepare_issued = False
         self._saved_memory_results = None
         self._record_path = record_path
         self._record_buf: bytearray | None = bytearray() if record_path else None
@@ -285,6 +286,7 @@ class SessionLoop:
         self._turn_shift_reason = None
         self._begin_streaming_time = 0.0
         self._speculative_attempts = 0
+        self._final_prepare_issued = False
 
         self._asr.start()
         self._set_led(LEDState.IDLE)
@@ -490,19 +492,27 @@ class SessionLoop:
         else:
             # Not ready yet — wait for the generator (detector stays PENDING)
             self._phase = Phase.AWAITING
-            # Start generation if not already preparing
-            if self._generator.state == GeneratorState.IDLE:
+            # Start generation if not already preparing. A speculative run that
+            # is still in flight keeps final=False; if it gets voided (tool
+            # calls), _check_generator_completion re-issues the final prepare.
+            self._final_prepare_issued = self._generator.state == GeneratorState.IDLE
+            if self._final_prepare_issued:
                 self._speculative_attempts += 1
                 self._generator.prepare(text)
         return False
 
     def _handle_prepare(self, text: str) -> None:
-        """Start speculative generation with current text."""
+        """Start speculative generation with current text.
+
+        final=False: the turn is not confirmed yet, so the generator must not
+        execute tool side effects (e.g. light control) — those runs are voided
+        and re-run on turn_shift.
+        """
         if self._phase is not Phase.LISTENING or self._skip_generation:
             return
         self._speculative_attempts += 1
         self._pending_truncation = None
-        self._generator.prepare(text)
+        self._generator.prepare(text, final=False)
 
     def _handle_cancel(self) -> None:
         """Handle cancel: turn_shift was premature, the user is continuing.
@@ -795,6 +805,14 @@ class SessionLoop:
         state = self._generator.state
         if state == GeneratorState.STREAMING:
             self._begin_streaming()
+        elif state == GeneratorState.IDLE and not self._final_prepare_issued:
+            # A speculative run was voided (tool calls deferred until the turn
+            # was confirmed). The turn IS confirmed now — re-run as final so
+            # the tools execute exactly once.
+            logger.info("Voided speculative run — re-preparing as final: %r", self._turn_shift_asr_text[:60])
+            self._speculative_attempts += 1
+            self._final_prepare_issued = True
+            self._generator.prepare(self._turn_shift_asr_text)
         elif state == GeneratorState.FAILED:
             logger.warning("Generator failed while awaiting — skipping turn")
             self._save_trace("cancelled")

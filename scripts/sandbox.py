@@ -76,6 +76,7 @@ from voice_pipeline.core.interfaces import (
     IEmbedder,
     ILEDController,
     IMemoryStorage,
+    IToolExecutor,
     ITurnGPT,
 )
 from voice_pipeline.core.types import (
@@ -591,6 +592,7 @@ def setup_sandbox(
     history_turns: list[tuple[str, str]] | None = None,
     session_summaries: list[str] | None = None,
     system_prompt: str | None = None,
+    tool_executor: IToolExecutor | None = None,
 ) -> SandboxSetup:
     """Wire all pipeline modules into a single sandbox setup.
 
@@ -656,6 +658,7 @@ def setup_sandbox(
         system_prompt or DEFAULT_SYSTEM_PROMPT,
         retriever=retriever,
         session_id="sandbox",
+        tool_executor=tool_executor,
     )
 
     # -- SessionLoop --
