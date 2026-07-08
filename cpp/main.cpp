@@ -118,6 +118,59 @@ std::mutex g_client_ws_mutex;
 std::queue<json> server_message_queue;
 std::mutex server_message_queue_mutex;
 std::condition_variable server_message_queue_cv;
+
+// ===== Head tracking (ReSpeaker DOA → yaw) =====
+// Python(respeaker_doa.py)이 {"type":"look_at","yaw_deg":±도(정면0),"duration":초}를 보냄.
+// yaw만 추적이 소유(roll/pitch는 idle/발화 모션 유지). 발화 중엔 마지막 방향으로 고정.
+namespace {
+    std::mutex ht_mutex;
+    double ht_target_yaw_rad = 0.0;   // 목표(정면=0)
+    double ht_start_yaw_rad  = 0.0;   // min-jerk 시작값
+    double ht_cur_yaw_rad    = 0.0;   // 현재 보간값
+    double ht_duration_s     = 0.0;   // 0이면 pursue(연속 추종)
+    std::chrono::steady_clock::time_point ht_start_time;
+    bool   ht_has_target     = false; // look_at 1회 이상 수신
+    constexpr double HT_PI   = 3.14159265358979323846;
+}
+std::atomic<bool> ht_frozen{false};   // true=발화 중(추적 yaw 고정)
+
+// 매 제어틱 호출 → 현재 추적 yaw(rad). roll/pitch는 호출측이 유지.
+static double head_track_current_yaw_rad() {
+    std::lock_guard<std::mutex> lk(ht_mutex);
+    if (!ht_has_target) return 0.0;            // 명령 전 → 정면(0)
+    if (ht_frozen.load()) return ht_cur_yaw_rad; // 발화 중 → 고정값
+    if (ht_duration_s > 1e-3) {
+        double t = std::chrono::duration<double>(
+                       std::chrono::steady_clock::now() - ht_start_time).count();
+        double tau = t / ht_duration_s;
+        if (tau < 0.0) tau = 0.0;
+        if (tau > 1.0) tau = 1.0;
+        double s = tau * tau * tau * (10.0 - 15.0 * tau + 6.0 * tau * tau); // min-jerk
+        ht_cur_yaw_rad = ht_start_yaw_rad + (ht_target_yaw_rad - ht_start_yaw_rad) * s;
+    } else {
+        ht_cur_yaw_rad += (ht_target_yaw_rad - ht_cur_yaw_rad) * 0.15; // pursue(임계감쇠형)
+    }
+    return ht_cur_yaw_rad;
+}
+
+// look_at을 1회 이상 받았는가 (받기 전엔 yaw를 덮지 않음 = 기존 모션 유지)
+static bool head_track_has_target() {
+    std::lock_guard<std::mutex> lk(ht_mutex);
+    return ht_has_target;
+}
+
+// look_at 수신 시 목표 갱신 (발화 중이면 무시 = 방향 고정 유지)
+static void head_track_set_target(double yaw_deg, double duration_s) {
+    std::lock_guard<std::mutex> lk(ht_mutex);
+    if (ht_frozen.load()) return;              // 발화 중: 새 추적 억제
+    ht_target_yaw_rad = yaw_deg * HT_PI / 180.0;
+    ht_duration_s = duration_s;
+    if (duration_s > 1e-3) {
+        ht_start_yaw_rad = ht_cur_yaw_rad;
+        ht_start_time = std::chrono::steady_clock::now();
+    }
+    ht_has_target = true;
+}
 std::promise<void> server_ready_promise;
 std::atomic<bool> server_ready_fired{false};
 
@@ -1196,6 +1249,9 @@ void generate_motion(int channels, int samplerate) {
 
 
 void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
+    // head-tracking은 대화 응답(RESPONSE)에서만 — 노래(PLAY_MUSIC/MUSIC)·테스트(PLAY_AUDIO)엔 미적용
+    const bool ht_active = cfg_ht.enabled && (mode_label == "RESPONSE");
+    if (ht_active) ht_frozen = true;  // 응답 발화 시작: 추적 yaw를 마지막 방향으로 고정
     #ifdef MOTOR_ENABLED
     std::vector<int32_t> past_position = dxl_driver->getLastGoalPosition();
     std::vector<int32_t> target_position(DXL_NUM);
@@ -1312,6 +1368,9 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
             double pitch = current_motion_data[i][1];
             double yaw   = current_motion_data[i][2];
             double mouth = motor_value;
+
+            // 응답 발화 중 + DOA 명령 받은 뒤에만: yaw를 고정 추적 방향이 덮음(roll/pitch는 발화 모션 유지)
+            if (ht_active && head_track_has_target()) yaw = head_track_current_yaw_rad();
 
             target_position = RPY2DXL(roll, pitch, yaw, mouth, 0);
 
@@ -1787,6 +1846,8 @@ void wait_control_motor(){
     while(!mouth_motion_queue.empty()) mouth_motion_queue.pop();
     while(!head_motion_queue.empty()) head_motion_queue.pop();
 
+    if (cfg_ht.enabled) ht_frozen = false;  // 대기 진입: 발화 고정 해제 → 추적 재개
+
     #ifdef MOTOR_ENABLED
     std::vector<int32_t> past_position = dxl_driver->getLastGoalPosition();
     std::vector<int32_t> target_position(DXL_NUM);
@@ -1850,6 +1911,9 @@ void wait_control_motor(){
             yaw_final = pose.y;
             mouth_final = 0.0;
         }
+
+        // 대기 중 + DOA 명령 받은 뒤에만: yaw는 추적이 덮음(roll/pitch는 idle 모션 유지)
+        if (cfg_ht.enabled && head_track_has_target()) yaw_final = head_track_current_yaw_rad();
 
         target_position = RPY2DXL(roll_final, pitch_final, yaw_final, mouth_final, 0);
 
@@ -2964,6 +3028,14 @@ int main(int argc, char* argv[]) {
                         responses_stream_buffer_cv.notify_all();
                         audio_queue_cv.notify_all();
                         mouth_motion_queue_cv.notify_all();
+                    }
+                }
+                else if (type == "look_at") {
+                    // ReSpeaker DOA → yaw 추적 목표 갱신. 비활성이면 무시(기존 동작 유지).
+                    if (cfg_ht.enabled) {
+                        double yaw_deg  = response.value("yaw_deg", 0.0);
+                        double duration = response.value("duration", 0.0);
+                        head_track_set_target(yaw_deg, duration);
                     }
                 }
                 else {

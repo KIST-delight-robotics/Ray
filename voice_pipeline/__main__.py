@@ -40,6 +40,7 @@ from voice_pipeline.core.interfaces import ILightControl
 from voice_pipeline.core.types import AudioFrame, CppEventType, LEDState, SystemMode
 from voice_pipeline.embedding.embedder import create_embedder
 from voice_pipeline.generation.speech_generator import SpeechGenerator
+from voice_pipeline.head_tracking import HeadTrackingController, load_head_tracking_config
 from voice_pipeline.history.conversation_history import ConversationHistory
 from voice_pipeline.history.storage_backend import create_storage_backend
 from voice_pipeline.led.led_controller import LEDController
@@ -329,12 +330,23 @@ def main() -> None:
 
     logger.info("Pipeline starting")
     bridge.connect()
+
+    # 헤드 트래킹 (ReSpeaker DOA → yaw). cpp/config.toml [head_tracking].enabled로 토글.
+    head_tracking: HeadTrackingController | None = None
+    ht_cfg = load_head_tracking_config()
+    if ht_cfg.enabled:
+        head_tracking = HeadTrackingController(bridge, ht_cfg)
+        if not head_tracking.start():
+            head_tracking = None
+
     audio_input.start()
     try:
         while not shutdown_event.is_set():
             # ---- SLEEP ----
             if mode == SystemMode.SLEEP:
                 led.set_state(LEDState.SLEEPING)
+                if head_tracking is not None:
+                    head_tracking.pause()  # 웨이크 전: DOA 추적 안 함(정면 복귀)
                 while not shutdown_event.is_set():
                     try:
                         frame = audio_queue.get(timeout=_FRAME_TIMEOUT_SEC)
@@ -344,6 +356,8 @@ def main() -> None:
                         continue
                     if wakeword.feed_audio(frame):
                         logger.info("Wakeword detected — transitioning to GREETING")
+                        if head_tracking is not None:
+                            head_tracking.resume()  # 깨어남: DOA 추적 시작
                         mode = SystemMode.GREETING
                         break
 
@@ -439,6 +453,8 @@ def main() -> None:
                     logger.warning("on_session_end callback failed on shutdown", exc_info=True)
 
         audio_input.stop()
+        if head_tracking is not None:
+            head_tracking.stop()
         bridge.disconnect()
         for wrapper in prev_async:
             wrapper.stop()

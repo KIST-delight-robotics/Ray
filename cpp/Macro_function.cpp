@@ -1249,7 +1249,13 @@ std::vector<int32_t> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double
     dxl_goal_position_rollr_double = g_home.home_roll_r - (cfg_robot.height - L2) * (4096 / (cfg_robot.pulley_diameter * PI)) - (delta_mouth * cfg_robot.mouth_back_compensation); // 1.5
     dxl_goal_position_rolll_double = g_home.home_roll_l - (cfg_robot.height - L3) * (4096 / (cfg_robot.pulley_diameter * PI)) - (delta_mouth * cfg_robot.mouth_back_compensation);
   }
-  
+
+  // yaw(ID4) 물리 안전 한계 — 절대 넘으면 안 됨. 모든 yaw 명령(idle/발화/추적)에 항상 적용.
+  dxl_goal_position_yaw_double = std::clamp(
+      dxl_goal_position_yaw_double,
+      static_cast<double>(cfg_robot.yaw_tick_min),
+      static_cast<double>(cfg_robot.yaw_tick_max));
+
   std::vector<int32_t> DXL(5);
   DXL[0] = static_cast<int32_t>(std::lround(dxl_goal_position_pitch_double));
   DXL[1] = static_cast<int32_t>(std::lround(dxl_goal_position_rollr_double));

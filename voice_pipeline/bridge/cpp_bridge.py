@@ -194,10 +194,19 @@ class CppBridge(ICppBridge):
         if not self._running.is_set():
             raise BridgeError("Not connected")
 
+    def send_look_at(self, yaw_deg: float, duration: float) -> None:
+        """Send a head-tracking target to C++ (yaw_deg: 정면=0, ±; duration: 초).
+
+        C++가 [head_tracking].enabled일 때만 소비한다(비활성이면 무시).
+        헤드트래킹 스레드에서 호출되며, _send_json이 락으로 직렬화한다.
+        """
+        self._send_json({"type": "look_at", "yaw_deg": float(yaw_deg), "duration": float(duration)})
+
     def _send_json(self, msg: dict) -> None:
-        """Serialize and send a JSON message."""
+        """Serialize and send a JSON message (thread-safe — 여러 스레드가 연결 공유)."""
         try:
-            self._conn.send(json.dumps(msg))  # type: ignore[union-attr]
+            with self._lock:
+                self._conn.send(json.dumps(msg))  # type: ignore[union-attr]
         except ConnectionClosed as exc:
             raise BridgeError(f"Connection lost during send: {exc}") from exc
         except WebSocketException as exc:

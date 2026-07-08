@@ -74,3 +74,25 @@ min_mouth = 400                    # 최대 mouth movement size in DXL dimension
 generate_head_motion = false        # 헤드 모션 온라인 생성 여부
 wait_mode_rpy_ratio = 1.0           # 대기모드에서 최종 roll, pitch, yaw 값에 곱해지는 비율
 control_motor_rpy_ratio = 1.0       # 온라인 생성 시 최종 roll, pitch, yaw 값에 곱해지는 비율
+
+# yaw(ID4) 물리 안전 한계 — 모든 yaw 명령에 항상 클램프. 절대 넘으면 안 됨.
+# 홈 3600(정면) · 하드 한계 ≈ 3070(좌45°)~4060(우45°). 안전 마진 적용:
+yaw_tick_min = 3200                 # 좌측 한계(작을수록 좌)
+yaw_tick_max = 4000                 # 우측 한계(클수록 우)
+
+
+# ReSpeaker DOA → 고개(yaw) 추적: 소리 방향으로 고개 돌리기
+# uv run ray(대화모드) 단일 프로세스에서 동작. C++는 enabled일 때만 yaw 구동.
+[head_tracking]
+enabled = false   # true=활성(소리 방향 추적), false=비활성(기존 동작)
+# --- 캘리브레이션 (Python head_tracking이 읽음. 생략 시 기본값) ---
+doa_front_deg = 90.0               # 로봇 정면에 해당하는 DOA 각도(측정 안정값 90°). 정면 소리를 0°로 보정
+doa_sign = 1.0                     # 고개가 반대로 돌면 -1.0
+max_yaw_deg = 35.0                 # 출력 yaw 한계(° ) — C++ tick 클램프 3200~4000(≈±35°)와 정합
+deadzone_deg = 8.0                 # (락 방식에선 미사용)
+lock_confirm_s = 0.50              # 음성이 이만큼 지속돼야 그 DOA에 '락'(짧은 잡음/blip 무시)
+t_per_deg = 0.03                   # 조준 회전 속도(초/도). 1/0.03≈33°/s. 키우면 더 느리게 조준
+return_delay_s = 2.0               # 음성 끊긴 뒤 정면 복귀까지 대기(초)=락 해제(응답종료 근사)
+return_t_per_deg = 0.05            # 정면 복귀 속도(초/도). 거리 비례=일정 속도 → 멀수록 천천히(빠르게 안 돌아옴)
+return_duration_s = 2.0            # 정면 복귀 소요시간 '상한'(초). 너무 멀어도 이 시간 넘지 않음
+poll_hz = 20.0                     # DOA 폴링 주기

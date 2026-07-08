@@ -49,12 +49,23 @@ struct RobotConfig {
     bool generate_head_motion;
     double wait_mode_rpy_ratio;
     double control_motor_rpy_ratio;
+
+    // yaw(ID4) 물리 안전 한계 — 절대 넘으면 안 되는 tick 범위. 모든 yaw 명령에 항상 클램프 적용.
+    // 하드 한계 ≈ 3070(좌45°)~4060(우45°), 홈 3600. 안전 마진 기본 3200~4000.
+    int32_t yaw_tick_min = 3200;
+    int32_t yaw_tick_max = 4000;
+};
+
+// ReSpeaker DOA 기반 고개(yaw) 추적 (true=활성, false=비활성). 없으면 false.
+struct HeadTrackingConfig {
+    bool enabled = false;
 };
 
 // 전역 인스턴스
 inline WebSocketConfig cfg_ws;
 inline DynamixelConfig cfg_dxl;
 inline RobotConfig cfg_robot;
+inline HeadTrackingConfig cfg_ht;
 
 
 inline bool LoadConfig(const std::string& path = "config.toml") {
@@ -162,6 +173,17 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
     ok &= REQ(robot_node, "control_motor_rpy_ratio",  cfg_robot.control_motor_rpy_ratio);
 
     if (!ok) return false;
+
+    // yaw 안전 한계 (옵션 — 없으면 기본 3200~4000 유지)
+    if (auto v = robot_node["yaw_tick_min"].value<int32_t>()) cfg_robot.yaw_tick_min = *v;
+    if (auto v = robot_node["yaw_tick_max"].value<int32_t>()) cfg_robot.yaw_tick_max = *v;
+
+    // [head_tracking] 섹션 (옵션 — 없으면 비활성)
+    if (tbl["head_tracking"].is_table()) {
+        if (auto v = tbl["head_tracking"]["enabled"].value<bool>()) cfg_ht.enabled = *v;
+    }
+    std::cout << "[Config] head_tracking.enabled = " << (cfg_ht.enabled ? "true" : "false")
+              << ", yaw 한계 tick = [" << cfg_robot.yaw_tick_min << ", " << cfg_robot.yaw_tick_max << "]\n";
 
     std::cout << "설정 파일 로드 완료.\n";
     return true;
