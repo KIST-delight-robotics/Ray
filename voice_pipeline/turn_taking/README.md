@@ -5,7 +5,7 @@ Wraps external turn-taking models (VAP, TurnGPT) and fuses their outputs via `Tu
 ## External Dependencies
 
 VAP는 MaAI(아래 "MaAI VAP")만 사용. 오리지널 VoiceActivityProjection은
-RPi 실시간 불가(torch ~1.2s/추론, `docs/vap_rpi_benchmark.md`)로 제거됨.
+RPi 실시간 불가(torch ~1.2s/추론, `docs/benchmarks/vap_rpi_benchmark.md`)로 제거됨.
 
 ### TurnGPT
 
