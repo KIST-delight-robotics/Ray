@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Objective evaluation of ONLINE mouth-trajectory logs (eval/mouth/logs/*.csv).
+"""Objective evaluation of ONLINE mouth-trajectory logs (motion_eval/mouth/logs/*.csv).
 
 Single-DOF jaw → judged against phonetic expectation, not raw envelope.
 Metrics (all pure-stdlib):
@@ -12,8 +12,8 @@ Metrics (all pure-stdlib):
   - silence closure: is the mouth closed where the audio is silent? (over-trigger check)
 
 Usage:
-    uv run python eval/mouth/analyze.py
-    uv run python eval/mouth/analyze.py --indir eval/mouth/logs --out eval/mouth/reports/report.html
+    uv run python motion_eval/mouth/analyze.py
+    uv run python motion_eval/mouth/analyze.py --indir motion_eval/mouth/logs --out motion_eval/mouth/reports/report.html
 """
 
 from __future__ import annotations
@@ -434,10 +434,10 @@ document.querySelectorAll('tr[data-name]').forEach(tr=>tr.onclick=()=>{{const e=
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--indir", default="eval/mouth/logs")
-    ap.add_argument("--offdir", default="eval/mouth/offline")
-    ap.add_argument("--txtdir", default="eval/mouth/text")
-    ap.add_argument("--out", default="eval/mouth/reports/report.html")
+    ap.add_argument("--indir", default="motion_eval/mouth/logs")
+    ap.add_argument("--offdir", default="motion_eval/mouth/offline")
+    ap.add_argument("--txtdir", default="motion_eval/mouth/text")
+    ap.add_argument("--out", default="motion_eval/mouth/reports/report.html")
     a = ap.parse_args()
     offdir = Path(a.offdir)
     txtdir = Path(a.txtdir)

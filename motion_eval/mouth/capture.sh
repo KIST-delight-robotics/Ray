@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # 온라인 입 궤적 평가용 로그 캡처 (기존 파이프라인 무수정, 재생 유틸만 재사용).
-# ./build/Ray 를 한 번 띄우고 eval/mouth/wavs/*.wav 를 순차 재생,
-# 재생마다 새로 생긴 pos4_audio CSV를 eval/mouth/logs/<name>.csv 로 라벨링.
+# ./build/Ray 를 한 번 띄우고 motion_eval/mouth/wavs/*.wav 를 순차 재생,
+# 재생마다 새로 생긴 pos4_audio CSV를 motion_eval/mouth/logs/<name>.csv 로 라벨링.
 #
-# 사용법: bash eval/mouth/capture.sh [wav ...]
+# 사용법: bash motion_eval/mouth/capture.sh [wav ...]
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."   # repo root
 
-EVAL=eval/mouth
+EVAL=motion_eval/mouth
 LOGDIR="$EVAL/logs"
 mkdir -p "$LOGDIR"
 

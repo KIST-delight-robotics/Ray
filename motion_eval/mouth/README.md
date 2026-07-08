@@ -10,7 +10,7 @@ TTS WAV를 로봇으로 구동하면서 온라인 생성된 입 모터 궤적 �
 ## 구성
 
 ```
-eval/mouth/
+motion_eval/mouth/
 ├── gen_wavs.py     # 음성학 스트레스 예문 + 자연문 WAV 합성 (scripts/tts_to_file.py 재사용)
 ├── capture.sh      # ./build/Ray 구동 + 각 WAV 재생 + pos4_audio 로그를 예문명으로 캡처
 ├── analyze.py      # 객관 지표 계산 + HTML 리포트 생성
@@ -23,14 +23,14 @@ eval/mouth/
 
 ```bash
 # 1) 평가 WAV 합성 (한 번)
-uv run python eval/mouth/gen_wavs.py
+uv run python motion_eval/mouth/gen_wavs.py
 
 # 2) 로봇 구동하며 로그 캡처 (하드웨어)
-bash eval/mouth/capture.sh
+bash motion_eval/mouth/capture.sh
 
 # 3) 객관 분석 + 리포트
-uv run python eval/mouth/analyze.py
-# -> eval/mouth/reports/report.html
+uv run python motion_eval/mouth/analyze.py
+# -> motion_eval/mouth/reports/report.html
 ```
 
 ## 평가 지표 (음성학·공학 근거)

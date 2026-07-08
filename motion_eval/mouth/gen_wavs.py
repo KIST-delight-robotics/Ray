@@ -4,10 +4,10 @@
 Each utterance targets a specific behavior of an amplitude-driven single-DOF jaw,
 so the trajectory can be judged against a known phonetic expectation.
 
-Reuses scripts/tts_to_file.py (no pipeline changes). Outputs to eval/mouth/wavs/.
+Reuses scripts/tts_to_file.py (no pipeline changes). Outputs to motion_eval/mouth/wavs/.
 
 Usage:
-    uv run python eval/mouth/gen_wavs.py
+    uv run python motion_eval/mouth/gen_wavs.py
 """
 
 from __future__ import annotations

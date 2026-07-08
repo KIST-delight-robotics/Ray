@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fetch ElevenLabs word-level timestamps for each eval utterance.
 
-Saves eval/mouth/text/<name>.json = {"text":..., "words":[{word,start,end}]}.
+Saves motion_eval/mouth/text/<name>.json = {"text":..., "words":[{word,start,end}]}.
 analyze.py reads these and places each word as a subtitle snapped to the
 nearest detected syllable nucleus.
 
@@ -10,7 +10,7 @@ audio is discarded (the robot already played the captured WAV). Word timing
 is near-deterministic; subtitles are snapped to nuclei so minor drift self-corrects.
 
 Usage:
-    uv run python eval/mouth/get_word_times.py
+    uv run python motion_eval/mouth/get_word_times.py
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 TXTDIR = Path(__file__).resolve().parent / "text"
 
-from eval.mouth.gen_wavs import UTTERANCES  # noqa: E402
+from motion_eval.mouth.gen_wavs import UTTERANCES  # noqa: E402
 from voice_pipeline.tts.elevenlabs_tts import ElevenLabsTTS  # noqa: E402
 
 # reference (movie/speech) utterances used in the eval set
