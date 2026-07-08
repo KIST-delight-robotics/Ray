@@ -6,6 +6,7 @@ import array
 import logging
 import queue
 import threading
+from typing import Any
 
 from voice_pipeline.audio.constants import (
     CHANNELS,
@@ -28,8 +29,9 @@ class AudioInput(IAudioInput):
     """
 
     _THREAD_JOIN_TIMEOUT_SEC = 2.0  # 캡처 스레드 종료 대기 (초)
-    _DEVICE_INDEX: int | None = None  # PyAudio 입력 디바이스 인덱스. None은 시스템 기본 장치
-    _CAPTURE_CHANNELS: int | None = 6  # 디바이스에서 캡처할 채널 수. None은 mono (ReSpeaker Flex 6ch는 6)
+    _DEVICE_INDEX: int | None = None  # PyAudio 입력 디바이스 인덱스 명시 오버라이드. None이면 _DEVICE_NAME으로 탐색
+    _DEVICE_NAME: str | None = "respeaker"  # 장치 이름 부분 문자열 매칭 (대소문자 무시). 인덱스와 달리 재열거에 안정적
+    _CAPTURE_CHANNELS: int | None = 6  # 디바이스에서 캡처할 채널 수. None은 mono (ReSpeaker 6ch는 6)
     _EXTRACT_CHANNEL = 0  # 다중 채널 캡처 시 mono 추출에 사용할 채널 인덱스 (0-based)
 
     def __init__(self, audio_queue: queue.Queue[AudioFrame]) -> None:
@@ -74,6 +76,39 @@ class AudioInput(IAudioInput):
         """Return the captured error if the capture thread has died."""
         return self._error
 
+    def _resolve_device_index(self, pa: Any) -> int | None:
+        """입력 장치 인덱스 결정: 명시 인덱스 > 이름 매칭 > 시스템 기본(None).
+
+        Args:
+            pa: 열려 있는 PyAudio 인스턴스.
+
+        Returns:
+            ``pa.open()``에 전달할 장치 인덱스. None이면 시스템 기본 장치.
+
+        Raises:
+            AudioInputError: ``_DEVICE_NAME``과 일치하는 입력 장치가 없는 경우.
+        """
+        if self._DEVICE_INDEX is not None:
+            return self._DEVICE_INDEX
+        if self._DEVICE_NAME is None:
+            return None
+
+        needle = self._DEVICE_NAME.lower()
+        candidates: list[str] = []
+        for i in range(pa.get_device_count()):
+            info = pa.get_device_info_by_index(i)
+            if info.get("maxInputChannels", 0) <= 0:
+                continue
+            name = str(info.get("name", ""))
+            if needle in name.lower():
+                logger.info("Input device matched '%s': [%d] %s", self._DEVICE_NAME, i, name)
+                return i
+            candidates.append(f"[{i}] {name}")
+        raise AudioInputError(
+            f"No input device matching '{self._DEVICE_NAME}'. Available input devices: "
+            f"{', '.join(candidates) if candidates else '(none)'}"
+        )
+
     def _capture_loop(self) -> None:
         """Thread target: open stream, read frames, push to queue."""
         pa = None
@@ -81,6 +116,7 @@ class AudioInput(IAudioInput):
         try:
             pa = self._pyaudio_module.PyAudio()
 
+            device_index = self._resolve_device_index(pa)
             capture_ch = self._CAPTURE_CHANNELS or CHANNELS
             need_extract = capture_ch != CHANNELS
 
@@ -89,7 +125,7 @@ class AudioInput(IAudioInput):
                 channels=capture_ch,
                 rate=SAMPLE_RATE,
                 input=True,
-                input_device_index=self._DEVICE_INDEX,
+                input_device_index=device_index,
                 frames_per_buffer=FRAME_SIZE_SAMPLES,
             )
 
