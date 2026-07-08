@@ -1196,7 +1196,19 @@ std::vector<int32_t> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double
 //double delta_mouth = (float)mouth_f * cfg_robot.mouth_tune; // mouth_f는 0 ~ 1 사이(보통 0.1 ~ 0.3), cfg_robot.mouth_tune은 입을 최대로 크게 벌리는 정도
   double delta_mouth = (float)mouth_f;
 
-  dxl_goal_position_mouth_double = g_home.home_mouth - delta_mouth - pitch_diff * cfg_robot.mouth_pitch_compensation;
+  // ===== mouth↔roll zero-sum 실험 (임시) =====
+  // 입 표현 budget(delta_mouth)을 입 모터와 roll R/L로 비율 분배.
+  //   r = roll 분담(0..1). 입 모터 분 = delta_mouth*(1-r), roll 분 = delta_mouth*r*gain.
+  // 실험 OFF(기본): 입 모터 = delta_mouth 전부, roll = delta_mouth*mouth_back_compensation (기존 거동).
+  double mouth_motor_delta = delta_mouth;
+  double roll_mouth_pull   = delta_mouth * cfg_robot.mouth_back_compensation;
+  if (cfg_robot.mouth_roll_experiment) {
+    double r = std::clamp(cfg_robot.mouth_roll_ratio, 0.0, 1.0);
+    mouth_motor_delta = delta_mouth * (1.0 - r);
+    roll_mouth_pull   = delta_mouth * r * cfg_robot.mouth_roll_gain;
+  }
+
+  dxl_goal_position_mouth_double = g_home.home_mouth - mouth_motor_delta - pitch_diff * cfg_robot.mouth_pitch_compensation;
 
   if (mode == 0) // mirroring
   {
@@ -1219,12 +1231,12 @@ std::vector<int32_t> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double
     //   if (rollL_diff > 0)
     //     rollL_diff *= 1.3;
     // }
-    dxl_goal_position_rollr_double = g_home.home_roll_r - rollR_diff - (delta_mouth * cfg_robot.mouth_back_compensation); // 1.5
-    dxl_goal_position_rolll_double = g_home.home_roll_l - rollL_diff - (delta_mouth * cfg_robot.mouth_back_compensation);
+    dxl_goal_position_rollr_double = g_home.home_roll_r - rollR_diff - roll_mouth_pull; // 1.5
+    dxl_goal_position_rolll_double = g_home.home_roll_l - rollL_diff - roll_mouth_pull;
 
     //// R, L이 너무 기울어졌을 때 입 보상 끄는거
-    //if (dxl_goal_position_rollr_double < 200) dxl_goal_position_rollr_double += delta_mouth * cfg_robot.mouth_back_compensation;
-    //if (dxl_goal_position_rolll_double < 200) dxl_goal_position_rolll_double += delta_mouth * cfg_robot.mouth_back_compensation;
+    //if (dxl_goal_position_rollr_double < 200) dxl_goal_position_rollr_double += roll_mouth_pull;
+    //if (dxl_goal_position_rolll_double < 200) dxl_goal_position_rolll_double += roll_mouth_pull;
   }
   else if (mode == 1) // cloning
   {
@@ -1240,16 +1252,16 @@ std::vector<int32_t> RPY2DXL(double roll_f, double pitch_f, double yaw_f, double
         rollL_diff *= 1.3;
     }
     // R L 변화량 change
-    dxl_goal_position_rollr_double = g_home.home_roll_r - rollR_diff - (delta_mouth * cfg_robot.mouth_back_compensation);
-    dxl_goal_position_rolll_double = g_home.home_roll_l - rollL_diff - (delta_mouth * cfg_robot.mouth_back_compensation);
+    dxl_goal_position_rollr_double = g_home.home_roll_r - rollR_diff - roll_mouth_pull;
+    dxl_goal_position_rolll_double = g_home.home_roll_l - rollL_diff - roll_mouth_pull;
   }
   else 
   {
     INFO_STREAM( "RPY2DXL: CHECK MODE NUMBER" );
-    dxl_goal_position_rollr_double = g_home.home_roll_r - (cfg_robot.height - L2) * (4096 / (cfg_robot.pulley_diameter * PI)) - (delta_mouth * cfg_robot.mouth_back_compensation); // 1.5
-    dxl_goal_position_rolll_double = g_home.home_roll_l - (cfg_robot.height - L3) * (4096 / (cfg_robot.pulley_diameter * PI)) - (delta_mouth * cfg_robot.mouth_back_compensation);
+    dxl_goal_position_rollr_double = g_home.home_roll_r - (cfg_robot.height - L2) * (4096 / (cfg_robot.pulley_diameter * PI)) - roll_mouth_pull; // 1.5
+    dxl_goal_position_rolll_double = g_home.home_roll_l - (cfg_robot.height - L3) * (4096 / (cfg_robot.pulley_diameter * PI)) - roll_mouth_pull;
   }
-
+  
   // yaw(ID4) 물리 안전 한계 — 절대 넘으면 안 됨. 모든 yaw 명령(idle/발화/추적)에 항상 적용.
   dxl_goal_position_yaw_double = std::clamp(
       dxl_goal_position_yaw_double,

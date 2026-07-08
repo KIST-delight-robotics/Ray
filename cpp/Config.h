@@ -46,6 +46,13 @@ struct RobotConfig {
     double max_mouth;
     double min_mouth;
 
+    // ===== mouth↔roll zero-sum 실험 (임시) =====
+    // experiment=true면 입 표현 budget을 입 모터와 roll R/L로 ratio 분배(합 100%).
+    // false(기본)면 기존 거동 그대로. 끄려면 mouth_roll_experiment=false.
+    bool   mouth_roll_experiment = false;  // 실험 on/off
+    double mouth_roll_ratio = 0.0;         // roll R/L 분담 r (0=입 모터 100%, 1=roll 100%)
+    double mouth_roll_gain = 0.75;         // roll 분담분 mouth tick→roll tick 환산 gain
+
     bool generate_head_motion;
     double wait_mode_rpy_ratio;
     double control_motor_rpy_ratio;
@@ -177,6 +184,11 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
     // yaw 안전 한계 (옵션 — 없으면 기본 3200~4000 유지)
     if (auto v = robot_node["yaw_tick_min"].value<int32_t>()) cfg_robot.yaw_tick_min = *v;
     if (auto v = robot_node["yaw_tick_max"].value<int32_t>()) cfg_robot.yaw_tick_max = *v;
+
+    // mouth↔roll zero-sum 실험 (옵션 — 없으면 비활성, 기존 거동 유지)
+    if (auto v = robot_node["mouth_roll_experiment"].value<bool>())  cfg_robot.mouth_roll_experiment = *v;
+    if (auto v = robot_node["mouth_roll_ratio"].value<double>())     cfg_robot.mouth_roll_ratio = *v;
+    if (auto v = robot_node["mouth_roll_gain"].value<double>())      cfg_robot.mouth_roll_gain = *v;
 
     // [head_tracking] 섹션 (옵션 — 없으면 비활성)
     if (tbl["head_tracking"].is_table()) {
