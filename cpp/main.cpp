@@ -901,6 +901,10 @@ class Pos4AudioCsvLogger {
         bool started_ = false;
 };
 
+// 입 모터-오디오 동기화 분석 로그 (logs/pos4_audio/). 40ms마다 원본 오디오를
+// 통째로 기록해 용량이 매우 커지므로, 입 모션 튜닝 때만 true로 켠다.
+constexpr bool kEnablePos4AudioLog = false;
+
 Pos4AudioCsvLogger g_pos4_audio_logger;
 
 // 실제 모션 제어에는 영향을 주지 않도록, 로그용으로만 사용. generate_motion 함수 내에서 모션 결과와 40ms 오디오 데이터를 함께 캡처하여 g_pos4_audio_logger에 기록.
@@ -1172,17 +1176,19 @@ void generate_motion(int channels, int samplerate) {
 
                 mouth_motion_queue.push(std::make_pair(cycle_num, result));
 
-                Pos4AudioLogMeta meta;
-                meta.cycle_num         = cycle_num;
-                meta.tick_idx_in_cycle = i;
-                meta.global_tick_idx   = g_pos4_audio_global_tick++;
-                meta.target_pos4       = 0.0f;
-                meta.audio_raw_point_40ms =
-                    (i < static_cast<int>(raw_audio_point_40ms.size())) ? raw_audio_point_40ms[i] : 0.0f;
-                meta.audio_raw_40ms =
-                    (i < static_cast<int>(raw_audio_40ms_text.size())) ? raw_audio_40ms_text[i] : "";
+                if (kEnablePos4AudioLog) {
+                    Pos4AudioLogMeta meta;
+                    meta.cycle_num         = cycle_num;
+                    meta.tick_idx_in_cycle = i;
+                    meta.global_tick_idx   = g_pos4_audio_global_tick++;
+                    meta.target_pos4       = 0.0f;
+                    meta.audio_raw_point_40ms =
+                        (i < static_cast<int>(raw_audio_point_40ms.size())) ? raw_audio_point_40ms[i] : 0.0f;
+                    meta.audio_raw_40ms =
+                        (i < static_cast<int>(raw_audio_40ms_text.size())) ? raw_audio_40ms_text[i] : "";
 
-                pos4_audio_log_queue.push(meta);
+                    pos4_audio_log_queue.push(meta);
+                }
             }
 
             head_motion_queue.push(deliverSegment);
@@ -1255,11 +1261,13 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
         int num_motor_updates = INTERVAL_MS / 40;
 
         if (cycle_num == 0) {
-            g_pos4_audio_logger.open(log_path);
-            log_opened = true;
+            if (kEnablePos4AudioLog) {
+                g_pos4_audio_logger.open(log_path);
+                log_opened = true;
+                g_pos4_audio_logger.mark_start_now();
+            }
 
             start_time = std::chrono::high_resolution_clock::now();
-            g_pos4_audio_logger.mark_start_now();
 
             soundStream.play(); // 첫 사이클에서 오디오 재생
             // Python에 playback_started 이벤트 전송
