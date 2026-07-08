@@ -130,7 +130,6 @@ voice_pipeline/
     └── integration/
 
 scripts/
-├── sandbox.py             # Pipeline execution sandbox for bug reproduction
 ├── mock_cpp_server.py     # Mock C++ WebSocket server
 ├── tts_to_file.py         # TTS → WAV file utility
 ├── export_maai_onnx.py    # MaAI VAP ONNX export
@@ -234,7 +233,7 @@ uv run pytest -m ''                              # everything
 
 ### Bug reproduction
 
-Do **not** add pytest test files to reproduce or verify bugs. Use `scripts/sandbox.py` instead — it runs the actual production code path (SpeechGenerator, SessionLoop) with controlled inputs. See `scripts/sandbox.py` module docstring for usage.
+Do **not** add pytest test files to reproduce or verify bugs. Reproduce through the production code path instead: wire components via `voice_pipeline/wiring.py` (`build_components()` / `create_session()`) in a throwaway script, or use `evaluation/run.py --text` (LLM-only text mode, skips audio/turn-taking) for generation/context behavior.
 
 
 ## Decision Log
