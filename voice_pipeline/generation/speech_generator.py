@@ -17,6 +17,7 @@ from voice_pipeline.core.interfaces import (
     ILLM,
     ITTS,
     IConversationHistory,
+    IHistorySummarizer,
     IMemoryRetriever,
     IMemoryStorage,
     ISpeechGenerator,
@@ -71,10 +72,10 @@ class SpeechGenerator(ISpeechGenerator):
         system_prompt: str,
         executor: ThreadPoolExecutor | None = None,
         *,
-        tools_token_cost: int = 0,
         memory_storage: IMemoryStorage | None = None,
         retriever: IMemoryRetriever | None = None,
         session_id: str | None = None,
+        summarizer: IHistorySummarizer | None = None,
         tool_executor: IToolExecutor | None = None,
     ) -> None:
         """Initialize the SpeechGenerator.
@@ -88,11 +89,12 @@ class SpeechGenerator(ISpeechGenerator):
             executor: 백그라운드 파이프라인 ThreadPoolExecutor. ``None``이면
                 내부 생성(``MAX_WORKERS`` 기반). 외부 주입 시 shutdown()은
                 executor를 닫지 않음.
-            tools_token_cost: tool 정의가 차지하는 토큰 수.
             memory_storage: 메모리 스토리지 — profiles/summaries 로딩 및
                 retriever에 전달. ``None``이면 메모리 사용 안 함.
             retriever: 메모리 retriever. ``None``이면 메모리 검색 안 함.
             session_id: 현재 세션 ID. context 로딩 및 retriever 제외용.
+            summarizer: 세션 내 히스토리 롤링 요약기. ``None``이면 요약 없이
+                오래된 턴 drop만으로 히스토리 예산을 지킨다.
             tool_executor: LLM 함수도구 실행기 (예: 조명 제어). ``None``이면
                 도구 호출을 무시하고 기존 동작 유지.
         """
@@ -100,9 +102,9 @@ class SpeechGenerator(ISpeechGenerator):
             history,
             system_prompt,
             token_counter,
-            tools_token_cost=tools_token_cost,
             memory_storage=memory_storage,
             session_id=session_id,
+            summarizer=summarizer,
         )
         self._llm = llm
         self._tts = tts

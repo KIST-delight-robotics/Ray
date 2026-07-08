@@ -21,6 +21,7 @@ from voice_pipeline.core.types import (
     CallRecord,
     CppEvent,
     GeneratorState,
+    HistorySummarySnapshot,
     HistoryTurn,
     LEDState,
     LLMMetrics,
@@ -263,6 +264,43 @@ class IConversationHistory(ABC):
 
         With write-through, individual messages are already persisted.
         """
+
+
+# ---------------------------------------------------------------------------
+# HistorySummarizer
+# ---------------------------------------------------------------------------
+
+
+class IHistorySummarizer(ABC):
+    """Rolling in-session summarizer of older conversation turns.
+
+    Maintains a background-generated summary that ContextBuilder shows in
+    place of the turns it covers. A context-view concern only — raw history
+    in storage is never modified (MemoryWriter still sees the full transcript).
+    """
+
+    @abstractmethod
+    def snapshot(self) -> HistorySummarySnapshot | None:
+        """Return the current summary snapshot, or None if none exists yet.
+
+        Thread-safe. The snapshot is immutable; turns with turn_id greater
+        than ``through_turn_id`` must still be sent verbatim.
+        """
+
+    @abstractmethod
+    def maybe_schedule(self, turns: list[HistoryTurn]) -> None:
+        """Kick off a background summarization when the trigger condition holds.
+
+        Non-blocking. No-op when usage is below the trigger threshold, a
+        summarization is already in flight, or close() was called.
+
+        Args:
+            turns: Full turn list from IConversationHistory.get_turns().
+        """
+
+    @abstractmethod
+    def close(self) -> None:
+        """Reject further scheduling and discard any in-flight result."""
 
 
 # ---------------------------------------------------------------------------
@@ -567,33 +605,40 @@ class ILEDController(ABC):
 
 
 class IVAP(ABC):
-    """Voice Activity Projection model wrapper.
+    """Voice Activity Projection — pipeline-facing runtime contract.
 
-    Maintains a rolling stereo audio buffer and runs periodic inference
-    to estimate current/future voice activity probabilities.
-
-    Returns cached result when no new inference is due.
+    Command/query separated: ``feed_audio`` only ingests audio (a command),
+    and the latest voice-activity estimate is read separately via
+    ``latest_result`` (a query). Implementations run inference on their own
+    schedule (e.g. a background thread); ``latest_result`` returns the most
+    recent estimate, repeatable and non-consuming.
     """
 
     @abstractmethod
-    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
-        """Feed pipeline audio and return voice activity estimates.
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> None:
+        """Ingest one pipeline frame of audio (non-blocking command).
 
         Args:
             user_audio: PCM audio at pipeline rate (16kHz). One or more
                 concatenated 30ms frames when batch-draining.
             robot_audio: PCM audio at TTS output sample rate (24kHz).
                 Length should match user_audio duration. None when the
-                robot is not speaking. Wrapper resamples internally
+                robot is not speaking. Implementation resamples internally
                 to 16kHz.
+        """
 
-        Returns:
-            VAPResult with p_now, p_fut, and user_is_speaking.
+    @property
+    @abstractmethod
+    def latest_result(self) -> VAPResult:
+        """Most recent voice-activity estimate (non-consuming query).
+
+        Returns the default ``VAPResult(0, 0, False)`` before the first
+        inference completes.
         """
 
     @abstractmethod
     def reset(self) -> None:
-        """Clear the rolling buffer and internal state for a new turn."""
+        """Clear buffered audio and internal state for a new turn."""
 
 
 # ---------------------------------------------------------------------------
@@ -930,7 +975,15 @@ class IEmbedder(ABC):
 
 
 class ICallStore(ABC):
-    """Records per-call execution data for pipeline modules."""
+    """Records per-call execution data for pipeline modules.
+
+    Also carries the current conversation exchange index as shared state:
+    the turn authority (TurnDetector) updates it via ``set_turn_index`` and
+    every recording site stamps it onto its ``CallRecord`` at construction
+    time, so per-call data is attributable to a specific turn.
+    """
+
+    _turn_index: int = 0
 
     @abstractmethod
     def record(self, record: CallRecord) -> None:
@@ -939,6 +992,15 @@ class ICallStore(ABC):
         Args:
             record: Call record to store.
         """
+
+    def set_turn_index(self, index: int) -> None:
+        """Set the current exchange index stamped onto new call records."""
+        self._turn_index = index
+
+    @property
+    def current_turn_index(self) -> int:
+        """Current exchange index (0-based) for stamping call records."""
+        return self._turn_index
 
     @abstractmethod
     def close(self) -> None:

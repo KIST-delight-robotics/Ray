@@ -310,6 +310,7 @@ class SessionLoop:
         import wave
 
         from voice_pipeline.audio.constants import CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH
+
         try:
             with wave.open(self._record_path, "wb") as wf:
                 wf.setnchannels(CHANNELS)

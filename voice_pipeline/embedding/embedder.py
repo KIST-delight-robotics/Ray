@@ -135,13 +135,16 @@ class OpenAIEmbedder(IEmbedder):
         return self._model
 
 
+_DEFAULT_MODEL_KWARGS: dict[str, Any] = {"file_name": "onnx/model_qint8_arm64.onnx"}
+
+
 def create_embedder(
     model: str = "all-MiniLM-L6-v2",
     backend: Literal["local", "api"] = "local",
     *,
     use_onnx: bool = True,
     expected_dimension: int | None = None,
-    model_kwargs: dict[str, Any] | None = {"file_name": "onnx/model_qint8_arm64.onnx"},
+    model_kwargs: dict[str, Any] | None = _DEFAULT_MODEL_KWARGS,
 ) -> IEmbedder:
     """Factory: create an IEmbedder instance.
 

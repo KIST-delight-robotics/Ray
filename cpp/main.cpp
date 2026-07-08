@@ -70,6 +70,8 @@ std::chrono::time_point<std::chrono::high_resolution_clock> start_time; // 쓰�
 std::atomic<bool> audio_done_flag(false);   // read/stream_and_split → generate_motion, CustomSoundStream
 std::atomic<bool> motion_done_flag(false);  // generate_motion → control_motor
 std::atomic<bool> user_interruption_flag(false);
+std::mutex cycle_wait_mutex;                 // wait_for_next_cycle 인터럽트 가능 대기용
+std::condition_variable cycle_wait_cv;
 std::atomic<bool> is_speaking(false);
 std::atomic<bool> g_shutdown_requested(false);  // 시그널 핸들러가 세움 → 워처 스레드가 정리·종료
 std::atomic<int>  g_shutdown_signum{0};          // 핸들러가 저장(async-signal-safe) → 워처가 메시지에 출력
@@ -202,7 +204,9 @@ std::string get_time_str() {
 // 쓰레드가 INTERVAL_MS 주기로 동작하게 하는 함수
 void wait_for_next_cycle(int cycle_num) {
     auto next_cycle_time = start_time + std::chrono::milliseconds(INTERVAL_MS * cycle_num);
-    std::this_thread::sleep_until(next_cycle_time);
+    // 인터럽트가 오면 deadline 전이라도 즉시 깸 (sleep_until은 notify로 못 깨움)
+    std::unique_lock<std::mutex> lock(cycle_wait_mutex);
+    cycle_wait_cv.wait_until(lock, next_cycle_time, [] { return user_interruption_flag.load(); });
 }
 
 // CSV파일 행 읽기 함수
@@ -950,6 +954,10 @@ class Pos4AudioCsvLogger {
         bool started_ = false;
 };
 
+// 입 모터-오디오 동기화 분석 로그 (logs/pos4_audio/). 40ms마다 원본 오디오를
+// 통째로 기록해 용량이 매우 커지므로, 입 모션 튜닝 때만 true로 켠다.
+constexpr bool kEnablePos4AudioLog = false;
+
 Pos4AudioCsvLogger g_pos4_audio_logger;
 
 // 실제 모션 제어에는 영향을 주지 않도록, 로그용으로만 사용. generate_motion 함수 내에서 모션 결과와 40ms 오디오 데이터를 함께 캡처하여 g_pos4_audio_logger에 기록.
@@ -1198,7 +1206,6 @@ void generate_motion(int channels, int samplerate) {
                 deliverSegment = connectTwoSegments(prevSegment, deliverSegment, 3, 3, 3);
                 prevSegment = deliverSegment;
             } else {
-                std::cout << "Idle motion 사용 중..." << std::endl;
                 deliverSegment = IdleMotionManager::getInstance().getNextSegment(
                     energy.size(), cfg_robot.control_motor_rpy_ratio
                 );
@@ -1222,17 +1229,19 @@ void generate_motion(int channels, int samplerate) {
 
                 mouth_motion_queue.push(std::make_pair(cycle_num, result));
 
-                Pos4AudioLogMeta meta;
-                meta.cycle_num         = cycle_num;
-                meta.tick_idx_in_cycle = i;
-                meta.global_tick_idx   = g_pos4_audio_global_tick++;
-                meta.target_pos4       = 0.0f;
-                meta.audio_raw_point_40ms =
-                    (i < static_cast<int>(raw_audio_point_40ms.size())) ? raw_audio_point_40ms[i] : 0.0f;
-                meta.audio_raw_40ms =
-                    (i < static_cast<int>(raw_audio_40ms_text.size())) ? raw_audio_40ms_text[i] : "";
+                if (kEnablePos4AudioLog) {
+                    Pos4AudioLogMeta meta;
+                    meta.cycle_num         = cycle_num;
+                    meta.tick_idx_in_cycle = i;
+                    meta.global_tick_idx   = g_pos4_audio_global_tick++;
+                    meta.target_pos4       = 0.0f;
+                    meta.audio_raw_point_40ms =
+                        (i < static_cast<int>(raw_audio_point_40ms.size())) ? raw_audio_point_40ms[i] : 0.0f;
+                    meta.audio_raw_40ms =
+                        (i < static_cast<int>(raw_audio_40ms_text.size())) ? raw_audio_40ms_text[i] : "";
 
-                pos4_audio_log_queue.push(meta);
+                    pos4_audio_log_queue.push(meta);
+                }
             }
 
             head_motion_queue.push(deliverSegment);
@@ -1277,6 +1286,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
     for (int cycle_num = 0;; cycle_num++) {
         if (user_interruption_flag) {
             std::cout << "Interruption detected in control_motor." << std::endl;
+            soundStream.stop();
             break;
         }
 
@@ -1290,6 +1300,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
         });
         if (user_interruption_flag) {
             std::cout << "Interruption detected in control_motor (outer wait)." << std::endl;
+            soundStream.stop();
             break;
         }
 
@@ -1306,11 +1317,13 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
         int num_motor_updates = INTERVAL_MS / 40;
 
         if (cycle_num == 0) {
-            g_pos4_audio_logger.open(log_path);
-            log_opened = true;
+            if (kEnablePos4AudioLog) {
+                g_pos4_audio_logger.open(log_path);
+                log_opened = true;
+                g_pos4_audio_logger.mark_start_now();
+            }
 
             start_time = std::chrono::high_resolution_clock::now();
-            g_pos4_audio_logger.mark_start_now();
 
             soundStream.play(); // 첫 사이클에서 오디오 재생
             // Python에 playback_started 이벤트 전송
@@ -1343,6 +1356,7 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
 
                 if (user_interruption_flag) {
                     std::cout << "Interruption detected in control_motor (inner wait)." << std::endl;
+                    soundStream.stop();
                     return;
                 }
 
@@ -2662,6 +2676,7 @@ void shutdown_watcher() {
 
     wait_mode_flag = false;
     user_interruption_flag = true;
+    { std::lock_guard<std::mutex> lk(cycle_wait_mutex); cycle_wait_cv.notify_all(); }
 
     #ifdef MOTOR_ENABLED
     set_led_brightness(0.0f);                       // LED 소등
@@ -2860,7 +2875,10 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signal_handler);
     std::thread(shutdown_watcher).detach();  // 시그널 → 정상 컨텍스트 정리·종료
 
-    LoadConfig("cpp/config.toml");
+    if (!LoadConfig("cpp/config.toml")) {
+        std::cerr << "config.toml 로드 실패 — 종료합니다. (RAY_UNIT 환경변수 확인)" << std::endl;
+        return -1;
+    }
 
     g_home.home_pitch  = cfg_robot.default_pitch;
     g_home.home_roll_r = cfg_robot.default_roll_r;
@@ -3028,6 +3046,7 @@ int main(int argc, char* argv[]) {
                         responses_stream_buffer_cv.notify_all();
                         audio_queue_cv.notify_all();
                         mouth_motion_queue_cv.notify_all();
+                        { std::lock_guard<std::mutex> lk(cycle_wait_mutex); cycle_wait_cv.notify_all(); }
                     }
                 }
                 else if (type == "look_at") {

@@ -5,12 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import UTC, datetime
 
 import numpy as np
 
 from voice_pipeline.core.interfaces import ICallStore, IEmbedder
-from voice_pipeline.core.types import CallRecord
+from voice_pipeline.core.types import CallRecord, utc_now_str
 
 logger = logging.getLogger("voice_pipeline.trace")
 
@@ -65,13 +64,14 @@ class TrackedEmbedder(IEmbedder):
     ) -> None:
         record = CallRecord(
             session_id=self.session_id,
-            timestamp=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+            timestamp=utc_now_str(),
             module="embedder",
             operation=operation,
             model=self._inner.model_name,
             elapsed_ms=elapsed_ms,
             status=status,
             metadata=metadata,
+            turn_index=self._store.current_turn_index,
         )
         try:
             self._store.record(record)

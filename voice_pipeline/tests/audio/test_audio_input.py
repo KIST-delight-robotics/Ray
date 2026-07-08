@@ -28,11 +28,13 @@ def _make_audio_input(
     *,
     queue_size: int = 10,
     device_index: int | None = None,
+    device_name: str | None = None,
     capture_channels: int | None = None,
     extract_channel: int = 0,
 ):
     """Create AudioInput with mocked PyAudio."""
     monkeypatch.setattr(AudioInput, "_DEVICE_INDEX", device_index)
+    monkeypatch.setattr(AudioInput, "_DEVICE_NAME", device_name)
     monkeypatch.setattr(AudioInput, "_CAPTURE_CHANNELS", capture_channels)
     monkeypatch.setattr(AudioInput, "_EXTRACT_CHANNEL", extract_channel)
     audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=queue_size)
@@ -262,6 +264,77 @@ class TestMultiChannelExtract:
 
         assert isinstance(ai._error, AudioInputError)
         assert "extract_channel" in str(ai._error)
+
+
+class TestDeviceResolution:
+    """Tests for name-based input device resolution."""
+
+    @staticmethod
+    def _mock_pa(devices: list[dict]) -> MagicMock:
+        pa = MagicMock()
+        pa.get_device_count.return_value = len(devices)
+        pa.get_device_info_by_index.side_effect = lambda i: devices[i]
+        return pa
+
+    def test_explicit_index_wins_over_name(self, monkeypatch) -> None:
+        """_DEVICE_INDEX가 지정되면 이름 탐색 없이 그대로 사용."""
+        ai, _ = _make_audio_input(monkeypatch, device_index=3, device_name="respeaker")
+        pa = self._mock_pa([])
+
+        assert ai._resolve_device_index(pa) == 3
+        pa.get_device_count.assert_not_called()
+
+    def test_name_match_case_insensitive(self, monkeypatch) -> None:
+        """이름 부분 문자열이 대소문자 무시로 매칭된다."""
+        ai, _ = _make_audio_input(monkeypatch, device_name="respeaker")
+        pa = self._mock_pa(
+            [
+                {"name": "HDMI", "maxInputChannels": 0},
+                {"name": "reSpeaker Flex XVF3800 C16K6Ch: USB Audio (hw:1,0)", "maxInputChannels": 6},
+                {"name": "pipewire", "maxInputChannels": 64},
+            ]
+        )
+
+        assert ai._resolve_device_index(pa) == 1
+
+    def test_output_only_device_not_matched(self, monkeypatch) -> None:
+        """이름이 맞아도 입력 채널이 없는 장치는 건너뛴다."""
+        ai, _ = _make_audio_input(monkeypatch, device_name="respeaker")
+        pa = self._mock_pa(
+            [
+                {"name": "reSpeaker playback", "maxInputChannels": 0},
+                {"name": "pipewire", "maxInputChannels": 64},
+            ]
+        )
+
+        with pytest.raises(AudioInputError, match="No input device matching"):
+            ai._resolve_device_index(pa)
+
+    def test_no_match_error_lists_candidates(self, monkeypatch) -> None:
+        """매칭 실패 에러에 사용 가능한 입력 장치 목록이 포함된다."""
+        ai, _ = _make_audio_input(monkeypatch, device_name="respeaker")
+        pa = self._mock_pa([{"name": "pipewire", "maxInputChannels": 64}])
+
+        with pytest.raises(AudioInputError, match="pipewire"):
+            ai._resolve_device_index(pa)
+
+    def test_name_none_uses_system_default(self, monkeypatch) -> None:
+        """인덱스와 이름 모두 None이면 시스템 기본 장치(None)."""
+        ai, _ = _make_audio_input(monkeypatch)
+        pa = self._mock_pa([])
+
+        assert ai._resolve_device_index(pa) is None
+
+    def test_resolution_failure_sets_error(self, monkeypatch) -> None:
+        """매칭 실패 시 캡처 스레드가 _error를 남기고 종료한다."""
+        ai, _ = _make_audio_input(monkeypatch, device_name="respeaker")
+        mock_pa_instance = self._mock_pa([{"name": "pipewire", "maxInputChannels": 64}])
+        ai._pyaudio_module.PyAudio.return_value = mock_pa_instance
+
+        ai.start()
+        ai._thread.join(timeout=2.0)
+
+        assert isinstance(ai._error, AudioInputError)
 
 
 # ---------------------------------------------------------------------------

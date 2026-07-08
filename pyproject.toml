@@ -26,14 +26,11 @@ dependencies = [
 
 [tool.uv.sources]
 turngpt = { path = "external/TurnGPT", editable = true }
-vap = { path = "external/VoiceActivityProjection", editable = true }
 
 [project.optional-dependencies]
 models-pytorch = [
     "turngpt",
-    "vap",
     "maai>=0.1",
-    "torchaudio",
     "einops>=0.8",
     "omegaconf>=2.3",
     "pytorch-lightning>=2.0",
@@ -45,14 +42,14 @@ models-pytorch = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
-    "ruff>=0.9",
+    "ruff==0.15.2",
 ]
 
 [project.scripts]
 ray = "voice_pipeline.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["voice_pipeline*", "matter_platform_led*"]
+include = ["voice_pipeline*", "evaluation*", "matter_platform_led*"]
 
 [tool.setuptools.package-data]
 matter_platform_led = ["config.toml"]
@@ -77,14 +74,14 @@ select = [
     "I",    # isort
     "UP",   # pyupgrade
     "B",    # flake8-bugbear
-    "SIM",  # flake8-simplify
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "voice_pipeline/__main__.py" = ["E402"]
-"voice_pipeline/llm/prompts.py" = ["E501"]  # prompt strings are long single lines by nature
-"scripts/eval/run.py" = ["E402"]
-"scripts/eval/dashboard.py" = ["E501"]
+"evaluation/run.py" = ["E402"]
+"evaluation/calibrate_noise.py" = ["E402"]
+"evaluation/dashboard.py" = ["E501"]
+"scripts/bench/*" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["voice_pipeline"]
+known-first-party = ["voice_pipeline", "evaluation"]

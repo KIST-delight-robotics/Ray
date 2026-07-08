@@ -1,8 +1,8 @@
 """Prompt style benchmark — test LLM output naturalness.
 
-Runs the production prompt through the real LLM with stubbed
-TTS/Bridge/ASR/VAP/TurnGPT.  Prints raw LLM output for each
-test input so you can evaluate conversational quality.
+Runs the production prompt through the real LLM and the production
+SpeechGenerator with a capture-only TTS.  Prints raw LLM output for
+each test input so you can evaluate conversational quality.
 
 Usage::
 
@@ -16,21 +16,166 @@ Optionally override the system prompt to compare::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
+import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
-from scripts.sandbox import (
-    CaptureTTS,
-    FakeTurnGPT,
-    FakeVAP,
-    ObservableLLM,
-    SandboxBridge,
-    ScriptedASR,
-    run_pipeline,
-    setup_sandbox,
+from voice_pipeline.core.interfaces import ILLM, ITTS
+from voice_pipeline.core.types import (
+    GeneratorState,
+    LLMResult,
+    LLMStream,
+    TTSStream,
+    WordTimestamp,
 )
+from voice_pipeline.generation.speech_generator import SpeechGenerator
+from voice_pipeline.history.conversation_history import ConversationHistory
+from voice_pipeline.history.storage_backend import MemoryStorageBackend
 from voice_pipeline.llm.llm import OpenAILLM
+from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
+from voice_pipeline.llm.token_counter import create_token_counter
+from voice_pipeline.tts.openai_tts import OpenAITTS
+
+# ---------------------------------------------------------------------------
+# Harness — capture wrappers and a minimal SpeechGenerator runner
+# ---------------------------------------------------------------------------
+
+
+class CaptureTTS(ITTS):
+    """Records text inputs and produces minimal valid audio.
+
+    Thread-safe: ``synthesize()`` may be called concurrently from the
+    TTS executor in sentence mode.
+    """
+
+    output_sample_rate: int = OpenAITTS.OUTPUT_SAMPLE_RATE
+    voice_id: str = "bench|capture"
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.calls: list[str] = []
+
+    def synthesize(self, text: str) -> TTSStream:
+        with self._lock:
+            self.calls.append(text)
+
+        words = text.split()
+
+        def _gen() -> Any:
+            chunk = b"\x00" * 4800  # 100ms silence at 24kHz 16-bit mono
+            for _ in range(3):
+                yield chunk
+
+        def _ts_fn() -> tuple[WordTimestamp, ...]:
+            return tuple(WordTimestamp(word=w, start_sec=i * 0.1, end_sec=(i + 1) * 0.1) for i, w in enumerate(words))
+
+        return TTSStream(_gen(), timestamps_fn=_ts_fn)
+
+
+class ObservableLLM(ILLM):
+    """Wraps a real LLM and captures raw output text.
+
+    ``self.calls`` accumulates the raw text from each ``generate()``
+    invocation.  If the stream is cancelled (``close()``), no text
+    is recorded for that call.
+    """
+
+    def __init__(self, real_llm: ILLM) -> None:
+        self._real = real_llm
+        self._lock = threading.Lock()
+        self.calls: list[str] = []
+
+    def generate(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMStream:
+        inner = self._real.generate(messages, tools, response_format)
+        captured_chunks: list[str] = []
+        obs = self
+
+        def _tee() -> Any:
+            for chunk in inner:
+                captured_chunks.append(chunk)
+                yield chunk
+            # Normal completion — record raw text.
+            with obs._lock:
+                obs.calls.append("".join(captured_chunks))
+
+        def _result_fn(_full_text: str) -> LLMResult:
+            return inner.result
+
+        return LLMStream(_tee(), close_fn=inner.close, result_fn=_result_fn)
+
+
+@dataclass
+class PipelineResult:
+    """Observable outputs from a single SpeechGenerator pipeline run."""
+
+    clean_text: str = ""
+    raw_llm_output: str = ""
+    error: str | None = None
+
+
+def build_generator(
+    llm: ILLM,
+    tts: ITTS,
+    *,
+    history_turns: list[tuple[str, str]] | None = None,
+    system_prompt: str | None = None,
+) -> SpeechGenerator:
+    """Wire a production SpeechGenerator with an in-memory history."""
+    token_counter = create_token_counter("gpt-4o")
+    history = ConversationHistory(MemoryStorageBackend(), token_counter)
+    history.new_session("bench_prompt")
+    for role, text in history_turns or []:
+        if role == "user":
+            history.add_user_message(text)
+        elif role == "assistant":
+            history.add_assistant_message(text)
+    return SpeechGenerator(
+        llm,
+        tts,
+        history,
+        token_counter,
+        system_prompt or DEFAULT_SYSTEM_PROMPT,
+        session_id="bench_prompt",
+    )
+
+
+def run_pipeline(
+    generator: SpeechGenerator,
+    llm: ObservableLLM,
+    input_text: str,
+    *,
+    timeout: float = 60.0,
+) -> PipelineResult:
+    """Run a single SpeechGenerator pipeline execution and collect results."""
+    generator.prepare(input_text)
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if generator.state == GeneratorState.FAILED:
+            return PipelineResult(error="Pipeline failed (GeneratorState.FAILED)")
+        if generator.stream_done:
+            break
+        time.sleep(0.05)
+    else:
+        return PipelineResult(error=f"Timeout after {timeout}s")
+
+    # get_text() before get_response_data() because the latter transitions
+    # state to IDLE.
+    clean_text = generator.get_text()
+    with contextlib.suppress(RuntimeError):
+        generator.get_response_data()
+    raw_llm_output = llm.calls[-1] if llm.calls else ""
+
+    return PipelineResult(clean_text=clean_text, raw_llm_output=raw_llm_output)
+
 
 # ---------------------------------------------------------------------------
 # Test scenarios
@@ -301,9 +446,7 @@ SCENARIOS: list[tuple[str, list[tuple[str, str]], str]] = [
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prompt style benchmark")
     parser.add_argument("--prompt", type=str, default=None, help="Override system prompt")
-    parser.add_argument(
-        "--model", type=str, default=None, help="Override LLM model (default: config default)"
-    )
+    parser.add_argument("--model", type=str, default=None, help="Override LLM model (default: config default)")
     parser.add_argument(
         "--tools",
         type=str,
@@ -323,9 +466,7 @@ def main() -> None:
     all_scenarios = SCENARIOS + SCENARIOS_KO + SCENARIOS_TTS + SCENARIOS_SEARCH
     selected = all_scenarios
     if args.scenarios:
-        selected = [
-            s for s in all_scenarios if any(filt in s[0] for filt in args.scenarios)
-        ]
+        selected = [s for s in all_scenarios if any(filt in s[0] for filt in args.scenarios)]
         if not selected:
             print(f"No scenarios matched: {args.scenarios}")
             sys.exit(1)
@@ -353,19 +494,15 @@ def main() -> None:
 
     for label, history, user_input in selected:
         llm = ObservableLLM(OpenAILLM(**llm_kwargs))
-        setup = setup_sandbox(
-            asr=ScriptedASR([]),
-            vap=FakeVAP(),
-            turngpt=FakeTurnGPT(),
-            tts=CaptureTTS(),
-            bridge=SandboxBridge(),
-            llm=llm,
+        generator = build_generator(
+            llm,
+            CaptureTTS(),
             history_turns=history or None,
             system_prompt=prompt_text,
         )
         try:
             t0 = time.monotonic()
-            result = run_pipeline(setup, user_input)
+            result = run_pipeline(generator, llm, user_input)
             elapsed = time.monotonic() - t0
 
             print(f"\n--- {label} ---")
@@ -381,7 +518,7 @@ def main() -> None:
             if result.error:
                 print(f"[error] {result.error}")
         finally:
-            setup.cleanup()
+            generator.shutdown()
 
     print("\n" + "=" * 60)
     print("DONE")

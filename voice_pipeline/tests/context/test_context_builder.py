@@ -7,16 +7,14 @@ from typing import Any
 import pytest
 
 from voice_pipeline.context.context_builder import (
-    _BASE_OVERHEAD_TOKENS,
     _PER_MESSAGE_OVERHEAD_TOKENS,
     ContextBuilder,
 )
-from voice_pipeline.core.types import HistoryTurn, LLMMetrics
+from voice_pipeline.core.types import HistorySummarySnapshot, HistoryTurn, LLMMetrics
 from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
 
 # Per-message overhead shorthand
 _MO = _PER_MESSAGE_OVERHEAD_TOKENS
-_BO = _BASE_OVERHEAD_TOKENS
 
 
 class StubHistory:
@@ -28,19 +26,22 @@ class StubHistory:
             for msg in messages:
                 text = msg.get("content", "")
                 tc = len(text.split()) if text and text.strip() else 0
-                self._turns.append(HistoryTurn(items=(msg,), token_count=tc))
+                self._append_turn((msg,), tc)
+
+    def _append_turn(self, items: tuple[dict[str, Any], ...], token_count: int) -> None:
+        self._turns.append(HistoryTurn(items=items, token_count=token_count, turn_id=len(self._turns)))
 
     def new_session(self, session_id: str) -> None:
         pass
 
     def add_user_message(self, text: str) -> int:
         tc = len(text.split()) if text.strip() else 0
-        self._turns.append(HistoryTurn(items=({"role": "user", "content": text},), token_count=tc))
+        self._append_turn(({"role": "user", "content": text},), tc)
         return len(self._turns) - 1
 
     def add_assistant_message(self, text: str, metrics: LLMMetrics | None = None) -> int:
         tc = len(text.split()) if text.strip() else 0
-        self._turns.append(HistoryTurn(items=({"role": "assistant", "content": text},), token_count=tc))
+        self._append_turn(({"role": "assistant", "content": text},), tc)
         return len(self._turns) - 1
 
     def add_message(
@@ -64,27 +65,39 @@ class StubHistory:
         pass
 
     def inject_turn(self, items: list[dict[str, Any]], token_count: int) -> None:
-        self._turns.append(HistoryTurn(items=tuple(items), token_count=token_count))
+        self._append_turn(tuple(items), token_count)
+
+
+class StubSummarizer:
+    """Records maybe_schedule calls and serves a fixed snapshot."""
+
+    def __init__(self, snapshot: HistorySummarySnapshot | None = None) -> None:
+        self._snapshot = snapshot
+        self.scheduled: list[list[HistoryTurn]] = []
+
+    def snapshot(self) -> HistorySummarySnapshot | None:
+        return self._snapshot
+
+    def maybe_schedule(self, turns: list[HistoryTurn]) -> None:
+        self.scheduled.append(list(turns))
+
+    def close(self) -> None:
+        pass
 
 
 def _word_counter(text: str) -> int:
     return len(text.split()) if text.strip() else 0
 
 
-def _budget(*msg_tokens: int, system: int = 0, tools: int = 0) -> int:
-    """Calculate the minimum budget needed for given messages.
-
-    Each value in msg_tokens is the content token count for one message.
-    Automatically adds base overhead, per-message overhead, and tool cost.
-    """
-    n_msgs = len(msg_tokens) + (1 if system else 0)
-    return sum(msg_tokens) + system + tools + _BO + n_msgs * _MO
+def _turn_cost(*msg_tokens: int) -> int:
+    """History-budget cost of single-item turns with the given token counts."""
+    return sum(t + _MO for t in msg_tokens)
 
 
 def _set_budgets(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    max_context: int = ContextBuilder._MAX_CONTEXT_TOKENS,
+    max_history: int = ContextBuilder._MAX_HISTORY_TOKENS,
     max_memory: int = ContextBuilder._MAX_MEMORY_TOKENS,
     max_profile: int = ContextBuilder._MAX_PROFILE_TOKENS,
     max_prev: int = ContextBuilder._MAX_PREV_SESSION_TOKENS,
@@ -93,16 +106,15 @@ def _set_budgets(
 
     Uses monkeypatch so values auto-revert at test scope.
     """
-    monkeypatch.setattr(ContextBuilder, "_MAX_CONTEXT_TOKENS", max_context)
+    monkeypatch.setattr(ContextBuilder, "_MAX_HISTORY_TOKENS", max_history)
     monkeypatch.setattr(ContextBuilder, "_MAX_MEMORY_TOKENS", max_memory)
     monkeypatch.setattr(ContextBuilder, "_MAX_PROFILE_TOKENS", max_profile)
     monkeypatch.setattr(ContextBuilder, "_MAX_PREV_SESSION_TOKENS", max_prev)
 
 
 class TestContextBuilder:
-    def test_basic_with_system_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_basic_with_system_prompt(self) -> None:
         history = StubHistory()
-        _set_budgets(monkeypatch, max_context=200)
         cb = ContextBuilder(history, "You are helpful.", _word_counter)
         result = cb.build("hello")
         assert result == [
@@ -110,21 +122,19 @@ class TestContextBuilder:
             {"role": "user", "content": "hello"},
         ]
 
-    def test_no_system_prompt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_system_prompt(self) -> None:
         history = StubHistory()
-        _set_budgets(monkeypatch, max_context=200)
         cb = ContextBuilder(history, "", _word_counter)
         result = cb.build("hello")
         assert result == [{"role": "user", "content": "hello"}]
 
-    def test_includes_history(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_includes_history(self) -> None:
         history = StubHistory(
             [
                 {"role": "user", "content": "hi"},  # 1 token
                 {"role": "assistant", "content": "hello there"},  # 2 tokens
             ]
         )
-        _set_budgets(monkeypatch, max_context=200)
         cb = ContextBuilder(history, "", _word_counter)
         result = cb.build("how are you")
         assert len(result) == 3
@@ -132,7 +142,7 @@ class TestContextBuilder:
         assert result[1] == {"role": "assistant", "content": "hello there"}
         assert result[2] == {"role": "user", "content": "how are you"}
 
-    def test_token_budget_trims_oldest_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_history_budget_trims_oldest_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
         history = StubHistory(
             [
                 {"role": "user", "content": "old message here"},  # 3 tokens
@@ -141,10 +151,8 @@ class TestContextBuilder:
                 {"role": "assistant", "content": "recent reply"},  # 2 tokens
             ]
         )
-        # Budget enough for current(1) + recent(1) + recent_reply(2) + overhead
-        # but not enough for old messages
-        budget = _budget(1) + (1 + _MO) + (2 + _MO)  # current + 2 history msgs
-        _set_budgets(monkeypatch, max_context=budget)
+        # History budget fits only the two recent messages
+        _set_budgets(monkeypatch, max_history=_turn_cost(1, 2))
         cb = ContextBuilder(history, "", _word_counter)
         result = cb.build("now")
         assert len(result) == 3
@@ -152,25 +160,25 @@ class TestContextBuilder:
         assert result[1] == {"role": "assistant", "content": "recent reply"}
         assert result[2] == {"role": "user", "content": "now"}
 
-    def test_system_prompt_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        history = StubHistory(
-            [
-                {"role": "user", "content": "hello"},  # 1 token
-            ]
-        )
-        # Budget for system(2) + current(1) + history(1) + overhead
-        budget = _budget(1, system=2) + (1 + _MO)
-        _set_budgets(monkeypatch, max_context=budget)
-        cb = ContextBuilder(history, "be nice", _word_counter)
+    def test_zero_history_budget_keeps_fixed_blocks(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        history = StubHistory([{"role": "user", "content": "old"}])
+        _set_budgets(monkeypatch, max_history=0)
+        cb = ContextBuilder(history, "sys", _word_counter)
         result = cb.build("hi")
-        assert len(result) == 3
-        assert result[0] == {"role": "system", "content": "be nice"}
-        assert result[1] == {"role": "user", "content": "hello"}
-        assert result[2] == {"role": "user", "content": "hi"}
+        assert result == [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"},
+        ]
 
-    def test_empty_history(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_current_text_always_included(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        history = StubHistory([{"role": "user", "content": "old"}])
+        _set_budgets(monkeypatch, max_history=0)
+        cb = ContextBuilder(history, "", _word_counter)
+        result = cb.build("a very long current user message that has no budget cap")
+        assert result == [{"role": "user", "content": "a very long current user message that has no budget cap"}]
+
+    def test_empty_history(self) -> None:
         history = StubHistory()
-        _set_budgets(monkeypatch, max_context=200)
         cb = ContextBuilder(history, "sys", _word_counter)
         result = cb.build("hello")
         assert result == [
@@ -178,53 +186,19 @@ class TestContextBuilder:
             {"role": "user", "content": "hello"},
         ]
 
-    def test_current_text_always_included(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        history = StubHistory(
-            [
-                {"role": "user", "content": "very long old message"},
-            ]
-        )
-        # Tight budget: only room for current message
-        budget = _budget(1)
-        _set_budgets(monkeypatch, max_context=budget)
-        cb = ContextBuilder(history, "", _word_counter)
-        result = cb.build("hi")
-        assert result == [{"role": "user", "content": "hi"}]
-
-    def test_system_prompt_exceeds_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        history = StubHistory([{"role": "user", "content": "old"}])
-        _set_budgets(monkeypatch, max_context=2)
-        cb = ContextBuilder(history, "a very long system prompt", _word_counter)
-        result = cb.build("hi")
-        assert result[0] == {"role": "system", "content": "a very long system prompt"}
-        assert result[-1] == {"role": "user", "content": "hi"}
-        assert len(result) == 2
-
-    def test_zero_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        history = StubHistory([{"role": "user", "content": "old"}])
-        _set_budgets(monkeypatch, max_context=0)
-        cb = ContextBuilder(history, "sys", _word_counter)
-        result = cb.build("hi")
-        assert result[0] == {"role": "system", "content": "sys"}
-        assert result[-1] == {"role": "user", "content": "hi"}
-        assert len(result) == 2
-
-    def test_empty_current_text(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_empty_current_text(self) -> None:
         history = StubHistory()
-        _set_budgets(monkeypatch, max_context=200)
         cb = ContextBuilder(history, "", _word_counter)
         result = cb.build("")
         assert result == [{"role": "user", "content": ""}]
 
-    def test_single_message_exactly_fills_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_single_turn_exactly_fills_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
         history = StubHistory(
             [
                 {"role": "user", "content": "two words"},  # 2 tokens
             ]
         )
-        # Exact budget for current(1) + history(2) + overhead
-        budget = _budget(1) + (2 + _MO)
-        _set_budgets(monkeypatch, max_context=budget)
+        _set_budgets(monkeypatch, max_history=_turn_cost(2))
         cb = ContextBuilder(history, "", _word_counter)
         result = cb.build("hi")
         assert len(result) == 2
@@ -241,9 +215,8 @@ class TestContextBuilder:
             ],
             token_count=15,
         )
-        # Budget enough for all: current + user_turn + tool_turn(3 items)
-        budget = _budget(1) + (1 + _MO) + (15 + 3 * _MO)
-        _set_budgets(monkeypatch, max_context=budget)
+        # History budget covers the user turn + 3-item tool turn
+        _set_budgets(monkeypatch, max_history=_turn_cost(1) + 15 + 3 * _MO)
         cb = ContextBuilder(history, "", _word_counter)
         result = cb.build("next")
         assert len(result) == 5  # user + 3 tool items + current
@@ -257,35 +230,122 @@ class TestContextBuilder:
             ],
             token_count=50,
         )
-        # Budget only for current message
-        budget = _budget(1)
-        _set_budgets(monkeypatch, max_context=budget)
+        # Tool turn (50 + 2*_MO) exceeds the budget; nothing older fits either
+        _set_budgets(monkeypatch, max_history=10)
         cb = ContextBuilder(history, "", _word_counter)
         result = cb.build("hi")
         assert len(result) == 1
         assert result[0] == {"role": "user", "content": "hi"}
 
-    def test_tools_token_cost_deducted(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Tool definitions reduce available budget."""
+
+# ---------------------------------------------------------------------------
+# Rolling in-session summary view
+# ---------------------------------------------------------------------------
+
+
+def _make_snapshot(
+    text: str = "[Earlier in this conversation]\nThey talked.", through: int = 1
+) -> HistorySummarySnapshot:
+    return HistorySummarySnapshot(
+        block_text=text,
+        token_count=_word_counter(text),
+        through_turn_id=through,
+    )
+
+
+class TestContextBuilderWithSummary:
+    def test_summary_block_replaces_covered_turns(self) -> None:
         history = StubHistory(
             [
-                {"role": "user", "content": "hello"},  # 1 token
+                {"role": "user", "content": "old question"},  # turn 0
+                {"role": "assistant", "content": "old answer"},  # turn 1
+                {"role": "user", "content": "new question"},  # turn 2
+                {"role": "assistant", "content": "new answer"},  # turn 3
             ]
         )
-        # Budget for current + 1 history message + overhead, NO tools
-        budget = _budget(1) + (1 + _MO)
-        # With tool cost, history message no longer fits
-        tool_cost = 100
-        _set_budgets(monkeypatch, max_context=budget)
-        cb = ContextBuilder(history, "", _word_counter, tools_token_cost=tool_cost)
-        result = cb.build("hi")
-        # Only current message fits (tool cost ate the history budget)
-        assert len(result) == 1
-        assert result[0] == {"role": "user", "content": "hi"}
+        snapshot = _make_snapshot(through=1)
+        cb = ContextBuilder(history, "", _word_counter, summarizer=StubSummarizer(snapshot))
+        result = cb.build("now")
+
+        contents = [m.get("content") for m in result]
+        assert snapshot.block_text in contents
+        assert "old question" not in contents
+        assert "old answer" not in contents
+        assert "new question" in contents
+        assert "new answer" in contents
+        # Summary block sits right before the live turns
+        assert contents.index(snapshot.block_text) < contents.index("new question")
+
+    def test_summary_cost_counts_against_history_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        history = StubHistory(
+            [
+                {"role": "user", "content": "old"},  # turn 0 (covered)
+                {"role": "user", "content": "live one"},  # turn 1, 2 tokens
+                {"role": "assistant", "content": "live two ok"},  # turn 2, 3 tokens
+            ]
+        )
+        snapshot = _make_snapshot(text="five word summary block here", through=0)  # 5 tokens
+        # Budget: summary (5+_MO) + most recent turn (3+_MO) — turn 1 must drop
+        _set_budgets(monkeypatch, max_history=(5 + _MO) + _turn_cost(3))
+        cb = ContextBuilder(history, "", _word_counter, summarizer=StubSummarizer(snapshot))
+        result = cb.build("now")
+
+        contents = [m.get("content") for m in result]
+        assert "five word summary block here" in contents
+        assert "live two ok" in contents
+        assert "live one" not in contents
+
+    def test_summary_placed_after_prev_sessions(self) -> None:
+        history = StubHistory(
+            [
+                {"role": "user", "content": "old"},  # turn 0 (covered)
+                {"role": "user", "content": "live"},  # turn 1
+            ]
+        )
+        snapshot = _make_snapshot(text="summary text", through=0)
+        cb = ContextBuilder(
+            history,
+            "sys",
+            _word_counter,
+            session_summaries=["[2026-03-28 14:00 session]\n- Prev ep."],
+            summarizer=StubSummarizer(snapshot),
+        )
+        result = cb.build("now")
+
+        contents = [m.get("content") for m in result]
+        prev_idx = next(i for i, c in enumerate(contents) if "2026-03-28" in c)
+        assert contents.index("summary text") == prev_idx + 1
+        assert contents.index("summary text") < contents.index("live")
+
+    def test_maybe_schedule_called_with_all_turns(self) -> None:
+        history = StubHistory(
+            [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+            ]
+        )
+        summarizer = StubSummarizer()
+        cb = ContextBuilder(history, "", _word_counter, summarizer=summarizer)
+        cb.build("now")
+
+        assert len(summarizer.scheduled) == 1
+        assert [t.turn_id for t in summarizer.scheduled[0]] == [0, 1]
+
+    def test_no_snapshot_sends_all_turns_verbatim(self) -> None:
+        history = StubHistory(
+            [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+            ]
+        )
+        cb = ContextBuilder(history, "", _word_counter, summarizer=StubSummarizer(None))
+        result = cb.build("now")
+        contents = [m.get("content") for m in result]
+        assert contents == ["one", "two", "now"]
 
 
 # ---------------------------------------------------------------------------
-# Memory-aware tests (Phase 4)
+# Memory-aware tests
 # ---------------------------------------------------------------------------
 
 
@@ -307,10 +367,9 @@ def _make_episode(text: str, ts: str = "2026-03-15 14:00:00", eid: int = 1) -> E
 class TestContextBuilderWithMemory:
     """Tests for profile, memory, and session summary injection."""
 
-    def test_profile_injected_as_developer_msg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_profile_injected_as_developer_msg(self) -> None:
         profiles = [_make_profile("basic_info", "name", "Alice")]
         history = StubHistory()
-        _set_budgets(monkeypatch, max_context=500)
         cb = ContextBuilder(history, "sys", _word_counter, profiles=profiles)
         result = cb.build("hi")
         # system, profile(developer), user
@@ -318,11 +377,10 @@ class TestContextBuilderWithMemory:
         assert result[1]["role"] == "developer"
         assert "basic_info::name: Alice" in result[1]["content"]
 
-    def test_memory_injected_last(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_memory_injected_last(self) -> None:
         history = StubHistory()
         history.add_user_message("prev")
         history.add_assistant_message("reply")
-        _set_budgets(monkeypatch, max_context=500)
         cb = ContextBuilder(history, "", _word_counter)
 
         ep = _make_episode("User likes SF.")
@@ -333,10 +391,9 @@ class TestContextBuilderWithMemory:
         assert "[M1]" in result[-1]["content"]
         assert result[-2] == {"role": "user", "content": "now"}
 
-    def test_session_summaries_injected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_session_summaries_injected(self) -> None:
         history = StubHistory()
         summary = "[2026-03-28 14:00 session]\n- User talked about Dune."
-        _set_budgets(monkeypatch, max_context=500)
         cb = ContextBuilder(
             history,
             "sys",
@@ -347,13 +404,12 @@ class TestContextBuilderWithMemory:
         # system, summary(developer), user
         assert any("2026-03-28 14:00 session" in m.get("content", "") for m in result)
 
-    def test_block_ordering(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_block_ordering(self) -> None:
         """Verify: system → profile → summary → history → user → memory."""
         profiles = [_make_profile("basic_info", "name", "Alice")]
         summary = "[2026-03-28 14:00 session]\n- Summary ep."
         history = StubHistory()
         history.add_user_message("old")
-        _set_budgets(monkeypatch, max_context=1000)
         cb = ContextBuilder(
             history,
             "sys",
@@ -374,9 +430,25 @@ class TestContextBuilderWithMemory:
         assert roles[-1] == "developer"  # memory (last)
         assert roles[-2] == "user"  # current text
 
-    def test_memory_budget_reserved_before_history(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Memory gets its dedicated budget even when history is large."""
-        # Fill history with many turns
+    def test_memory_trimmed_to_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Episodes over the memory cap are dropped from the tail (lowest salience)."""
+        eps = [
+            _make_episode("first episode with several words inside", eid=1),
+            _make_episode("second episode with several words inside", eid=2),
+            _make_episode("third episode with several words inside", eid=3),
+        ]
+        mem = MemoryReadResult(eps, [0.9, 0.8, 0.7], {1: 1, 2: 2, 3: 3})
+        _set_budgets(monkeypatch, max_memory=20)
+        cb = ContextBuilder(StubHistory(), "", _word_counter)
+        result = cb.build("hi", memory_result=mem)
+
+        memory_msg = result[-1]
+        assert memory_msg["role"] == "developer"
+        assert "[M1]" in memory_msg["content"]
+        assert "[M3]" not in memory_msg["content"]
+
+    def test_memory_included_even_with_large_history(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Memory has its own budget — a full history cannot crowd it out."""
         history = StubHistory()
         for i in range(20):
             history.add_user_message(f"turn {i} user message here")
@@ -384,35 +456,16 @@ class TestContextBuilderWithMemory:
 
         ep = _make_episode("Important memory episode text here.")
         mem = MemoryReadResult([ep], [0.9], {1: 1})
-
-        # Tight budget: memory reservation eats into history space
-        _set_budgets(monkeypatch, max_context=80, max_memory=20)
+        _set_budgets(monkeypatch, max_history=30)
         cb = ContextBuilder(history, "", _word_counter)
         result = cb.build("hi", memory_result=mem)
 
-        # Memory block must be present (last message)
         assert result[-1]["role"] == "developer"
         assert "[M1]" in result[-1]["content"]
 
-    def test_no_memory_gives_budget_to_history(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Without memory, history gets the full remaining budget."""
-        history = StubHistory()
-        for i in range(5):
-            history.add_user_message(f"msg {i}")
-
-        _set_budgets(monkeypatch, max_context=200, max_memory=50)
-        cb = ContextBuilder(history, "", _word_counter)
-
-        result_no_mem = cb.build("now")
-        result_with_mem = cb.build("now", memory_result=MemoryReadResult([], [], {}))
-
-        # Both should have same result (empty memory = no reservation)
-        assert len(result_no_mem) == len(result_with_mem)
-
-    def test_backward_compatible_build_call(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_backward_compatible_build_call(self) -> None:
         """build(text) without memory_result still works."""
         history = StubHistory()
-        _set_budgets(monkeypatch, max_context=200)
         cb = ContextBuilder(history, "sys", _word_counter)
         result = cb.build("hello")
         assert result[0] == {"role": "system", "content": "sys"}
@@ -423,7 +476,7 @@ class TestContextBuilderWithMemory:
         # Create a profile with long content
         profiles = [_make_profile("basic_info", "bio", "a " * 200)]
         history = StubHistory()
-        _set_budgets(monkeypatch, max_context=500, max_profile=10)  # very tight cap
+        _set_budgets(monkeypatch, max_profile=10)  # very tight cap
         cb = ContextBuilder(history, "", _word_counter, profiles=profiles)
         result = cb.build("hi")
         # No developer message (profile too large)
@@ -437,7 +490,7 @@ class TestContextBuilderWithMemory:
             "[2026-03-28 10:00 session]\n- Recent session ep.",
         ]
         # Each summary ≈ 7 words + 3 overhead = 10 tokens. Cap at 15 → only 1 fits.
-        _set_budgets(monkeypatch, max_context=500, max_prev=15)
+        _set_budgets(monkeypatch, max_prev=15)
         history = StubHistory()
         cb = ContextBuilder(
             history,

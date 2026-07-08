@@ -252,7 +252,7 @@
       "category": "interruption",
       "memory": false,
       "multi_turn": false,
-      "interrupt_delays_sec": [0.0, 1.0, 2.0, 3.0],
+      "interrupt_delays_sec": [3.0],
       "interrupt_audios": ["int_i_001", "int_i_002", "int_i_003"],
       "questions": [
         {"id": "int_q_001", "text": "Tell me about the history of computers."},

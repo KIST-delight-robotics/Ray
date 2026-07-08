@@ -58,7 +58,7 @@ from voice_pipeline.memory.types import Episode
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.session_loop import SessionLoop
 from voice_pipeline.tts.openai_tts import OpenAITTS
-from voice_pipeline.turn_taking.async_turngpt import SyncTurnGPTAdapter
+from voice_pipeline.turn_taking.threaded_turngpt import SyncTurnGPTAdapter
 from voice_pipeline.turn_taking.turn_detector import TurnDetector
 
 # ---------------------------------------------------------------------------
@@ -195,7 +195,11 @@ class FakeTTS(ITTS):
 class FakeVAP(IVAP):
     """VAP mock: always indicates user is not speaking, robot-favoring probs."""
 
-    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> None:
+        pass
+
+    @property
+    def latest_result(self) -> VAPResult:
         return VAPResult(p_now=0.2, p_fut=0.2, user_is_speaking=False)
 
     def reset(self) -> None:
@@ -208,7 +212,11 @@ class InterruptableVAP(IVAP):
     def __init__(self) -> None:
         self.interrupting = False
 
-    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> VAPResult:
+    def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> None:
+        pass
+
+    @property
+    def latest_result(self) -> VAPResult:
         if self.interrupting:
             return VAPResult(p_now=0.8, p_fut=0.8, user_is_speaking=True)
         return VAPResult(p_now=0.2, p_fut=0.2, user_is_speaking=False)

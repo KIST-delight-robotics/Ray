@@ -1,0 +1,1678 @@
+"""E2E evaluation runner for the voice pipeline.
+
+Plays pre-generated question WAV files through a physical speaker,
+lets the full pipeline process them, and records session mappings.
+Actual turn data (ASR text, response, latency) is captured by the
+existing storage systems (trace_store, history, memory_storage).
+
+Usage:
+    uv run python -m evaluation.run \\
+        --questions data/eval/questions.json \\
+        --device plughw:1,0 \\
+        --output-dir data/eval/results
+"""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import json
+import logging
+import os
+import queue
+import random
+import signal
+import sys
+import threading
+import time
+import uuid
+from collections.abc import Callable
+from datetime import datetime
+from functools import partial
+from pathlib import Path
+
+# Suppress ALSA/JACK noise during PyAudio initialization.
+_alsa_error_handler = ctypes.CFUNCTYPE(
+    None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p
+)(lambda *_: None)
+try:
+    _asound = ctypes.cdll.LoadLibrary("libasound.so.2")
+    _asound.snd_lib_error_set_handler(_alsa_error_handler)
+except Exception:
+    _asound = None
+
+from evaluation.noise_bed import NoiseBed
+from evaluation.question_player import QuestionPlayer
+from voice_pipeline.core.types import AudioFrame
+from voice_pipeline.session_loop import SessionComponents
+from voice_pipeline.wiring import build_components
+
+logger = logging.getLogger("eval")
+
+_STARTUP_DELAY_SEC = 1.5
+_TURN_TIMEOUT_SEC = 60.0
+_TURN_DETECT_TIMEOUT_SEC = 10.0
+_WATCHDOG_POLL_SEC = 0.1  # 감지 워치독 폴링 주기
+_BEEP_SETTLE_SEC = 0.2  # 비프음이 마이크 큐에 다 들어온 뒤 drain하기 위한 대기
+_BED_SETTLE_SEC = 1.0  # 노이즈 레벨 전환(aplay 재시작) 후 스피커 출력이 안정될 때까지의 대기
+_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+# 질문 재생 기본 장치 — ALSA "default"는 로봇 응답 전용이라 질문 재생엔 안 씀.
+# dmix PCM이라 노이즈 베드와 질문을 한 카드에서 섞을 수 있고, 단일 스트림도 정상 동작.
+_DEFAULT_PLAYBACK_DEVICE = "plug:dmix:CARD=DAC,DEV=0"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _drain_audio_queue(audio_queue: queue.Queue[AudioFrame]) -> None:
+    while True:
+        try:
+            audio_queue.get_nowait()
+        except queue.Empty:
+            break
+
+
+def _begin_session_audio(player: QuestionPlayer, audio_queue: queue.Queue[AudioFrame]) -> None:
+    """Sound the session-start beep, then clear the audio queue.
+
+    ``audio_input`` runs continuously across the whole eval, so the beep —
+    played through the same external speaker as the questions — is picked up
+    by the mic. Draining after it (once the beep has settled into the queue)
+    keeps it out of the ASR stream and the session recording, and also clears
+    any frames left over from the previous session.
+    """
+    if player.beep():
+        time.sleep(_BEEP_SETTLE_SEC)
+    _drain_audio_queue(audio_queue)
+
+
+def _make_beep_wav(
+    path: str,
+    *,
+    freq_hz: float = 1000.0,
+    duration_sec: float = 0.15,
+    sample_rate: int = 16000,
+    volume: float = 0.5,
+) -> None:
+    """Write a short sine-wave beep (mono 16-bit) used to mark session starts.
+
+    Played through the question speaker just before each session's mic
+    capture begins, so a human watching the run can hear when a new
+    question/scenario starts. Endpoints are faded to avoid click artifacts.
+    """
+    import math
+    import struct
+    import wave
+
+    n = int(sample_rate * duration_sec)
+    fade = max(1, int(sample_rate * 0.01))
+    frames = bytearray()
+    for i in range(n):
+        amp = volume
+        if i < fade:
+            amp *= i / fade
+        elif i >= n - fade:
+            amp *= (n - i) / fade
+        sample = int(amp * 32767 * math.sin(2 * math.pi * freq_hz * i / sample_rate))
+        frames += struct.pack("<h", sample)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(bytes(frames))
+
+
+def _iter_questions(suite: dict):
+    """Yield all question dicts from a suite (handles both flat and scenario formats)."""
+    if suite.get("multi_turn"):
+        for scenario in suite.get("scenarios", []):
+            yield from scenario["questions"]
+    else:
+        yield from suite.get("questions", [])
+
+
+def _load_manifest(questions_path: str, wav_dir: str) -> dict[str, dict[str, str]]:
+    """Load WAV manifest. Returns ``{id: {"path": ..., "voice": ...}}``.
+
+    Supports both the new format (``{id: {"path", "voice"}}``) and the legacy
+    format (``{id: path_str}``).  Falls back to ``<wav_dir>/<id>.wav`` when no
+    manifest file exists.
+    """
+    manifest_path = Path(wav_dir) / "manifest.json"
+    if manifest_path.exists():
+        raw = json.loads(manifest_path.read_text())
+        first = next(iter(raw.values()), None) if raw else None
+        if isinstance(first, str):
+            return {qid: {"path": p, "voice": ""} for qid, p in raw.items()}
+        return raw
+    data = json.loads(Path(questions_path).read_text())
+    manifest: dict[str, dict[str, str]] = {}
+    wav_dir_path = Path(wav_dir)
+    for suite in data["suites"]:
+        for q in _iter_questions(suite):
+            legacy = wav_dir_path / f"{q['id']}.wav"
+            if legacy.exists():
+                manifest[q["id"]] = {"path": str(legacy), "voice": ""}
+                continue
+            matches = sorted(wav_dir_path.glob(f"{q['id']}_*.wav"))
+            if matches:
+                voice = matches[0].stem.removeprefix(f"{q['id']}_")
+                manifest[q["id"]] = {"path": str(matches[0]), "voice": voice}
+    return manifest
+
+
+def _inject_seeds(seed_data, memory_storage, vector_index, embedder, token_counter):
+    """Inject seed sessions into memory storage and run MemoryWriter on each.
+
+    Returns:
+        dict[int, str]: Mapping from session index to session_id.
+    """
+    from voice_pipeline.llm.llm import OpenAILLM as _OpenAILLM
+    from voice_pipeline.memory.writer import MemoryWriter
+
+    write_llm = _OpenAILLM(
+        model="gpt-4o-mini",
+        temperature=0.0,
+        reasoning_effort=None,
+        max_tokens=4096,
+        tools=[],
+    )
+    writer = MemoryWriter(memory_storage, vector_index, embedder, write_llm, token_counter)
+
+    session_map: dict[int, str] = {}
+    for idx, session in enumerate(seed_data["sessions"]):
+        session_id = f"seed_{uuid.uuid4()}"
+        timestamp = f"{session['date']} 10:00:00"
+        for utt in session["utterances"]:
+            memory_storage.add_utterance(
+                session_id,
+                utt["role"],
+                utt["text"],
+                timestamp,
+                token_counter(utt["text"]),
+            )
+        writer.process_session(session_id, timestamp)
+        session_map[idx] = session_id
+        logger.info("Seed session %d → %s (%s)", idx, session_id, session["date"])
+
+    return session_map
+
+
+def _resolve_target_episodes(target_sessions, seed_session_map, seed_episode_map):
+    """Map target session indices to episode IDs."""
+    ids = []
+    for idx in target_sessions:
+        sid = seed_session_map.get(idx)
+        if sid:
+            ids.extend(seed_episode_map.get(sid, []))
+    return ids
+
+
+class _PauseController:
+    """Listens for Enter key on stdin to toggle pause/resume between sessions."""
+
+    def __init__(
+        self,
+        shutdown_event: threading.Event,
+        audio_queue: queue.Queue[AudioFrame] | None = None,
+    ) -> None:
+        self._shutdown = shutdown_event
+        self._audio_queue = audio_queue
+        self._pause_requested = threading.Event()
+        self._resume = threading.Event()
+        self._paused = threading.Event()
+
+    def start(self) -> None:
+        if not sys.stdin.isatty():
+            return
+        thread = threading.Thread(target=self._listen, daemon=True)
+        thread.start()
+        logger.info("Press Enter to pause/resume evaluation between sessions")
+
+    def _listen(self) -> None:
+        while not self._shutdown.is_set():
+            try:
+                line = sys.stdin.readline()
+                if not line:
+                    break
+            except (OSError, ValueError):
+                break
+            if self._paused.is_set():
+                self._resume.set()
+            else:
+                self._pause_requested.set()
+                logger.info("Pause requested — will pause after current session completes")
+
+    def wait_if_paused(self) -> bool:
+        """Call at session boundaries. Returns True if eval should stop."""
+        if self._shutdown.is_set():
+            return True
+        if not self._pause_requested.is_set():
+            return False
+        self._pause_requested.clear()
+        self._paused.set()
+        logger.info("Paused. Press Enter to resume...")
+        while not self._resume.is_set():
+            if self._shutdown.is_set():
+                self._paused.clear()
+                return True
+            # audio_input은 일시정지 중에도 계속 캡처해 큐를 채운다. 소비자(SessionLoop)가
+            # 멈춰 있으므로 비워주지 않으면 큐가 가득 차 "queue full" 경고가 초당 수십 번
+            # 쏟아진다. 어차피 버릴 오디오이므로 대기 주기마다 드레인한다.
+            if self._audio_queue is not None:
+                _drain_audio_queue(self._audio_queue)
+            self._resume.wait(timeout=0.5)
+        self._resume.clear()
+        self._paused.clear()
+        logger.info("Resumed")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Text-mode execution
+# ---------------------------------------------------------------------------
+
+
+def _run_text_single_turn(suite, question, session_map, create_text_session, seed_episode_map, seed_session_map):
+    """Execute one single-turn eval question in text mode."""
+    is_memory = suite.get("category") == "memory"
+    session = create_text_session(
+        memory_enabled=suite.get("memory", False),
+        load_session_context=not is_memory,
+    )
+    try:
+        session.send(question["text"])
+    except Exception:
+        logger.error("Text session error for %s", question["id"], exc_info=True)
+        session_map.append(
+            {
+                "question_id": question["id"],
+                "session_id": session.session_id,
+                "suite_name": suite["name"],
+                "input_text": question["text"],
+                "asr_text": question["text"],
+                "success": False,
+                "error": "text_session_error",
+                "text_mode": True,
+                "retrieved_episodes": [],
+                "target_sessions": question.get("target_sessions", []),
+                "target_episode_ids": _resolve_target_episodes(
+                    question.get("target_sessions", []), seed_session_map, seed_episode_map
+                ),
+            }
+        )
+        session.close()
+        return
+
+    # Extract retrieved episodes from memory results
+    retrieved_episodes = []
+    if session.memory_results and session.memory_results[-1] is not None:
+        mr = session.memory_results[-1]
+        for ep, score in zip(mr.episodes, mr.scores, strict=False):
+            retrieved_episodes.append(
+                {
+                    "episode_id": ep.id,
+                    "text": ep.text,
+                    "score": round(score, 4),
+                    "timestamp": ep.timestamp,
+                    "session_id": ep.session_id,
+                }
+            )
+
+    target_episode_ids = _resolve_target_episodes(
+        question.get("target_sessions", []), seed_session_map, seed_episode_map
+    )
+
+    trace = session.traces[-1] if session.traces else None
+    latency = {}
+    if trace:
+        latency = {
+            "memory_ms": round(trace.memory_ms, 1),
+            "context_ms": round(trace.context_ms, 1),
+            "llm_ms": round(trace.llm_ms, 1),
+            "llm_ttft_ms": round(trace.llm_ttft_ms, 1),
+            "total_ms": round(trace.total_ms, 1),
+        }
+
+    session_map.append(
+        {
+            "question_id": question["id"],
+            "session_id": session.session_id,
+            "suite_name": suite["name"],
+            "input_text": question["text"],
+            "asr_text": question["text"],
+            "success": True,
+            "error": None,
+            "text_mode": True,
+            "latency": latency,
+            "retrieved_episodes": retrieved_episodes,
+            "target_sessions": question.get("target_sessions", []),
+            "target_episode_ids": target_episode_ids,
+        }
+    )
+    session.close()
+
+    logger.info("[OK] %s: %s", question["id"], question["text"][:60])
+
+
+def _run_text_multi_turn(suite, scenario, session_map, create_text_session, seed_episode_map, seed_session_map):
+    """Execute a multi-turn scenario in text mode (one session for all turns)."""
+    is_memory = suite.get("category") == "memory"
+    session = create_text_session(
+        memory_enabled=suite.get("memory", False),
+        load_session_context=not is_memory,
+    )
+    questions = scenario["questions"]
+
+    try:
+        for i, question in enumerate(questions):
+            try:
+                session.send(question["text"])
+            except Exception:
+                logger.error("Text session error at turn %d for %s", i, question["id"], exc_info=True)
+                session_map.append(
+                    {
+                        "question_id": question["id"],
+                        "scenario_id": scenario["id"],
+                        "session_id": session.session_id,
+                        "suite_name": suite["name"],
+                        "input_text": question["text"],
+                        "asr_text": question["text"],
+                        "success": False,
+                        "error": "text_session_error",
+                        "text_mode": True,
+                        "retrieved_episodes": [],
+                        "target_sessions": question.get("target_sessions", []),
+                        "target_episode_ids": _resolve_target_episodes(
+                            question.get("target_sessions", []), seed_session_map, seed_episode_map
+                        ),
+                    }
+                )
+                continue
+
+            # Extract retrieved episodes for this turn
+            retrieved_episodes = []
+            turn_idx = i  # memory_results index matches send() call order
+            if len(session.memory_results) > turn_idx and session.memory_results[turn_idx] is not None:
+                mr = session.memory_results[turn_idx]
+                for ep, score in zip(mr.episodes, mr.scores, strict=False):
+                    retrieved_episodes.append(
+                        {
+                            "episode_id": ep.id,
+                            "text": ep.text,
+                            "score": round(score, 4),
+                            "timestamp": ep.timestamp,
+                            "session_id": ep.session_id,
+                        }
+                    )
+
+            target_episode_ids = _resolve_target_episodes(
+                question.get("target_sessions", []), seed_session_map, seed_episode_map
+            )
+
+            trace = session.traces[turn_idx] if len(session.traces) > turn_idx else None
+            latency = {}
+            if trace:
+                latency = {
+                    "memory_ms": round(trace.memory_ms, 1),
+                    "context_ms": round(trace.context_ms, 1),
+                    "llm_ms": round(trace.llm_ms, 1),
+                    "llm_ttft_ms": round(trace.llm_ttft_ms, 1),
+                    "total_ms": round(trace.total_ms, 1),
+                }
+
+            session_map.append(
+                {
+                    "question_id": question["id"],
+                    "scenario_id": scenario["id"],
+                    "session_id": session.session_id,
+                    "suite_name": suite["name"],
+                    "input_text": question["text"],
+                    "asr_text": question["text"],
+                    "success": True,
+                    "error": None,
+                    "text_mode": True,
+                    "latency": latency,
+                    "retrieved_episodes": retrieved_episodes,
+                    "target_sessions": question.get("target_sessions", []),
+                    "target_episode_ids": target_episode_ids,
+                }
+            )
+    finally:
+        session.close()
+
+    logger.info(
+        "Scenario %s (%s): %d turns completed (text mode)",
+        scenario["id"],
+        suite["name"],
+        len(questions),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Single-turn execution
+# ---------------------------------------------------------------------------
+
+
+def _run_single_turn(
+    suite: dict,
+    question: dict,
+    wav_path: str,
+    player: QuestionPlayer,
+    session_map: list[dict],
+    create_session: Callable[..., SessionComponents],
+    audio_queue: queue.Queue[AudioFrame],
+    seed_session_map: dict[int, str] | None = None,
+    seed_episode_map: dict[str, list[int]] | None = None,
+    record_dir: str | None = None,
+    voice: str = "",
+) -> None:
+    """Execute one single-turn eval: play question, capture response."""
+    _begin_session_audio(player, audio_queue)
+
+    turn_event = threading.Event()
+    gen_failed_event = threading.Event()
+    watchdog_stop = threading.Event()
+    play_end_time = [0.0]
+    turn_shift_time = [0.0]
+    final_asr_text = [""]
+    shift_count = [0]
+    cancel_count = [0]
+
+    def on_turn_done(ts_time: float, asr_text: str) -> None:
+        turn_shift_time[0] = ts_time
+        final_asr_text[0] = asr_text
+        turn_event.set()
+        components.session_loop.request_stop()
+
+    def on_turn_shift(ts_time: float, asr_text: str) -> None:
+        shift_count[0] += 1
+
+    def on_cancel() -> None:
+        cancel_count[0] += 1
+
+    def on_gen_failed() -> None:
+        gen_failed_event.set()
+        components.session_loop.request_stop()
+
+    rec_path = str(Path(record_dir) / f"{question['id']}.wav") if record_dir else None
+    skip = suite.get("category") == "asr"
+    components = create_session(
+        on_turn_complete=on_turn_done,
+        on_turn_shift=on_turn_shift,
+        on_generation_failed=on_gen_failed,
+        on_cancel=on_cancel,
+        memory_enabled=suite.get("memory", False),
+        skip_generation=skip,
+        record_path=rec_path,
+    )
+    components.history.new_session(components.session_id)
+
+    def play_with_delay() -> None:
+        time.sleep(_STARTUP_DELAY_SEC)
+        try:
+            player.play(wav_path)
+            play_end_time[0] = time.monotonic()
+        except Exception:
+            logger.error("Failed to play %s", wav_path, exc_info=True)
+            return
+        # 감지 타임아웃은 질문 재생 종료 시점에 고정 — 잠정 shift가 cancel로
+        # 철회되면 같은 기준선으로 재대기. 잠정 shift가 서 있는 동안(생성 중)은
+        # 타임아웃을 평가하지 않음 (생성 지연을 감지 실패로 오분류 방지).
+        deadline = play_end_time[0] + _TURN_DETECT_TIMEOUT_SEC
+        while not turn_event.is_set() and not watchdog_stop.is_set():
+            standing_shift = shift_count[0] > cancel_count[0]
+            if not standing_shift and time.monotonic() >= deadline:
+                logger.warning("Turn detection timeout for %s", question["id"])
+                components.session_loop.request_stop()
+                return
+            time.sleep(_WATCHDOG_POLL_SEC)
+
+    player_thread = threading.Thread(target=play_with_delay, daemon=True)
+    player_thread.start()
+
+    try:
+        components.session_loop.run()
+    except Exception:
+        logger.error("SessionLoop error", exc_info=True)
+    finally:
+        components.history.save()
+        watchdog_stop.set()
+
+    player_thread.join(timeout=5.0)
+
+    success = turn_event.is_set()
+    gen_failed = gen_failed_event.is_set()
+    # 조기 턴 전환: 발화 종료 전에 shift가 커밋된 경우. WAV 꼬리 무음이 트림되어
+    # play_end ≈ 발화 종료 +0.2s이고, 정상 shift는 침묵 ≥0.5s가 필요하므로
+    # ts < play_end면 구조적으로 발화 도중 전환이다.
+    early_turn_shift = success and (
+        play_end_time[0] == 0.0  # 극단: 질문 재생 중 세션 종료 — join(5s)로도 play() 미반환
+        or turn_shift_time[0] < play_end_time[0]
+    )
+    ts_reason = components.session_loop.turn_shift_reason
+    # expect_wait 스위트(미완성 발화)는 최대 timeout까지 대기한 전환만 정답 —
+    # 그보다 빠른 전환은 미완성 발화를 완결로 오판한 것(premature).
+    expect_wait = suite.get("expect_wait", False)
+    completed_normally = success and not early_turn_shift
+    if expect_wait:
+        late_turn_shift = False
+        premature_turn_shift = completed_normally and ts_reason != "turngpt_3.0"
+    else:
+        late_turn_shift = completed_normally and ts_reason == "turngpt_3.0"
+        premature_turn_shift = False
+    vap_delay = None
+    if success and not early_turn_shift:
+        vap_delay = round((turn_shift_time[0] - play_end_time[0]) * 1000, 1)
+
+    error = None
+    if gen_failed:
+        error = "generation_failed"
+    elif not success:
+        error = "no_turn_shift" if final_asr_text[0] else "no_recognition"
+    elif early_turn_shift:
+        error = "early_turn_shift"
+    elif late_turn_shift:
+        error = "late_turn_shift"
+    elif premature_turn_shift:
+        error = "premature_turn_shift"
+
+    # Extract retrieved episodes from memory results
+    retrieved_episodes = []
+    mem_results = components.session_loop.memory_results
+    if mem_results and mem_results[-1] is not None:
+        mr = mem_results[-1]
+        for ep, score in zip(mr.episodes, mr.scores, strict=False):
+            retrieved_episodes.append(
+                {
+                    "episode_id": ep.id,
+                    "text": ep.text,
+                    "score": round(score, 4),
+                    "timestamp": ep.timestamp,
+                    "session_id": ep.session_id,
+                }
+            )
+
+    target_episode_ids = _resolve_target_episodes(
+        question.get("target_sessions", []), seed_session_map or {}, seed_episode_map or {}
+    )
+
+    entry = {
+        "question_id": question["id"],
+        "session_id": components.session_id,
+        "suite_name": suite["name"],
+        "input_text": question["text"],
+        "asr_text": final_asr_text[0],
+        "voice": voice,
+        "success": success
+        and not early_turn_shift
+        and not late_turn_shift
+        and not premature_turn_shift
+        and not gen_failed,
+        "error": error,
+        "turn_shift_reason": ts_reason,
+        "turn_detection_delay_ms": vap_delay,
+    }
+    if expect_wait:
+        entry["expect_wait"] = True
+    if retrieved_episodes:
+        entry["retrieved_episodes"] = retrieved_episodes
+    if target_episode_ids:
+        entry["target_episode_ids"] = target_episode_ids
+        entry["target_sessions"] = question.get("target_sessions", [])
+    session_map.append(entry)
+
+    status = "OK" if success else "FAIL"
+    logger.info("[%s] %s: %s", status, question["id"], question["text"][:60])
+
+
+# ---------------------------------------------------------------------------
+# Interruption execution
+# ---------------------------------------------------------------------------
+
+
+def _run_interruption(
+    suite: dict,
+    question: dict,
+    wav_path: str,
+    interrupt_wav_path: str,
+    interrupt_delay_sec: float,
+    player: QuestionPlayer,
+    session_map: list[dict],
+    create_session: Callable[..., SessionComponents],
+    audio_queue: queue.Queue[AudioFrame],
+    interrupt_audio: str = "",
+    seed_session_map: dict[int, str] | None = None,
+    seed_episode_map: dict[str, list[int]] | None = None,
+    record_dir: str | None = None,
+    voice: str = "",
+) -> None:
+    """Execute one interruption test: play question, wait for response, interrupt."""
+    _begin_session_audio(player, audio_queue)
+
+    turn_event = threading.Event()
+    gen_failed_event = threading.Event()
+    playback_started_event = threading.Event()
+    watchdog_stop = threading.Event()
+    play_end_time = [0.0]
+    turn_shift_time = [0.0]
+    interrupt_played = [False]
+    shift_count = [0]
+    cancel_count = [0]
+
+    def on_turn_done(ts_time: float, asr_text: str) -> None:
+        turn_shift_time[0] = ts_time
+        turn_event.set()
+        components.session_loop.request_stop()
+
+    def on_turn_shift(ts_time: float, asr_text: str) -> None:
+        shift_count[0] += 1
+
+    def on_cancel() -> None:
+        cancel_count[0] += 1
+
+    def on_gen_failed() -> None:
+        gen_failed_event.set()
+        components.session_loop.request_stop()
+
+    def on_playback_started() -> None:
+        playback_started_event.set()
+
+    rec_path = (
+        str(Path(record_dir) / f"{question['id']}_{interrupt_audio}_{interrupt_delay_sec:.0f}s.wav")
+        if record_dir
+        else None
+    )
+    components = create_session(
+        on_turn_complete=on_turn_done,
+        on_turn_shift=on_turn_shift,
+        on_playback_started=on_playback_started,
+        on_generation_failed=on_gen_failed,
+        on_cancel=on_cancel,
+        memory_enabled=suite.get("memory", False),
+        record_path=rec_path,
+    )
+    components.history.new_session(components.session_id)
+
+    def play_and_interrupt() -> None:
+        time.sleep(_STARTUP_DELAY_SEC)
+        try:
+            player.play(wav_path)
+            play_end_time[0] = time.monotonic()
+        except Exception:
+            logger.error("Failed to play %s", wav_path, exc_info=True)
+            return
+
+        # 감지 타임아웃은 질문 재생 종료 시점에 고정 — 잠정 shift가 cancel로
+        # 철회되면 같은 기준선으로 재대기 (tt 러너와 동일). 재생 시작 대기 중
+        # cancel이 나면 감지 대기로 복귀한다.
+        detect_deadline = play_end_time[0] + _TURN_DETECT_TIMEOUT_SEC
+        playback_deadline = play_end_time[0] + _TURN_TIMEOUT_SEC
+        while not playback_started_event.is_set():
+            if turn_event.is_set() or watchdog_stop.is_set():
+                return
+            standing_shift = shift_count[0] > cancel_count[0]
+            now = time.monotonic()
+            if not standing_shift and now >= detect_deadline:
+                logger.warning("Turn detection timeout for %s", question["id"])
+                components.session_loop.request_stop()
+                return
+            if standing_shift and now >= playback_deadline:
+                logger.warning("Playback never started for %s", question["id"])
+                components.session_loop.request_stop()
+                return
+            time.sleep(_WATCHDOG_POLL_SEC)
+        time.sleep(interrupt_delay_sec)
+
+        try:
+            player.play(interrupt_wav_path)
+            interrupt_played[0] = True
+        except Exception:
+            logger.error("Failed to play interrupt %s", interrupt_wav_path, exc_info=True)
+
+    player_thread = threading.Thread(target=play_and_interrupt, daemon=True)
+    player_thread.start()
+
+    try:
+        components.session_loop.run()
+    except Exception:
+        logger.error("SessionLoop error", exc_info=True)
+    finally:
+        components.history.save()
+        watchdog_stop.set()
+
+    player_thread.join(timeout=10.0)
+
+    success = turn_event.is_set()
+    gen_failed = gen_failed_event.is_set()
+    ts_reason = components.session_loop.turn_shift_reason
+    vap_delay = None
+    if play_end_time[0] > 0 and turn_shift_time[0] >= play_end_time[0]:
+        vap_delay = round((turn_shift_time[0] - play_end_time[0]) * 1000, 1)
+
+    # Extract retrieved episodes
+    retrieved_episodes = []
+    mem_results = components.session_loop.memory_results
+    if mem_results and mem_results[-1] is not None:
+        mr = mem_results[-1]
+        for ep, score in zip(mr.episodes, mr.scores, strict=False):
+            retrieved_episodes.append(
+                {
+                    "episode_id": ep.id,
+                    "text": ep.text,
+                    "score": round(score, 4),
+                    "timestamp": ep.timestamp,
+                    "session_id": ep.session_id,
+                }
+            )
+
+    target_episode_ids = _resolve_target_episodes(
+        question.get("target_sessions", []), seed_session_map or {}, seed_episode_map or {}
+    )
+
+    entry = {
+        "question_id": question["id"],
+        "session_id": components.session_id,
+        "suite_name": suite["name"],
+        "input_text": question["text"],
+        "voice": voice,
+        "interrupt_audio": interrupt_audio,
+        "interrupt_delay_sec": interrupt_delay_sec,
+        "interrupt_played": interrupt_played[0],
+        "success": success and not gen_failed,
+        "error": "generation_failed" if gen_failed else (None if success else "no_turn_shift"),
+        "turn_shift_reason": ts_reason,
+        "turn_detection_delay_ms": vap_delay,
+    }
+    if retrieved_episodes:
+        entry["retrieved_episodes"] = retrieved_episodes
+    if target_episode_ids:
+        entry["target_episode_ids"] = target_episode_ids
+        entry["target_sessions"] = question.get("target_sessions", [])
+    session_map.append(entry)
+
+    status = "OK" if success else "FAIL"
+    logger.info(
+        "[%s] %s: delay=%.1fs int=%s played=%s",
+        status,
+        question["id"],
+        interrupt_delay_sec,
+        interrupt_audio,
+        interrupt_played[0],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn execution
+# ---------------------------------------------------------------------------
+
+
+def _run_multi_turn_suite(
+    suite: dict,
+    scenario: dict,
+    wav_map: dict[str, dict[str, str]],
+    player: QuestionPlayer,
+    session_map: list[dict],
+    create_session: Callable[..., SessionComponents],
+    audio_queue: queue.Queue[AudioFrame],
+    seed_session_map: dict[int, str] | None = None,
+    seed_episode_map: dict[str, list[int]] | None = None,
+    record_dir: str | None = None,
+) -> None:
+    """Execute a single multi-turn scenario: all questions in one session."""
+    _begin_session_audio(player, audio_queue)
+
+    questions = scenario["questions"]
+    turn_event = threading.Event()
+    gen_failed_event = threading.Event()
+    watchdog_stop = threading.Event()
+    turn_index = [0]
+    shift_count = [0]
+    cancel_count = [0]
+    turn_shift_times: dict[int, float] = {}
+    turn_asr_texts: dict[int, str] = {}
+    turn_shift_reasons: dict[int, str | None] = {}
+
+    def on_turn_done(ts_time: float, asr_text: str) -> None:
+        turn_shift_times[turn_index[0]] = ts_time
+        turn_asr_texts[turn_index[0]] = asr_text
+        turn_shift_reasons[turn_index[0]] = components.session_loop.turn_shift_reason
+        turn_index[0] += 1
+        if turn_index[0] >= len(questions):
+            components.session_loop.request_stop()
+        turn_event.set()
+
+    def on_turn_shift(ts_time: float, asr_text: str) -> None:
+        shift_count[0] += 1
+
+    def on_cancel() -> None:
+        cancel_count[0] += 1
+
+    def on_gen_failed() -> None:
+        gen_failed_event.set()
+        components.session_loop.request_stop()
+
+    rec_path = str(Path(record_dir) / f"{scenario['id']}.wav") if record_dir else None
+    skip = suite.get("category") == "asr"
+    components = create_session(
+        on_turn_complete=on_turn_done,
+        on_turn_shift=on_turn_shift,
+        on_generation_failed=on_gen_failed,
+        on_cancel=on_cancel,
+        memory_enabled=suite.get("memory", False),
+        skip_generation=skip,
+        record_path=rec_path,
+    )
+    components.history.new_session(components.session_id)
+
+    play_end_times: dict[str, float] = {}
+
+    def play_sequence() -> None:
+        time.sleep(_STARTUP_DELAY_SEC)
+        for i, q in enumerate(questions):
+            wav_entry = wav_map.get(q["id"])
+            wav_path = wav_entry["path"] if wav_entry else None
+            if wav_path is None:
+                logger.error("No WAV for question %s", q["id"])
+                break
+            if i > 0:
+                turn_event.clear()
+            base_shift = shift_count[0]
+            base_cancel = cancel_count[0]
+            try:
+                player.play(wav_path)
+                play_end_times[q["id"]] = time.monotonic()
+            except Exception:
+                logger.error("Failed to play %s", wav_path, exc_info=True)
+                break
+            # 감지 타임아웃은 질문 재생 종료 시점에 고정 — cancel로 잠정 shift가
+            # 철회되면 같은 기준선으로 재대기. 잠정 shift가 서 있는 동안은
+            # 감지 타임아웃을 평가하지 않고, 턴 완료 상한만 적용.
+            detect_deadline = play_end_times[q["id"]] + _TURN_DETECT_TIMEOUT_SEC
+            complete_deadline = play_end_times[q["id"]] + _TURN_TIMEOUT_SEC
+            failed = None
+            while not turn_event.is_set() and not watchdog_stop.is_set():
+                now = time.monotonic()
+                standing_shift = (shift_count[0] - base_shift) > (cancel_count[0] - base_cancel)
+                if not standing_shift and now >= detect_deadline:
+                    failed = "detection"
+                    break
+                if now >= complete_deadline:
+                    failed = "completion"
+                    break
+                time.sleep(_WATCHDOG_POLL_SEC)
+            if watchdog_stop.is_set():
+                break
+            if failed:
+                logger.warning("Turn %s timeout at question %s", failed, q["id"])
+                components.session_loop.request_stop()
+                break
+
+    player_thread = threading.Thread(target=play_sequence, daemon=True)
+    player_thread.start()
+
+    try:
+        components.session_loop.run()
+    except Exception:
+        logger.error("SessionLoop error", exc_info=True)
+    finally:
+        components.history.save()
+        watchdog_stop.set()
+
+    player_thread.join(timeout=5.0)
+
+    completed_turns = turn_index[0]
+    scenario_voice = wav_map.get(questions[0]["id"], {}).get("voice", "") if questions else ""
+    mem_results = components.session_loop.memory_results
+    for i, q in enumerate(questions):
+        pe = play_end_times.get(q["id"], 0.0)
+        ts = turn_shift_times.get(i, 0.0)
+
+        retrieved_episodes = []
+        if mem_results and i < len(mem_results) and mem_results[i] is not None:
+            mr = mem_results[i]
+            for ep, score in zip(mr.episodes, mr.scores, strict=False):
+                retrieved_episodes.append(
+                    {
+                        "episode_id": ep.id,
+                        "text": ep.text,
+                        "score": round(score, 4),
+                        "timestamp": ep.timestamp,
+                        "session_id": ep.session_id,
+                    }
+                )
+
+        target_episode_ids = _resolve_target_episodes(
+            q.get("target_sessions", []), seed_session_map or {}, seed_episode_map or {}
+        )
+
+        ts_reason = turn_shift_reasons.get(i)
+        is_completed = i < completed_turns
+        # 조기 턴 전환: 발화 종료(+트림 여유 0.2s) 전 shift 커밋 (단일 러너와 동일 기준)
+        is_early = is_completed and (pe == 0.0 or ts < pe)
+        expect_wait = suite.get("expect_wait", False)
+        completed_normally = is_completed and not is_early
+        if expect_wait:
+            is_late = False
+            is_premature = completed_normally and ts_reason != "turngpt_3.0"
+        else:
+            is_late = completed_normally and ts_reason == "turngpt_3.0"
+            is_premature = False
+        is_gen_failed = not is_completed and gen_failed_event.is_set() and i == completed_turns
+
+        vap_delay = None
+        if completed_normally:
+            vap_delay = round((ts - pe) * 1000, 1)
+
+        if is_gen_failed:
+            error = "generation_failed"
+        elif not is_completed:
+            error = "no_turn_shift" if turn_asr_texts.get(i) else "no_recognition"
+        elif is_early:
+            error = "early_turn_shift"
+        elif is_late:
+            error = "late_turn_shift"
+        elif is_premature:
+            error = "premature_turn_shift"
+        else:
+            error = None
+
+        entry = {
+            "question_id": q["id"],
+            "scenario_id": scenario["id"],
+            "session_id": components.session_id,
+            "suite_name": suite["name"],
+            "input_text": q["text"],
+            "asr_text": turn_asr_texts.get(i, ""),
+            "voice": scenario_voice,
+            "success": is_completed and not is_early and not is_late and not is_premature,
+            "error": error,
+            "turn_shift_reason": ts_reason,
+            "turn_detection_delay_ms": vap_delay,
+        }
+        if expect_wait:
+            entry["expect_wait"] = True
+        if retrieved_episodes:
+            entry["retrieved_episodes"] = retrieved_episodes
+        if target_episode_ids:
+            entry["target_episode_ids"] = target_episode_ids
+            entry["target_sessions"] = q.get("target_sessions", [])
+        session_map.append(entry)
+
+    logger.info(
+        "Scenario %s (%s): %d/%d turns completed",
+        scenario["id"],
+        suite["name"],
+        completed_turns,
+        len(questions),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Noise-bed e2e mode
+# ---------------------------------------------------------------------------
+
+
+def _load_bed_conditions(
+    bed_dir: str,
+) -> tuple[list[str], str, dict[str, float | None], dict[str, float], str | None]:
+    """Read calibration.json → (ordered labels, master path, gains, snr, device).
+
+    Each condition is a per-master gain (``quiet`` = None = bed off); NoiseBed
+    scales the single master at playback. Conditions are ordered clean→noisy:
+    ``quiet`` (SNR = floor ceiling) first, then the rest by descending SNR.
+    """
+    bed_path = Path(bed_dir)
+    calib = json.loads((bed_path / "calibration.json").read_text())
+    conds = calib["conditions"]
+    master = calib.get("bed_master") or str(bed_path / "bed_master.wav")
+    ordered: list[tuple[str, float | None, float]] = [("quiet", None, float(calib.get("floor_snr_ceiling_db", 0.0)))]
+    for name in sorted(conds, key=lambda n: -conds[n]["achievable_snr_db"]):
+        ordered.append((name, float(conds[name]["gain"]), float(conds[name]["achievable_snr_db"])))
+    labels = [lab for lab, _, _ in ordered]
+    gains = {lab: g for lab, g, _ in ordered}
+    snr_by = {lab: s for lab, _, s in ordered}
+    return labels, master, gains, snr_by, calib.get("device")
+
+
+def _is_exclusive_device(device: str) -> bool:
+    """True if ``device`` is a raw hardware PCM that allows only one open.
+
+    ``hw:``/``plughw:`` PCMs have no software mixing, so the noise bed and
+    question playback can't coexist on them — the bed grabs the device and
+    every later playback fails with "device busy". Only dmix-backed PCMs mix.
+    Conservatively returns False for names we can't classify (``default``,
+    ``pulse``, custom asound.conf PCMs) to avoid false alarms.
+    """
+    name = device.strip().strip("'\"").lower()
+    if "dmix" in name:
+        return False
+    return name.startswith(("hw:", "plughw:"))
+
+
+def _collect_audio_units(
+    audio_suites: list[dict],
+    wav_map: dict[str, dict[str, str]],
+    player: QuestionPlayer,
+    session_map: list[dict],
+    create_session: Callable[..., SessionComponents],
+    audio_queue: queue.Queue[AudioFrame],
+    seed_session_map: dict[int, str],
+    seed_episode_map: dict[str, list[int]],
+    record_dir: str,
+    quick: bool,
+) -> list[tuple[str, Callable[[], None]]]:
+    """Build deferred (category, thunk) pairs for noise-bed scheduling.
+
+    Each thunk runs exactly one session (single-turn question, multi-turn
+    scenario, or one interruption combo) via the existing runners, so the bed
+    scheduler can regroup them into per-category condition blocks. Quick mode
+    samples down the same way the normal loop does. ASR questions play their
+    clean WAV — the acoustic bed supplies the noise.
+    """
+    units: list[tuple[str, Callable[[], None]]] = []
+    for suite in audio_suites:
+        if suite.get("multi_turn"):
+            scenarios = suite["scenarios"]
+            if quick and len(scenarios) > 1:
+                scenarios = random.sample(scenarios, 1)
+            for scenario in scenarios:
+                units.append(
+                    (
+                        suite["category"],
+                        lambda sc=scenario, su=suite: _run_multi_turn_suite(
+                            su,
+                            sc,
+                            wav_map,
+                            player,
+                            session_map,
+                            create_session,
+                            audio_queue,
+                            seed_session_map=seed_session_map,
+                            seed_episode_map=seed_episode_map,
+                            record_dir=record_dir,
+                        ),
+                    )
+                )
+        elif suite.get("category") == "interruption":
+            questions = suite["questions"]
+            if quick and len(questions) > 1:
+                questions = random.sample(questions, 1)
+            delays = suite.get("interrupt_delays_sec", [2.0])
+            interrupt_audios = suite.get("interrupt_audios", [])
+            if not interrupt_audios:
+                logger.error("Suite %s has no interrupt_audios", suite["name"])
+                continue
+            if quick:
+                delays = [delays[0], delays[-1]] if len(delays) > 1 else delays
+                interrupt_audios = random.sample(interrupt_audios, 1)
+            for delay in delays:
+                for int_id in interrupt_audios:
+                    interrupt_wav = wav_map.get(int_id, {}).get("path", "")
+                    if not interrupt_wav:
+                        logger.error("No WAV for interrupt %s", int_id)
+                        continue
+                    for question in questions:
+                        q_entry = wav_map[question["id"]]
+                        units.append(
+                            (
+                                suite["category"],
+                                lambda q=question, qe=q_entry, su=suite, iw=interrupt_wav, d=delay, ii=int_id: (
+                                    _run_interruption(  # noqa: E501
+                                        su,
+                                        q,
+                                        qe["path"],
+                                        iw,
+                                        d,
+                                        player,
+                                        session_map,
+                                        create_session,
+                                        audio_queue,
+                                        interrupt_audio=ii,
+                                        seed_session_map=seed_session_map,
+                                        seed_episode_map=seed_episode_map,
+                                        record_dir=record_dir,
+                                        voice=qe.get("voice", ""),
+                                    )
+                                ),
+                            )
+                        )
+        else:
+            questions = suite["questions"]
+            if quick and len(questions) > 1:
+                questions = random.sample(questions, 1)
+            for question in questions:
+                q_entry = wav_map[question["id"]]
+                units.append(
+                    (
+                        suite["category"],
+                        lambda q=question, qe=q_entry, su=suite: _run_single_turn(
+                            su,
+                            q,
+                            qe["path"],
+                            player,
+                            session_map,
+                            create_session,
+                            audio_queue,
+                            seed_session_map=seed_session_map,
+                            seed_episode_map=seed_episode_map,
+                            record_dir=record_dir,
+                            voice=qe.get("voice", ""),
+                        ),
+                    )
+                )
+    return units
+
+
+def _run_audio_noise_bed(
+    units: list[tuple[str, Callable[[], None]]],
+    bed: NoiseBed,
+    labels: list[str],
+    snr_by: dict[str, float],
+    audio_queue: queue.Queue[AudioFrame],
+    session_map: list[dict],
+    pause_ctrl: _PauseController,
+) -> None:
+    """Assign conditions (global round-robin), play as per-category condition blocks.
+
+    Assignment stays a continuous index over the flat unit list — full-run
+    stratification (suite×condition cells) and quick-mode spreading are
+    unchanged. Playback groups each category's units by condition so the run
+    reads in questions.json category order ("asr: quiet→medium→loud, then
+    turn_taking: …"); the starting condition rotates per category so no
+    condition always plays first within its category (time-drift
+    counterbalance). Every session's entries are tagged with condition + SNR.
+    """
+    # Condition assignment: global continuous round-robin over the flat list.
+    pools: dict[str, dict[str, list[Callable[[], None]]]] = {}
+    cat_order: list[str] = []
+    for i, (cat, unit) in enumerate(units):
+        if cat not in pools:
+            pools[cat] = {lab: [] for lab in labels}
+            cat_order.append(cat)
+        pools[cat][labels[i % len(labels)]].append(unit)
+
+    schedule: list[tuple[str, str, list[Callable[[], None]]]] = []
+    for ci, cat in enumerate(cat_order):
+        offset = ci % len(labels)
+        for lab in labels[offset:] + labels[:offset]:
+            if pools[cat][lab]:
+                schedule.append((cat, lab, pools[cat][lab]))
+
+    logger.info(
+        "Noise-bed: %d sessions, %d categories (%s) → %d blocks",
+        len(units),
+        len(cat_order),
+        ", ".join(cat_order),
+        len(schedule),
+    )
+    try:
+        for bi, (cat, lab, chunk) in enumerate(schedule, 1):
+            if pause_ctrl.wait_if_paused():
+                break
+            bed.set_level(lab)
+            # Let the new level actually reach the speaker before the block's
+            # first session, then discard mic frames from the transition.
+            time.sleep(_BED_SETTLE_SEC)
+            _drain_audio_queue(audio_queue)
+            logger.info(
+                "Noise block %d/%d: %s / %s (snr≈%.1f dB, %d sessions)",
+                bi,
+                len(schedule),
+                cat,
+                lab,
+                snr_by[lab],
+                len(chunk),
+            )
+            for unit in chunk:
+                if pause_ctrl.wait_if_paused():
+                    break
+                mark = len(session_map)
+                unit()
+                for entry in session_map[mark:]:
+                    entry["condition"] = lab
+                    entry["snr"] = snr_by[lab]
+    finally:
+        bed.stop()
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="E2E evaluation runner")
+    parser.add_argument("--questions", required=True, help="Path to questions JSON")
+    parser.add_argument(
+        "--device",
+        default=None,
+        help=f"ALSA device for question playback (default: {_DEFAULT_PLAYBACK_DEVICE}; "
+        "noise-bed mode prefers the calibrated device)",
+    )
+    parser.add_argument("--output-dir", default="data/eval/results", help="Output directory")
+    parser.add_argument("--wav-dir", default="data/eval/wav", help="Directory with question WAVs")
+    parser.add_argument("--quick", action="store_true", help="Quick mode: 1 question per suite")
+    parser.add_argument("--category", default=None, help="Only run suites of these categories (comma-separated)")
+    parser.add_argument(
+        "--text",
+        action="store_true",
+        help="Run quality/memory suites in text mode (skip audio/turn-taking, LLM only)",
+    )
+    parser.add_argument("--no-beep", action="store_true", help="Disable the session-start identification beep")
+    parser.add_argument(
+        "--noise-bed",
+        action="store_true",
+        help="E2E acoustic-bed mode: play a continuous noise bed and distribute SNR conditions "
+        "across one run (requires prepare_noise_bed.py + calibrate_noise.py output)",
+    )
+    parser.add_argument("--bed-dir", default="data/eval/noise_bed", help="Noise-bed dir (calibration.json + bed_*.wav)")
+    args = parser.parse_args()
+
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path(args.output_dir) / run_timestamp
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    log_format = "%(asctime)s %(name)-40s %(levelname)-7s %(message)s"
+    logging.basicConfig(level=logging.INFO, format=log_format)
+    file_handler = logging.FileHandler(output_dir / "eval.log")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(log_format))
+    logging.getLogger("voice_pipeline").setLevel(logging.DEBUG)
+    logging.getLogger().addHandler(file_handler)
+
+    # 재현용으로 실행 명령과 파싱된 옵션을 로그에 남긴다 (device 등은 이후 단계에서
+    # 재해석되므로, 여기 기록은 사용자가 실제로 넘긴 값 그대로다).
+    logger.info("Command: %s", " ".join(sys.argv))
+    logger.info("Options: %s", json.dumps(vars(args), ensure_ascii=False, sort_keys=True, default=str))
+
+    for entry in os.environ.get("LOG_LEVEL", "").split(","):
+        entry = entry.strip()
+        if "=" in entry:
+            name, level = entry.split("=", 1)
+            logging.getLogger(name.strip()).setLevel(level.strip().upper())
+
+    # --- Load questions & seeds ---
+    questions_data = json.loads(Path(args.questions).read_text())
+
+    seed_data = None
+    seed_file = questions_data.get("seed_file")
+    seed_path = None
+    if seed_file:
+        seed_path = Path(args.questions).parent / seed_file
+        if seed_path.exists():
+            seed_data = json.loads(seed_path.read_text())
+
+    all_suites = [s for s in questions_data["suites"] if not s.get("category", "").startswith("_")]
+    if args.category:
+        selected = {c.strip() for c in args.category.split(",")}
+        available = {s.get("category") for s in all_suites}
+        unknown = selected - available
+        if unknown:
+            logger.error(
+                "Unknown categories: %s (available: %s)", ", ".join(sorted(unknown)), ", ".join(sorted(available))
+            )
+            sys.exit(1)
+        all_suites = [s for s in all_suites if s.get("category") in selected]
+        if not all_suites:
+            logger.error("No suites matched categories: %s", ", ".join(sorted(selected)))
+            sys.exit(1)
+
+    # --- Classify suites into text vs audio ---
+    text_categories: set[str] = {"quality", "memory"} if args.text else set()
+    text_suites = [s for s in all_suites if s.get("category") in text_categories]
+    audio_suites = [s for s in all_suites if s.get("category") not in text_categories]
+
+    # --- WAV manifest check (audio suites only) ---
+    wav_map = _load_manifest(args.questions, args.wav_dir)
+    missing = []
+    for suite in audio_suites:
+        for q in _iter_questions(suite):
+            if q["id"] not in wav_map:
+                missing.append(q["id"])
+    if missing:
+        logger.error("Missing WAV files for: %s", ", ".join(missing))
+        logger.error("Run prepare_audio.py first")
+        sys.exit(1)
+
+    # --- Component wiring: 프로덕션과 동일 그래프, 런별 격리 DB (voice_pipeline.wiring) ---
+    eval_db = str(output_dir / "eval.db")
+    components = build_components(db_path=eval_db, led_enabled=False)
+
+    if _asound is not None:
+        _asound.snd_lib_error_set_handler(None)
+
+    llm = components.llm
+    embedder = components.embedder
+    memory_storage = components.memory_storage
+    vector_index = components.vector_index
+    token_counter = components.token_counter
+    audio_queue = components.audio_queue
+    audio_input = components.audio_input
+    bridge = components.bridge
+    shutdown_event = components.shutdown_event
+    # eval 세션은 사용자 종료 키워드로 끝나면 안 됨 — eval 전용 기본값을 여기서 고정
+    create_session = partial(components.create_session, disable_exit_keywords=True)
+    create_text_session = components.create_text_session
+
+    # --- Seed injection ---
+    seed_session_map: dict[int, str] = {}
+    seed_episode_map: dict[str, list[int]] = {}
+    has_memory = any(s.get("category") == "memory" for s in all_suites)
+    if has_memory and seed_data:
+        logger.info("Injecting %d seed sessions", len(seed_data["sessions"]))
+        seed_session_map = _inject_seeds(seed_data, memory_storage, vector_index, embedder, token_counter)
+        seed_sids = list(seed_session_map.values())
+        eps_by_session = memory_storage.get_episodes_by_session_ids(seed_sids)
+        for sid, episodes in eps_by_session.items():
+            seed_episode_map[sid] = [ep.id for ep in episodes]
+        logger.info("Seed injection complete: %d episodes total", sum(len(v) for v in seed_episode_map.values()))
+
+    # --- Signal handling & pause control ---
+    def _handle_signal(*_: object) -> None:
+        shutdown_event.set()
+
+    signal.signal(signal.SIGINT, _handle_signal)
+
+    pause_ctrl = _PauseController(shutdown_event, audio_queue=audio_queue)
+    pause_ctrl.start()
+
+    # --- Run eval ---
+    session_map: list[dict] = []
+    started_at = datetime.now().strftime(_TIMESTAMP_FORMAT)
+
+    logger.info("Eval starting — %d suites (%d text, %d audio)", len(all_suites), len(text_suites), len(audio_suites))
+
+    # --- Run text suites ---
+    for suite in text_suites:
+        if pause_ctrl.wait_if_paused():
+            break
+
+        if suite.get("multi_turn"):
+            scenarios = suite.get("scenarios", [])
+            if args.quick and len(scenarios) > 1:
+                scenarios = random.sample(scenarios, 1)
+            logger.info(
+                "Suite [text]: %s (%d/%d scenarios)",
+                suite["name"],
+                len(scenarios),
+                len(suite.get("scenarios", [])),
+            )
+            for scenario in scenarios:
+                if pause_ctrl.wait_if_paused():
+                    break
+                _run_text_multi_turn(
+                    suite, scenario, session_map, create_text_session, seed_episode_map, seed_session_map
+                )
+        else:
+            questions = suite.get("questions", [])
+            if args.quick and len(questions) > 1:
+                questions = random.sample(questions, 1)
+            logger.info(
+                "Suite [text]: %s (%d/%d questions)",
+                suite["name"],
+                len(questions),
+                len(suite.get("questions", [])),
+            )
+            for question in questions:
+                if pause_ctrl.wait_if_paused():
+                    break
+                _run_text_single_turn(
+                    suite, question, session_map, create_text_session, seed_episode_map, seed_session_map
+                )
+
+    # --- Run audio suites ---
+    if audio_suites:
+        record_dir = str(output_dir / "recordings")
+        Path(record_dir).mkdir(exist_ok=True)
+
+        bed_labels: list[str] = []
+        bed_master = ""
+        bed_gains: dict[str, float | None] = {}
+        bed_snr: dict[str, float] = {}
+        if args.noise_bed:
+            calib_path = Path(args.bed_dir) / "calibration.json"
+            if not calib_path.exists():
+                logger.error(
+                    "Noise-bed mode needs %s — run prepare_noise_bed.py + calibrate_noise.py first", calib_path
+                )
+                sys.exit(1)
+            bed_labels, bed_master, bed_gains, bed_snr, calib_device = _load_bed_conditions(args.bed_dir)
+            if args.device is None and calib_device:
+                args.device = calib_device  # bed + questions must share the dmix PCM
+            logger.info("Noise-bed: device=%s conditions=%s", args.device, bed_labels)
+
+        if args.device is None:
+            args.device = _DEFAULT_PLAYBACK_DEVICE
+
+        if args.noise_bed and _is_exclusive_device(args.device):
+            logger.error(
+                "Noise-bed mode needs a mixing (dmix) device, but got %r — a raw hw/plughw PCM "
+                "allows only one open, so the bed blocks question playback (device busy). "
+                "Omit --device to use the calibrated dmix device, or pass --device 'plug:dmix:...'.",
+                args.device,
+            )
+            sys.exit(1)
+
+        beep_wav = None
+        if not args.no_beep:
+            beep_wav = str(output_dir / "beep.wav")
+            _make_beep_wav(beep_wav)
+            logger.info("Session-start beep enabled: %s", beep_wav)
+        player = QuestionPlayer(args.device, beep_wav=beep_wav)
+        bridge.connect()
+        audio_input.start()
+        # PyAudio 초기화(장치 프로빙) 중에는 aplay가 device busy로 실패할 수 있음 —
+        # 첫 프레임 도착 = 캡처 스트림 open 완료를 확인한 뒤에 비프/재생을 시작한다.
+        try:
+            audio_queue.get(timeout=10.0)
+        except queue.Empty:
+            if audio_input.error is not None:
+                raise audio_input.error from None
+            logger.warning("No audio frame within 10s after AudioInput start")
+
+        try:
+            if args.noise_bed:
+                bed = NoiseBed(args.device, bed_master, bed_gains)
+                units = _collect_audio_units(
+                    audio_suites,
+                    wav_map,
+                    player,
+                    session_map,
+                    create_session,
+                    audio_queue,
+                    seed_session_map,
+                    seed_episode_map,
+                    record_dir,
+                    args.quick,
+                )
+                _run_audio_noise_bed(
+                    units,
+                    bed,
+                    bed_labels,
+                    bed_snr,
+                    audio_queue,
+                    session_map,
+                    pause_ctrl,
+                )
+            for suite in [] if args.noise_bed else audio_suites:
+                if pause_ctrl.wait_if_paused():
+                    break
+
+                if suite.get("multi_turn"):
+                    scenarios = suite["scenarios"]
+                    if args.quick and len(scenarios) > 1:
+                        scenarios = random.sample(scenarios, 1)
+                    logger.info(
+                        "Suite: %s (%d/%d scenarios)",
+                        suite["name"],
+                        len(scenarios),
+                        len(suite["scenarios"]),
+                    )
+                    for scenario in scenarios:
+                        if pause_ctrl.wait_if_paused():
+                            break
+                        _run_multi_turn_suite(
+                            suite,
+                            scenario,
+                            wav_map,
+                            player,
+                            session_map,
+                            create_session,
+                            audio_queue,
+                            seed_session_map=seed_session_map,
+                            seed_episode_map=seed_episode_map,
+                            record_dir=record_dir,
+                        )
+                    continue
+
+                questions = suite["questions"]
+                if args.quick and len(questions) > 1:
+                    questions = random.sample(questions, 1)
+
+                logger.info("Suite: %s (%d/%d questions)", suite["name"], len(questions), len(suite["questions"]))
+
+                if suite.get("category") == "interruption":
+                    delays = suite.get("interrupt_delays_sec", [2.0])
+                    interrupt_audios = suite.get("interrupt_audios", [])
+                    if not interrupt_audios:
+                        logger.error("Suite %s has no interrupt_audios", suite["name"])
+                        continue
+                    if args.quick:
+                        delays = [delays[0], delays[-1]] if len(delays) > 1 else delays
+                        interrupt_audios = random.sample(interrupt_audios, 1)
+                    for delay in delays:
+                        for int_id in interrupt_audios:
+                            int_entry = wav_map.get(int_id, {})
+                            interrupt_wav = int_entry.get("path", "")
+                            if not interrupt_wav:
+                                logger.error("No WAV for interrupt %s", int_id)
+                                continue
+                            for question in questions:
+                                if pause_ctrl.wait_if_paused():
+                                    break
+                                q_entry = wav_map[question["id"]]
+                                _run_interruption(
+                                    suite,
+                                    question,
+                                    q_entry["path"],
+                                    interrupt_wav,
+                                    delay,
+                                    player,
+                                    session_map,
+                                    create_session,
+                                    audio_queue,
+                                    interrupt_audio=int_id,
+                                    seed_session_map=seed_session_map,
+                                    seed_episode_map=seed_episode_map,
+                                    record_dir=record_dir,
+                                    voice=q_entry.get("voice", ""),
+                                )
+                else:
+                    for question in questions:
+                        if pause_ctrl.wait_if_paused():
+                            break
+                        q_entry = wav_map[question["id"]]
+                        _run_single_turn(
+                            suite,
+                            question,
+                            q_entry["path"],
+                            player,
+                            session_map,
+                            create_session,
+                            audio_queue,
+                            seed_session_map=seed_session_map,
+                            seed_episode_map=seed_episode_map,
+                            record_dir=record_dir,
+                            voice=q_entry.get("voice", ""),
+                        )
+        finally:
+            audio_input.stop()
+            bridge.disconnect()
+
+    # --- Shared cleanup (text-only 실행에서도 컴포넌트 스레드/클라이언트 정리) ---
+    components.stop_threaded()
+    components.vap.stop()
+    components.executor.shutdown(wait=False)
+    components.asr.stop()
+    components.led.close()
+    memory_storage.close()
+    components.trace_store.close()
+    components.call_store.close()
+
+    # --- Save session mapping ---
+    finished_at = datetime.now().strftime(_TIMESTAMP_FORMAT)
+    successful = sum(1 for s in session_map if s["success"])
+
+    pipeline_config: dict = {
+        "llm_model": llm.model,
+        "llm_temperature": llm.temperature,
+        "writer_llm_model": "gpt-4o-mini",
+        "tts_model": components.raw_tts.model_name,
+        "tts_voice": components.raw_tts.voice_id,
+        "asr_model": components.asr._MODEL,
+        "asr_language": components.language_code,
+        "vap_model": type(components.vap).__name__,
+        "turngpt_model": type(components.turngpt).__name__,
+        "vad_model": "silero_vad",
+    }
+    runner_config: dict = {
+        "quick": args.quick,
+        "text": args.text,
+        "category": args.category,
+        "suites": [s["name"] for s in all_suites],
+        "question_count": sum(len(list(_iter_questions(s))) for s in all_suites),
+    }
+
+    result = {
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "total": len(session_map),
+        "successful": successful,
+        "failed": len(session_map) - successful,
+        "config": {
+            "pipeline": pipeline_config,
+            "runner": runner_config,
+            "suite_descriptions": {s["name"]: s.get("description", "") for s in all_suites},
+            "question_texts": {q["id"]: q["text"] for s in questions_data["suites"] for q in _iter_questions(s)},
+        },
+        "eval_db": eval_db,
+        "seed_session_map": {str(k): v for k, v in seed_session_map.items()},
+        "seed_file": str(seed_path) if seed_path else None,
+        "sessions": session_map,
+    }
+    sessions_path = output_dir / "sessions.json"
+    sessions_path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+
+    logger.info(
+        "Eval complete: %d/%d successful — %s",
+        successful,
+        len(session_map),
+        sessions_path,
+    )
+
+    # --- Report & Score & Dashboard ---
+    from evaluation.dashboard import build_html
+    from evaluation.report import build_report, print_summary
+    from evaluation.score import print_scores, score_report
+
+    report = build_report(output_dir)
+    report_path = output_dir / "report.json"
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+
+    scored = score_report(report)
+    scored_path = output_dir / "scored.json"
+    scored_path.write_text(json.dumps(scored, indent=2, ensure_ascii=False))
+
+    dashboard_path = output_dir / "dashboard.html"
+    dashboard_path.write_text(build_html(scored))
+
+    print_summary(report)
+    print_scores(scored)
+    logger.info("Dashboard: %s", dashboard_path)
+
+
+if __name__ == "__main__":
+    main()

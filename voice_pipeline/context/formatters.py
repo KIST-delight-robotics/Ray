@@ -102,6 +102,24 @@ def format_raw_transcript_block(
 
 
 # ---------------------------------------------------------------------------
+# In-session history summary
+# ---------------------------------------------------------------------------
+
+
+def format_history_summary_block(summary_text: str) -> str:
+    """Format the rolling summary of earlier turns in the current session.
+
+    Shown in place of the turns it covers, right before the live history.
+
+    Output example::
+
+        [Earlier in this conversation]
+        User asked about weekend plans; Ray suggested a movie night. ...
+    """
+    return f"[Earlier in this conversation]\n{summary_text}"
+
+
+# ---------------------------------------------------------------------------
 # Block 4: Retrieved memories
 # ---------------------------------------------------------------------------
 

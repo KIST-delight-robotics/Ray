@@ -28,7 +28,8 @@ __main__.py (mode loop + DI)
 
 ```
 voice_pipeline/
-├── __main__.py                # Entry point, DI, mode loop (SLEEP/GREETING/ACTIVE/FAREWELL)
+├── __main__.py                # Entry point, mode loop (SLEEP/GREETING/ACTIVE/FAREWELL)
+├── wiring.py                  # Shared component graph assembly (build_components / create_session)
 ├── session_loop.py            # ACTIVE mode frame-driven conversation loop (SessionLoop)
 │
 ├── core/
@@ -50,11 +51,10 @@ voice_pipeline/
 │   └── exceptions.py
 │
 ├── turn_taking/
-│   ├── vap.py                 # VAPWrapper(IVAP) — VoiceActivityProjection
-│   ├── maai_vap.py            # MaAIVAPWrapper(IVAP) — MaAI ONNX (default)
-│   ├── async_vap.py           # AsyncVAP(IVAP) — background thread wrapper
+│   ├── maai_vap.py            # MaAIVAPModel — MaAI ONNX inference (synchronous)
+│   ├── threaded_vap.py        # ThreadedVAP(IVAP) — runs a VAP model on a bg thread
 │   ├── turngpt.py             # TurnGPTWrapper(ITurnGPT)
-│   ├── async_turngpt.py       # AsyncTurnGPT — background thread wrapper
+│   ├── threaded_turngpt.py    # ThreadedTurnGPT + SyncTurnGPTAdapter — bg thread wrapper
 │   ├── turn_detector.py       # TurnDetector — combined turn decision
 │   └── exceptions.py
 │
@@ -95,11 +95,8 @@ voice_pipeline/
 │   ├── animations.py          # LED animation patterns
 │   └── exceptions.py
 │
-├── similarity/
-│   └── similarity.py          # Semantic similarity (embedding / difflib)
-│
 ├── embedding/
-│   └── embedder.py            # IEmbedder implementations + factory
+│   └── embedder.py            # IEmbedder implementations + factory (shared by memory & TurnDetector similarity)
 │
 ├── memory/
 │   ├── types.py               # Episode, Profile, MemoryReadResult data types
@@ -133,12 +130,15 @@ voice_pipeline/
     └── integration/
 
 scripts/
-├── sandbox.py             # Pipeline execution sandbox for bug reproduction
 ├── mock_cpp_server.py     # Mock C++ WebSocket server
 ├── tts_to_file.py         # TTS → WAV file utility
 ├── export_maai_onnx.py    # MaAI VAP ONNX export
 ├── bench/                 # Performance benchmarks
 └── hardware/              # Hardware integration checks (mic, LED, bridge)
+
+evaluation/                # E2E evaluation pipeline (audio prep, run, report, score, dashboard)
+
+music_dance/               # Standalone music-sync LED+motor demo (Python analysis + C++ player)
 ```
 
 
@@ -173,7 +173,8 @@ Some modules (VAP, TurnGPT, Wakeword etc.) wrap externally cloned model reposito
 
 - **Interfaces**: `I` prefix (`IASR`, `ITTS`). All defined in `core/interfaces.py`. Inject via constructor using interface types.
 - **Vendor abstraction**: ASR, LLM, TTS are interface-backed. Impl selection via config.
-- **Dependency direction**: always `module → core`. Modules must not import each other directly. TurnDetector does not know about SpeechGenerator or ASR; `__main__.py` wires them.
+- **Dependency direction**: always `module → core`. Modules must not import each other directly. TurnDetector does not know about SpeechGenerator or ASR; `voice_pipeline/wiring.py` wires them.
+- **Entry-point wiring**: production (`__main__.py`) and eval (`evaluation/run.py`) share the component graph via `voice_pipeline/wiring.py` (`build_components()` + `ProcessComponents.create_session()`). Production code exposes only neutral injection points (paths, toggles, callbacks) — never eval-specific behavior or branches. Dependency direction: `evaluation → voice_pipeline`, never the reverse.
 - **Type hints** required. **Docstrings** required on interface methods.
 - **Configuration**: per-module class variables and constructor parameters. No centralized config object.
 - **Logging**: `voice_pipeline.*` namespace (`voice_pipeline.asr`, `voice_pipeline.session_loop`, etc.)
@@ -232,7 +233,7 @@ uv run pytest -m ''                              # everything
 
 ### Bug reproduction
 
-Do **not** add pytest test files to reproduce or verify bugs. Use `scripts/sandbox.py` instead — it runs the actual production code path (SpeechGenerator, SessionLoop) with controlled inputs. See `scripts/sandbox.py` module docstring for usage.
+Do **not** add pytest test files to reproduce or verify bugs. Reproduce through the production code path instead: wire components via `voice_pipeline/wiring.py` (`build_components()` / `create_session()`) in a throwaway script, or use `evaluation/run.py --text` (LLM-only text mode, skips audio/turn-taking) for generation/context behavior.
 
 
 ## Decision Log

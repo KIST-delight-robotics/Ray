@@ -14,15 +14,14 @@ import json
 import logging
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
 from typing import Literal
 
 import numpy as np
 
 from voice_pipeline.audio.constants import FRAME_DURATION_MS
 from voice_pipeline.core.interfaces import IVAP, ICallStore, IEmbedder, ITurnDetector
-from voice_pipeline.core.types import AudioFrame, CallRecord, TurnDecision, VAPResult
-from voice_pipeline.turn_taking.async_turngpt import AsyncTurnGPT, SyncTurnGPTAdapter
+from voice_pipeline.core.types import AudioFrame, CallRecord, TurnDecision, VAPResult, utc_now_str
+from voice_pipeline.turn_taking.threaded_turngpt import SyncTurnGPTAdapter, ThreadedTurnGPT
 
 logger = logging.getLogger("voice_pipeline.turn_taking")
 
@@ -88,7 +87,7 @@ class TurnDetector(ITurnDetector):
     def __init__(
         self,
         vap: IVAP,
-        turngpt: AsyncTurnGPT | SyncTurnGPTAdapter,
+        turngpt: ThreadedTurnGPT | SyncTurnGPTAdapter,
         embedder: IEmbedder,
         vad_fn: Callable[[AudioFrame], float] | None = None,
         vad_reset_fn: Callable[[], None] | None = None,
@@ -109,6 +108,10 @@ class TurnDetector(ITurnDetector):
         self._turn_state = _TurnState.USER_TURN
         self._dialog_parts: list[str] = []
         self._turn_index = 0
+        # Seed the shared exchange counter so call records of the first turn
+        # (before any commit) are stamped turn_index=0.
+        if self._call_store is not None:
+            self._call_store.set_turn_index(0)
 
         # Per-frame tracking (reset between turns)
         self._prev_asr_text: str = ""
@@ -133,7 +136,8 @@ class TurnDetector(ITurnDetector):
         frame_count: int = 1,
     ) -> TurnDecision:
         """Process one pipeline frame and return a turn decision."""
-        vap_result = self._vap.feed_audio(user_audio, robot_audio)
+        self._vap.feed_audio(user_audio, robot_audio)
+        vap_result = self._vap.latest_result
 
         if self._vad_fn is not None:
             vad_score = self._vad_fn(user_audio)
@@ -185,11 +189,7 @@ class TurnDetector(ITurnDetector):
         # Evaluate turn-shift first so its VAP-sustain timer keeps advancing even
         # on frames where prepare preempts the shift below (see _check_turn_shift's
         # side effect). The decision itself is acted on after the prepare check.
-        turn_shift_reason = (
-            self._check_turn_shift(vap_result, elapsed)
-            if not user_is_speaking and asr_text
-            else None
-        )
+        turn_shift_reason = self._check_turn_shift(vap_result, elapsed) if not user_is_speaking and asr_text else None
 
         # Prepare preempts turn-shift on a fresh dissimilar change (→ regenerate).
         # turn_shift 직전에는 발화 조건(turngpt/0.2s 스로틀)을 우회 — 스로틀은 발화
@@ -245,6 +245,11 @@ class TurnDetector(ITurnDetector):
             self._dialog_parts.append(text)
         self._turn_state = _TurnState.ROBOT_TURN
         self._turn_index += 1
+        # Generation (LLM/TTS) for the exchange that just ended runs during
+        # this ROBOT_TURN — attribute its call records to that exchange, not
+        # the next user turn that will reuse the incremented index.
+        if self._call_store is not None:
+            self._call_store.set_turn_index(self._turn_index - 1)
         if self._vad_reset_fn is not None:
             try:
                 self._vad_reset_fn()
@@ -258,6 +263,9 @@ class TurnDetector(ITurnDetector):
         Does NOT clear dialog_parts (TurnGPT context persists across turns).
         """
         self._turn_state = _TurnState.USER_TURN
+        # Entering the next user turn: stamp its exchange index onto records.
+        if self._call_store is not None:
+            self._call_store.set_turn_index(self._turn_index)
         self._reset_per_frame_state()
 
     def _reset_per_frame_state(self) -> None:
@@ -353,19 +361,24 @@ class TurnDetector(ITurnDetector):
         """Cancel detection during the tentative PENDING window.
 
         The user reclaiming the floor means the turn_shift was premature →
-        cancel. ``user_is_speaking`` is a prerequisite (mirrors interrupt) —
-        the user must actually be speaking — then one of two signals confirms
-        the reclaim:
+        cancel. Two signals, gated differently:
         - VAP: p_now/p_fut both favor the user (immediate; each VAP result
-          already integrates ~100ms, so no sustain is needed).
+          already integrates ~100ms, so no sustain is needed). 현재형 신호라
+          ``user_is_speaking``이 전제 (interrupt와 동일) — VAD가 침묵인데
+          VAP 예측만으로 취소하는 것을 막는다.
         - ASR: new text dissimilar to the last prepared text — the basis of
           the (speculative) response (a finalization stays similar, ignored).
+          과거형 증거라 ``user_is_speaking`` 무관하게 평가: ASR 결과는 실제
+          오디오보다 수백 ms 늦게 도착하므로, 응답을 무효화하는 텍스트는
+          대개 VAD가 이미 침묵을 보고한 뒤(바로 그 조건으로 turn_shift가
+          발화된 뒤)에 온다.
         On cancel, rewind to USER_TURN with per-frame state preserved.
         """
-        if not user_is_speaking:
-            return TurnDecision.none()
-
-        if vap_result.p_now > self._INTERRUPT_USER_THRESHOLD and vap_result.p_fut > self._INTERRUPT_USER_THRESHOLD:
+        if (
+            user_is_speaking
+            and vap_result.p_now > self._INTERRUPT_USER_THRESHOLD
+            and vap_result.p_fut > self._INTERRUPT_USER_THRESHOLD
+        ):
             logger.info("CANCEL (vap): p_now=%.2f p_fut=%.2f", vap_result.p_now, vap_result.p_fut)
             self._turn_state = _TurnState.USER_TURN
             return TurnDecision(cancel=True)
@@ -401,12 +414,13 @@ class TurnDetector(ITurnDetector):
         """Record a similarity-gate decision to the call store (if configured)."""
         if self._call_store is None:
             return
+        # turn_index lives on the CallRecord column (below), not in metadata —
+        # report.py groups all call records by that column.
         metadata = json.dumps(
             {
                 "similarity": round(similarity, 4),
                 "threshold": self._SIMILARITY_THRESHOLD,
                 "decision": decision,
-                "turn_index": self._turn_index,
                 "prev_text": prev_text,
                 "new_text": new_text,
             },
@@ -416,12 +430,13 @@ class TurnDetector(ITurnDetector):
             self._call_store.record(
                 CallRecord(
                     session_id=self._session_id,
-                    timestamp=datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+                    timestamp=utc_now_str(),
                     module="similarity_gate",
                     operation=operation,
                     model="embedder",
                     elapsed_ms=elapsed_ms,
                     metadata=metadata,
+                    turn_index=self._turn_index,
                 )
             )
         except Exception:

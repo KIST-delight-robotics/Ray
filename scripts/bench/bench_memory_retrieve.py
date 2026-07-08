@@ -90,7 +90,7 @@ time.sleep(gap_sec if gap_sec > 0 else 1.0)  # let cache settle
 
 # --- Measure ---
 times = []
-for i, q in enumerate(queries):
+for q in queries:
     if gap_sec > 0:
         time.sleep(gap_sec)
     t0 = time.perf_counter()

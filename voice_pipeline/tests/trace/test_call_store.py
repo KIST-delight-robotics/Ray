@@ -103,6 +103,60 @@ class TestSQLiteCallStore:
         assert row["status"] == "ok"
         conn.close()
 
+    def test_turn_index_persisted(self) -> None:
+        store = self._make_store()
+        store.record(_make_record(turn_index=3))
+        store.close()
+
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM call_records").fetchone()
+        assert row["turn_index"] == 3
+        conn.close()
+
+    def test_turn_index_defaults_to_zero(self) -> None:
+        store = self._make_store()
+        store.record(_make_record())
+        store.close()
+
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM call_records").fetchone()
+        assert row["turn_index"] == 0
+        conn.close()
+
+    def test_legacy_db_migrated(self) -> None:
+        # A pre-change DB without the turn_index column must gain it on open.
+        conn = sqlite3.connect(self._db_path)
+        conn.execute(
+            "CREATE TABLE call_records ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, "
+            "timestamp TEXT NOT NULL, module TEXT NOT NULL, operation TEXT NOT NULL, "
+            "model TEXT NOT NULL, elapsed_ms REAL NOT NULL, "
+            "status TEXT NOT NULL DEFAULT 'ok', metadata TEXT)"
+        )
+        conn.commit()
+        conn.close()
+
+        store = self._make_store()
+        store.record(_make_record(turn_index=2))
+        store.close()
+
+        conn = sqlite3.connect(self._db_path)
+        conn.row_factory = sqlite3.Row
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(call_records)")}
+        assert "turn_index" in cols
+        row = conn.execute("SELECT * FROM call_records").fetchone()
+        assert row["turn_index"] == 2
+        conn.close()
+
+    def test_turn_index_counter(self) -> None:
+        store = self._make_store()
+        assert store.current_turn_index == 0
+        store.set_turn_index(5)
+        assert store.current_turn_index == 5
+        store.close()
+
     def test_thread_safety(self) -> None:
         store = self._make_store()
         errors: list[Exception] = []

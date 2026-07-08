@@ -255,16 +255,16 @@ data/eval/results/<timestamp>/
 
 ```bash
 # 1. 질문 WAV 파일 생성 (최초 1회, 이후 변경 없으면 skip)
-uv run python scripts/eval/prepare_audio.py data/eval/questions.json
+uv run python -m evaluation.prepare_audio data/eval/questions.json
 
 # 2. 평가 실행 (결과는 data/eval/results/<timestamp>/ 에 저장)
-uv run python scripts/eval/run.py --questions data/eval/questions.json
+uv run python -m evaluation.run --questions data/eval/questions.json
 
 # 채점·대시보드는 run.py 종료 시 자동으로 실행된다.
 # 필요하면 개별 실행도 가능:
-uv run python scripts/eval/report.py data/eval/results/<timestamp>
-uv run python scripts/eval/score.py data/eval/results/<timestamp>/report.json
-uv run python scripts/eval/dashboard.py data/eval/results/<timestamp>/scored.json
+uv run python -m evaluation.report data/eval/results/<timestamp>
+uv run python -m evaluation.score data/eval/results/<timestamp>/report.json
+uv run python -m evaluation.dashboard data/eval/results/<timestamp>/scored.json
 ```
 
 ### 실행 옵션

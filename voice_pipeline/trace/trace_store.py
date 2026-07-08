@@ -85,7 +85,6 @@ class SQLiteTraceStore:
         if "turn_shift_reason" not in existing:
             conn.execute("ALTER TABLE pipeline_traces ADD COLUMN turn_shift_reason TEXT NOT NULL DEFAULT ''")
 
-
     def save(self, trace: PipelineTrace) -> None:
         """Persist a trace record."""
         record = trace.to_record()
@@ -132,6 +131,7 @@ _CALL_COLUMNS = (
     "elapsed_ms",
     "status",
     "metadata",
+    "turn_index",
 )
 
 
@@ -144,6 +144,7 @@ class SQLiteCallStore:
 
     def __init__(self, db_path: str) -> None:
         self._lock = threading.Lock()
+        self._turn_index = 0
         path = Path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -162,12 +163,25 @@ class SQLiteCallStore:
                 model       TEXT NOT NULL,
                 elapsed_ms  REAL NOT NULL,
                 status      TEXT NOT NULL DEFAULT 'ok',
-                metadata    TEXT
+                metadata    TEXT,
+                turn_index  INTEGER NOT NULL DEFAULT 0
             )
         """)
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_call_session ON call_records(session_id)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_call_module ON call_records(module)")
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(call_records)")}
+        if "turn_index" not in existing:
+            self._conn.execute("ALTER TABLE call_records ADD COLUMN turn_index INTEGER NOT NULL DEFAULT 0")
         self._conn.commit()
+
+    def set_turn_index(self, index: int) -> None:
+        """Set the current exchange index stamped onto new call records."""
+        self._turn_index = index
+
+    @property
+    def current_turn_index(self) -> int:
+        """Current exchange index (0-based) for stamping call records."""
+        return self._turn_index
 
     def record(self, record: CallRecord) -> None:
         """Persist a single call record."""
@@ -192,10 +206,20 @@ class InMemoryCallStore:
 
     def __init__(self) -> None:
         self.records: list[CallRecord] = []
+        self._turn_index = 0
 
     def record(self, record: CallRecord) -> None:
         """Append record to in-memory list."""
         self.records.append(record)
+
+    def set_turn_index(self, index: int) -> None:
+        """Set the current exchange index stamped onto new call records."""
+        self._turn_index = index
+
+    @property
+    def current_turn_index(self) -> int:
+        """Current exchange index (0-based) for stamping call records."""
+        return self._turn_index
 
     def close(self) -> None:
         """No-op."""
