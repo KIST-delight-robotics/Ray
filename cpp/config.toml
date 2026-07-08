@@ -5,7 +5,7 @@ port = 9200
 protocol_version = 2.0
 device_name = "/dev/ttyUSB0"
 
-ids = [1, 2, 3, 4, 5, 6]   # Pitch, Roll_R, Roll_L, Yaw, Mouth, LED
+ids = [1, 2, 3, 4, 5]   # Pitch, Roll_R, Roll_L, Yaw, Mouth
 baudrate = 2000000      # 9600, 57600, 115200, 1000000, 2000000, 3000000, 4000000, 4500000
 is_time_based = true    # true: Time-based, false: Velocity-based
 operating_mode = 4      # 1: Velocity, 3: Position, 4: Extended Position, 16: PWM
@@ -15,44 +15,19 @@ profile_velocity_homing = 5000   # 기기 부팅 시 초기 위치로 이동할 
 profile_velocity = 60
 profile_acceleration = 0
 
-pos_p_gain = [500, 500, 500, 500, 500, 500]
-pos_i_gain = [0, 0, 0, 0, 0, 0]
-pos_d_gain = [0, 0, 0, 0, 0, 0]
-ff1_gain = [0, 0, 0, 0, 0, 0]
-ff2_gain = [0, 0, 0, 0, 0, 0]
+pos_p_gain = [500, 500, 500, 500, 500]
+pos_i_gain = [0, 0, 0, 0, 0]
+pos_d_gain = [0, 0, 0, 0, 0]
+ff1_gain = [0, 0, 0, 0, 0]
+ff2_gain = [0, 0, 0, 0, 0]
 
 [robot]
-# 모터 초기 위치
-# 1호기
-# default_pitch   = 3460
-# default_roll_r  = 1900
-# default_roll_l  = 1350
-# default_yaw     = 1000
-# default_mouth   = 3040
+# 모터 초기 위치는 기기별 [robot.unitN] 섹션에서 선택된다 (파일 하단).
+# 실행 전 RAY_UNIT 환경변수 필수 (예: RAY_UNIT=unit1). 미설정/오타 시 기동 실패.
 
-# 2호기
-# default_pitch   = 1100
-# default_roll_r  = 2750
-# default_roll_l  = 1450
-# default_yaw     = 2085
-# default_mouth   = 1980
-
-# 3호기
-default_pitch   = 1100
-default_roll_r  = 2750
-default_roll_l  = 1450
-default_yaw     = 3600
-default_mouth   = 1980
-default_led     = 1550               # ID6 홈 tick - 100 (angle_deg 0°일 때 절대 위치). 장착 후 실측
-
-# LED(ID6 막대) 각도/밝기 변환
-# CSV col0 = 절대 tick(PC home=led_csv_home 기준). 우리 home(default_led)에 재앵커링:
-#   goal = default_led + led_dir*(csv_tick - led_csv_home)
-# default_led == led_csv_home 이면 절대치와 동일. default_led를 내리면 궤적 전체가 같이 내려감.
-led_csv_home      = 1550            # LED CSV를 생성한 PC의 home tick (led_motion.py home_tick)
-led_dir           = 1               # +1 / -1: CSV tick 증가가 "빛 위로(천장)"가 되도록
 led_pwm_pin       = 13              # LED 밝기 PWM용 BCM GPIO 번호 (GPIO13, 물리 33번). -1 = 비활성
 led_pwm_range     = 100             # softPwm duty 범위 (0..range). 100 → ~100Hz
+# PWM LED가 없는 기기에서는 부팅 서비스(led-pwm.service)가 없으므로 자동 비활성된다.
 
 #robot parameter
 pulley_diameter = 40
@@ -74,3 +49,29 @@ min_mouth = 400                    # 최대 mouth movement size in DXL dimension
 generate_head_motion = false        # 헤드 모션 온라인 생성 여부
 wait_mode_rpy_ratio = 1.0           # 대기모드에서 최종 roll, pitch, yaw 값에 곱해지는 비율
 control_motor_rpy_ratio = 1.0       # 온라인 생성 시 최종 roll, pitch, yaw 값에 곱해지는 비율
+
+
+# ---------------------------------------------------------------------------
+# 기기별 모터 초기 위치 — RAY_UNIT 환경변수로 선택
+# ---------------------------------------------------------------------------
+
+[robot.unit1]
+default_pitch   = 3460
+default_roll_r  = 1900
+default_roll_l  = 1350
+default_yaw     = 1000
+default_mouth   = 3040
+
+[robot.unit2]
+default_pitch   = 1100
+default_roll_r  = 2750
+default_roll_l  = 1450
+default_yaw     = 2085
+default_mouth   = 1980
+
+[robot.unit3]
+default_pitch   = 1100
+default_roll_r  = 2750
+default_roll_l  = 1450
+default_yaw     = 3600
+default_mouth   = 1980

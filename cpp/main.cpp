@@ -2811,7 +2811,10 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signal_handler);
     std::thread(shutdown_watcher).detach();  // 시그널 → 정상 컨텍스트 정리·종료
 
-    LoadConfig("cpp/config.toml");
+    if (!LoadConfig("cpp/config.toml")) {
+        std::cerr << "config.toml 로드 실패 — 종료합니다. (RAY_UNIT 환경변수 확인)" << std::endl;
+        return -1;
+    }
 
     g_home.home_pitch  = cfg_robot.default_pitch;
     g_home.home_roll_r = cfg_robot.default_roll_r;

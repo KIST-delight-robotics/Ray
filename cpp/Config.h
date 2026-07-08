@@ -6,6 +6,7 @@
 #include <vector>
 #include <iostream>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 
 struct DynamixelConfig {
@@ -140,11 +141,25 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
     }
     auto robot_node = tbl["robot"];
 
-    ok &= REQ(robot_node, "default_pitch",  cfg_robot.default_pitch);
-    ok &= REQ(robot_node, "default_roll_r", cfg_robot.default_roll_r);
-    ok &= REQ(robot_node, "default_roll_l", cfg_robot.default_roll_l);
-    ok &= REQ(robot_node, "default_yaw",    cfg_robot.default_yaw);
-    ok &= REQ(robot_node, "default_mouth",  cfg_robot.default_mouth);
+    // 기기별 모터 초기 위치: RAY_UNIT 환경변수로 [robot.unitN] 섹션 선택.
+    // 잘못된 초기값으로 홈 이동하면 하드웨어가 위험하므로 미설정/오타는 즉시 실패.
+    const char* unit = std::getenv("RAY_UNIT");
+    if (unit == nullptr || *unit == '\0') {
+        std::cerr << "[Config Error] RAY_UNIT 환경변수가 설정되지 않았습니다 (예: RAY_UNIT=unit1).\n";
+        return false;
+    }
+    if (!robot_node[unit].is_table()) {
+        std::cerr << "[Config Error] [robot." << unit << "] 섹션이 config.toml에 없습니다.\n";
+        return false;
+    }
+    auto unit_node = robot_node[unit];
+    std::cout << "[Config] 기기 설정 선택: [robot." << unit << "]" << std::endl;
+
+    ok &= REQ(unit_node, "default_pitch",  cfg_robot.default_pitch);
+    ok &= REQ(unit_node, "default_roll_r", cfg_robot.default_roll_r);
+    ok &= REQ(unit_node, "default_roll_l", cfg_robot.default_roll_l);
+    ok &= REQ(unit_node, "default_yaw",    cfg_robot.default_yaw);
+    ok &= REQ(unit_node, "default_mouth",  cfg_robot.default_mouth);
     ok &= REQ(robot_node, "led_pwm_pin",       cfg_robot.led_pwm_pin);
     ok &= REQ(robot_node, "led_pwm_range",     cfg_robot.led_pwm_range);
 
