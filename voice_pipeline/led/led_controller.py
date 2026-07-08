@@ -9,6 +9,7 @@ from typing import Any
 from voice_pipeline.core.interfaces import ILEDController
 from voice_pipeline.core.types import LEDState
 from voice_pipeline.led.animations import RGB, BreathingAnimation, LEDAnimation, StaticAnimation
+from voice_pipeline.led.arbiter_client import OSLedArbiterClient
 from voice_pipeline.led.exceptions import LEDError
 
 logger = logging.getLogger("voice_pipeline.led")
@@ -71,8 +72,11 @@ class LEDController(ILEDController):
         self._stop_event = threading.Event()
         self._state_changed = threading.Event()
 
-        # Hardware strip (None = noop fallback)
+        # Hardware strip (None = noop fallback). When a real strip is used we
+        # first borrow it from the OS_LED rainbow daemon (shared SPI bus).
         self._strip: Any = None
+        self._driver: Any = None
+        self._arbiter = OSLedArbiterClient()
         self._init_strip()
 
         # Start animation thread
@@ -94,12 +98,16 @@ class LEDController(ILEDController):
         if _WS2812SpiDriver is None:
             logger.info("rpi5_ws2812 not available — LED controller running in noop mode")
             return
+        # Borrow the shared strip from the OS_LED rainbow daemon before opening
+        # SPI, so the two processes never drive the bus at the same time.
+        self._arbiter.acquire()
         try:
             driver = _WS2812SpiDriver(
                 spi_bus=0,
                 spi_device=0,
                 led_count=self._LED_COUNT,
             )
+            self._driver = driver
             self._strip = driver.get_strip()
             self._strip.set_brightness(self._brightness)
             logger.info(
@@ -110,6 +118,7 @@ class LEDController(ILEDController):
                 self._brightness,
             )
         except Exception as exc:
+            self._arbiter.release()  # hand the strip back to the rainbow daemon
             raise LEDError(f"Failed to initialize LED strip: {exc}") from exc
 
     # ------------------------------------------------------------------
@@ -144,7 +153,23 @@ class LEDController(ILEDController):
         if self._thread.is_alive():
             logger.warning("LED animation thread did not exit within timeout")
         self._apply_off()
+        # Fully close our SPI device BEFORE releasing the token, so no RAY-side
+        # write can overlap the daemon's rainbow fade-in on the shared bus.
+        self._close_strip()
+        # Hand the strip back: the daemon fades the rainbow back in.
+        self._arbiter.release()
         logger.debug("LED controller closed")
+
+    def _close_strip(self) -> None:
+        """Close the underlying SPI device (rpi5_ws2812 exposes no public close)."""
+        if self._driver is None:
+            return
+        try:
+            self._driver._device.close()
+        except Exception:
+            logger.debug("Error closing SPI device (suppressed)", exc_info=True)
+        self._strip = None
+        self._driver = None
 
     # ------------------------------------------------------------------
     # Animation loop (runs on daemon thread)

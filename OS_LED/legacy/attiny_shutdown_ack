@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ACTION="${1:-}"
+
+case "$ACTION" in
+  poweroff|halt)
+    ;;
+  *)
+    # Do not assert the shutdown ACK on reboot/kexec.
+    exit 0
+    ;;
+esac
+
+GPIOCHIP="/dev/gpiochip4"
+if [[ ! -e "$GPIOCHIP" ]]; then
+  GPIOCHIP="/dev/gpiochip0"
+fi
+
+ACK_HOLD_USEC=500000
+
+# This script runs from /usr/lib/systemd/system-shutdown/ near the very end
+# of shutdown, after services have already been stopped.
+# Hold GPIO24 HIGH long enough for the Pi-side 3.3 V level to be observed and
+# for the ATtiny85 to sample a stable shutdown-complete ACK.
+#
+# Using time mode here is important: with libgpiod, the line reverts when the
+# holding process exits. A short-lived background helper can drop the line too
+# early during shutdown, while signal mode would block indefinitely.
+exec /usr/bin/gpioset -m time -u "$ACK_HOLD_USEC" "$GPIOCHIP" 24=1
