@@ -1,7 +1,20 @@
 # Voice Conversation Robot — Project Guide
 
 Python pipeline that handles real-time voice input, turn-taking detection, LLM response generation, and TTS synthesis.
-Audio playback is handled by a C++ process, communicating over WebSocket.
+Audio playback and motor control are handled by a C++ process, communicating over WebSocket.
+
+
+## Collaboration Workflow
+
+- **Discuss before implementing.** For non-trivial work, first resolve ambiguities and
+  present a plan (or a proposed fix). Start code changes only after the user explicitly
+  confirms. Answering the user's question is not approval to implement.
+- **Questions get answers, not edits.** When the user asks a question or describes a
+  problem, respond with findings and proposed solutions, then stop and wait.
+- **Mid-work deviations**: if an important change from the agreed plan comes up, stop,
+  explain it with alternatives, and continue only after the user decides.
+- **Commits require explicit approval.** Never commit unless the user explicitly asks or
+  approves that specific commit. Announcing an intent to commit is not approval.
 
 
 ## System Structure
@@ -18,128 +31,42 @@ __main__.py (mode loop + DI)
              ├── ASR
              ├── TurnDetector (VAP + TurnGPT)
              ├── SpeechGenerator (ContextBuilder → LLM → TTS)
-             ├── CppBridge
+             ├── CppBridge ⇄ WebSocket(:9200) ⇄ C++ Ray process (audio playback + motors)
              ├── UtteranceTruncator
              └── ConversationHistory
 ```
 
 
-## Directory Structure
+## Repository Layout
 
-```
-voice_pipeline/
-├── __main__.py                # Entry point, mode loop (SLEEP/GREETING/ACTIVE/FAREWELL)
-├── wiring.py                  # Shared component graph assembly (build_components / create_session)
-├── session_loop.py            # ACTIVE mode frame-driven conversation loop (SessionLoop)
-│
-├── core/
-│   ├── types.py               # Shared data types (TurnDecision, ResponseData, PipelineTrace, etc.)
-│   ├── interfaces.py          # All module interfaces (IASR, ITTS, ILLM, etc.)
-│   └── exceptions.py          # PipelineError base only
-│
-├── audio/
-│   ├── audio_input.py         # Mic capture → audio_queue
-│   ├── constants.py           # Audio format constants (sample rate, frame size, etc.)
-│   └── exceptions.py
-│
-├── wakeword/
-│   ├── wakeword.py            # Wakeword detection (Silero VAD + Google STT)
-│   └── exceptions.py
-│
-├── asr/
-│   ├── asr.py                 # ASR interface impl
-│   └── exceptions.py
-│
-├── turn_taking/
-│   ├── maai_vap.py            # MaAIVAPModel — MaAI ONNX inference (synchronous)
-│   ├── threaded_vap.py        # ThreadedVAP(IVAP) — runs a VAP model on a bg thread
-│   ├── turngpt.py             # TurnGPTWrapper(ITurnGPT)
-│   ├── threaded_turngpt.py    # ThreadedTurnGPT + SyncTurnGPTAdapter — bg thread wrapper
-│   ├── turn_detector.py       # TurnDetector — combined turn decision
-│   └── exceptions.py
-│
-├── llm/
-│   ├── llm.py                 # LLM interface impl
-│   ├── prompts.py             # Prompt templates
-│   ├── tools.py               # Tool definitions & execution
-│   ├── token_counter.py       # Token counting utilities
-│   └── exceptions.py
-│
-├── tts/
-│   ├── openai_tts.py          # OpenAITTS
-│   ├── elevenlabs_tts.py      # ElevenLabsTTS (word timestamps)
-│   ├── factory.py             # create_tts vendor factory
-│   ├── greeting_audio.py      # Pre-generated greeting/farewell audio
-│   ├── utterance_truncator.py # Barge-in text truncation strategies
-│   └── exceptions.py
-│
-├── context/
-│   ├── context_builder.py     # LLM context assembly
-│   └── formatters.py          # Memory/profile block formatting, citation parsing
-│
-├── history/
-│   ├── conversation_history.py
-│   └── storage_backend.py     # Persistence (memory / sqlite)
-│
-├── generation/
-│   ├── speech_generator.py    # ContextBuilder → LLM → TTS orchestration
-│   ├── sentence_detector.py   # LLM stream → sentence boundary detection (sentence mode)
-│   └── exceptions.py
-│
-├── bridge/
-│   ├── cpp_bridge.py          # C++ WebSocket communication
-│   └── exceptions.py
-│
-├── led/
-│   ├── led_controller.py      # LED interface + impls (Direct / Bridge)
-│   ├── animations.py          # LED animation patterns
-│   └── exceptions.py
-│
-├── embedding/
-│   └── embedder.py            # IEmbedder implementations + factory (shared by memory & TurnDetector similarity)
-│
-├── memory/
-│   ├── types.py               # Episode, Profile, MemoryReadResult data types
-│   ├── vector_index.py        # IVectorIndex interface + NumpyVectorIndex
-│   ├── storage.py             # SQLiteMemoryStorage + InMemoryMemoryStorage
-│   ├── retriever.py           # MemoryRetriever — hybrid search + retained buffer
-│   ├── writer.py              # MemoryWriter — episode/profile extraction pipeline
-│   ├── prompts.py             # Write prompts, JSON schemas, profile schema
-│   └── exceptions.py
-│
-├── trace/
-│   └── trace_store.py         # Pipeline latency trace storage (SQLite / in-memory)
-│
-└── tests/
-    ├── test_session_loop.py   # SessionLoop unit tests
-    ├── core/
-    ├── audio/
-    ├── wakeword/
-    ├── asr/
-    ├── turn_taking/
-    ├── llm/
-    ├── tts/
-    ├── context/
-    ├── history/
-    ├── generation/
-    ├── bridge/
-    ├── led/
-    ├── embedding/
-    ├── memory/
-    ├── trace/
-    └── integration/
+Top-level only — for module details, inspect the folder directly (every module has
+docstrings; modules wrapping external repos have their own README).
 
-scripts/
-├── mock_cpp_server.py     # Mock C++ WebSocket server
-├── tts_to_file.py         # TTS → WAV file utility
-├── export_maai_onnx.py    # MaAI VAP ONNX export
-├── bench/                 # Performance benchmarks
-└── hardware/              # Hardware integration checks (mic, LED, bridge)
+- `voice_pipeline/` — Python conversation pipeline (entry: `__main__.py`, wiring: `wiring.py`)
+- `cpp/` — C++ audio playback + motor control process (see **C++ Process** below)
+- `evaluation/` — E2E evaluation pipeline (audio prep, run, report, score, dashboard)
+- `scripts/` — dev utilities, benchmarks (`bench/`), hardware checks (`hardware/`)
+- `docs/` — project docs (see **Documentation** below)
+- `data/` — datasets and runtime data. Gitignored as a whole, but a few required files are
+  tracked (e.g. `data/segments/`, `data/eval/questions.json`). `git add` refuses paths under
+  it; commit tracked files via pathspec: `git commit -- data/<path>`
+- `logs/` — runtime logs (`pipeline/` Python; `motion/`, `pos4_audio/` C++)
+- `models/`, `external/`, `third_party/` — model files and external repos
+- `build/` — C++ build output
 
-evaluation/                # E2E evaluation pipeline (audio prep, run, report, score, dashboard)
 
-music_dance/               # Standalone music-sync LED+motor demo (Python analysis + C++ player)
-```
+## C++ Process
+
+Audio playback + motor control (`build/Ray`). The Python pipeline connects to it over
+WebSocket (port 9200).
+
+- **Build**: `cmake --build build --target Ray`
+- **Run**: `RAY_UNIT` env var is **required** — selects the per-device motor home positions
+  from `[robot.unitN]` in `cpp/config.toml`. Missing/typo → startup fails with a config error.
+  Set it per device (e.g. `export RAY_UNIT=unit1` in `~/.bashrc`).
+- **Config**: `cpp/config.toml` — shared params + per-unit sections. Do not keep per-device
+  local edits; add or update a `[robot.unitN]` section instead.
+- **Python-side dev without the robot**: run `scripts/mock_cpp_server.py` instead of `build/Ray`.
 
 
 ## Documentation
@@ -148,7 +75,10 @@ music_dance/               # Standalone music-sync LED+motor demo (Python analys
 - **docs/decisions.md**: Finalized decision log for completed work.
 - **docs/decisions-wip.md**: Decision log for work in progress. Merged into `decisions.md` after cleanup when the work is complete.
 - **docs/ARCHITECTURE.md**: System architecture details.
+- **docs/eval-system.md**: Evaluation system design.
 - **docs/ray-memory/**: Long-term memory system design (overview, session, read, write, storage).
+- **docs/troubleshooting/**: Hardware issue investigations (DAC I2S/DMA, ReSpeaker USB).
+- **docs/benchmarks/**: Model benchmark reports (TurnGPT, VAP).
 - **Module READMEs** (`turn_taking/README.md`, etc.): External repo setup, constraints, config params.
 
 
@@ -251,19 +181,6 @@ Exclude:
 - Refactoring history (removed X, replaced with Y)
 
 
-## Collaboration Workflow
-
-- **Discuss before implementing.** For non-trivial work, first resolve ambiguities and
-  present a plan (or a proposed fix). Start code changes only after the user explicitly
-  confirms. Answering the user's question is not approval to implement.
-- **Questions get answers, not edits.** When the user asks a question or describes a
-  problem, respond with findings and proposed solutions, then stop and wait.
-- **Mid-work deviations**: if an important change from the agreed plan comes up, stop,
-  explain it with alternatives, and continue only after the user decides.
-- **Commits require explicit approval.** Never commit unless the user explicitly asks or
-  approves that specific commit. Announcing an intent to commit is not approval.
-
-
 ## Commit Convention
 
 ```
@@ -272,8 +189,6 @@ Exclude:
 
 - **type**: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`
 - **scope**: module name (`core`, `asr`, `tts`, `session_loop`, …) or `project` for cross-cutting changes
-- **subject**: lowercase, imperative, no period (e.g. `add ASR interface`)
+- **subject**: 한글로 작성, 명사형 종결, 마침표 없음 (e.g. `ASR 인터페이스 추가`)
 
 Propose a commit at natural checkpoints — when a task is complete and before starting the next one — and commit only after the user approves. Don’t split a single task into multiple commits.
-
-
