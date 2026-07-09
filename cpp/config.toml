@@ -92,11 +92,11 @@ default_yaw     = 3600
 default_mouth   = 1980
 
 [robot.unit4]
-default_pitch   = 3050
-default_roll_r  = 1650
-default_roll_l  = 1640
+default_pitch   = 2850
+default_roll_r  = 1550
+default_roll_l  = 1540
 default_yaw     = 3600
-default_mouth   = 700
+default_mouth   = 680
 
 
 # ReSpeaker DOA → 고개(yaw) 추적: 소리 방향으로 고개 돌리기
