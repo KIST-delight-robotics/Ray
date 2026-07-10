@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from evaluation.memory_bench.dataset import load_locomo, parse_session_datetime
+from evaluation.memory_bench.datasets.locomo import load_locomo, parse_session_datetime
 
 
 @pytest.fixture()
@@ -73,6 +73,12 @@ def locomo_path(tmp_path: Path) -> Path:
     return path
 
 
+def test_perspectives_are_both_speakers(locomo_path: Path) -> None:
+    conv = load_locomo(locomo_path)[0]
+    assert conv.perspectives == ["Caroline", "Melanie"]
+    assert "Caroline and Melanie" in conv.participants_desc
+
+
 def test_sessions_sorted_numerically(locomo_path: Path) -> None:
     conv = load_locomo(locomo_path)[0]
     assert [s.index for s in conv.sessions] == [1, 2, 10]
@@ -94,14 +100,15 @@ def test_qa_normalization(locomo_path: Path) -> None:
     qa = load_locomo(locomo_path)[0].qa
 
     assert qa[0].answer == "2022"  # int → str
-    assert qa[0].category == 2
+    assert qa[0].category == "temporal"  # 2 → 유형명
     assert qa[0].evidence == ["D1:2", "D2:1"]
-    assert qa[0].evidence_session_indices == [1, 2]
+    assert qa[0].evidence_sessions == [1, 2]
 
-    assert qa[1].category == 1  # "1" → 1
+    assert qa[1].category == "multi-hop"  # "1" → 유형명
     assert qa[1].evidence == ["D2:1"]  # "['D2:1']" → list
 
-    assert qa[2].is_adversarial
+    assert qa[2].adversarial
+    assert qa[2].category == "adversarial"
     assert qa[2].answer == ""
     assert qa[2].adversarial_answer == "self-care is important"
 

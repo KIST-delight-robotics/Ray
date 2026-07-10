@@ -1,8 +1,9 @@
-"""Ingest phase: replay LoCoMo sessions through the production memory write pipeline.
+"""Ingest phase: replay benchmark sessions through the production memory write pipeline.
 
-듀얼 인제스트 — 대화당 두 관점(각 화자를 user로 매핑)으로 두 번 인제스트해서
-관점별 DB를 만든다. 추출 프롬프트가 user 중심이라 한 관점만으로는 상대 화자
-기억이 빠지는데, 프로덕션 프롬프트를 수정하지 않고 양쪽을 커버하기 위한 방식.
+대화당 ``Conversation.perspectives``의 각 관점(user로 매핑할 화자)마다 별도 DB를
+만든다. LoCoMo(user–user)는 듀얼 인제스트 — 추출 프롬프트가 user 중심이라 한
+관점만으로는 상대 화자 기억이 빠지는데, 프로덕션 프롬프트를 수정하지 않고 양쪽을
+커버하기 위한 방식. LongMemEval(user–assistant)은 user 관점 하나만 인제스트한다.
 
 재실행 시 ``processed_sessions``를 확인해 이미 처리된 세션은 건너뛴다 (자연 resume).
 """
@@ -22,7 +23,9 @@ from evaluation.memory_bench.common import (
     session_db_id,
     update_config,
 )
-from evaluation.memory_bench.dataset import Conversation, load_locomo
+from evaluation.memory_bench.datasets import load_dataset
+from evaluation.memory_bench.datasets.longmemeval import sample_per_type as lme_sample_per_type
+from evaluation.memory_bench.types import Conversation
 from voice_pipeline.core.interfaces import IEmbedder
 from voice_pipeline.embedding.embedder import create_embedder
 from voice_pipeline.llm.llm import OpenAILLM
@@ -56,7 +59,9 @@ _WRITER_CONSTANT_NAMES = (
 def ingest_run(
     data_path: str,
     run_dir: Path,
+    dataset: str = "locomo",
     sample_ids: list[str] | None = None,
+    per_type: int | None = None,
     workers: int = 4,
     writer_model: str = DEFAULT_WRITER_MODEL,
     episode_prompt_file: str | None = None,
@@ -64,15 +69,22 @@ def ingest_run(
     """Run the ingest phase for all (conversation, perspective) units.
 
     Args:
-        data_path: Path to ``locomo10.json``.
+        data_path: Path to the dataset JSON.
         run_dir: Run directory; DBs are written under ``<run_dir>/dbs/``.
-        sample_ids: 지정 시 해당 대화만 인제스트.
+        dataset: 데이터셋 이름 (``locomo`` | ``longmemeval``).
+        sample_ids: 지정 시 해당 대화/문항만 인제스트.
+        per_type: 유형별 결정론적 샘플 수 (LongMemEval 전용 — 문항당 히스토리가
+            독립이라 인제스트 비용이 문항 수에 비례하므로 서브셋 실행용).
         workers: Concurrent (conversation, perspective) units.
         writer_model: LLM for episode/profile extraction.
         episode_prompt_file: 에피소드 추출 시스템 프롬프트 변형 파일 (실험용).
             ``None``이면 프로덕션 프롬프트. 적용된 전문은 config에 기록된다.
     """
-    conversations = load_locomo(data_path, sample_ids)
+    conversations = load_dataset(dataset, data_path, sample_ids)
+    if per_type is not None:
+        if dataset != "longmemeval":
+            raise ValueError("--sample-per-type은 longmemeval 전용입니다 (locomo는 --conversations 사용)")
+        conversations = lme_sample_per_type(conversations, per_type)
     if not conversations:
         raise ValueError(f"No conversations matched {sample_ids!r} in {data_path}")
 
@@ -83,25 +95,25 @@ def ingest_run(
     embedder = LockedEmbedder(create_embedder(expected_dimension=_DEFAULT_DIMENSION))
     token_counter = create_token_counter(writer_model)
 
-    units = [(conv, speaker) for conv in conversations for speaker in conv.speakers]
+    units = [(conv, perspective) for conv in conversations for perspective in conv.perspectives]
     logger.info("Ingesting %d conversations (%d units) with %d workers", len(conversations), len(units), workers)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(_ingest_unit, conv, speaker, run_dir, embedder, token_counter, writer_model, episode_prompt): (
-                conv.sample_id,
-                speaker,
-            )
-            for conv, speaker in units
+            pool.submit(
+                _ingest_unit, conv, perspective, run_dir, embedder, token_counter, writer_model, episode_prompt
+            ): (conv.sample_id, perspective)
+            for conv, perspective in units
         }
-        for future, (sample_id, speaker) in futures.items():
+        for future, (sample_id, perspective) in futures.items():
             episode_count = future.result()
-            logger.info("Ingested %s [user=%s]: %d episodes", sample_id, speaker, episode_count)
+            logger.info("Ingested %s [user=%s]: %d episodes", sample_id, perspective, episode_count)
 
     update_config(
         run_dir,
         "ingest",
         {
+            "dataset": dataset,
             "data_path": str(data_path),
             "writer_model": writer_model,
             "embedder": "all-MiniLM-L6-v2 (local)",
@@ -117,15 +129,15 @@ def ingest_run(
 
 def _ingest_unit(
     conv: Conversation,
-    user_speaker: str,
+    perspective: str,
     run_dir: Path,
     embedder: IEmbedder,
     token_counter: TokenCounter,
     writer_model: str,
     episode_prompt: str | None,
 ) -> int:
-    """Ingest one conversation from one speaker's perspective. Returns episode count."""
-    storage = SQLiteMemoryStorage(str(db_path(run_dir, conv.sample_id, user_speaker)))
+    """Ingest one conversation from one perspective. Returns episode count."""
+    storage = SQLiteMemoryStorage(str(db_path(run_dir, conv.sample_id, perspective)))
     try:
         vector_index = NumpyVectorIndex()
         ids, vectors = storage.load_all_embeddings()
@@ -146,7 +158,7 @@ def _ingest_unit(
             # 이전 실행이 utterance 저장 후 중단됐을 수 있으므로 중복 삽입 방지.
             if not storage.get_utterances(sid):
                 for turn in session.turns:
-                    role = "user" if turn.speaker == user_speaker else "assistant"
+                    role = "user" if turn.speaker == perspective else "assistant"
                     storage.add_utterance(sid, role, turn.text, session.timestamp, token_counter(turn.text))
             episode_count += len(writer.process_session(sid, session.timestamp))
         return episode_count

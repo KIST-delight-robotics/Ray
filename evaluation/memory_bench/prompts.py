@@ -1,6 +1,8 @@
-"""Benchmark-only prompts: QA answering over retrieved memories, LLM judge.
+"""Harness-shared prompts: 메모리/프로필 렌더링, 기본(ray) judge.
 
-프로덕션 프롬프트(voice_pipeline/memory/prompts.py)와 분리 — 측정·채점용
+데이터셋별 답변 프롬프트와 데이터셋 전용 judge는 각 ``datasets/<name>.py``에
+있다. 여기에는 어떤 데이터셋에도 의존하지 않는 공용 조각만 둔다.
+프로덕션 프롬프트(voice_pipeline/memory/prompts.py)와도 분리 — 측정·채점용
 프롬프트는 evaluation 패키지에 둔다 (wiring.py 독트린).
 """
 
@@ -9,44 +11,6 @@ from __future__ import annotations
 from typing import Any
 
 from voice_pipeline.memory.types import Episode, Profile
-
-ABSTAIN_ANSWER = "Not mentioned in the conversation"
-
-_ANSWER_SYSTEM = """\
-You answer questions about past conversations between two people, {speaker_a} and {speaker_b}.
-
-You are given memory notes extracted from those conversations. Notes are grouped per person; \
-within each group, "the user" refers to that person. Each note is prefixed with the date it was \
-recorded as [YYYY-MM-DD]. You may also see profile facts about each person.
-
-## Rules
-- Every fact about {speaker_a} or {speaker_b} — their experiences, events, plans, and \
-preferences — must come from the provided memories and profiles. Never invent or guess \
-personal facts about them.
-- You may use general world knowledge to interpret the question and to reason about \
-real-world entities and concepts, but not as a source of personal facts about the speakers.
-- Be concise: give the shortest answer that fully answers the question (a few words, \
-not a full sentence).
-- For questions asking for a date, answer in the form "8 May 2023". For questions about \
-durations or ordering, reason from the [YYYY-MM-DD] dates on the notes.
-- If the personal facts needed to answer are not in the provided memories, answer exactly: \
-"{abstain}"."""
-
-_ANSWER_USER_TEMPLATE = """\
-## Memories about {speaker_a} (notes where "the user" = {speaker_a})
-{memories_a}
-
-## Profile of {speaker_a}
-{profile_a}
-
-## Memories about {speaker_b} (notes where "the user" = {speaker_b})
-{memories_b}
-
-## Profile of {speaker_b}
-{profile_b}
-
-## Question
-{question}"""
 
 
 def format_memories(episodes: list[Episode]) -> str:
@@ -68,35 +32,9 @@ def format_profile(profiles: list[Profile]) -> str:
     return "\n".join(f"- {p.topic}/{p.sub_topic}: {p.content}" for p in profiles)
 
 
-def build_answer_messages(
-    question: str,
-    speaker_a: str,
-    speaker_b: str,
-    memories_a: str,
-    profile_a: str,
-    memories_b: str,
-    profile_b: str,
-) -> list[dict[str, Any]]:
-    """Build messages for the QA answering LLM call."""
-    return [
-        {
-            "role": "system",
-            "content": _ANSWER_SYSTEM.format(speaker_a=speaker_a, speaker_b=speaker_b, abstain=ABSTAIN_ANSWER),
-        },
-        {
-            "role": "user",
-            "content": _ANSWER_USER_TEMPLATE.format(
-                speaker_a=speaker_a,
-                speaker_b=speaker_b,
-                memories_a=memories_a,
-                profile_a=profile_a,
-                memories_b=memories_b,
-                profile_b=profile_b,
-                question=question,
-            ),
-        },
-    ]
-
+# ---------------------------------------------------------------------------
+# 기본(ray) judge — 데이터셋 무관 gold 대조 채점
+# ---------------------------------------------------------------------------
 
 JUDGE_SCHEMA: dict[str, Any] = {
     "type": "json_schema",

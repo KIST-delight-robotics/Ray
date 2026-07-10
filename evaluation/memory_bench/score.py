@@ -1,7 +1,9 @@
 """Score phase: LLM judge + token-F1 + failure attribution.
 
-- 헤드라인 지표: adversarial(카테고리 5) 제외 judge 정확도 (Mem0 평가 관례).
-- adversarial은 별도 리포트 — abstention("Not mentioned...")이 정답.
+- 헤드라인 지표: abstention/adversarial 제외 judge 정확도.
+- abstention 문항은 별도 리포트 — "Not mentioned..."가 정답.
+- judge 스타일: ``ray``(하네스 기본, 데이터셋 무관) / ``official-lme``
+  (LongMemEval 공식 judge — datasets/longmemeval.py에 원문 이식).
 - 오답은 3단계로 귀속: extraction(에피소드가 아예 추출 안 됨) →
   retrieval(추출됐지만 검색 top-N이 evidence 세션을 못 덮음) → generation.
 """
@@ -20,13 +22,14 @@ from typing import Any
 
 from evaluation.memory_bench.common import (
     DEFAULT_JUDGE_MODEL,
-    SCORES_FILENAME,
     JsonlWriter,
     db_path,
+    load_config,
     read_answers,
     update_config,
 )
-from evaluation.memory_bench.dataset import CATEGORY_NAMES
+from evaluation.memory_bench.datasets import longmemeval as lme
+from evaluation.memory_bench.datasets.locomo import CATEGORY_NAMES
 from evaluation.memory_bench.prompts import JUDGE_SCHEMA, build_judge_messages, gold_display
 from voice_pipeline.llm.llm import OpenAILLM
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
@@ -34,6 +37,29 @@ from voice_pipeline.memory.storage import SQLiteMemoryStorage
 logger = logging.getLogger("eval.memory_bench")
 
 JUDGEMENTS_FILENAME = "judgements.jsonl"
+
+JUDGE_STYLES = ("ray", "official-lme")
+
+
+def _category_of(record: dict[str, Any]) -> str:
+    """카테고리 유형명 (구버전 레코드의 LoCoMo int 카테고리 호환)."""
+    category = record["category"]
+    if isinstance(category, int):
+        return CATEGORY_NAMES.get(category, str(category))
+    return str(category)
+
+
+def _is_adversarial(record: dict[str, Any]) -> bool:
+    """abstention이 정답인 문항 여부 (구버전 레코드는 LoCoMo 카테고리 5)."""
+    if "adversarial" in record:
+        return bool(record["adversarial"])
+    return record["category"] == 5
+
+
+def _perspectives_of(record: dict[str, Any]) -> list[str]:
+    """DB 파일 키가 되는 관점 목록 (구버전 레코드는 "speakers" 키)."""
+    return record.get("perspectives") or record.get("speakers") or []
+
 
 _ARTICLES_RE = re.compile(r"\b(a|an|the)\b")
 _PUNCT_TABLE = str.maketrans("", "", string.punctuation)
@@ -95,14 +121,14 @@ def attribute_failure(
     return "generation"
 
 
-def _sessions_with_episodes(run_dir: Path, sample_id: str, speakers: list[str], session_ids: set[str]) -> set[str]:
-    """Sessions (of one conversation) that produced at least one episode in either perspective DB."""
+def _sessions_with_episodes(run_dir: Path, sample_id: str, perspectives: list[str], session_ids: set[str]) -> set[str]:
+    """Sessions (of one conversation) that produced at least one episode in any perspective DB."""
     non_empty: set[str] = set()
     remaining = list(session_ids)
-    for speaker in speakers:
-        path = db_path(run_dir, sample_id, speaker)
+    for perspective in perspectives:
+        path = db_path(run_dir, sample_id, perspective)
         if not path.exists():
-            logger.warning("DB missing for %s [user=%s]: %s", sample_id, speaker, path)
+            logger.warning("DB missing for %s [user=%s]: %s", sample_id, perspective, path)
             continue
         storage = SQLiteMemoryStorage(str(path))
         try:
@@ -118,11 +144,20 @@ def _sessions_with_episodes(run_dir: Path, sample_id: str, speakers: list[str], 
 # ---------------------------------------------------------------------------
 
 
-def _judge_one(llm: OpenAILLM, record: dict[str, Any]) -> str:
+def _judge_one(llm: OpenAILLM, record: dict[str, Any], judge_style: str) -> str:
     """Return ``"CORRECT"``/``"WRONG"``, or ``"ERROR"`` on judge failure."""
-    gold = gold_display(record["gold_answer"], record["category"] == 5, record["adversarial_answer"])
-    messages = build_judge_messages(record["question"], gold, record["answer"])
+    adversarial = _is_adversarial(record)
     try:
+        if judge_style == "official-lme":
+            messages = lme.build_official_judge_messages(
+                _category_of(record), record["question"], record["gold_answer"], record["answer"], adversarial
+            )
+            stream = llm.generate(messages, tools=[])
+            for _ in stream:
+                pass
+            return lme.parse_official_judge(stream.text)
+        gold = gold_display(record["gold_answer"], adversarial, record.get("adversarial_answer", ""))
+        messages = build_judge_messages(record["question"], gold, record["answer"])
         stream = llm.generate(messages, tools=[], response_format=JUDGE_SCHEMA)
         for _ in stream:
             pass
@@ -138,16 +173,38 @@ def _judge_one(llm: OpenAILLM, record: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def score_run(run_dir: Path, workers: int = 8, judge_model: str = DEFAULT_JUDGE_MODEL) -> dict[str, Any]:
+def score_run(
+    run_dir: Path,
+    workers: int = 8,
+    judge_model: str | None = None,
+    judge_style: str | None = None,
+) -> dict[str, Any]:
     """Judge all answers, attribute failures, and write ``scores.json``.
 
-    기존 ``judgements.jsonl``에 있는 항목은 재사용한다 (resume / 재집계).
+    Args:
+        judge_model: ``None``이면 스타일별 기본값 (ray → gpt-4o-mini,
+            official-lme → 공식 하네스의 gpt-4o).
+        judge_style: ``None``이면 데이터셋별 기본값 (locomo → ray,
+            longmemeval → official-lme). 스타일별 산출물은 별도 파일로 저장되어
+            (judgements[-official].jsonl / scores[-official].json) 병행 비교 가능.
+
+    기존 judgements 파일에 있는 항목은 재사용한다 (resume / 재집계).
     """
     records = read_answers(run_dir)
     if not records:
         raise ValueError(f"No answers found in {run_dir} — run the answer phase first")
 
-    judgements_path = run_dir / JUDGEMENTS_FILENAME
+    dataset = load_config(run_dir).get("ingest", {}).get("dataset", "locomo")
+    if judge_style is None:
+        judge_style = "official-lme" if dataset == "longmemeval" else "ray"
+    if judge_style not in JUDGE_STYLES:
+        raise ValueError(f"Unknown judge style: {judge_style!r} (expected one of {JUDGE_STYLES})")
+    if judge_model is None:
+        judge_model = lme.OFFICIAL_JUDGE_MODEL if judge_style == "official-lme" else DEFAULT_JUDGE_MODEL
+    suffix = "" if judge_style == "ray" else "-official"
+    logger.info("Judge style: %s (model=%s, dataset=%s)", judge_style, judge_model, dataset)
+
+    judgements_path = run_dir / f"judgements{suffix}.jsonl"
     existing: dict[tuple[str, int], str] = {}
     if judgements_path.exists():
         with judgements_path.open() as f:
@@ -163,7 +220,7 @@ def score_run(run_dir: Path, workers: int = 8, judge_model: str = DEFAULT_JUDGE_
         llm = OpenAILLM(model=judge_model, temperature=0.0, reasoning_effort=None, max_tokens=128, tools=[])
         writer = JsonlWriter(judgements_path)
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_judge_one, llm, r): r for r in pending}
+            futures = {pool.submit(_judge_one, llm, r, judge_style): r for r in pending}
             for future, record in futures.items():
                 label = future.result()
                 writer.append({"sample_id": record["sample_id"], "qa_index": record["qa_index"], "label": label})
@@ -172,21 +229,26 @@ def score_run(run_dir: Path, workers: int = 8, judge_model: str = DEFAULT_JUDGE_
 
     # 대화별로 evidence 세션의 에피소드 존재 여부를 한 번에 조회.
     evidence_by_sample: dict[str, set[str]] = defaultdict(set)
-    speakers_by_sample: dict[str, list[str]] = {}
+    perspectives_by_sample: dict[str, list[str]] = {}
     for r in records:
         evidence_by_sample[r["sample_id"]].update(r["evidence_sessions"])
-        speakers_by_sample[r["sample_id"]] = r["speakers"]
+        perspectives_by_sample[r["sample_id"]] = _perspectives_of(r)
     extracted_by_sample = {
-        sample_id: _sessions_with_episodes(run_dir, sample_id, speakers_by_sample[sample_id], sids)
+        sample_id: _sessions_with_episodes(run_dir, sample_id, perspectives_by_sample[sample_id], sids)
         for sample_id, sids in evidence_by_sample.items()
     }
 
     scores = _aggregate(records, existing, extracted_by_sample)
-    (run_dir / SCORES_FILENAME).write_text(json.dumps(scores, indent=2, ensure_ascii=False) + "\n")
+    scores["judge_style"] = judge_style
+    (run_dir / f"scores{suffix}.json").write_text(json.dumps(scores, indent=2, ensure_ascii=False) + "\n")
     update_config(
         run_dir,
-        "score",
-        {"judge_model": judge_model, "completed_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")},
+        f"score{suffix}",
+        {
+            "judge_model": judge_model,
+            "judge_style": judge_style,
+            "completed_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
+        },
     )
     return scores
 
@@ -196,7 +258,8 @@ def _aggregate(
     labels: dict[tuple[str, int], str],
     extracted_by_sample: dict[str, set[str]],
 ) -> dict[str, Any]:
-    per_category: dict[int, dict[str, float]] = defaultdict(lambda: {"n": 0, "correct": 0, "f1_sum": 0.0})
+    per_category: dict[str, dict[str, float]] = defaultdict(lambda: {"n": 0, "correct": 0, "f1_sum": 0.0})
+    adversarial_buckets: set[str] = set()
     attribution: dict[str, Counter] = defaultdict(Counter)
     per_conversation: dict[str, dict[str, int]] = defaultdict(lambda: {"n": 0, "correct": 0})
     judged = 0
@@ -206,26 +269,33 @@ def _aggregate(
         if label is None:
             continue
         judged += 1
-        category = r["category"]
+        adversarial = _is_adversarial(r)
+        name = _category_of(r)
+        # abstention 문항은 같은 유형명이라도 별도 버킷 (LoCoMo는 원래 별도 카테고리).
+        if adversarial and name != "adversarial":
+            name = f"{name} [abs]"
+        if adversarial:
+            adversarial_buckets.add(name)
         correct = label == "CORRECT"
-        stats = per_category[category]
+        stats = per_category[name]
         stats["n"] += 1
         stats["correct"] += int(correct)
-        if category != 5:
+        if not adversarial:
             stats["f1_sum"] += token_f1(r["answer"], r["gold_answer"])
         conv_stats = per_conversation[r["sample_id"]]
         conv_stats["n"] += 1
         conv_stats["correct"] += int(correct)
 
-        if not correct and category != 5:
+        if not correct and not adversarial:
             retrieved_sessions = {str(ep["session_id"]) for episodes in r["retrieved"].values() for ep in episodes}
             stage = attribute_failure(
                 r["evidence_sessions"], extracted_by_sample.get(r["sample_id"], set()), retrieved_sessions
             )
-            attribution[CATEGORY_NAMES.get(category, str(category))][stage] += 1
+            attribution[name][stage] += 1
 
-    headline_n = sum(s["n"] for c, s in per_category.items() if c != 5)
-    headline_correct = sum(s["correct"] for c, s in per_category.items() if c != 5)
+    adversarial_buckets.add("adversarial")
+    headline_n = sum(s["n"] for c, s in per_category.items() if c not in adversarial_buckets)
+    headline_correct = sum(s["correct"] for c, s in per_category.items() if c not in adversarial_buckets)
 
     return {
         "judged": judged,
@@ -233,12 +303,12 @@ def _aggregate(
         "headline_accuracy": round(headline_correct / headline_n, 4) if headline_n else None,
         "headline_n": headline_n,
         "per_category": {
-            CATEGORY_NAMES.get(c, str(c)): {
+            name: {
                 "n": s["n"],
                 "judge_accuracy": round(s["correct"] / s["n"], 4) if s["n"] else None,
-                "mean_f1": round(s["f1_sum"] / s["n"], 4) if (s["n"] and c != 5) else None,
+                "mean_f1": round(s["f1_sum"] / s["n"], 4) if (s["n"] and name not in adversarial_buckets) else None,
             }
-            for c, s in sorted(per_category.items())
+            for name, s in sorted(per_category.items())
         },
         "failure_attribution": {cat: dict(counter) for cat, counter in sorted(attribution.items())},
         "per_conversation": {

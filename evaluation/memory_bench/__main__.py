@@ -1,12 +1,18 @@
 """CLI entry point for the memory benchmark harness.
 
 Usage:
-    uv run python -m evaluation.memory_bench ingest --data data/eval/locomo/locomo10.json \\
-        --run-dir data/eval/locomo/runs/r1 [--conversations conv-26,conv-30] [--workers 4]
-    uv run python -m evaluation.memory_bench answer --run-dir data/eval/locomo/runs/r1 \\
-        [--conversations conv-26] [--workers 8] [--model gpt-4o-mini]
-    uv run python -m evaluation.memory_bench score --run-dir data/eval/locomo/runs/r1 \\
-        [--workers 8] [--judge-model gpt-4o-mini]
+    uv run python -m evaluation.memory_bench ingest --dataset locomo \\
+        --data data/eval/locomo/locomo10.json --run-dir data/eval/locomo/runs/r1 \\
+        [--conversations conv-26,conv-30] [--workers 4]
+    uv run python -m evaluation.memory_bench ingest --dataset longmemeval \\
+        --data data/eval/longmemeval/longmemeval_oracle.json \\
+        --run-dir data/eval/longmemeval/runs/r1 [--sample-per-type 2]
+    uv run python -m evaluation.memory_bench answer --run-dir <run-dir> \\
+        [--conversations ...] [--workers 8] [--model gpt-4o-mini]
+    uv run python -m evaluation.memory_bench score --run-dir <run-dir> \\
+        [--workers 8] [--judge-style ray|official-lme] [--judge-model ...]
+
+answer/score는 데이터셋 종류·대상 문항을 run config(ingest 섹션)에서 읽는다.
 """
 
 from __future__ import annotations
@@ -27,9 +33,16 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_ingest = sub.add_parser("ingest", help="Replay sessions through MemoryWriter into per-perspective DBs")
-    p_ingest.add_argument("--data", required=True, help="Path to locomo10.json")
+    p_ingest.add_argument("--dataset", choices=["locomo", "longmemeval"], default="locomo")
+    p_ingest.add_argument("--data", required=True, help="Path to the dataset JSON")
     p_ingest.add_argument("--run-dir", required=True)
     p_ingest.add_argument("--conversations", help="Comma-separated sample_ids (default: all)")
+    p_ingest.add_argument(
+        "--sample-per-type",
+        type=int,
+        default=None,
+        help="longmemeval 전용: 유형별 결정론적 샘플 수 (전체 500문항 비용 제어)",
+    )
     p_ingest.add_argument("--workers", type=int, default=4)
     p_ingest.add_argument("--writer-model", default=None, help="Extraction LLM (default: production model)")
     p_ingest.add_argument(
@@ -45,6 +58,17 @@ def main() -> None:
     p_answer.add_argument("--workers", type=int, default=8)
     p_answer.add_argument("--model", default=None, help="Answer LLM")
     p_answer.add_argument(
+        "--answer-style",
+        choices=["bench", "production"],
+        default="bench",
+        help="bench=슬림 QA 프롬프트(진단축), production=실제 레이 프롬프트(제품축, longmemeval 전용)",
+    )
+    p_answer.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="검색 없이 답변 (오염 검사 ablation — 기억 없이 점수가 나오면 암기 신호)",
+    )
+    p_answer.add_argument(
         "--half-life-days",
         type=float,
         default=None,
@@ -54,7 +78,13 @@ def main() -> None:
     p_score = sub.add_parser("score", help="Judge answers, attribute failures, write scores.json")
     p_score.add_argument("--run-dir", required=True)
     p_score.add_argument("--workers", type=int, default=8)
-    p_score.add_argument("--judge-model", default=None, help="Judge LLM")
+    p_score.add_argument(
+        "--judge-style",
+        choices=["ray", "official-lme"],
+        default=None,
+        help="채점 방식 (default: 데이터셋별 — locomo는 ray, longmemeval은 official-lme)",
+    )
+    p_score.add_argument("--judge-model", default=None, help="Judge LLM (default: 스타일별 기본값)")
 
     args = parser.parse_args()
 
@@ -71,7 +101,9 @@ def main() -> None:
         ingest_run(
             data_path=args.data,
             run_dir=run_dir,
+            dataset=args.dataset,
             sample_ids=_parse_sample_ids(args.conversations),
+            per_type=args.sample_per_type,
             workers=args.workers,
             writer_model=args.writer_model or DEFAULT_WRITER_MODEL,
             episode_prompt_file=args.episode_prompt_file,
@@ -87,15 +119,17 @@ def main() -> None:
             workers=args.workers,
             answer_model=args.model or DEFAULT_ANSWER_MODEL,
             half_life_days=args.half_life_days,
+            answer_style=args.answer_style,
+            no_memory=args.no_memory,
         )
     elif args.command == "score":
-        from evaluation.memory_bench.common import DEFAULT_JUDGE_MODEL
         from evaluation.memory_bench.score import format_summary, score_run
 
         scores = score_run(
             run_dir=run_dir,
             workers=args.workers,
-            judge_model=args.judge_model or DEFAULT_JUDGE_MODEL,
+            judge_model=args.judge_model,
+            judge_style=args.judge_style,
         )
         print()
         print(format_summary(scores))
