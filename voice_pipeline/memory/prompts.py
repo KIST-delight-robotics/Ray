@@ -156,19 +156,22 @@ Session date: {session_date}
 def build_episode_extraction_messages(
     utterances: list[tuple[str, str, str, int]],
     session_date: str,
+    system_prompt: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build messages for episode extraction LLM call.
 
     Args:
         utterances: List of (role, text, timestamp, token_count) tuples.
         session_date: Session date string for context.
+        system_prompt: 추출 시스템 프롬프트 오버라이드 (중립 주입점 — 평가에서
+            프롬프트 변형 실험용). ``None``이면 기본 프롬프트.
 
     Returns:
         Messages list with system + user message.
     """
     transcript = _format_transcript(utterances)
     return [
-        {"role": "system", "content": _EPISODE_SYSTEM},
+        {"role": "system", "content": system_prompt or _EPISODE_SYSTEM},
         {
             "role": "user",
             "content": _EPISODE_USER_TEMPLATE.format(

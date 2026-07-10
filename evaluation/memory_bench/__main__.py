@@ -32,6 +32,11 @@ def main() -> None:
     p_ingest.add_argument("--conversations", help="Comma-separated sample_ids (default: all)")
     p_ingest.add_argument("--workers", type=int, default=4)
     p_ingest.add_argument("--writer-model", default=None, help="Extraction LLM (default: production model)")
+    p_ingest.add_argument(
+        "--episode-prompt-file",
+        default=None,
+        help="Experimental episode-extraction system prompt file (default: production prompt)",
+    )
 
     p_answer = sub.add_parser("answer", help="Retrieve memories and answer benchmark questions")
     p_answer.add_argument("--run-dir", required=True)
@@ -69,6 +74,7 @@ def main() -> None:
             sample_ids=_parse_sample_ids(args.conversations),
             workers=args.workers,
             writer_model=args.writer_model or DEFAULT_WRITER_MODEL,
+            episode_prompt_file=args.episode_prompt_file,
         )
     elif args.command == "answer":
         from evaluation.memory_bench.answer import answer_run

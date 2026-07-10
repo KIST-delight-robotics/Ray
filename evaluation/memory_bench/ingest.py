@@ -59,6 +59,7 @@ def ingest_run(
     sample_ids: list[str] | None = None,
     workers: int = 4,
     writer_model: str = DEFAULT_WRITER_MODEL,
+    episode_prompt_file: str | None = None,
 ) -> None:
     """Run the ingest phase for all (conversation, perspective) units.
 
@@ -68,10 +69,14 @@ def ingest_run(
         sample_ids: 지정 시 해당 대화만 인제스트.
         workers: Concurrent (conversation, perspective) units.
         writer_model: LLM for episode/profile extraction.
+        episode_prompt_file: 에피소드 추출 시스템 프롬프트 변형 파일 (실험용).
+            ``None``이면 프로덕션 프롬프트. 적용된 전문은 config에 기록된다.
     """
     conversations = load_locomo(data_path, sample_ids)
     if not conversations:
         raise ValueError(f"No conversations matched {sample_ids!r} in {data_path}")
+
+    episode_prompt = Path(episode_prompt_file).read_text().strip() if episode_prompt_file else None
 
     (run_dir / DBS_DIRNAME).mkdir(parents=True, exist_ok=True)
 
@@ -83,7 +88,7 @@ def ingest_run(
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(_ingest_unit, conv, speaker, run_dir, embedder, token_counter, writer_model): (
+            pool.submit(_ingest_unit, conv, speaker, run_dir, embedder, token_counter, writer_model, episode_prompt): (
                 conv.sample_id,
                 speaker,
             )
@@ -101,6 +106,8 @@ def ingest_run(
             "writer_model": writer_model,
             "embedder": "all-MiniLM-L6-v2 (local)",
             "sample_ids": [c.sample_id for c in conversations],
+            "episode_prompt_file": episode_prompt_file,
+            "episode_prompt": episode_prompt,  # None = 프로덕션 기본 프롬프트
             "retriever_constants": {n: getattr(MemoryRetriever, n) for n in _RETRIEVER_CONSTANT_NAMES},
             "writer_constants": {n: getattr(MemoryWriter, n) for n in _WRITER_CONSTANT_NAMES},
             "completed_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
@@ -115,6 +122,7 @@ def _ingest_unit(
     embedder: IEmbedder,
     token_counter: TokenCounter,
     writer_model: str,
+    episode_prompt: str | None,
 ) -> int:
     """Ingest one conversation from one speaker's perspective. Returns episode count."""
     storage = SQLiteMemoryStorage(str(db_path(run_dir, conv.sample_id, user_speaker)))
@@ -125,7 +133,7 @@ def _ingest_unit(
             vector_index.load(ids, vectors)
 
         llm = OpenAILLM(model=writer_model, temperature=0.0, reasoning_effort=None, max_tokens=4096, tools=[])
-        writer = MemoryWriter(storage, vector_index, embedder, llm, token_counter)
+        writer = MemoryWriter(storage, vector_index, embedder, llm, token_counter, episode_system_prompt=episode_prompt)
 
         session_ids = [session_db_id(conv.sample_id, s.index) for s in conv.sessions]
         processed = storage.get_processed_session_ids(session_ids)

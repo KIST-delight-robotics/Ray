@@ -53,12 +53,26 @@ class MemoryWriter:
         embedder: IEmbedder,
         llm: ILLM,
         token_counter: TokenCounter,
+        *,
+        episode_system_prompt: str | None = None,
     ) -> None:
+        """
+        Args:
+            storage: Episode/profile persistence backend.
+            vector_index: Vector index updated with new episode embeddings.
+            embedder: Episode embedder.
+            llm: Extraction LLM.
+            token_counter: Token counter for windowing and profile budgets.
+            episode_system_prompt: 에피소드 추출 시스템 프롬프트 오버라이드
+                (중립 주입점 — 평가에서 프롬프트 변형 실험용). ``None``이면
+                기본 프롬프트.
+        """
         self._storage = storage
         self._vector_index = vector_index
         self._embedder = embedder
         self._llm = llm
         self._token_counter = token_counter
+        self._episode_system_prompt = episode_system_prompt
         self._profile_schema_text = format_profile_schema()
 
     def process_session(self, session_id: str, session_timestamp: str) -> list[Episode]:
@@ -169,7 +183,9 @@ class MemoryWriter:
     ) -> list[Episode]:
         """Extract episodes from a single window of utterances."""
         session_date = session_timestamp[:10]  # YYYY-MM-DD
-        messages = build_episode_extraction_messages(utterances, session_date)
+        messages = build_episode_extraction_messages(
+            utterances, session_date, system_prompt=self._episode_system_prompt
+        )
 
         text = self._call_llm(messages, EPISODE_EXTRACTION_SCHEMA)
         if text is None:

@@ -627,3 +627,35 @@ class TestErrorHandling:
 
         assert len(episodes) == 1
         assert storage.get_episode(episodes[0].id) is not None
+
+
+class TestEpisodePromptOverride:
+    """episode_system_prompt 주입점 (평가에서 프롬프트 변형 실험용)."""
+
+    def test_override_replaces_system_prompt(self) -> None:
+        st = InMemoryMemoryStorage(dimension=_DIM)
+        llm = FakeLLM(['{"episodes": []}'])
+        writer = MemoryWriter(
+            st,
+            NumpyVectorIndex(),
+            FakeEmbedder(),
+            llm,
+            lambda text: len(text.split()),
+            episode_system_prompt="CUSTOM EXTRACTION PROMPT",
+        )
+        _add_utterances(st)
+
+        writer.process_session(_SESSION_ID, _TIMESTAMP)
+
+        assert llm.messages_log[0][0]["role"] == "system"
+        assert llm.messages_log[0][0]["content"] == "CUSTOM EXTRACTION PROMPT"
+
+    def test_default_prompt_used_when_not_overridden(self) -> None:
+        from voice_pipeline.memory.prompts import _EPISODE_SYSTEM
+
+        writer, storage, _, llm = _make_writer(['{"episodes": []}'])
+        _add_utterances(storage)
+
+        writer.process_session(_SESSION_ID, _TIMESTAMP)
+
+        assert llm.messages_log[0][0]["content"] == _EPISODE_SYSTEM
