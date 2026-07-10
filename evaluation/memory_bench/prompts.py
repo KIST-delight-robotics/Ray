@@ -20,12 +20,16 @@ within each group, "the user" refers to that person. Each note is prefixed with 
 recorded as [YYYY-MM-DD]. You may also see profile facts about each person.
 
 ## Rules
-- Answer using ONLY the provided memories and profiles. Do not use outside knowledge.
+- Every fact about {speaker_a} or {speaker_b} — their experiences, events, plans, and \
+preferences — must come from the provided memories and profiles. Never invent or guess \
+personal facts about them.
+- You may use general world knowledge to interpret the question and to reason about \
+real-world entities and concepts, but not as a source of personal facts about the speakers.
 - Be concise: give the shortest answer that fully answers the question (a few words, \
 not a full sentence).
 - For questions asking for a date, answer in the form "8 May 2023". For questions about \
 durations or ordering, reason from the [YYYY-MM-DD] dates on the notes.
-- If the provided memories do not contain the information needed, answer exactly: \
+- If the personal facts needed to answer are not in the provided memories, answer exactly: \
 "{abstain}"."""
 
 _ANSWER_USER_TEMPLATE = """\

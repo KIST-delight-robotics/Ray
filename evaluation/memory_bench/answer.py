@@ -28,7 +28,12 @@ from evaluation.memory_bench.common import (
     update_config,
 )
 from evaluation.memory_bench.dataset import Conversation, QAItem, load_locomo
-from evaluation.memory_bench.prompts import build_answer_messages, format_memories, format_profile
+from evaluation.memory_bench.prompts import (
+    _ANSWER_SYSTEM,
+    build_answer_messages,
+    format_memories,
+    format_profile,
+)
 from voice_pipeline.core.interfaces import IEmbedder
 from voice_pipeline.embedding.embedder import create_embedder
 from voice_pipeline.llm.llm import OpenAILLM
@@ -125,6 +130,7 @@ def answer_run(
         {
             "answer_model": answer_model,
             "recency_half_life_days": MemoryRetriever._RECENCY_HALF_LIFE_DAYS,
+            "answer_system_prompt": _ANSWER_SYSTEM,  # 적용 시점의 템플릿 전문 (재현용)
             "answered_this_run": total,
             "completed_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
         },
