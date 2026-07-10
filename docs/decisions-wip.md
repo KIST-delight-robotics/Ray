@@ -65,6 +65,8 @@
 - **질문당 새 MemoryRetriever**: retained buffer가 세션(대화) 스코프 상태라 재사용하면 직전 질문의 검색 결과가 다음 질문 컨텍스트를 오염시킨다. `update_citations()` 미호출로 DB는 읽기 전용 유지.
 - **3단계 분리 (ingest/answer/score)**: 비용이 인제스트(LLM 추출)에 집중되므로 DB 스냅샷·answers.jsonl·judgements.jsonl을 남겨 — retriever 상수 실험은 answer부터, judge/집계 변경은 score만 재실행. 각 단계는 처리 완료 키를 확인해 자연 resume.
 - **헤드라인 = adversarial 제외 judge 정확도**: Mem0 등 기존 발표 수치와 비교 가능하도록 관례를 따름. adversarial은 abstention 지시("Not mentioned in the conversation")를 넣고 별도 리포트. 채점의 실질 가치는 점수보다 오답의 실패 귀속(추출/검색/생성) — LoCoMo evidence 주석으로 세션 단위 recall을 계산해 튜닝 근거를 뽑는 것.
+- **파일럿(conv-26) 결과: recency decay가 검색 병목**: 질문 근거는 19개 세션에 고르게 분포하는데 반감기 30일 감쇠로 5개월 전 에피소드의 salience가 최근 대비 ~2%가 되어 검색이 후반 세션에 쏠렸다(초반 6세션 검색 비율 1.4%, 헤드라인 22.4%). 반감기를 사실상 무감쇠로 오버라이드하고 answer만 재실행하자 검색 귀속 실패 52→11건, single-hop +10pp, 초반 세션 검색 28.4%. 상수 실험이 반복될 것이라 `answer --half-life-days` 옵션으로 상설화 (인제스트 재사용, 재실험 ~2분).
+- **다음 병목은 추출 디테일 손실**: decay를 꺼도 헤드라인이 26.3%에 그친 이유 — evidence 세션의 에피소드가 검색까지 돼도 본문에 질문의 구체 사실이 없는 경우가 지배적 (에피소드 "self-care가 중요함을 깨달음" vs 정답 "me-time에 달리기·독서·바이올린"). 추출 프롬프트의 "Be selective" + 1–3문장 추상 내러티브 방침의 트레이드오프로, 친구 컨셉의 의도일 수 있으나 구체 회상도 친구다움의 일부라는 반론 여지. 현재 귀속 로직의 generation 버킷은 세션 단위 프록시라 이 손실과 순수 생성 실패를 구분하지 못한다. temporal(8.1%)은 무감쇠에서도 불변 — decay가 아니라 날짜 추론 자체가 병목.
 
 ## 차후 고려
 

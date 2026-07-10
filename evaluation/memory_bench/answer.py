@@ -61,16 +61,26 @@ def answer_run(
     sample_ids: list[str] | None = None,
     workers: int = 8,
     answer_model: str = DEFAULT_ANSWER_MODEL,
+    half_life_days: float | None = None,
 ) -> None:
     """Answer all benchmark questions using the ingested memory DBs.
 
     이미 ``answers.jsonl``에 있는 (sample_id, qa_index)는 건너뛴다 (resume).
+
+    Args:
+        half_life_days: 실험용 recency decay 반감기 오버라이드. 프로세스 전역
+            클래스 변수를 바꾸므로 벤치 프로세스 안에서만 사용할 것. 적용값은
+            config의 answer 섹션에 기록된다.
     """
     config = load_config(run_dir)
     if data_path is None:
         data_path = config.get("ingest", {}).get("data_path")
         if not data_path:
             raise ValueError("data_path not given and not found in config.json — run ingest first")
+
+    if half_life_days is not None:
+        MemoryRetriever._RECENCY_HALF_LIFE_DAYS = half_life_days
+        logger.info("Recency half-life overridden to %.1f days", half_life_days)
 
     conversations = load_locomo(data_path, sample_ids)
     done = {(r["sample_id"], r["qa_index"]) for r in read_answers(run_dir)}
@@ -114,6 +124,7 @@ def answer_run(
         "answer",
         {
             "answer_model": answer_model,
+            "recency_half_life_days": MemoryRetriever._RECENCY_HALF_LIFE_DAYS,
             "answered_this_run": total,
             "completed_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
         },

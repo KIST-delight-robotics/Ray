@@ -39,6 +39,12 @@ def main() -> None:
     p_answer.add_argument("--conversations", help="Comma-separated sample_ids (default: all)")
     p_answer.add_argument("--workers", type=int, default=8)
     p_answer.add_argument("--model", default=None, help="Answer LLM")
+    p_answer.add_argument(
+        "--half-life-days",
+        type=float,
+        default=None,
+        help="Experimental override for the retriever recency-decay half-life (default: production value)",
+    )
 
     p_score = sub.add_parser("score", help="Judge answers, attribute failures, write scores.json")
     p_score.add_argument("--run-dir", required=True)
@@ -74,6 +80,7 @@ def main() -> None:
             sample_ids=_parse_sample_ids(args.conversations),
             workers=args.workers,
             answer_model=args.model or DEFAULT_ANSWER_MODEL,
+            half_life_days=args.half_life_days,
         )
     elif args.command == "score":
         from evaluation.memory_bench.common import DEFAULT_JUDGE_MODEL
