@@ -57,6 +57,15 @@
 - **요약 스레드는 daemon 단발 Thread**: single-flight(동시 1개)라 executor가 불필요하고, non-daemon executor 스레드는 프로세스 종료를 in-flight LLM 호출(최대 30초)만큼 블로킹한다. 세션 정리는 ThreadedTurnGPT와 같은 패턴(wiring `stop_threaded`에서 다음 세션 생성 시 close).
 
 
+## LoCoMo 벤치 하네스 — 프로덕션 메모리 파이프라인 무수정 측정
+
+- **듀얼 인제스트 (대화당 관점별 DB 2개)**: LoCoMo는 user–user 대화인데 에피소드/프로필 추출 프롬프트는 user 중심("Extract from USER utterances only")이라, 한 화자만 user로 매핑하면 상대 화자 기억이 통째로 빠져 점수가 검색 품질이 아닌 매핑 손실을 측정하게 된다. 벤치용 2인 추출 프롬프트를 주입하는 대안은 "배포된 시스템의 점수"라는 주장을 약화시켜 기각 — 같은 대화를 A/B 각각 user 관점으로 두 번 인제스트하고 QA 때 양쪽 DB 검색을 병합. 인제스트 비용 2배는 gpt-4o-mini 기준 무시 가능.
+- **`now_fn` 주입 (프로덕션 유일 변경)**: retriever의 recency decay(반감기 30일)가 `datetime.now()` 기준이라 과거(2023년) 대화의 에피소드는 salience가 사실상 0이 된다. 날짜를 현재로 평행이동하는 대안은 temporal 카테고리 정답이 절대 날짜("8 May 2023")를 참조해서 불가 → "현재"를 마지막 세션 다음 날로 고정하는 clock 주입점을 추가 (wiring의 중립 주입점 규율에 부합).
+- **에피소드 날짜는 QA 컨텍스트에서 렌더링**: 추출 프롬프트가 에피소드 본문에 날짜 포함을 금지하므로 temporal 질문의 유일한 단서는 `Episode.timestamp` — 벤치 QA 컨텍스트에서 `[YYYY-MM-DD]` prefix로 렌더링하고, 순서도 검색 랭킹 대신 시간순으로 배치 (temporal 추론 보조).
+- **질문당 새 MemoryRetriever**: retained buffer가 세션(대화) 스코프 상태라 재사용하면 직전 질문의 검색 결과가 다음 질문 컨텍스트를 오염시킨다. `update_citations()` 미호출로 DB는 읽기 전용 유지.
+- **3단계 분리 (ingest/answer/score)**: 비용이 인제스트(LLM 추출)에 집중되므로 DB 스냅샷·answers.jsonl·judgements.jsonl을 남겨 — retriever 상수 실험은 answer부터, judge/집계 변경은 score만 재실행. 각 단계는 처리 완료 키를 확인해 자연 resume.
+- **헤드라인 = adversarial 제외 judge 정확도**: Mem0 등 기존 발표 수치와 비교 가능하도록 관례를 따름. adversarial은 abstention 지시("Not mentioned in the conversation")를 넣고 별도 리포트. 채점의 실질 가치는 점수보다 오답의 실패 귀속(추출/검색/생성) — LoCoMo evidence 주석으로 세션 단위 recall을 계산해 튜닝 근거를 뽑는 것.
+
 ## 차후 고려
 
 - **음악 댄스 메인 로봇 통합**: `music_dance/`는 현재 독립 실행(시리얼 포트 단독 점유). 메인 로봇의 한 모드로 통합 시 분석 코어(analyzer/timeline) 재사용 전제. 실시간(마이크) 입력이 필요해지면 HPSS(lookahead 필요) 재설계.

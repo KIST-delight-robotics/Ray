@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -51,10 +52,22 @@ class MemoryRetriever(IMemoryRetriever):
         storage: IMemoryStorage,
         vector_index: IVectorIndex,
         embedder: IEmbedder,
+        *,
+        now_fn: Callable[[], datetime] | None = None,
     ) -> None:
+        """
+        Args:
+            storage: Episode/profile persistence backend.
+            vector_index: Vector search index over episode embeddings.
+            embedder: Query embedder.
+            now_fn: Clock override for recency decay (중립 주입점 — 과거 시점
+                대화를 다루는 평가에서 "현재"를 고정할 때 사용). ``None``이면
+                ``datetime.now(UTC)``.
+        """
         self._storage = storage
         self._vector_index = vector_index
         self._embedder = embedder
+        self._now_fn: Callable[[], datetime] = now_fn or (lambda: datetime.now(UTC))
 
         self._retained: dict[int, _RetainedEntry] = {}
         self._last_index_to_id: dict[int, int] = {}
@@ -64,7 +77,7 @@ class MemoryRetriever(IMemoryRetriever):
     # ------------------------------------------------------------------
 
     def retrieve(self, query: str, exclude_session_ids: set[str]) -> MemoryReadResult:
-        now = datetime.now(UTC)
+        now = self._now_fn()
 
         # 1. Embed query
         try:
@@ -159,7 +172,7 @@ class MemoryRetriever(IMemoryRetriever):
         if not cited_indices:
             return
 
-        now_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        now_str = self._now_fn().strftime("%Y-%m-%d %H:%M:%S")
 
         for idx in cited_indices:
             eid = self._last_index_to_id.get(idx)

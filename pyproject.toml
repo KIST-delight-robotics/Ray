@@ -51,7 +51,7 @@ ray = "voice_pipeline.__main__:main"
 include = ["voice_pipeline*", "evaluation*"]
 
 [tool.pytest.ini_options]
-testpaths = ["voice_pipeline/tests"]
+testpaths = ["voice_pipeline/tests", "evaluation/tests"]
 addopts = "-m 'not requires_model and not requires_api'"
 markers = [
     "requires_model: tests requiring real model files",
