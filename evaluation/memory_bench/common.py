@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import re
 import threading
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from voice_pipeline.core.interfaces import IEmbedder
+from voice_pipeline.core.interfaces import ILLM, IEmbedder
+from voice_pipeline.core.types import LLMResult, LLMStream
 
 CONFIG_FILENAME = "config.json"
 ANSWERS_FILENAME = "answers.jsonl"
@@ -106,3 +108,58 @@ class LockedEmbedder(IEmbedder):
     @property
     def model_name(self) -> str:
         return self._inner.model_name
+
+
+class UsageTrackingLLM(ILLM):
+    """Delegate ILLM that accumulates token usage across calls (thread-safe).
+
+    벤치 각 단계(ingest/answer/score)의 LLM을 감싸 응답 usage(input/output/
+    cached 토큰)를 합산한다. 합계는 run config의 해당 단계 섹션에 기록된다.
+    스트림을 끝까지 소비한 호출만 집계된다 (벤치는 항상 완주).
+    """
+
+    def __init__(self, inner: ILLM) -> None:
+        self._inner = inner
+        self._lock = threading.Lock()
+        self.calls = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cached_tokens = 0
+        self.missing_usage = 0  # usage가 응답에 없던 호출 수
+
+    def generate(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMStream:
+        """Delegate to the inner LLM and record usage after full iteration."""
+        stream = self._inner.generate(messages, tools=tools, response_format=response_format)
+
+        def gen() -> Generator[str, None, None]:
+            yield from stream
+            self._record(stream.result)
+
+        return LLMStream(gen(), close_fn=stream.close, result_fn=lambda _text: stream.result)
+
+    def _record(self, result: LLMResult) -> None:
+        with self._lock:
+            self.calls += 1
+            metrics = result.metrics
+            if metrics is None:
+                self.missing_usage += 1
+                return
+            self.input_tokens += metrics.usage.input_tokens
+            self.output_tokens += metrics.usage.output_tokens
+            self.cached_tokens += metrics.usage.cached_tokens
+
+    def summary(self) -> dict[str, int]:
+        """Accumulated usage totals (config 기록용)."""
+        with self._lock:
+            return {
+                "calls": self.calls,
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "cached_tokens": self.cached_tokens,
+                "missing_usage": self.missing_usage,
+            }

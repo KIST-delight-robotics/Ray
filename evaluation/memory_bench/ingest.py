@@ -19,6 +19,7 @@ from evaluation.memory_bench.common import (
     DBS_DIRNAME,
     DEFAULT_WRITER_MODEL,
     LockedEmbedder,
+    UsageTrackingLLM,
     db_path,
     session_db_id,
     update_config,
@@ -94,27 +95,40 @@ def ingest_run(
 
     embedder = LockedEmbedder(create_embedder(expected_dimension=_DEFAULT_DIMENSION))
     token_counter = create_token_counter(writer_model)
+    llm = UsageTrackingLLM(
+        OpenAILLM(model=writer_model, temperature=0.0, reasoning_effort=None, max_tokens=4096, tools=[])
+    )
 
     units = [(conv, perspective) for conv in conversations for perspective in conv.perspectives]
     logger.info("Ingesting %d conversations (%d units) with %d workers", len(conversations), len(units), workers)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(
-                _ingest_unit, conv, perspective, run_dir, embedder, token_counter, writer_model, episode_prompt
-            ): (conv.sample_id, perspective)
+            pool.submit(_ingest_unit, conv, perspective, run_dir, embedder, token_counter, llm, episode_prompt): (
+                conv.sample_id,
+                perspective,
+            )
             for conv, perspective in units
         }
         for future, (sample_id, perspective) in futures.items():
             episode_count = future.result()
             logger.info("Ingested %s [user=%s]: %d episodes", sample_id, perspective, episode_count)
 
+    usage = llm.summary()
+    logger.info(
+        "Ingest LLM usage: %d calls, in=%d out=%d cached=%d",
+        usage["calls"],
+        usage["input_tokens"],
+        usage["output_tokens"],
+        usage["cached_tokens"],
+    )
     update_config(
         run_dir,
         "ingest",
         {
             "dataset": dataset,
             "data_path": str(data_path),
+            "usage": usage,
             "writer_model": writer_model,
             "embedder": "all-MiniLM-L6-v2 (local)",
             "sample_ids": [c.sample_id for c in conversations],
@@ -133,7 +147,7 @@ def _ingest_unit(
     run_dir: Path,
     embedder: IEmbedder,
     token_counter: TokenCounter,
-    writer_model: str,
+    llm: UsageTrackingLLM,
     episode_prompt: str | None,
 ) -> int:
     """Ingest one conversation from one perspective. Returns episode count."""
@@ -144,7 +158,6 @@ def _ingest_unit(
         if ids:
             vector_index.load(ids, vectors)
 
-        llm = OpenAILLM(model=writer_model, temperature=0.0, reasoning_effort=None, max_tokens=4096, tools=[])
         writer = MemoryWriter(storage, vector_index, embedder, llm, token_counter, episode_system_prompt=episode_prompt)
 
         session_ids = [session_db_id(conv.sample_id, s.index) for s in conv.sessions]

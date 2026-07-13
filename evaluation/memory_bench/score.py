@@ -23,6 +23,7 @@ from typing import Any
 from evaluation.memory_bench.common import (
     DEFAULT_JUDGE_MODEL,
     JsonlWriter,
+    UsageTrackingLLM,
     db_path,
     load_config,
     read_answers,
@@ -31,6 +32,7 @@ from evaluation.memory_bench.common import (
 from evaluation.memory_bench.datasets import longmemeval as lme
 from evaluation.memory_bench.datasets.locomo import CATEGORY_NAMES
 from evaluation.memory_bench.prompts import JUDGE_SCHEMA, build_judge_messages, gold_display
+from voice_pipeline.core.interfaces import ILLM
 from voice_pipeline.llm.llm import OpenAILLM
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 
@@ -144,7 +146,7 @@ def _sessions_with_episodes(run_dir: Path, sample_id: str, perspectives: list[st
 # ---------------------------------------------------------------------------
 
 
-def _judge_one(llm: OpenAILLM, record: dict[str, Any], judge_style: str) -> str:
+def _judge_one(llm: ILLM, record: dict[str, Any], judge_style: str) -> str:
     """Return ``"CORRECT"``/``"WRONG"``, or ``"ERROR"`` on judge failure."""
     adversarial = _is_adversarial(record)
     try:
@@ -215,9 +217,12 @@ def score_run(
                         existing[(j["sample_id"], j["qa_index"])] = j["label"]
 
     pending = [r for r in records if (r["sample_id"], r["qa_index"]) not in existing]
+    usage: dict[str, int] | None = None
     if pending:
         logger.info("Judging %d answers (%d cached) with %s", len(pending), len(existing), judge_model)
-        llm = OpenAILLM(model=judge_model, temperature=0.0, reasoning_effort=None, max_tokens=128, tools=[])
+        llm = UsageTrackingLLM(
+            OpenAILLM(model=judge_model, temperature=0.0, reasoning_effort=None, max_tokens=128, tools=[])
+        )
         writer = JsonlWriter(judgements_path)
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(_judge_one, llm, r, judge_style): r for r in pending}
@@ -226,6 +231,14 @@ def score_run(
                 writer.append({"sample_id": record["sample_id"], "qa_index": record["qa_index"], "label": label})
                 if label != "ERROR":
                     existing[(record["sample_id"], record["qa_index"])] = label
+        usage = llm.summary()
+        logger.info(
+            "Judge LLM usage: %d calls, in=%d out=%d cached=%d",
+            usage["calls"],
+            usage["input_tokens"],
+            usage["output_tokens"],
+            usage["cached_tokens"],
+        )
 
     # 대화별로 evidence 세션의 에피소드 존재 여부를 한 번에 조회.
     evidence_by_sample: dict[str, set[str]] = defaultdict(set)
@@ -247,6 +260,7 @@ def score_run(
         {
             "judge_model": judge_model,
             "judge_style": judge_style,
+            "usage": usage,  # None = 전부 캐시 재사용 (judge 호출 없음)
             "completed_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
         },
     )

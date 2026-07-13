@@ -24,6 +24,7 @@ from evaluation.memory_bench.common import (
     DEFAULT_ANSWER_MODEL,
     JsonlWriter,
     LockedEmbedder,
+    UsageTrackingLLM,
     db_path,
     load_config,
     read_answers,
@@ -38,7 +39,7 @@ from evaluation.memory_bench.production_answer import (
 )
 from evaluation.memory_bench.prompts import format_memories, format_profile
 from evaluation.memory_bench.types import TIMESTAMP_FORMAT, Conversation, QAItem
-from voice_pipeline.core.interfaces import IEmbedder
+from voice_pipeline.core.interfaces import ILLM, IEmbedder
 from voice_pipeline.embedding.embedder import create_embedder
 from voice_pipeline.llm.llm import OpenAILLM
 from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
@@ -117,7 +118,9 @@ def answer_run(
 
     embedder = LockedEmbedder(create_embedder(expected_dimension=_DEFAULT_DIMENSION))
     max_tokens = PRODUCTION_MAX_TOKENS if answer_style == "production" else 128
-    llm = OpenAILLM(model=answer_model, temperature=0.0, reasoning_effort=None, max_tokens=max_tokens, tools=[])
+    llm = UsageTrackingLLM(
+        OpenAILLM(model=answer_model, temperature=0.0, reasoning_effort=None, max_tokens=max_tokens, tools=[])
+    )
     writer = JsonlWriter(run_dir / ANSWERS_FILENAME)
 
     total = 0
@@ -161,6 +164,14 @@ def answer_run(
             for p in perspectives:
                 p.close()
 
+    usage = llm.summary()
+    logger.info(
+        "Answer LLM usage: %d calls, in=%d out=%d cached=%d",
+        usage["calls"],
+        usage["input_tokens"],
+        usage["output_tokens"],
+        usage["cached_tokens"],
+    )
     update_config(
         run_dir,
         "answer",
@@ -168,6 +179,7 @@ def answer_run(
             "answer_model": answer_model,
             "answer_style": answer_style,
             "no_memory": no_memory,
+            "usage": usage,
             "recency_half_life_days": MemoryRetriever._RECENCY_HALF_LIFE_DAYS,
             # 적용 시점의 프롬프트 전문 (재현용)
             "answer_system_prompt": (
@@ -185,7 +197,7 @@ def _answer_one(
     qa: QAItem,
     perspectives: list[_Perspective],
     embedder: IEmbedder,
-    llm: OpenAILLM,
+    llm: ILLM,
     build_messages: AnswerBuilder,
     answer_style: str,
     fallback_now: datetime,
