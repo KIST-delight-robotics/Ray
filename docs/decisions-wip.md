@@ -80,6 +80,8 @@
 - **제품축 답변 스타일 추가**: `--answer-style production` — 실제 레이 프롬프트(DEFAULT_SYSTEM_PROMPT)와 프로덕션 포매터(Block 1/2/4 조립, 인용 태그 파싱)를 그대로 재사용해 "같은 기억으로 실제 레이라면 몇 점"을 잰다. 규칙 0개인데 슬림 벤치 프롬프트와 대등(42%) — 진단축(슬림)/제품축(production) 병행의 근거. LoCoMo는 레이가 대화 참여자가 아니라 비적용.
 - **no-memory ablation = 오염 검사**: 검색·프로필 없이 답하게 하면 0/12, CORRECT 0건 — 점수 전부가 기억에서 나옴을 확인. 벤치 공개 이후 컷오프 모델(gpt-5.4-mini 등)로 답변자를 바꿀 때마다 이 ablation을 다시 볼 것.
 - **oracle 파일럿의 추출 축 발견**: temporal(두 사건 간 날짜 계산)·multi-session(횟수·금액 집계)·single-session-assistant는 어떤 프롬프트로도 0점. oracle은 검색 난이도가 0이므로 추출 단계 문제로 확정 — 구체 수치 손실(LoCoMo와 동일 병목) + assistant 발화 미추출. 후자는 제품 관점의 발견: "레이가 말해준 내용"을 레이가 기억하지 못한다.
+- **oracle 전체 500문항 (수정 전 베이스라인)**: 헤드라인 46.8%(n=470) — 검색 무결 조건이므로 "추출+답변 축의 상한". 유형별: single-session-user 76.6 / knowledge-update 69.4 / temporal 44.1 / multi-session 38.8 / preference 30.0 / assistant 16.1, abstention 27/30(90%). 파일럿(n=2)의 이상치들이 정리됨 — knowledge-update의 "최신값 규칙" 삭제 영향은 노이즈였던 것으로 판단, assistant가 정확히 0이 아닌 건 user 발화에 섞여 들어간 정보 덕. 실패 귀속은 generation 버킷이 지배(244/250)인데 oracle 특성상 실체는 추출 디테일 손실 + 답변 단계의 집계·날짜 추론 한계 — 세션 단위 프록시로는 이 둘이 안 갈라진다.
+- **벤치 사용 원칙 — 티어링 (진단 임무 종료)**: decay·추출 디테일·assistant 미추출·temporal 추론·abstention 건전성까지 기억 시스템 수정에 필요한 진단 목록은 확보됐다. 이후 변경마다 전체 런을 돌리지 않는다 — 이터레이션에는 스모크(oracle 유형별 5문항 또는 LoCoMo conv-26, ~$0.2/~5분; +10pp급 효과는 이 규모로 판별됨), 전체 런은 프로덕션 반영 결정 시점의 확정 수치용만. 수정 전 베이스라인 스냅샷: LoCoMo 42.8%(conv-26, v2+no-decay+knowledge 규칙), LME oracle 46.8%/abstention 90%(프로덕션 추출 프롬프트·슬림 답변). 실행 비용 감각: 전체 런 ~6M토큰/~$1.5, 스모크 ~0.2M토큰.
 
 ## 차후 고려
 
