@@ -16,7 +16,7 @@ import time
 
 from voice_pipeline.context.context_builder import _PER_MESSAGE_OVERHEAD_TOKENS
 from voice_pipeline.context.formatters import format_history_summary_block
-from voice_pipeline.core.interfaces import ILLM, ICallStore, IHistorySummarizer
+from voice_pipeline.core.interfaces import ILLM, ICallStore, IHistorySummarizer, IStorageBackend
 from voice_pipeline.core.types import (
     CallRecord,
     HistorySummarySnapshot,
@@ -59,6 +59,7 @@ class HistorySummarizer(IHistorySummarizer):
         *,
         call_store: ICallStore | None = None,
         session_id: str = "",
+        summary_backend: IStorageBackend | None = None,
     ) -> None:
         """Initialize the summarizer.
 
@@ -69,13 +70,17 @@ class HistorySummarizer(IHistorySummarizer):
             history_budget_tokens: ContextBuilder의 히스토리 예산
                 (트리거 판정 기준).
             call_store: 요약 호출 기록 스토어. ``None``이면 기록 안 함.
-            session_id: call record에 남길 세션 ID.
+            session_id: call record 및 요약 영속화에 쓸 세션 ID.
+            summary_backend: 요약 영속화 대상 히스토리 백엔드. 스왑 성공 시
+                다음 세션의 이월(carryover) 로딩을 위해 저장한다.
+                ``None``이면 저장 안 함.
         """
         self._llm = llm
         self._token_counter = token_counter
         self._trigger_tokens = int(history_budget_tokens * self._TRIGGER_RATIO)
         self._call_store = call_store
         self._session_id = session_id
+        self._summary_backend = summary_backend
 
         self._lock = threading.Lock()
         self._snapshot: HistorySummarySnapshot | None = None
@@ -177,6 +182,7 @@ class HistorySummarizer(IHistorySummarizer):
                     token_count=block_tokens,
                     through_turn_id=through_turn_id,
                 )
+            self._persist(summary, through_turn_id)
             logger.info(
                 "History summary updated: through turn %d, block %d tokens",
                 through_turn_id,
@@ -206,6 +212,15 @@ class HistorySummarizer(IHistorySummarizer):
         result = stream.result
         output_tokens = result.metrics.usage.output_tokens if result.metrics is not None else None
         return text.strip(), output_tokens
+
+    def _persist(self, summary: str, through_turn_id: int) -> None:
+        """Persist the summary for next-session carryover. Failure is non-fatal."""
+        if self._summary_backend is None:
+            return
+        try:
+            self._summary_backend.save_rolling_summary(self._session_id, summary, through_turn_id)
+        except Exception:
+            logger.warning("Failed to persist rolling summary", exc_info=True)
 
     def _record_call(self, status: str, elapsed_ms: float) -> None:
         if self._call_store is None:

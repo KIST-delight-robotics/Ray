@@ -45,6 +45,7 @@ from voice_pipeline.core.interfaces import (
     IConversationHistory,
     IMemoryRetriever,
     IMemoryStorage,
+    IStorageBackend,
 )
 from voice_pipeline.core.types import LLMMetrics, TokenCounter
 
@@ -86,6 +87,7 @@ class TextSession:
         retriever: IMemoryRetriever | None = None,
         session_id: str | None = None,
         load_session_context: bool = True,
+        history_backend: IStorageBackend | None = None,
     ) -> None:
         self._llm = llm
         self._history = history
@@ -104,6 +106,7 @@ class TextSession:
                 token_counter,
                 memory_storage=memory_storage,
                 session_id=self._session_id,
+                history_backend=history_backend,
             )
         else:
             profiles = memory_storage.get_all_profiles() if memory_storage else []

@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Any, Literal
 
@@ -27,6 +28,8 @@ class MemoryStorageBackend(IStorageBackend):
 
     def __init__(self) -> None:
         self._sessions: dict[str, dict[str, Any]] = {}
+        # (session_id, summary_text, through_turn_id) — latest session only
+        self._rolling_summary: tuple[str, str, int] | None = None
 
     def create_session(self, session_id: str, started_at: str) -> None:
         """Create a new session record."""
@@ -101,16 +104,42 @@ class MemoryStorageBackend(IStorageBackend):
         """Delete all data for a session."""
         self._sessions.pop(session_id, None)
 
+    def get_latest_session(self, exclude_session_id: str | None = None) -> tuple[str, str] | None:
+        """Return the most recent session that has at least one message."""
+        candidates = [
+            (sid, data["started_at"])
+            for sid, data in self._sessions.items()
+            if sid != exclude_session_id and data["messages"]
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda c: c[1])
+
+    def save_rolling_summary(self, session_id: str, summary_text: str, through_turn_id: int) -> None:
+        """Persist the rolling summary (latest session only)."""
+        self._rolling_summary = (session_id, summary_text, through_turn_id)
+
+    def load_rolling_summary(self, session_id: str) -> tuple[str, int] | None:
+        """Load the rolling summary if it belongs to the given session."""
+        if self._rolling_summary is None or self._rolling_summary[0] != session_id:
+            return None
+        return (self._rolling_summary[1], self._rolling_summary[2])
+
 
 class SQLiteStorageBackend(IStorageBackend):
     """SQLite write-through storage backend.
 
     Uses WAL mode for concurrent read/write safety.
     Graduated corruption recovery: normal open → WAL delete → new DB.
+
+    Thread-safe via an internal lock: ConversationHistory serializes its own
+    calls, but HistorySummarizer persists rolling summaries from its worker
+    thread on the same connection.
     """
 
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
+        self._lock = threading.Lock()
         self._conn = self._open_db(db_path)
         self._create_tables()
 
@@ -177,39 +206,51 @@ class SQLiteStorageBackend(IStorageBackend):
                 created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (session_id, msg_id)
             );
+
+            CREATE TABLE IF NOT EXISTS rolling_summary (
+                id              INTEGER PRIMARY KEY CHECK (id = 1),
+                session_id      TEXT    NOT NULL,
+                summary_text    TEXT    NOT NULL,
+                through_turn_id INTEGER NOT NULL,
+                updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+            );
         """)
 
     def create_session(self, session_id: str, started_at: str) -> None:
         """Create a new session record."""
         try:
-            self._conn.execute(
-                "INSERT INTO sessions (session_id, started_at) VALUES (?, ?)",
-                (session_id, started_at),
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    "INSERT INTO sessions (session_id, started_at) VALUES (?, ?)",
+                    (session_id, started_at),
+                )
+                self._conn.commit()
         except sqlite3.Error:
             logger.warning("Failed to create session %s", session_id, exc_info=True)
 
     def end_session(self, session_id: str, ended_at: str) -> None:
         """Mark session as ended and checkpoint WAL."""
         try:
-            self._conn.execute(
-                "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
-                (ended_at, session_id),
-            )
-            self._conn.commit()
-            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            with self._lock:
+                self._conn.execute(
+                    "UPDATE sessions SET ended_at = ? WHERE session_id = ?",
+                    (ended_at, session_id),
+                )
+                self._conn.commit()
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.Error:
             logger.warning("Failed to end session %s", session_id, exc_info=True)
 
     def load_session(self, session_id: str) -> list[tuple[int, int, dict[str, Any], int]]:
         """Load all messages for a session."""
         try:
-            cursor = self._conn.execute(
-                "SELECT msg_id, turn_id, item_json, token_count FROM messages WHERE session_id = ? ORDER BY msg_id",
-                (session_id,),
-            )
-            return [(row[0], row[1], json.loads(row[2]), row[3]) for row in cursor]
+            with self._lock:
+                cursor = self._conn.execute(
+                    "SELECT msg_id, turn_id, item_json, token_count FROM messages WHERE session_id = ? ORDER BY msg_id",
+                    (session_id,),
+                )
+                rows = cursor.fetchall()
+            return [(row[0], row[1], json.loads(row[2]), row[3]) for row in rows]
         except sqlite3.Error:
             logger.warning("Failed to load session %s", session_id, exc_info=True)
             return []
@@ -217,11 +258,12 @@ class SQLiteStorageBackend(IStorageBackend):
     def load_message(self, session_id: str, msg_id: int) -> tuple[int, int, dict[str, Any], int] | None:
         """Load a single message by ID."""
         try:
-            cursor = self._conn.execute(
-                "SELECT msg_id, turn_id, item_json, token_count FROM messages WHERE session_id = ? AND msg_id = ?",
-                (session_id, msg_id),
-            )
-            row = cursor.fetchone()
+            with self._lock:
+                cursor = self._conn.execute(
+                    "SELECT msg_id, turn_id, item_json, token_count FROM messages WHERE session_id = ? AND msg_id = ?",
+                    (session_id, msg_id),
+                )
+                row = cursor.fetchone()
             if row is None:
                 return None
             return (row[0], row[1], json.loads(row[2]), row[3])
@@ -240,20 +282,21 @@ class SQLiteStorageBackend(IStorageBackend):
     ) -> None:
         """Append a message. Graceful on failure."""
         try:
-            self._conn.execute(
-                "INSERT INTO messages "
-                "(session_id, msg_id, turn_id, item_json, token_count, metrics_json) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    session_id,
-                    msg_id,
-                    turn_id,
-                    json.dumps(item, ensure_ascii=False),
-                    token_count,
-                    metrics_json,
-                ),
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    "INSERT INTO messages "
+                    "(session_id, msg_id, turn_id, item_json, token_count, metrics_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        msg_id,
+                        turn_id,
+                        json.dumps(item, ensure_ascii=False),
+                        token_count,
+                        metrics_json,
+                    ),
+                )
+                self._conn.commit()
         except sqlite3.Error:
             logger.warning(
                 "Failed to append message %d to session %s",
@@ -271,16 +314,17 @@ class SQLiteStorageBackend(IStorageBackend):
     ) -> None:
         """Update an existing message (write-through)."""
         try:
-            self._conn.execute(
-                "UPDATE messages SET item_json = ?, token_count = ? WHERE session_id = ? AND msg_id = ?",
-                (
-                    json.dumps(item, ensure_ascii=False),
-                    token_count,
-                    session_id,
-                    msg_id,
-                ),
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    "UPDATE messages SET item_json = ?, token_count = ? WHERE session_id = ? AND msg_id = ?",
+                    (
+                        json.dumps(item, ensure_ascii=False),
+                        token_count,
+                        session_id,
+                        msg_id,
+                    ),
+                )
+                self._conn.commit()
         except sqlite3.Error:
             logger.warning(
                 "Failed to update message %d in session %s",
@@ -292,16 +336,63 @@ class SQLiteStorageBackend(IStorageBackend):
     def delete_session(self, session_id: str) -> None:
         """Delete all data for a session."""
         try:
-            self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-            self._conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+                self._conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+                self._conn.commit()
         except sqlite3.Error:
             logger.warning("Failed to delete session %s", session_id, exc_info=True)
+
+    def get_latest_session(self, exclude_session_id: str | None = None) -> tuple[str, str] | None:
+        """Return the most recent session that has at least one message."""
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT s.session_id, s.started_at FROM sessions s "
+                    "WHERE s.session_id != COALESCE(?, '') "
+                    "AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.session_id) "
+                    "ORDER BY s.started_at DESC LIMIT 1",
+                    (exclude_session_id,),
+                ).fetchone()
+            return (row[0], row[1]) if row is not None else None
+        except sqlite3.Error:
+            logger.warning("Failed to get latest session", exc_info=True)
+            return None
+
+    def save_rolling_summary(self, session_id: str, summary_text: str, through_turn_id: int) -> None:
+        """Persist the rolling summary (single row — latest session only)."""
+        try:
+            with self._lock:
+                self._conn.execute(
+                    "INSERT INTO rolling_summary (id, session_id, summary_text, through_turn_id, updated_at) "
+                    "VALUES (1, ?, ?, ?, datetime('now')) "
+                    "ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, "
+                    "summary_text = excluded.summary_text, through_turn_id = excluded.through_turn_id, "
+                    "updated_at = excluded.updated_at",
+                    (session_id, summary_text, through_turn_id),
+                )
+                self._conn.commit()
+        except sqlite3.Error:
+            logger.warning("Failed to save rolling summary for session %s", session_id, exc_info=True)
+
+    def load_rolling_summary(self, session_id: str) -> tuple[str, int] | None:
+        """Load the rolling summary if it belongs to the given session."""
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT summary_text, through_turn_id FROM rolling_summary WHERE id = 1 AND session_id = ?",
+                    (session_id,),
+                ).fetchone()
+            return (row[0], row[1]) if row is not None else None
+        except sqlite3.Error:
+            logger.warning("Failed to load rolling summary for session %s", session_id, exc_info=True)
+            return None
 
     def close(self) -> None:
         """Close the database connection."""
         try:
-            self._conn.close()
+            with self._lock:
+                self._conn.close()
         except sqlite3.Error:
             logger.debug("Error closing DB connection", exc_info=True)
 

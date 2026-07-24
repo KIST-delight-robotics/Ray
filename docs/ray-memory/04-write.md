@@ -131,7 +131,7 @@ interaction_style::tone_preference, topic_preference, humor_style
 
 ### 4-5. 사용자 기억 삭제 요청
 
-- 기본: Write 시 대화에서 삭제/수정 요청을 감지하여 처리. 현재 세션 중 지연은 블록 3(대화 히스토리)이 커버
+- 기본: Write 시 대화에서 삭제/수정 요청을 감지하여 처리. 현재 세션 중 지연은 블록 5(대화 히스토리)이 커버
 - 옵션: LLM tool call로 즉시 삭제/플래그 처리
 
 ---

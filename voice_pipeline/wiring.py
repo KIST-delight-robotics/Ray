@@ -157,6 +157,7 @@ class ProcessComponents:
             ContextBuilder._MAX_HISTORY_TOKENS,
             call_store=self.call_store,
             session_id=session_id,
+            summary_backend=self.storage,
         )
         self._prev_summarizers.append(summarizer)
 
@@ -171,6 +172,7 @@ class ProcessComponents:
             retriever=retriever,
             session_id=session_id,
             summarizer=summarizer,
+            history_backend=self.storage,
         )
         session_loop = SessionLoop(
             asr=self.asr,
@@ -212,6 +214,7 @@ class ProcessComponents:
             memory_storage=memory_storage,
             retriever=retriever,
             load_session_context=load_session_context,
+            history_backend=self.storage,
         )
 
 

@@ -72,6 +72,19 @@ def _make_turns(n: int, tokens_each: int = 10) -> list[HistoryTurn]:
     return turns
 
 
+class FakeSummaryBackend:
+    """Records save_rolling_summary calls; optionally raises."""
+
+    def __init__(self) -> None:
+        self.saved: list[tuple[str, str, int]] = []
+        self.error: Exception | None = None
+
+    def save_rolling_summary(self, session_id: str, summary_text: str, through_turn_id: int) -> None:
+        if self.error is not None:
+            raise self.error
+        self.saved.append((session_id, summary_text, through_turn_id))
+
+
 def _make_summarizer(
     llm: FakeLLM,
     monkeypatch: pytest.MonkeyPatch,
@@ -79,6 +92,7 @@ def _make_summarizer(
     budget: int = 100,
     keep_recent: int = 4,
     call_store: InMemoryCallStore | None = None,
+    summary_backend: FakeSummaryBackend | None = None,
 ) -> HistorySummarizer:
     monkeypatch.setattr(HistorySummarizer, "_KEEP_RECENT_TURNS", keep_recent)
     return HistorySummarizer(
@@ -87,6 +101,7 @@ def _make_summarizer(
         budget,
         call_store=call_store,
         session_id="test-session",
+        summary_backend=summary_backend,
     )
 
 
@@ -251,6 +266,49 @@ class TestFailureHandling:
         s.maybe_schedule(_make_turns(10))
         _join(s)
         assert s.snapshot() is None
+
+
+class TestPersistence:
+    def test_summary_persisted_on_swap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        backend = FakeSummaryBackend()
+        llm = FakeLLM(response="Merged summary text.")
+        s = _make_summarizer(llm, monkeypatch, budget=100, keep_recent=4, summary_backend=backend)
+        s.maybe_schedule(_make_turns(10))
+        _join(s)
+
+        assert backend.saved == [("test-session", "Merged summary text.", 5)]
+
+    def test_discarded_result_not_persisted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        backend = FakeSummaryBackend()
+        llm = FakeLLM(output_tokens=HistorySummarizer._HARD_CAP_TOKENS)  # truncated → discarded
+        s = _make_summarizer(llm, monkeypatch, budget=100, keep_recent=4, summary_backend=backend)
+        s.maybe_schedule(_make_turns(10))
+        _join(s)
+
+        assert backend.saved == []
+
+    def test_persist_failure_keeps_snapshot(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        backend = FakeSummaryBackend()
+        backend.error = RuntimeError("disk full")
+        llm = FakeLLM()
+        s = _make_summarizer(llm, monkeypatch, budget=100, keep_recent=4, summary_backend=backend)
+        s.maybe_schedule(_make_turns(10))
+        _join(s)
+
+        # Persistence is best-effort — the in-memory swap must survive
+        assert s.snapshot() is not None
+
+    def test_closed_summarizer_does_not_persist(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        backend = FakeSummaryBackend()
+        llm = FakeLLM()
+        llm.block_event = threading.Event()
+        s = _make_summarizer(llm, monkeypatch, budget=100, keep_recent=4, summary_backend=backend)
+        s.maybe_schedule(_make_turns(10))
+
+        s.close()
+        llm.block_event.set()
+        _join(s)
+        assert backend.saved == []
 
 
 class TestObservability:

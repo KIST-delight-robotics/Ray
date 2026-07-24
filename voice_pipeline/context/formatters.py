@@ -74,31 +74,44 @@ def format_session_summary_block(
     return "\n".join(lines)
 
 
-def format_raw_transcript_block(
-    started_at: str,
-    utterances: list[tuple[str, str, str, int]],
-) -> str:
-    """Format raw utterances as a session block (fallback when no episodes).
+# ---------------------------------------------------------------------------
+# Previous-session carryover
+# ---------------------------------------------------------------------------
 
-    Used for sessions not yet processed by MemoryWriter.
+
+def format_carryover_block(started_at: str, summary_text: str | None = None) -> str:
+    """Header opening the previous session's raw turns carried into context.
 
     Args:
-        started_at: Session start timestamp (UTC, '%Y-%m-%d %H:%M:%S').
-        utterances: List of (role, text, timestamp, token_count) tuples.
+        started_at: Previous session start timestamp (UTC, '%Y-%m-%d %H:%M:%S').
+        summary_text: Persisted rolling summary covering the earlier part of
+            that session, or None if it never summarized.
 
     Output example::
 
-        [2026-03-28 21:30 session]
-        User: What time is it?
-        Ray: It's 9:30.
+        [Previous session — 2026-03-28 21:30]
+        Earlier in that session: User asked about weekend plans; Ray suggested
+        a movie night. ...
     """
     display_time = started_at[:16] if len(started_at) >= 16 else started_at
-    header = f"[{display_time} session]"
-    lines = [header]
-    for role, text, _ts, _tc in utterances:
-        label = "User" if role == "user" else "Ray"
-        lines.append(f"{label}: {text}")
-    return "\n".join(lines)
+    header = f"[Previous session — {display_time}]"
+    if summary_text:
+        return f"{header}\nEarlier in that session: {summary_text}"
+    return header
+
+
+def format_session_boundary(started_at: str) -> str:
+    """Marker separating carried-over previous-session turns from the current session.
+
+    Args:
+        started_at: Current session start timestamp (UTC, '%Y-%m-%d %H:%M:%S').
+
+    Output example::
+
+        [New session — 2026-03-29 09:15]
+    """
+    display_time = started_at[:16] if len(started_at) >= 16 else started_at
+    return f"[New session — {display_time}]"
 
 
 # ---------------------------------------------------------------------------

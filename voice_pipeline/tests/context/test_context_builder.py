@@ -100,7 +100,7 @@ def _set_budgets(
     max_history: int = ContextBuilder._MAX_HISTORY_TOKENS,
     max_memory: int = ContextBuilder._MAX_MEMORY_TOKENS,
     max_profile: int = ContextBuilder._MAX_PROFILE_TOKENS,
-    max_prev: int = ContextBuilder._MAX_PREV_SESSION_TOKENS,
+    max_recent: int = ContextBuilder._MAX_RECENT_SESSIONS_TOKENS,
 ) -> None:
     """Override ContextBuilder token budget class vars for a test.
 
@@ -109,7 +109,7 @@ def _set_budgets(
     monkeypatch.setattr(ContextBuilder, "_MAX_HISTORY_TOKENS", max_history)
     monkeypatch.setattr(ContextBuilder, "_MAX_MEMORY_TOKENS", max_memory)
     monkeypatch.setattr(ContextBuilder, "_MAX_PROFILE_TOKENS", max_profile)
-    monkeypatch.setattr(ContextBuilder, "_MAX_PREV_SESSION_TOKENS", max_prev)
+    monkeypatch.setattr(ContextBuilder, "_MAX_RECENT_SESSIONS_TOKENS", max_recent)
 
 
 class TestContextBuilder:
@@ -353,12 +353,12 @@ def _make_profile(topic: str, sub: str, content: str) -> Profile:
     return Profile(id=1, topic=topic, sub_topic=sub, content=content, updated_at="2026-03-15")
 
 
-def _make_episode(text: str, ts: str = "2026-03-15 14:00:00", eid: int = 1) -> Episode:
+def _make_episode(text: str, ts: str = "2026-03-15 14:00:00", eid: int = 1, sid: str = "s1") -> Episode:
     return Episode(
         id=eid,
         text=text,
         timestamp=ts,
-        session_id="s1",
+        session_id=sid,
         importance=1.0,
         last_cited_at=ts,
     )
@@ -482,15 +482,15 @@ class TestContextBuilderWithMemory:
         # No developer message (profile too large)
         assert all(m.get("role") != "developer" for m in result)
 
-    def test_summary_overflow_drops_later(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """When summaries exceed budget, later ones are dropped."""
+    def test_summary_overflow_keeps_newest(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Soft cap fills newest-first — oldest summaries are dropped."""
         summaries = [
             "[2026-03-26 10:00 session]\n- Old session ep.",
             "[2026-03-27 10:00 session]\n- Mid session ep.",
             "[2026-03-28 10:00 session]\n- Recent session ep.",
         ]
         # Each summary ≈ 7 words + 3 overhead = 10 tokens. Cap at 15 → only 1 fits.
-        _set_budgets(monkeypatch, max_prev=15)
+        _set_budgets(monkeypatch, max_recent=15)
         history = StubHistory()
         cb = ContextBuilder(
             history,
@@ -501,5 +501,284 @@ class TestContextBuilderWithMemory:
         result = cb.build("hi")
         dev_msgs = [m for m in result if m.get("role") == "developer"]
         assert len(dev_msgs) == 1
-        # First summary (oldest) is included
-        assert "2026-03-26" in dev_msgs[0]["content"]
+        # Newest summary survives the cap
+        assert "2026-03-28" in dev_msgs[0]["content"]
+
+    def test_summaries_displayed_chronologically(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Within the cap, summaries appear oldest-first."""
+        summaries = [
+            "[2026-03-26 10:00 session]\n- Old session ep.",
+            "[2026-03-28 10:00 session]\n- Recent session ep.",
+        ]
+        _set_budgets(monkeypatch, max_recent=500)
+        cb = ContextBuilder(StubHistory(), "", _word_counter, session_summaries=summaries)
+        result = cb.build("hi")
+        contents = [m.get("content", "") for m in result]
+        old_idx = next(i for i, c in enumerate(contents) if "2026-03-26" in c)
+        new_idx = next(i for i, c in enumerate(contents) if "2026-03-28" in c)
+        assert old_idx < new_idx
+
+
+# ---------------------------------------------------------------------------
+# Previous-session carryover + eviction
+# ---------------------------------------------------------------------------
+
+
+class StubHistoryBackend:
+    """Minimal history backend stub for carryover loading."""
+
+    def __init__(
+        self,
+        latest: tuple[str, str] | None = None,
+        rows: list[tuple[int, int, dict[str, Any], int]] | None = None,
+        summary: tuple[str, int] | None = None,
+    ) -> None:
+        self.latest = latest
+        self.rows = rows or []
+        self.summary = summary
+
+    def get_latest_session(self, exclude_session_id: str | None = None) -> tuple[str, str] | None:
+        if self.latest is not None and self.latest[0] == exclude_session_id:
+            return None
+        return self.latest
+
+    def load_session(self, session_id: str) -> list[tuple[int, int, dict[str, Any], int]]:
+        return list(self.rows)
+
+    def load_rolling_summary(self, session_id: str) -> tuple[str, int] | None:
+        return self.summary
+
+
+class StubMemoryStorage:
+    """Minimal memory storage stub for the recent-sessions block and eviction."""
+
+    def __init__(
+        self,
+        recent: list[tuple[str, str]] | None = None,
+        episodes: dict[str, list[Episode]] | None = None,
+        processed: set[str] | None = None,
+    ) -> None:
+        self.recent = recent or []  # newest first
+        self.episodes = episodes or {}
+        self.processed = processed or set()
+
+    def get_all_profiles(self) -> list[Profile]:
+        return []
+
+    def get_recent_sessions(self, limit: int, exclude_session_id: str | None = None) -> list[tuple[str, str]]:
+        return [(s, t) for s, t in self.recent if s != exclude_session_id][:limit]
+
+    def get_episodes_by_session_ids(self, session_ids: list[str]) -> dict[str, list[Episode]]:
+        return {sid: list(self.episodes[sid]) for sid in session_ids if sid in self.episodes}
+
+    def get_processed_session_ids(self, session_ids: list[str]) -> set[str]:
+        return {sid for sid in session_ids if sid in self.processed}
+
+
+def _carryover_backend(summary: tuple[str, int] | None = None) -> StubHistoryBackend:
+    """Previous session 'prev-1' with one user and one assistant turn (cost 6 each)."""
+    rows = [
+        (0, 0, {"role": "user", "content": "do you remember"}, 3),
+        (1, 1, {"role": "assistant", "content": "yes I do"}, 3),
+    ]
+    return StubHistoryBackend(latest=("prev-1", "2026-03-28 21:30:00"), rows=rows, summary=summary)
+
+
+class TestCarryover:
+    def test_carryover_rendered_before_current_turns(self) -> None:
+        summarizer = StubSummarizer()
+        cb = ContextBuilder(
+            StubHistory(),
+            "",
+            _word_counter,
+            session_id="cur",
+            history_backend=_carryover_backend(),
+            summarizer=summarizer,
+        )
+        result = cb.build("now")
+        contents = [m.get("content", "") for m in result]
+
+        header_idx = next(i for i, c in enumerate(contents) if c.startswith("[Previous session — 2026-03-28 21:30]"))
+        marker_idx = next(i for i, c in enumerate(contents) if c.startswith("[New session — "))
+        assert result[header_idx]["role"] == "developer"
+        assert result[marker_idx]["role"] == "developer"
+        assert header_idx < contents.index("do you remember") < contents.index("yes I do") < marker_idx
+        assert marker_idx < contents.index("now")
+        # Rolling summarization stays paused while the carryover is present
+        assert summarizer.scheduled == []
+
+    def test_persisted_summary_in_header_skips_covered_turns(self) -> None:
+        backend = _carryover_backend(summary=("they chatted a lot", 0))
+        cb = ContextBuilder(StubHistory(), "", _word_counter, session_id="cur", history_backend=backend)
+        result = cb.build("now")
+        contents = [m.get("content", "") for m in result]
+
+        header = next(c for c in contents if c.startswith("[Previous session"))
+        assert "Earlier in that session: they chatted a lot" in header
+        assert "do you remember" not in contents  # turn 0 covered by the summary
+        assert "yes I do" in contents
+
+    def test_no_previous_session_means_no_carryover(self) -> None:
+        backend = StubHistoryBackend(latest=None)
+        cb = ContextBuilder(StubHistory(), "", _word_counter, session_id="cur", history_backend=backend)
+        result = cb.build("now")
+        assert all(not str(m.get("content", "")).startswith("[Previous session") for m in result)
+
+    def test_own_session_never_carried(self) -> None:
+        backend = _carryover_backend()
+        cb = ContextBuilder(StubHistory(), "", _word_counter, session_id="prev-1", history_backend=backend)
+        result = cb.build("now")
+        assert all(not str(m.get("content", "")).startswith("[Previous session") for m in result)
+
+
+class TestCarryoverEviction:
+    """Carryover total = header(8) + marker(8) + turns(6+6) = 28 tokens;
+    one live turn 'current turn here' adds 6 → demand 34."""
+
+    def _build(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        max_history: int,
+        storage: StubMemoryStorage | None,
+    ) -> tuple[ContextBuilder, StubSummarizer]:
+        _set_budgets(monkeypatch, max_history=max_history)
+        history = StubHistory([{"role": "user", "content": "current turn here"}])
+        summarizer = StubSummarizer()
+        cb = ContextBuilder(
+            history,
+            "",
+            _word_counter,
+            memory_storage=storage,
+            session_id="cur",
+            history_backend=_carryover_backend(),
+            summarizer=summarizer,
+        )
+        return cb, summarizer
+
+    def test_eviction_moves_episodes_to_recent_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        storage = StubMemoryStorage(
+            episodes={"prev-1": [_make_episode("User asked about memory.", sid="prev-1")]},
+            processed={"prev-1"},
+        )
+        # trigger = int(40 * 0.75) = 30 ≤ demand 34 → evict
+        cb, summarizer = self._build(monkeypatch, max_history=40, storage=storage)
+        result = cb.build("now")
+        contents = [m.get("content", "") for m in result]
+
+        block = next(c for c in contents if "[2026-03-28 21:30 session]" in c)
+        assert "- User asked about memory." in block
+        assert not any(c.startswith("[Previous session") for c in contents)
+        assert "do you remember" not in contents
+        assert "prev-1" in cb.exclude_session_ids  # exclusion set unchanged by eviction
+        assert len(summarizer.scheduled) == 1  # summarization unblocked
+
+    def test_eviction_deferred_until_processed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        storage = StubMemoryStorage(processed=set())
+        # trigger = int(30 * 0.75) = 22 ≤ demand 34 → evict attempt, but deferred;
+        # render budget: 30 - live(6) - fixed(16) = 8 → only the newest carryover turn fits
+        cb, summarizer = self._build(monkeypatch, max_history=30, storage=storage)
+        result = cb.build("now")
+        contents = [m.get("content", "") for m in result]
+
+        assert any(c.startswith("[Previous session") for c in contents)  # still carried
+        assert "current turn here" in contents  # live turns keep priority
+        assert "yes I do" in contents
+        assert "do you remember" not in contents  # oldest carryover turn dropped first
+        assert summarizer.scheduled == []  # summarization still paused
+
+    def test_eviction_with_zero_episodes_drops_carryover(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        storage = StubMemoryStorage(episodes={}, processed={"prev-1"})
+        cb, summarizer = self._build(monkeypatch, max_history=40, storage=storage)
+        result = cb.build("now")
+        contents = [m.get("content", "") for m in result]
+
+        assert not any(c.startswith("[Previous session") for c in contents)
+        assert not any("[2026-03-28 21:30 session]" in c for c in contents)
+        assert len(summarizer.scheduled) == 1
+
+    def test_carryover_dropped_without_memory_storage(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cb, summarizer = self._build(monkeypatch, max_history=40, storage=None)
+        result = cb.build("now")
+        contents = [m.get("content", "") for m in result]
+
+        assert not any(c.startswith("[Previous session") for c in contents)
+        assert len(summarizer.scheduled) == 1
+
+
+class TestRecentSessionsFromStorage:
+    def test_carryover_session_skipped_and_soft_cap_applied(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Each block costs 8 words + 3 overhead = 11; cap 15 fits only the newest.
+        _set_budgets(monkeypatch, max_recent=15)
+        recent = [
+            ("s3", "2026-03-28 10:00:00"),
+            ("s2", "2026-03-27 10:00:00"),
+            ("prev-1", "2026-03-26 10:00:00"),
+        ]
+        episodes = {
+            "s3": [_make_episode("Newest session episode text.", sid="s3")],
+            "s2": [_make_episode("Older session episode text.", sid="s2")],
+        }
+        storage = StubMemoryStorage(recent=recent, episodes=episodes, processed={"s3", "s2"})
+        cb = ContextBuilder(
+            StubHistory(),
+            "",
+            _word_counter,
+            memory_storage=storage,
+            session_id="cur",
+            history_backend=_carryover_backend(),
+        )
+
+        # Exclusion covers current + carryover + actually-included sessions only
+        assert cb.exclude_session_ids == {"cur", "prev-1", "s3"}
+        result = cb.build("now")
+        contents = [m.get("content", "") for m in result]
+        assert any("[2026-03-28 10:00 session]" in c for c in contents)
+        assert not any("2026-03-27" in c for c in contents)  # dropped by cap → retrievable
+        assert not any("[2026-03-26 10:00 session]" in c for c in contents)  # carried, not in block
+
+    def test_newest_session_included_despite_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _set_budgets(monkeypatch, max_recent=5)
+        recent = [("s3", "2026-03-28 10:00:00")]
+        episodes = {"s3": [_make_episode("A very long episode text that exceeds the tiny cap easily.", sid="s3")]}
+        storage = StubMemoryStorage(recent=recent, episodes=episodes, processed={"s3"})
+        cb = ContextBuilder(StubHistory(), "", _word_counter, memory_storage=storage, session_id="cur")
+
+        assert cb.exclude_session_ids == {"cur", "s3"}
+        result = cb.build("now")
+        assert any("[2026-03-28 10:00 session]" in str(m.get("content", "")) for m in result)
+
+    def test_sessions_without_episodes_skipped(self) -> None:
+        recent = [("s3", "2026-03-28 10:00:00"), ("s2", "2026-03-27 10:00:00")]
+        episodes = {"s2": [_make_episode("Older session episode text.", sid="s2")]}
+        storage = StubMemoryStorage(recent=recent, episodes=episodes, processed={"s2"})
+        cb = ContextBuilder(StubHistory(), "", _word_counter, memory_storage=storage, session_id="cur")
+
+        assert cb.exclude_session_ids == {"cur", "s2"}
+        result = cb.build("now")
+        contents = [str(m.get("content", "")) for m in result]
+        assert any("[2026-03-27 10:00 session]" in c for c in contents)
+        assert not any("2026-03-28" in c for c in contents)
+
+    def test_recent_block_chronological_before_carryover(self) -> None:
+        recent = [("s3", "2026-03-28 10:00:00"), ("s2", "2026-03-27 10:00:00")]
+        episodes = {
+            "s3": [_make_episode("Newest session episode text.", sid="s3")],
+            "s2": [_make_episode("Older session episode text.", sid="s2")],
+        }
+        storage = StubMemoryStorage(recent=recent, episodes=episodes, processed={"s3", "s2"})
+        cb = ContextBuilder(
+            StubHistory(),
+            "",
+            _word_counter,
+            memory_storage=storage,
+            session_id="cur",
+            history_backend=_carryover_backend(),
+        )
+        result = cb.build("now")
+        contents = [str(m.get("content", "")) for m in result]
+
+        s2_idx = next(i for i, c in enumerate(contents) if "2026-03-27 10:00 session]" in c)
+        s3_idx = next(i for i, c in enumerate(contents) if "2026-03-28 10:00 session]" in c)
+        header_idx = next(i for i, c in enumerate(contents) if c.startswith("[Previous session"))
+        assert s2_idx < s3_idx < header_idx  # oldest → newest → carryover

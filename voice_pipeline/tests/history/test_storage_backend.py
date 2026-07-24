@@ -139,6 +139,59 @@ class _BackendTests:
         b = self.make_backend()
         assert b.load_message("nonexistent", 0) is None
 
+    def test_get_latest_session(self) -> None:
+        b = self.make_backend()
+        b.create_session("s1", "2026-03-29 10:00:00")
+        b.create_session("s2", "2026-03-29 11:00:00")
+        b.append_message("s1", 0, 0, _user_item("a"), 3)
+        b.append_message("s2", 0, 0, _user_item("b"), 3)
+        assert b.get_latest_session() == ("s2", "2026-03-29 11:00:00")
+
+    def test_get_latest_session_excludes_given(self) -> None:
+        b = self.make_backend()
+        b.create_session("s1", "2026-03-29 10:00:00")
+        b.create_session("s2", "2026-03-29 11:00:00")
+        b.append_message("s1", 0, 0, _user_item("a"), 3)
+        b.append_message("s2", 0, 0, _user_item("b"), 3)
+        assert b.get_latest_session(exclude_session_id="s2") == ("s1", "2026-03-29 10:00:00")
+
+    def test_get_latest_session_skips_empty_sessions(self) -> None:
+        """Sessions without messages (e.g. silent wake) are not carryover candidates."""
+        b = self.make_backend()
+        b.create_session("s1", "2026-03-29 10:00:00")
+        b.create_session("s2", "2026-03-29 11:00:00")  # newer but empty
+        b.append_message("s1", 0, 0, _user_item("a"), 3)
+        assert b.get_latest_session() == ("s1", "2026-03-29 10:00:00")
+
+    def test_get_latest_session_none(self) -> None:
+        b = self.make_backend()
+        assert b.get_latest_session() is None
+        b.create_session("s1", "2026-03-29 10:00:00")  # empty session only
+        assert b.get_latest_session() is None
+
+    def test_rolling_summary_roundtrip(self) -> None:
+        b = self.make_backend()
+        b.create_session("s1", "2026-03-29 10:00:00")
+        b.save_rolling_summary("s1", "They discussed the weather.", 7)
+        assert b.load_rolling_summary("s1") == ("They discussed the weather.", 7)
+
+    def test_rolling_summary_missing(self) -> None:
+        b = self.make_backend()
+        assert b.load_rolling_summary("s1") is None
+
+    def test_rolling_summary_keeps_latest_session_only(self) -> None:
+        b = self.make_backend()
+        b.save_rolling_summary("s1", "First summary.", 3)
+        b.save_rolling_summary("s2", "Second summary.", 5)
+        assert b.load_rolling_summary("s1") is None
+        assert b.load_rolling_summary("s2") == ("Second summary.", 5)
+
+    def test_rolling_summary_overwrite_same_session(self) -> None:
+        b = self.make_backend()
+        b.save_rolling_summary("s1", "Early summary.", 3)
+        b.save_rolling_summary("s1", "Merged summary.", 9)
+        assert b.load_rolling_summary("s1") == ("Merged summary.", 9)
+
     def test_tool_call_turn(self) -> None:
         """Store a multi-message tool call turn with shared turn_id."""
         b = self.make_backend()
@@ -189,6 +242,15 @@ class TestSQLiteStorageBackend(_BackendTests):
         loaded = b2.load_session("s1")
         assert len(loaded) == 1
         assert loaded[0][2]["content"] == "hello"
+        b2.close()
+
+    def test_rolling_summary_persists_across_instances(self) -> None:
+        b1 = SQLiteStorageBackend(self._db_path)
+        b1.save_rolling_summary("s1", "Persisted summary.", 4)
+        b1.close()
+
+        b2 = SQLiteStorageBackend(self._db_path)
+        assert b2.load_rolling_summary("s1") == ("Persisted summary.", 4)
         b2.close()
 
     def test_graceful_insert_failure(self) -> None:

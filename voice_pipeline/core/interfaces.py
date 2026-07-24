@@ -137,6 +137,44 @@ class IStorageBackend(ABC):
             session_id: Session to delete.
         """
 
+    @abstractmethod
+    def get_latest_session(self, exclude_session_id: str | None = None) -> tuple[str, str] | None:
+        """Return the most recent session that has at least one message.
+
+        Used to locate the previous session for context carryover.
+
+        Args:
+            exclude_session_id: Session ID to skip (e.g. the current session).
+
+        Returns:
+            Tuple of (session_id, started_at), or None if no such session.
+        """
+
+    @abstractmethod
+    def save_rolling_summary(self, session_id: str, summary_text: str, through_turn_id: int) -> None:
+        """Persist the in-session rolling summary for a session.
+
+        Only the latest session's summary is retained — saving for one
+        session discards any summary stored for another.
+
+        Args:
+            session_id: Session the summary belongs to.
+            summary_text: Raw summary text (no formatting header).
+            through_turn_id: Last turn_id covered by the summary.
+        """
+
+    @abstractmethod
+    def load_rolling_summary(self, session_id: str) -> tuple[str, int] | None:
+        """Load the persisted rolling summary for a session.
+
+        Args:
+            session_id: Session to query.
+
+        Returns:
+            Tuple of (summary_text, through_turn_id), or None if no summary
+            is stored for this session.
+        """
+
 
 # ---------------------------------------------------------------------------
 # ConversationHistory

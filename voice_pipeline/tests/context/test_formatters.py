@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from voice_pipeline.context.formatters import (
+    format_carryover_block,
     format_memory_block,
     format_profile_block,
-    format_raw_transcript_block,
+    format_session_boundary,
     format_session_summary_block,
     parse_citation_tag,
 )
@@ -84,32 +85,33 @@ class TestFormatSessionSummaryBlock:
 
 
 # ---------------------------------------------------------------------------
-# format_raw_transcript_block
+# format_carryover_block / format_session_boundary
 # ---------------------------------------------------------------------------
 
 
-class TestFormatRawTranscriptBlock:
+class TestFormatCarryoverBlock:
+    def test_without_summary(self) -> None:
+        result = format_carryover_block("2026-03-28 21:30:00")
+        assert result == "[Previous session — 2026-03-28 21:30]"
+
+    def test_with_summary(self) -> None:
+        result = format_carryover_block("2026-03-28 21:30:00", "User planned a trip to Busan.")
+        assert result.startswith("[Previous session — 2026-03-28 21:30]\n")
+        assert "Earlier in that session: User planned a trip to Busan." in result
+
+    def test_short_timestamp_passthrough(self) -> None:
+        result = format_carryover_block("2026-03-28")
+        assert result == "[Previous session — 2026-03-28]"
+
+
+class TestFormatSessionBoundary:
     def test_basic(self) -> None:
-        utterances = [
-            ("user", "What time is it?", "2026-03-28 21:30:00", 5),
-            ("assistant", "It's 9:30.", "2026-03-28 21:30:05", 3),
-        ]
-        result = format_raw_transcript_block("2026-03-28 21:30:00", utterances)
-        assert "[2026-03-28 21:30 session]" in result
-        assert "User: What time is it?" in result
-        assert "Ray: It's 9:30." in result
+        result = format_session_boundary("2026-03-29 09:15:00")
+        assert result == "[New session — 2026-03-29 09:15]"
 
-    def test_user_only(self) -> None:
-        utterances = [("user", "Hello!", "2026-03-28 10:00:00", 1)]
-        result = format_raw_transcript_block("2026-03-28 10:00:00", utterances)
-        assert "User: Hello!" in result
-        assert "Ray" not in result
-
-    def test_empty_utterances(self) -> None:
-        result = format_raw_transcript_block("2026-03-28 10:00:00", [])
-        assert "[2026-03-28 10:00 session]" in result
-        # Only header, no content
-        assert result.count("\n") == 0
+    def test_microsecond_timestamp_truncated(self) -> None:
+        result = format_session_boundary("2026-03-29 09:15:42.123456")
+        assert result == "[New session — 2026-03-29 09:15]"
 
 
 # ---------------------------------------------------------------------------

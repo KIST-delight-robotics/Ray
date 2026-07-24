@@ -21,6 +21,7 @@ from voice_pipeline.core.interfaces import (
     IMemoryRetriever,
     IMemoryStorage,
     ISpeechGenerator,
+    IStorageBackend,
 )
 from voice_pipeline.core.types import (
     GeneratorState,
@@ -75,6 +76,7 @@ class SpeechGenerator(ISpeechGenerator):
         retriever: IMemoryRetriever | None = None,
         session_id: str | None = None,
         summarizer: IHistorySummarizer | None = None,
+        history_backend: IStorageBackend | None = None,
     ) -> None:
         """Initialize the SpeechGenerator.
 
@@ -93,6 +95,8 @@ class SpeechGenerator(ISpeechGenerator):
             session_id: 현재 세션 ID. context 로딩 및 retriever 제외용.
             summarizer: 세션 내 히스토리 롤링 요약기. ``None``이면 요약 없이
                 오래된 턴 drop만으로 히스토리 예산을 지킨다.
+            history_backend: 직전 세션 이월(carryover) 로딩용 히스토리 백엔드.
+                ``None``이면 이월 없음.
         """
         self._context_builder = ContextBuilder(
             history,
@@ -101,6 +105,7 @@ class SpeechGenerator(ISpeechGenerator):
             memory_storage=memory_storage,
             session_id=session_id,
             summarizer=summarizer,
+            history_backend=history_backend,
         )
         self._llm = llm
         self._tts = tts
