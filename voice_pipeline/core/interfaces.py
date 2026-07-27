@@ -1177,13 +1177,13 @@ class IMemoryStorage(ABC):
     @abstractmethod
     def get_recent_sessions(
         self,
-        limit: int,
+        limit: int | None = None,
         exclude_session_id: str | None = None,
     ) -> list[tuple[str, str]]:
         """Return the most recent sessions that have utterances.
 
         Args:
-            limit: Maximum number of sessions.
+            limit: Maximum number of sessions. None returns all.
             exclude_session_id: Session ID to exclude (e.g. current).
 
         Returns:

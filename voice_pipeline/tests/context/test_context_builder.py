@@ -561,14 +561,18 @@ class StubMemoryStorage:
         self.recent = recent or []  # newest first
         self.episodes = episodes or {}
         self.processed = processed or set()
+        self.episode_calls: list[list[str]] = []  # get_episodes_by_session_ids 호출 기록
 
     def get_all_profiles(self) -> list[Profile]:
         return []
 
-    def get_recent_sessions(self, limit: int, exclude_session_id: str | None = None) -> list[tuple[str, str]]:
+    def get_recent_sessions(
+        self, limit: int | None = None, exclude_session_id: str | None = None
+    ) -> list[tuple[str, str]]:
         return [(s, t) for s, t in self.recent if s != exclude_session_id][:limit]
 
     def get_episodes_by_session_ids(self, session_ids: list[str]) -> dict[str, list[Episode]]:
+        self.episode_calls.append(list(session_ids))
         return {sid: list(self.episodes[sid]) for sid in session_ids if sid in self.episodes}
 
     def get_processed_session_ids(self, session_ids: list[str]) -> set[str]:
@@ -759,6 +763,34 @@ class TestRecentSessionsFromStorage:
         contents = [str(m.get("content", "")) for m in result]
         assert any("[2026-03-27 10:00 session]" in c for c in contents)
         assert not any("2026-03-28" in c for c in contents)
+
+    def test_walk_continues_past_empty_sessions_across_pages(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """에피소드 없는 세션이 페이지 경계를 넘어 이어져도 캡이 찰 때까지 걷는다."""
+        monkeypatch.setattr(ContextBuilder, "_SESSION_PAGE_SIZE", 5)
+        recent = [(f"empty-{i}", "2026-03-28 10:00:00") for i in range(12)]
+        recent.append(("old-1", "2026-03-01 09:00:00"))
+        episodes = {"old-1": [_make_episode("Old but meaningful episode.", sid="old-1")]}
+        storage = StubMemoryStorage(recent=recent, episodes=episodes, processed={"old-1"})
+        cb = ContextBuilder(StubHistory(), "", _word_counter, memory_storage=storage, session_id="cur")
+
+        assert cb.exclude_session_ids == {"cur", "old-1"}
+        result = cb.build("now")
+        assert any("[2026-03-01 09:00 session]" in str(m.get("content", "")) for m in result)
+
+    def test_paging_stops_once_cap_binds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """캡이 바인딩되면 이후 페이지의 에피소드는 로드하지 않는다 (lazy)."""
+        monkeypatch.setattr(ContextBuilder, "_SESSION_PAGE_SIZE", 2)
+        _set_budgets(monkeypatch, max_recent=15)
+        recent = [(f"s{i}", f"2026-03-{28 - i:02d} 10:00:00") for i in range(6)]
+        episodes = {sid: [_make_episode(f"Episode text for session {sid}.", sid=sid)] for sid, _ in recent}
+        storage = StubMemoryStorage(recent=recent, episodes=episodes, processed=set(episodes))
+        cb = ContextBuilder(StubHistory(), "", _word_counter, memory_storage=storage, session_id="cur")
+
+        # 블록당 비용 ~12토큰, 캡 15 → 첫 세션만 포함, 두 번째에서 중단.
+        # 둘 다 첫 페이지(크기 2)에 있으므로 두 번째 페이지는 로드되지 않는다.
+        assert cb.exclude_session_ids == {"cur", "s0"}
+        assert len(storage.episode_calls) == 1
+        assert storage.episode_calls[0] == ["s0", "s1"]
 
     def test_recent_block_chronological_before_carryover(self) -> None:
         recent = [("s3", "2026-03-28 10:00:00"), ("s2", "2026-03-27 10:00:00")]

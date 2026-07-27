@@ -398,26 +398,22 @@ class SQLiteMemoryStorage(IMemoryStorage):
 
     def get_recent_sessions(
         self,
-        limit: int,
+        limit: int | None = None,
         exclude_session_id: str | None = None,
     ) -> list[tuple[str, str]]:
         """Return recent sessions based on utterance timestamps."""
         with self._lock:
             try:
-                if exclude_session_id:
-                    rows = self._conn.execute(
-                        "SELECT session_id, MIN(timestamp) as started_at "
-                        "FROM utterances WHERE session_id != ? "
-                        "GROUP BY session_id ORDER BY started_at DESC LIMIT ?",
-                        (exclude_session_id, limit),
-                    ).fetchall()
-                else:
-                    rows = self._conn.execute(
-                        "SELECT session_id, MIN(timestamp) as started_at "
-                        "FROM utterances "
-                        "GROUP BY session_id ORDER BY started_at DESC LIMIT ?",
-                        (limit,),
-                    ).fetchall()
+                query = (
+                    "SELECT session_id, MIN(timestamp) as started_at "
+                    "FROM utterances WHERE session_id != COALESCE(?, '') "
+                    "GROUP BY session_id ORDER BY started_at DESC"
+                )
+                params: tuple = (exclude_session_id,)
+                if limit is not None:
+                    query += " LIMIT ?"
+                    params = (exclude_session_id, limit)
+                rows = self._conn.execute(query, params).fetchall()
                 return [(row[0], row[1]) for row in rows]
             except sqlite3.Error:
                 logger.warning("Failed to get recent sessions", exc_info=True)
@@ -703,7 +699,7 @@ class InMemoryMemoryStorage(IMemoryStorage):
 
     def get_recent_sessions(
         self,
-        limit: int,
+        limit: int | None = None,
         exclude_session_id: str | None = None,
     ) -> list[tuple[str, str]]:
         """Return recent sessions based on utterance timestamps."""

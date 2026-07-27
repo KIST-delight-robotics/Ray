@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -105,7 +106,7 @@ class ContextBuilder:
     _MAX_MEMORY_TOKENS = 512  # retrieved memory 블록 전용 예산 (초과 시 낮은 salience 순 drop)
     _MAX_PROFILE_TOKENS = 256  # profile 블록 전용 예산 (초과 시 블록 skip)
     _MAX_RECENT_SESSIONS_TOKENS = 512  # 최근 세션 블록 soft cap — 최신 세션 1개는 캡 무관 보장
-    _RECENT_SESSION_CANDIDATES = 10  # 최근 세션 후보 조회 수 (실제 포함 수는 캡이 결정)
+    _SESSION_PAGE_SIZE = 20  # 세션 에피소드 lazy 로딩 배치 크기 — 순수 조회 배치, 동작에 영향 없음
     _CARRYOVER_EVICT_RATIO = 0.75  # 히스토리 수요가 예산 대비 이 비율을 넘으면 이월분 퇴거
 
     def __init__(
@@ -393,39 +394,50 @@ class ContextBuilder:
 
         Sessions without episodes (extraction pending, failed, or judged
         meaningless) are skipped — the carryover covers the only session
-        whose extraction can still be legitimately in flight.
+        whose extraction can still be legitimately in flight. The walk
+        continues into older sessions until the soft cap binds or history
+        is exhausted.
 
         Returns:
             (profiles, block texts in chronological order,
             session IDs actually included in the block).
         """
         profiles = memory_storage.get_all_profiles()
-        carryover_sid = self._carryover.session_id if self._carryover is not None else None
-        recent = memory_storage.get_recent_sessions(self._RECENT_SESSION_CANDIDATES, exclude_session_id=session_id)
-        sids = [sid for sid, _ in recent if sid != carryover_sid]
-        episodes_by_sid = memory_storage.get_episodes_by_session_ids(sids)
-
-        candidates: list[tuple[str | None, str]] = []  # newest first
-        for sid, started_at in recent:
-            if sid == carryover_sid:
-                continue
-            episodes = episodes_by_sid.get(sid, [])
-            if not episodes:
-                continue
-            candidates.append((sid, format_session_summary_block(started_at, episodes)))
-
-        selected = self._select_recent_blocks(candidates)
+        selected = self._select_recent_blocks(self._iter_session_blocks(memory_storage, session_id))
         block_texts = [text for _, text in selected]
         included_ids = {sid for sid, _ in selected if sid is not None}
         return profiles, block_texts, included_ids
 
-    def _select_recent_blocks(self, candidates: list[tuple[str | None, str]]) -> list[tuple[str | None, str]]:
+    def _iter_session_blocks(
+        self,
+        memory_storage: IMemoryStorage,
+        session_id: str,
+    ) -> Iterator[tuple[str, str]]:
+        """Yield (session_id, block_text) newest-first, skipping episode-less sessions.
+
+        Episode loading is paged (``_SESSION_PAGE_SIZE``) and lazy — the
+        consumer stops pulling once the soft cap binds, so sessions beyond
+        that point are never fetched.
+        """
+        carryover_sid = self._carryover.session_id if self._carryover is not None else None
+        sessions = memory_storage.get_recent_sessions(exclude_session_id=session_id)
+        for start in range(0, len(sessions), self._SESSION_PAGE_SIZE):
+            page = [(sid, ts) for sid, ts in sessions[start : start + self._SESSION_PAGE_SIZE] if sid != carryover_sid]
+            episodes_by_sid = memory_storage.get_episodes_by_session_ids([sid for sid, _ in page])
+            for sid, started_at in page:
+                episodes = episodes_by_sid.get(sid, [])
+                if not episodes:
+                    continue
+                yield sid, format_session_summary_block(started_at, episodes)
+
+    def _select_recent_blocks(self, candidates: Iterable[tuple[str | None, str]]) -> list[tuple[str | None, str]]:
         """Fill whole sessions newest-first under the soft cap; return chronological.
 
         The newest candidate is always included regardless of size (soft
         cap); older ones are appended while the running total stays within
         ``_MAX_RECENT_SESSIONS_TOKENS``, stopping at the first that no
-        longer fits (keeps the block temporally contiguous).
+        longer fits (keeps the block temporally contiguous). Consumes the
+        candidates iterable lazily.
         """
         selected: list[tuple[str | None, str]] = []
         spent = 0
