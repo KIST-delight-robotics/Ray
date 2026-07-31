@@ -1,0 +1,12 @@
+[Unit]
+Description=OS_LED immediate poweroff on PWR_BTN (ATtiny J2 pulse)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/os_led_poweroff.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

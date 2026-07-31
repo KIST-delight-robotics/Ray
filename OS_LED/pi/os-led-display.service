@@ -1,0 +1,12 @@
+[Unit]
+Description=OS_LED Pi-side display (assert READY + drive WS2812)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/os_led_display.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
