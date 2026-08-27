@@ -45,6 +45,14 @@ class LEDController(ILEDController):
     Threading:
         A daemon thread runs the animation loop. ``set_state()`` is thread-safe
         and swaps the active animation under a lock. ``close()`` stops the thread.
+
+    Strip ownership:
+        The strip is shared with the OS_LED boot daemon, which keeps drawing the
+        boot animation until RAY borrows it. Borrowing happens lazily on the
+        first ``set_state()`` — not in ``__init__`` — because construction runs
+        before model loading (~50 s of it). Acquiring at construction time would
+        blank the strip for that whole stretch, since the boot daemon stops
+        drawing the moment we take the token and we have nothing to show yet.
     """
 
     _BAR_COUNT = 8  # 바 세그먼트 LED 개수
@@ -77,7 +85,9 @@ class LEDController(ILEDController):
         self._strip: Any = None
         self._driver: Any = None
         self._arbiter = OSLedArbiterClient()
-        self._init_strip()
+        # Borrowed on the first set_state() — see "Strip ownership" above.
+        self._init_lock = threading.Lock()
+        self._strip_init_done = False
 
         # Start animation thread
         self._thread = threading.Thread(
@@ -90,6 +100,25 @@ class LEDController(ILEDController):
     # ------------------------------------------------------------------
     # Hardware init
     # ------------------------------------------------------------------
+
+    def _ensure_strip(self) -> None:
+        """Borrow and open the strip once, on first use.
+
+        A failure here degrades to noop mode instead of propagating: the boot
+        daemon keeps the strip and stays visible, which is a better outcome than
+        killing the pipeline over an indicator light. (When this ran in
+        ``__init__`` the same failure aborted startup.)
+        """
+        if self._strip_init_done:
+            return
+        with self._init_lock:
+            if self._strip_init_done:
+                return
+            self._strip_init_done = True
+            try:
+                self._init_strip()
+            except LEDError:
+                logger.error("LED strip init failed — continuing in noop mode", exc_info=True)
 
     def _init_strip(self) -> None:
         if not self._enabled:
@@ -130,7 +159,11 @@ class LEDController(ILEDController):
 
         Swaps the active animation and resets the tick counter.
         Thread-safe.
+
+        The first call also borrows the strip from the OS_LED boot daemon, which
+        is what makes the boot animation hand over directly to the RAY pattern.
         """
+        self._ensure_strip()
         with self._lock:
             if state == self._state:
                 return

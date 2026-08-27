@@ -1,6 +1,8 @@
 """Unit tests for the LED controller module.
 
-Hardware driver is never present in CI — all tests exercise noop fallback mode.
+All tests run in noop fallback mode: ``conftest.py`` patches the SPI driver to None
+and mocks the OS_LED arbiter client, so the suite is safe to run on a robot Pi where
+both are really present. Tests needing a driver patch ``_DRIVER_PATH`` with a mock.
 """
 
 from __future__ import annotations
@@ -287,13 +289,47 @@ class TestCustomAnimations:
 
 
 class TestHardwareInit:
-    def test_hardware_init_error_raises_led_error(self) -> None:
+    def test_init_strip_raises_led_error(self) -> None:
         mock_driver_cls = MagicMock(side_effect=RuntimeError("SPI fail"))
-        with (
-            patch(_DRIVER_PATH, mock_driver_cls),
-            pytest.raises(LEDError, match="Failed to initialize LED strip"),
-        ):
-            _make_controller()
+        ctrl = _make_controller()
+        try:
+            with (
+                patch(_DRIVER_PATH, mock_driver_cls),
+                pytest.raises(LEDError, match="Failed to initialize LED strip"),
+            ):
+                ctrl._init_strip()
+        finally:
+            ctrl.close()
+
+    def test_construction_does_not_touch_hardware(self) -> None:
+        """The strip is borrowed lazily, so __init__ must not open the driver.
+
+        Acquiring at construction time blanks the shared strip for the whole
+        model-loading stretch (the OS_LED daemon stops drawing once we hold the
+        token), which is why init moved to the first set_state().
+        """
+        mock_driver_cls = MagicMock()
+        with patch(_DRIVER_PATH, mock_driver_cls):
+            ctrl = _make_controller()
+            try:
+                mock_driver_cls.assert_not_called()
+                ctrl.set_state(LEDState.SLEEPING)
+                mock_driver_cls.assert_called_once()
+            finally:
+                ctrl.close()
+
+    def test_lazy_init_failure_degrades_to_noop(self) -> None:
+        """A failing strip must not kill the pipeline — set_state still works."""
+        mock_driver_cls = MagicMock(side_effect=RuntimeError("SPI fail"))
+        with patch(_DRIVER_PATH, mock_driver_cls):
+            ctrl = _make_controller()
+            try:
+                ctrl.set_state(LEDState.SLEEPING)  # must not raise
+                assert ctrl._strip is None
+                ctrl.set_state(LEDState.IDLE)
+                mock_driver_cls.assert_called_once()  # not retried every call
+            finally:
+                ctrl.close()
 
 
 # ===================================================================

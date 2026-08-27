@@ -8,11 +8,16 @@ On startup:
      strip latches that while we set up SPI.
   2. Sleep briefly to let ATtiny release the line. ATtiny needs only a few
      dozen ms after seeing READY HIGH, so keep this short.
-  3. Drive WS2812 with a smooth handoff: start at full-brightness pure
-     white (matches ATtiny's frozen frame, no visible jump), then over
-     TRANSITION_FRAMES (~1.5 s) fade saturation 0→1 and brightness 1.0→
-     runtime BRIGHTNESS. The strip "blooms" from white into the rainbow.
-  4. Continue rainbow rotation at ~60 fps thereafter.
+  3. Drive WS2812 continuing the ATtiny's white breathing (same parabolic
+     curve / 2.0 s period / PULSE_MIN..PULSE_MAX levels), starting at the
+     peak so it picks up exactly where ATtiny's frozen full-white frame
+     left off. The hand-off is invisible: the boot animation just keeps
+     going, now driven by the Pi.
+  4. Normally RAY acquires the strip during this hold and the boot
+     breathing hands straight over to the RAY pattern — no rainbow at all.
+     If RAY never shows up within BOOT_WHITE_HOLD_S, bloom white → rainbow
+     (TRANSITION_FRAMES ≈ 1.5 s) and rotate at ~60 fps thereafter, so
+     "Pi is up but RAY is dead" still looks different from a normal boot.
 
 Ownership arbiter (so RAY can borrow the strip):
   This daemon is the single Pi-side owner of /dev/spidev0.0. The RAY voice
@@ -68,6 +73,22 @@ ROT_PER_FRAME     = 0.005
 BRIGHTNESS        = 0.25        # runtime brightness — caps current ~360 mA
 TRANSITION_FRAMES = 90          # 1.5 s at 60 fps for the white → rainbow bloom
 
+# Boot hold — continue ATtiny's white breathing instead of blooming into the
+# rainbow, so 부팅 애니메이션 → RAY LED 로 곧장 넘어간다. Values mirror the
+# firmware (HANDOFF §2 "모든 ATtiny 애니메이션은 순백, 포물선 idx*(N-idx) 근사,
+# PULSE_MIN=16~PULSE_MAX=255, 한 호흡 주기 ≈ 2.0 s") — they must stay in sync or
+# the hand-off becomes visible as a brightness/rate jump.
+BREATH_PERIOD_S   = 2.0
+BREATH_FRAMES     = round(BREATH_PERIOD_S / FRAME_DT_S)   # 120 frames @60 fps
+BREATH_MIN        = 16 / 255    # PULSE_MIN
+BREATH_MAX        = 1.0         # PULSE_MAX (ATtiny's frozen hand-off frame)
+# How long to keep breathing before deciding RAY isn't coming. RAY normally
+# acquires ~25–50 s after this daemon starts (model loading dominates), so this
+# is generous. Rounded to whole breaths so the hold always ends at a peak —
+# the bloom below starts at full white, so ending anywhere else would jump.
+BOOT_WHITE_HOLD_S = 150.0
+BOOT_HOLD_FRAMES  = BREATH_FRAMES * round(BOOT_WHITE_HOLD_S / BREATH_PERIOD_S)
+
 # Ownership arbiter
 CONTROL_SOCK      = "/run/os-led.sock"  # RAY connects here to borrow the strip
 FADE_OUT_FRAMES   = 18          # ~0.3 s rainbow → black when RAY acquires
@@ -89,6 +110,25 @@ def encode_frame(pixels):
         buf += _LUT[r]
         buf += _LUT[b]
     return bytes(buf)
+
+
+def breath_level(frame_i):
+    """ATtiny's breathing curve: parabolic idx*(N-idx), starting at the peak.
+
+    frame_i 0 → BREATH_MAX, so the first Pi-driven frame matches the full-white
+    frame ATtiny latched at hand-off (no visible jump).
+    """
+    n = BREATH_FRAMES
+    half = n // 2
+    idx = (frame_i + half) % n          # phase-shift so frame 0 lands on the peak
+    tri = idx * (n - idx) / (half * half)   # 0..1, peaks at idx == half
+    return BREATH_MIN + (BREATH_MAX - BREATH_MIN) * tri
+
+
+def white_frame(level):
+    """Pure white on the whole chain (G=R=B), like every ATtiny animation."""
+    v = int(max(0.0, min(1.0, level)) * 255)
+    return [(v, v, v)] * NUM_LEDS
 
 
 def rainbow(phase, brightness=BRIGHTNESS, saturation=1.0, tail_brightness=0.0):
@@ -234,9 +274,18 @@ def main():
             # --- yield to RAY: fade rainbow → black, then stop writing SPI ---
             if pause_req.is_set() and not paused.is_set():
                 print("arbiter: client acquired — fading out, releasing SPI", flush=True)
+                # Fade out whatever is actually on screen: during the boot hold
+                # that's the white breathing, afterwards the rainbow. Fading the
+                # wrong one snaps brightness/colour at the exact moment RAY takes
+                # over — the one transition this whole design tries to hide.
+                boot_level = breath_level(frame_count) if frame_count < BOOT_HOLD_FRAMES else None
                 for i in range(FADE_OUT_FRAMES):
                     scale = 1.0 - (i + 1) / FADE_OUT_FRAMES
-                    spi.writebytes2(encode_frame(rainbow(phase, BRIGHTNESS * scale)))
+                    if boot_level is None:
+                        frame = rainbow(phase, BRIGHTNESS * scale)
+                    else:
+                        frame = white_frame(boot_level * scale)
+                    spi.writebytes2(encode_frame(frame))
                     time.sleep(FRAME_DT_S)
                 spi.writebytes2(black)
                 paused.set()                 # tell the arbiter the pause is committed
@@ -259,15 +308,31 @@ def main():
                         phase = (phase + ROT_PER_FRAME) % 1.0
                         time.sleep(FRAME_DT_S)
                     paused.clear()
-                    frame_count = TRANSITION_FRAMES  # skip the white bloom on resume
+                    # Skip both the boot breathing hold and the bloom: RAY was
+                    # already up, so the rainbow here means "RAY went away".
+                    frame_count = BOOT_HOLD_FRAMES + TRANSITION_FRAMES
                     print("arbiter: rainbow resumed", flush=True)
                     continue
                 time.sleep(FRAME_DT_S)
                 continue
 
-            # --- normal: rainbow (with the one-time white bloom at startup) ---
-            if frame_count < TRANSITION_FRAMES:
-                t = frame_count / TRANSITION_FRAMES
+            # --- boot hold: keep breathing ATtiny's white, waiting for RAY ---
+            if frame_count < BOOT_HOLD_FRAMES:
+                spi.writebytes2(encode_frame(white_frame(breath_level(frame_count))))
+                frame_count += 1
+                time.sleep(FRAME_DT_S)
+                continue
+
+            if frame_count == BOOT_HOLD_FRAMES:
+                print(
+                    f"RAY did not acquire within {BOOT_WHITE_HOLD_S:.0f}s "
+                    "— blooming into the rainbow", flush=True
+                )
+
+            # --- fallback: bloom white → rainbow, then rotate ---
+            bloom_i = frame_count - BOOT_HOLD_FRAMES
+            if bloom_i < TRANSITION_FRAMES:
+                t = bloom_i / TRANSITION_FRAMES
                 cur_brightness = 1.0 - (1.0 - BRIGHTNESS) * t
                 cur_saturation = t
                 tail_brightness = 1.0 - t   # LEDs 9–24: white → off over the bloom
