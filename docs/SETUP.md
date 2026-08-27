@@ -107,6 +107,22 @@ rm models.zip
 ```
 
 
+### 모델 캐시 부트스트랩 (첫 실행 1회, 온라인 필요)
+
+production wiring은 부팅 시 네트워크 의존을 없애기 위해 **로컬 캐시만** 쓴다
+(`create_embedder(local_files_only=True)`, `TIKTOKEN_CACHE_DIR`). 새 기기에서는 캐시가
+없어 첫 기동이 실패하므로, 네트워크가 있는 상태에서 아래를 1회 실행해 캐시를 만든다:
+
+```bash
+# 임베딩 모델 (HF 허브 → ~/.cache/huggingface). local_files_only=False로 1회 로드
+uv run python -c "from voice_pipeline.embedding.embedder import create_embedder; create_embedder(expected_dimension=384)"
+# tiktoken 인코딩 사전 (→ $TIKTOKEN_CACHE_DIR). ray.env의 경로와 같아야 한다
+mkdir -p ~/.cache/tiktoken
+TIKTOKEN_CACHE_DIR=~/.cache/tiktoken uv run python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
+```
+
+`HF_HUB_OFFLINE=1`은 쓰지 말 것 — sentence-transformers가 허브 트리 조회를 시도해 예외로 죽는다.
+
 ## 8. API 인증 설정
 
 ### Google Cloud (ASR)

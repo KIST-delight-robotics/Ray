@@ -1,0 +1,26 @@
+[Unit]
+Description=RAY Python voice pipeline
+# ray-cpp를 함께 띄우되(Wants) 순서는 걸지 않는다(After 없음). After=ray-cpp를 두면 python이
+# cpp의 ExecStartPre(PWM 게이트, 최대 60s)를 그대로 기다린다 — 실측 9.4s 지연. python은
+# cpp를 모델 로딩이 끝난 뒤(+40~60s)에야 연결하고 CppBridge에 연결 재시도가 있으므로,
+# 먼저 뜨는 편이 항상 이득이다. (실측: 분리 전 python 시작 +24.9s, cpp 서버 준비 +26.5s)
+Wants=ray-cpp.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/KIST_RAY/Ray
+EnvironmentFile=%h/.config/ray/ray.env
+# `uv run ray` 대신 venv 바이너리를 직접 호출한다. uv run은 실행 전 lock/venv 동기화를
+# 시도하는데, 부팅 시점엔 네트워크가 아직 없을 수 있어 불필요한 실패 요인이 된다.
+# 의존성을 바꿨다면 `uv sync` 후 이 서비스를 restart 할 것.
+# LED arbiter 소켓 대기 게이트는 두지 않는다. ACQUIRE가 LED 모듈 초기화가 아니라
+# 파이프라인 준비 완료 시점(첫 set_state)으로 옮겨졌고, 그때는 소켓이 이미 있다.
+# 게이트를 두면 모델 로딩(~48s)이 소켓 대기(~27s)와 직렬로 붙어 준비가 그만큼 늦어진다.
+# 남는 경합은 OSLedArbiterClient의 연결 재시도(5s)가 흡수한다.
+ExecStart=%h/KIST_RAY/Ray/.venv/bin/ray
+# C++ 준비 지연/네트워크 미준비로 인한 초기 실패를 흡수한다.
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

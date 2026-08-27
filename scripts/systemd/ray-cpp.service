@@ -1,0 +1,31 @@
+[Unit]
+Description=RAY C++ process (audio playback + motor control)
+# 시스템 서비스가 아니라 systemd --user 서비스인 이유:
+# build/Ray는 SFML -> OpenAL -> PipeWire 경로로 소리를 낸다. PipeWire는 유저 세션
+# ($XDG_RUNTIME_DIR=/run/user/1000)에서만 접근 가능하므로 유저 매니저 아래에서 돌아야 한다.
+#
+# 전제: `loginctl enable-linger ray_mk3`. GUI(graphical.target)를 끈 구성이라 로그인
+# 세션이 없으므로, linger가 부팅 시 user@1000.service를 띄워주지 않으면 이 서비스도
+# PipeWire도 시작되지 않는다. GUI를 끌 때 linger를 빼먹으면 RAY가 아예 안 뜬다.
+After=pipewire.service wireplumber.service
+Wants=pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+# cpp/config.toml, assets/ 를 상대경로로 열기 때문에 저장소 루트에서 실행해야 한다.
+WorkingDirectory=%h/KIST_RAY/Ray
+# RAY_UNIT(모터 홈 포지션 선택) 필수. 없으면 config 에러로 즉시 죽는다.
+EnvironmentFile=%h/.config/ray/ray.env
+# led-pwm.service(시스템 서비스)가 pwmchip0/pwm1을 export/enable할 때까지 대기.
+# user 매니저는 시스템 유닛에 After=를 걸 수 없어서, 존재 확인으로 순서를 대신한다.
+# 이 게이트가 없으면 부팅 시 "[LED] 하드웨어 PWM 미준비 → 밝기 비활성" 상태로 뜬다.
+# 60s 상한(600 x 0.1s). led-pwm.service(After=multi-user.target)는 부팅 +44s에 돈다(3회 부팅
+# 실측) — 10s 상한이었을 때는 매번 타임아웃해 "밝기 비활성"으로 떴다. 못 기다려도 부팅은 막지 않는다.
+ExecStartPre=/bin/sh -c 'n=0; while [ ! -r /sys/class/pwm/pwmchip0/pwm1/period ] && [ $n -lt 600 ]; do sleep 0.1; n=$((n+1)); done'
+ExecStart=%h/KIST_RAY/Ray/build/Ray
+# /dev/ttyUSB0(Dynamixel)가 아직 안 올라왔거나 모터 초기화가 실패하면 재시도.
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

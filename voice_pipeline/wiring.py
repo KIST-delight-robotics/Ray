@@ -297,7 +297,11 @@ def build_components(
     retry_handler = OpenAIRetryHandler(call_store)
     logging.getLogger("openai._base_client").addHandler(retry_handler)
     tts = TrackedTTS(raw_tts, call_store)
-    embedder = TrackedEmbedder(create_embedder(expected_dimension=_DEFAULT_DIMENSION), call_store)
+    # local_files_only: 부팅 시 HF 허브 왕복 생략(−3.4s) + 네트워크 미준비 상태에서도 기동.
+    # 새 기기 첫 실행은 캐시가 없어 실패한다 — docs/SETUP.md의 모델 캐시 부트스트랩 참고.
+    embedder = TrackedEmbedder(
+        create_embedder(expected_dimension=_DEFAULT_DIMENSION, local_files_only=True), call_store
+    )
 
     vector_index = NumpyVectorIndex()
     ids, vectors = memory_storage.load_all_embeddings()

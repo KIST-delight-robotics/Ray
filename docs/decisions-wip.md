@@ -95,6 +95,15 @@
 - **후보 수 상한(10) 제거 → 캡 도달까지 lazy 페이지 워크**: 최초 구현의 후보 조회 상한은 토큰 캡과 별개로 바인딩될 수 있는 의미 섞인 상수였다 (에피소드 0건 세션도 슬롯을 소모 → 캡이 남았는데 블록이 짧아지는 케이스). 세션 하나 확인 비용(인덱스 조회+포맷+토큰 카운트)이 밀리초 미만이고 워크는 캡 바인딩에서 멈추므로 상한의 실익이 없음 — 세션 목록은 전량 조회(GROUP BY라 어차피 전체 스캔), 에피소드 로딩만 페이지 단위 lazy로 전환해 페이지 크기(20)를 동작에 영향 없는 순수 배치 상수로 강등. 시간 기준 컷오프 대안은 기각 — "항상 이월 + 간격은 타임스탬프로 전달" 철학과 어긋나고, 세션 헤더가 이미 날짜를 나른다. 에피소드 토큰 수 사전 저장(컬럼 추가) 대안도 기각 — 계산이 병목이 아니고, 토크나이저 교체 시 낡아지며, 캡 판정 대상은 헤더 포함 포맷 텍스트라 합산만으로는 부정확.
 - **SQLite 히스토리 백엔드에 내부 락 추가**: 기존에는 ConversationHistory의 락이 유일한 직렬화 지점이었는데, 요약 영속화로 summarizer 워커 스레드가 같은 커넥션에 쓰는 두 번째 writer가 됐다. SQLiteMemoryStorage와 같은 패턴으로 백엔드 자체를 스레드 안전하게 전환.
 
+## 부팅 자동실행 (systemd) — 기동 순서와 네트워크 의존 제거
+
+- **user 유닛 + linger (system 유닛 기각)**: `build/Ray`가 SFML→OpenAL→PipeWire로 소리를 내고 PipeWire는 유저 세션(`/run/user/1000`)에만 있다. 대가: user 매니저는 system 유닛(`os-led-display`, `led-pwm`)에 `After=`를 걸 수 없어, 경계를 넘는 순서는 파일/소켓 존재 게이트(`ExecStartPre` 폴링)로 대신한다. GUI를 끄면 로그인 세션이 없으므로 `loginctl enable-linger` 없이는 RAY도 PipeWire도 안 뜬다.
+- **python은 cpp 게이트에 묶지 않는다**: `After=ray-cpp`는 cpp의 `ExecStartPre`(PWM 게이트) 완료까지 python을 잡아둔다 — 실측 9.4s. python은 모델 로딩(~44s) 뒤에야 cpp에 연결하고 `CppBridge`에 재시도가 있어 먼저 뜨는 편이 항상 이득. `Wants=`만 유지. cpp의 PWM 게이트 상한은 60s — `led-pwm.service`(After=multi-user.target)가 부팅 +44s에 돌아 10s 상한은 매번 타임아웃해 "밝기 비활성"으로 떴다(3회 부팅 재현).
+- **부팅 시 네트워크 의존 제거 — 두 곳**: (1) tiktoken 인코딩 사전이 `/tmp/data-gym-cache`에 캐시되는데 `/tmp`는 부팅마다 비워져 매 부팅 3.6MB 다운로드(8.6s vs 로컬 0.65s). 실패 시 `KeyError`만 잡혀 있어 python이 죽고 네트워크가 올 때까지 재시작 루프 — `TIKTOKEN_CACHE_DIR`을 홈으로. (2) `SentenceTransformer` 로드가 캐시가 있어도 허브 메타데이터 왕복(~3.4s) — `local_files_only=True`. 새 기기 첫 실행은 캐시가 없어 실패하므로 SETUP에 1회 부트스트랩을 명시.
+- **`HF_HUB_OFFLINE=1`은 대안이 아니다**: `file_name`을 명시해도 sentence-transformers가 `/api/models/.../tree/main` 조회를 시도해 `OfflineModeIsEnabled`로 죽는다(2회 재현). 환경변수 한 줄로 끝날 것 같지만 부팅 시 크래시 루프를 만든다 — 생성자 인자 `local_files_only`만 동작.
+- **부팅 시 임포트 13s의 구성 (측정)**: CPU 5.7s(torch 2.2 / openai 0.65 / google.cloud.speech 0.63) + SD 콜드 I/O 3.3s(터치되는 페이지 `.so` 126MB + `.pyc` 28MB, 전체 556MB 중) + 경합 4.2s(gdm 자동로그인→GNOME Shell 기동이 +23.6~35.7s로 임포트 구간과 정확히 겹침). 네트워크 사용은 0건(`connect()` 가로채기로 확인). torch는 silero_vad(onnx 모드여도 최상위 임포트)·텐서 변환·sentence_transformers 세 갈래로 묶여 제거 불가. google/openai lazy import는 기각 — 기동 시 클라이언트를 생성하므로 임포트만 미룰 수 없고, 생성까지 미루면 첫 웨이크워드 응답이 1~2s 느려진다(부팅 1회 vs 매 대화의 교환).
+- **부팅 시 시계 신뢰 불가**: RTC 배터리가 없어 부팅 후 ~30–40s 동안 시계가 며칠 틀리다 NTP로 점프한다(로그 파일명·타임스탬프가 파일 중간에서 점프). 부팅 타임라인 진단은 `journalctl -o short-monotonic`으로만.
+
 ## 차후 고려
 
 - **음악 댄스 메인 로봇 통합**: `music_dance/`는 현재 독립 실행(시리얼 포트 단독 점유). 메인 로봇의 한 모드로 통합 시 분석 코어(analyzer/timeline) 재사용 전제. 실시간(마이크) 입력이 필요해지면 HPSS(lookahead 필요) 재설계.

@@ -30,6 +30,7 @@ class SentenceTransformerEmbedder(IEmbedder):
         use_onnx: bool = False,
         expected_dimension: int | None = None,
         model_kwargs: dict[str, Any] | None = None,
+        local_files_only: bool = False,
     ) -> None:
         """Load a sentence-transformers embedding model.
 
@@ -42,13 +43,24 @@ class SentenceTransformerEmbedder(IEmbedder):
                 ``ConfigurationError``. 검증 생략하려면 ``None``.
             model_kwargs: ``SentenceTransformer`` 생성자에 전달할 추가 인자.
                 예: ``{"file_name": "onnx/model_qint8_arm64.onnx"}``.
+            local_files_only: ``True``면 HF 허브에 접속하지 않고 로컬 캐시만 사용.
+                부팅 시 네트워크 의존을 없애고 로드가 ~3.4s 빨라진다(허브 메타데이터
+                왕복 생략). 캐시가 없는 새 기기에서는 실패하므로 첫 1회는 ``False``로
+                로드해 캐시를 만들어야 한다. 환경변수 ``HF_HUB_OFFLINE=1``은 대안이
+                아니다 — sentence-transformers가 ``file_name``을 명시해도 허브 트리
+                조회를 시도해 예외로 죽는다.
         """
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:
             raise ImportError("sentence-transformers is required for local embeddings. Install with: uv sync") from exc
         backend = "onnx" if use_onnx else "torch"
-        self._model = SentenceTransformer(model, backend=backend, model_kwargs=model_kwargs or {})
+        self._model = SentenceTransformer(
+            model,
+            backend=backend,
+            model_kwargs=model_kwargs or {},
+            local_files_only=local_files_only,
+        )
         actual_dim = self._model.get_sentence_embedding_dimension()
         if expected_dimension is not None and actual_dim != expected_dimension:
             raise ConfigurationError(
@@ -145,6 +157,7 @@ def create_embedder(
     use_onnx: bool = True,
     expected_dimension: int | None = None,
     model_kwargs: dict[str, Any] | None = _DEFAULT_MODEL_KWARGS,
+    local_files_only: bool = False,
 ) -> IEmbedder:
     """Factory: create an IEmbedder instance.
 
@@ -159,6 +172,9 @@ def create_embedder(
             쓰려면 ``None``.
         model_kwargs: ``SentenceTransformer`` 생성자에 전달할 추가 인자.
             ``"local"`` backend에서만 사용.
+        local_files_only: ``"local"`` backend에서 HF 허브 접속 없이 캐시만 사용.
+            production wiring은 ``True`` (부팅 시 네트워크 의존 제거). 자세한 제약은
+            ``SentenceTransformerEmbedder`` 참고.
 
     Returns:
         Configured IEmbedder instance.
@@ -169,6 +185,7 @@ def create_embedder(
             use_onnx=use_onnx,
             expected_dimension=expected_dimension,
             model_kwargs=model_kwargs,
+            local_files_only=local_files_only,
         )
     elif backend == "api":
         return OpenAIEmbedder(model, dimension=expected_dimension)
