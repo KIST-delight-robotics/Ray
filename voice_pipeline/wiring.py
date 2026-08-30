@@ -188,7 +188,7 @@ class ProcessComponents:
         history = ConversationHistory(self.storage, self.token_counter)
         memory_storage = self.memory_storage if memory_enabled else None
         retriever = MemoryRetriever(self.memory_storage, self.vector_index, self.embedder) if memory_enabled else None
-        return TextSession(
+        session = TextSession(
             llm=self.llm,
             history=history,
             token_counter=self.token_counter,
@@ -198,6 +198,8 @@ class ProcessComponents:
             load_session_context=load_session_context,
             history_backend=self.storage,
         )
+        trace.set_session(session.session_id)  # 텍스트 모드의 호출 기록에도 세션 ID를 찍는다
+        return session
 
 
 def build_components(
