@@ -17,8 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
-from voice_pipeline.trace import CallRecord, SQLiteCallStore
-from voice_pipeline.types import utc_now_str
+from voice_pipeline.trace import CallRecord, capture_call, write_calls
 
 if TYPE_CHECKING:
     from torch import Tensor
@@ -444,16 +443,11 @@ class ThreadedTurnGPT:
 
     Args:
         turngpt: The underlying (synchronous) TurnGPTWrapper implementation.
-        call_store: Optional call store for latency recording. Records are
-            buffered in memory and flushed on ``stop()``.
-        session_id: Session identifier for call records.
     """
 
     def __init__(
         self,
         turngpt: TurnGPTWrapper,
-        call_store: SQLiteCallStore | None = None,
-        session_id: str = "",
     ) -> None:
         self._turngpt = turngpt
         self._pending_text: str | None = None
@@ -462,8 +456,6 @@ class ThreadedTurnGPT:
         self._work_event = threading.Event()
         self._stop_event = threading.Event()
         self._pending_reset = False
-        self._call_store = call_store
-        self._session_id = session_id
         self._call_records: list[CallRecord] = []
         self._thread = threading.Thread(target=self._run, daemon=True, name="threaded-turngpt")
         self._thread.start()
@@ -548,33 +540,17 @@ class ThreadedTurnGPT:
                         elapsed_ms,
                     )
 
-            if self._call_store is not None:
-                status = "ok" if elapsed_ms <= 100 else "slow"
-                self._call_records.append(
-                    CallRecord(
-                        session_id=self._session_id,
-                        timestamp=utc_now_str(),
-                        module="turngpt",
-                        operation="predict",
-                        model="turngpt",
-                        elapsed_ms=elapsed_ms,
-                        status=status,
-                        turn_index=self._call_store.current_turn_index,
-                    )
-                )
+            status = "ok" if elapsed_ms <= 100 else "slow"
+            record = capture_call("turngpt", "predict", "turngpt", elapsed_ms, status=status)
+            if record is not None:
+                self._call_records.append(record)
 
     # ------------------------------------------------------------------
     # Call record flush
     # ------------------------------------------------------------------
 
     def _flush_call_records(self) -> None:
-        if not self._call_store or not self._call_records:
-            return
-        try:
-            for record in self._call_records:
-                self._call_store.record(record)
-        except Exception:
-            logger.warning("Failed to flush TurnGPT call records", exc_info=True)
+        write_calls(self._call_records)
         self._call_records.clear()
 
 

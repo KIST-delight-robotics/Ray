@@ -104,8 +104,18 @@
 - **인메모리 테스트 더블 제거**: `MemoryStorageBackend`/`InMemoryMemoryStorage`는 SQLite `:memory:`로 대체(두 백엔드 모두 단일 커넥션이라 동작). 검증용으로 리스트에 쌓아야 하는 call/trace 스토어는 `tests/fakes.py`로 이동 — 테스트 더블은 테스트가 소유한다.
 - **공유 상수는 `settings.py`**: 토큰 예산(`_MAX_HISTORY_TOKENS`, `_HARD_CAP_TOKENS`)을 wiring이 다른 모듈의 private 클래스 변수로 꺼내 쓰고 있었다. "중앙 설정 없음" 규칙은 벤더 파라미터엔 맞지만 여러 모듈이 공유하는 값엔 안 맞는다. 클래스 변수는 테스트 monkeypatch를 위해 남기고 초기값만 settings에서 가져온다.
 - **타입은 만들어 내는 모듈이 소유**: `core/types.py` 27개 중 17개가 파일 한두 곳에서만 쓰였다(`Phase`는 session_loop만, `SystemMode`는 __main__만). "경계를 넘는 타입은 core에" 규칙이 소유자가 명확한 타입까지 끌어모은 것. `types.py`에는 벤더 인터페이스와 그 시그니처가 참조하는 계약 타입(스트림·결과·LLMMetrics), 공통 별칭만 남기고 나머지는 생산자로 보냈다(`TurnDecision → turn_detector`, `ResponseData → generator`, `VAPResult → adapters/vap`, …). 방향은 전부 소비자 → 생산자라 순환 없음. 남긴 기준: 소유자에 두면 어색한 의존이 생기는 것 — `LLMMetrics`를 `llm_openai`에 두면 history가 OpenAI 어댑터를 import하게 된다.
-- **이번에 하지 않은 것**: `session_id`/`call_store`가 생성자마다 들어가는 트레이싱 주입 정리. `adapters/vap.py`·`turngpt.py`가 `trace.py`에 런타임 의존하는 것도 그 잔재. 동작 리팩터라 구조 이동(동작 변경 0)과 분리했다.
+- **이번에 하지 않은 것**: `session_id`/`call_store`가 생성자마다 들어가는 트레이싱 주입 정리. 동작 리팩터라 구조 이동(동작 변경 0)과 분리했다 — 다음 항목(트레이싱)에서 처리.
 - **병합 도구의 함정**: ast 기반으로 파일을 합칠 때 첫 body 문장의 데코레이터(`@pytest.fixture`)와, 삭제 범위 사이에 끼어 있던 모듈 상수(`_CALL_COLUMNS`)가 유실됐다. 대규모 이동 후에는 반드시 전체 테스트 수를 전후 비교할 것.
+
+## 트레이싱 — 주입에서 logging식 모듈 API로
+
+- **문제**: CallRecord 하나를 채우려면 emitter마다 싱크(`call_store` 생성자 주입 6곳), `session_id`(생성자 3곳 + wiring이 세션마다 속성 4개에 대입), `turn_index`(스토어를 우체통으로 써서 `set_turn_index`/`current_turn_index`로 되읽기)가 필요했다. 같은 레코드의 두 컨텍스트 필드가 다른 경로로 전파되고, `if self._call_store is not None` 가드가 15곳.
+- **관찰**: 트레이싱은 logging과 같은 모양이다 — fire-and-forget, 컨텍스트는 "지금 진행 중인 것", 싱크는 프로세스에 하나. 아무도 logger를 주입하지 않는데 트레이싱만 DI 규칙을 적용해서 9개 객체에 `session_id`를 밀어 넣게 됐다. 명시적 주입이 원인이었다.
+- **채택**: `trace.py` 모듈 전역 API. `install()`(wiring, 1회), `set_session()`(세션마다), `set_turn()`(TurnDetector), `record_call()` / `save_turn()`. 싱크 없으면 no-op이라 가드가 사라진다. 저장 형식(두 테이블)은 불변 — 기록 경로만 바뀜.
+- **핫패스 버퍼링은 유지**: VAP(10Hz)·TurnGPT 추론 스레드는 SQLite 쓰기를 피해야 해서 기록을 모아 `reset()/stop()`에서 쓴다. 이때 `turn_index`는 **캡처 시점** 값이어야 하므로(flush 시점이면 세션 전체가 마지막 턴으로 찍힘) `capture_call()`(스탬프만) + `write_calls()`(나중에 쓰기)를 분리했다. 비동기 writer 스레드 대안은 기각 — 테스트 단언이 경합하게 되고 얻는 건 균일성뿐.
+- **`pipeline_traces.turn_index` 추가**: 두 테이블의 조인 키가 `session_id`뿐이었다. `save_turn`이 저장 시점의 턴을 찍는다 — `_save_trace`는 completed/truncated/cancelled 모두 `turn_detector.reset()` 이전(해당 exchange 안)에서 호출되므로 그 턴의 call_records와 같은 값. 기존 DB는 `ALTER TABLE`로 무손실 추가(`call_records.turn_index`와 같은 패턴).
+- **전역 상태 트레이드오프**: 프로세스당 세션 하나가 전제(현 아키텍처·eval 모두 순차). 동시 세션이 필요해지면 내부를 `contextvars`로 바꾸되 API는 불변. 테스트는 autouse `trace.reset()`으로 격리하고, 검증은 `call_log`/`turn_log` 픽스처 — logging의 `caplog`과 같은 패턴. 결과적으로 이전(생성자에 fake 주입)보다 테스트 코드가 짧아졌다.
+- **`HistorySummarizer.session_id`는 남김**: 트레이싱이 아니라 롤링 요약 영속화(다음 세션 이월)의 키라서 정당한 인자다. "session_id가 보이면 전부 트레이싱 잔재"가 아니다.
 
 ## 차후 고려
 

@@ -1,9 +1,13 @@
 """실행 기록 (관측용). 없어도 대화는 돈다.
 
-- ``PipelineTrace`` → ``SQLiteTraceStore``: 턴 하나의 타임스탬프·결과.
-- ``CallRecord`` → ``SQLiteCallStore``: 외부 호출 1건(모듈/작업/지연/상태).
-- ``TrackedTTS`` / ``TrackedEmbedder``: ITTS / IEmbedder 를 감싸 호출을 기록하는 래퍼.
-- ``OpenAIRetryHandler``: openai SDK의 재시도 로그를 CallRecord로 바꾸는 logging 핸들러.
+기록은 두 종류, 입구는 하나:
+- ``PipelineTrace`` (턴 1개 = 1행) → ``save_turn()`` → ``SQLiteTraceStore``
+- ``CallRecord`` (외부 호출 1건 = 1행) → ``record_call()`` → ``SQLiteCallStore``
+
+컨텍스트(session_id, turn_index)는 이 모듈이 들고 있다 — wiring이 ``set_session()``,
+TurnDetector가 ``set_turn()``으로 갱신하고, 레코드를 만들 때 자동으로 찍힌다.
+``TrackedTTS`` / ``TrackedEmbedder``는 ITTS / IEmbedder 를 감싸 호출을 기록하는 래퍼,
+``OpenAIRetryHandler``는 openai SDK 재시도 로그를 CallRecord로 바꾸는 logging 핸들러.
 """
 
 from __future__ import annotations
@@ -15,9 +19,10 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Generator
+from collections.abc import Generator, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import numpy as np
 
@@ -60,6 +65,7 @@ class PipelineTrace:
 
     # -- Link to conversation history --
     user_msg_id: int = 0
+    turn_index: int = 0  # call_records.turn_index 와 같은 exchange 인덱스 — 두 테이블 조인 키
 
     # -- Orchestrator-level monotonic timestamps --
     prepare_ts: float = 0.0
@@ -110,6 +116,7 @@ class PipelineTrace:
             "outcome": self.outcome,
             "speculative_attempts": self.speculative_attempts,
             "user_msg_id": self.user_msg_id,
+            "turn_index": self.turn_index,
             "memory_ms": self._delta_ms(self.pipeline_start_ts, self.memory_done_ts),
             "context_ms": self._delta_ms(self.memory_done_ts, self.context_done_ts),
             "llm_ms": self._delta_ms(self.llm_start_ts, self.llm_done_ts),
@@ -159,8 +166,8 @@ class CallRecord:
 
     ``turn_index`` is the conversation exchange this call belongs to (0-based),
     letting per-call data be attributed to a specific question/turn within a
-    multi-turn session. Stamped at construction time from the shared turn
-    counter (see SQLiteCallStore.current_turn_index).
+    multi-turn session. ``capture_call()`` / ``record_call()`` stamp it from the
+    current turn context (``set_turn``).
     """
 
     session_id: str
@@ -182,6 +189,7 @@ _COLUMNS = (
     "outcome",
     "speculative_attempts",
     "user_msg_id",
+    "turn_index",
     "memory_ms",
     "context_ms",
     "llm_ms",
@@ -224,6 +232,7 @@ class SQLiteTraceStore:
                 outcome                 TEXT    NOT NULL,
                 speculative_attempts    INTEGER NOT NULL DEFAULT 1,
                 user_msg_id             INTEGER NOT NULL DEFAULT 0,
+                turn_index              INTEGER NOT NULL DEFAULT 0,
                 memory_ms               REAL    NOT NULL DEFAULT 0,
                 context_ms              REAL    NOT NULL DEFAULT 0,
                 llm_ms                  REAL    NOT NULL DEFAULT 0,
@@ -247,6 +256,8 @@ class SQLiteTraceStore:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(pipeline_traces)")}
         if "turn_shift_reason" not in existing:
             conn.execute("ALTER TABLE pipeline_traces ADD COLUMN turn_shift_reason TEXT NOT NULL DEFAULT ''")
+        if "turn_index" not in existing:
+            conn.execute("ALTER TABLE pipeline_traces ADD COLUMN turn_index INTEGER NOT NULL DEFAULT 0")
 
     def save(self, trace: PipelineTrace) -> None:
         """Persist a trace record."""
@@ -289,7 +300,6 @@ class SQLiteCallStore:
 
     def __init__(self, db_path: str) -> None:
         self._lock = threading.Lock()
-        self._turn_index = 0
         path = Path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -319,15 +329,6 @@ class SQLiteCallStore:
             self._conn.execute("ALTER TABLE call_records ADD COLUMN turn_index INTEGER NOT NULL DEFAULT 0")
         self._conn.commit()
 
-    def set_turn_index(self, index: int) -> None:
-        """Set the current exchange index stamped onto new call records."""
-        self._turn_index = index
-
-    @property
-    def current_turn_index(self) -> int:
-        """Current exchange index (0-based) for stamping call records."""
-        return self._turn_index
-
     def record(self, record: CallRecord) -> None:
         """Persist a single call record."""
         values = tuple(getattr(record, col) for col in _CALL_COLUMNS)
@@ -346,6 +347,140 @@ class SQLiteCallStore:
             self._conn.close()
 
 
+# ---------------------------------------------------------------------------
+# 기록 API — logging처럼 모듈 전역. 프로세스당 세션 하나를 전제한다.
+#
+# wiring이 install()로 싱크를 꽂고 세션마다 set_session(), TurnDetector가 턴마다
+# set_turn()을 부른다. emitter는 record_call() 한 줄이면 되고, 싱크가 없으면 no-op.
+# 추론 스레드처럼 SQLite 쓰기를 피해야 하는 곳은 capture_call()로 레코드만 만들어
+# 모아 두고 write_calls()로 한 번에 쓴다.
+# ---------------------------------------------------------------------------
+
+
+class _CallSink(Protocol):
+    def record(self, record: CallRecord) -> None: ...
+
+
+class _TurnSink(Protocol):
+    def save(self, trace: PipelineTrace) -> None: ...
+
+
+_call_sink: _CallSink | None = None
+_turn_sink: _TurnSink | None = None
+_session_id = ""
+_turn_index = 0
+
+
+def install(call_store: _CallSink | None = None, trace_store: _TurnSink | None = None) -> None:
+    """싱크 설치 (프로세스 시작 시 1회). 이전 싱크는 닫지 않는다."""
+    global _call_sink, _turn_sink
+    _call_sink, _turn_sink = call_store, trace_store
+
+
+def reset() -> None:
+    """싱크와 컨텍스트를 초기 상태로 (테스트 격리용)."""
+    global _call_sink, _turn_sink, _session_id, _turn_index
+    _call_sink = _turn_sink = None
+    _session_id, _turn_index = "", 0
+
+
+def close() -> None:
+    """싱크를 닫고 초기화 (프로세스 종료 시)."""
+    for sink in (_call_sink, _turn_sink):
+        close_fn = getattr(sink, "close", None)
+        if close_fn is not None:
+            try:
+                close_fn()
+            except Exception:
+                logger.warning("Failed to close trace sink", exc_info=True)
+    reset()
+
+
+def set_session(session_id: str) -> None:
+    global _session_id
+    _session_id = session_id
+
+
+def set_turn(turn_index: int) -> None:
+    """현재 exchange 인덱스(0-based). 이후 레코드에 찍힌다."""
+    global _turn_index
+    _turn_index = turn_index
+
+
+def current_turn() -> int:
+    return _turn_index
+
+
+def capture_call(
+    module: str,
+    operation: str,
+    model: str,
+    elapsed_ms: float,
+    *,
+    status: str = "ok",
+    metadata: str | None = None,
+    turn_index: int | None = None,
+) -> CallRecord | None:
+    """현재 컨텍스트로 CallRecord를 만든다(쓰지는 않음). 싱크가 없으면 None."""
+    if _call_sink is None:
+        return None
+    return CallRecord(
+        session_id=_session_id,
+        timestamp=utc_now_str(),
+        module=module,
+        operation=operation,
+        model=model,
+        elapsed_ms=elapsed_ms,
+        status=status,
+        metadata=metadata,
+        turn_index=_turn_index if turn_index is None else turn_index,
+    )
+
+
+def write_calls(records: Iterable[CallRecord]) -> None:
+    """레코드들을 싱크에 쓴다. 첫 실패에서 경고 후 중단(로그 폭주 방지)."""
+    sink = _call_sink
+    if sink is None:
+        return
+    for record in records:
+        try:
+            sink.record(record)
+        except Exception:
+            logger.warning("Failed to record call (%s.%s)", record.module, record.operation, exc_info=True)
+            return
+
+
+def record_call(
+    module: str,
+    operation: str,
+    model: str,
+    elapsed_ms: float,
+    *,
+    status: str = "ok",
+    metadata: str | None = None,
+    turn_index: int | None = None,
+) -> None:
+    """외부 호출 1건을 기록한다. 싱크가 없으면 no-op."""
+    record = capture_call(module, operation, model, elapsed_ms, status=status, metadata=metadata, turn_index=turn_index)
+    if record is not None:
+        write_calls((record,))
+
+
+def save_turn(trace: PipelineTrace) -> None:
+    """턴 기록을 저장한다. session_id / turn_index는 현재 컨텍스트로 채운다. 싱크가 없으면 no-op."""
+    sink = _turn_sink
+    if sink is None:
+        return
+    trace.session_id = _session_id
+    trace.turn_index = _turn_index
+    try:
+        sink.save(trace)
+        if trace.outcome != "cancelled":
+            logger.debug("Pipeline trace: %s", trace.summary())
+    except Exception:
+        logger.warning("Failed to save pipeline trace", exc_info=True)
+
+
 _PATTERN = re.compile(r"Retrying request to (/\S+) in ([\d.]+) seconds")
 
 _ENDPOINT_MAP: dict[str, tuple[str, str]] = {
@@ -360,15 +495,7 @@ class OpenAIRetryHandler(logging.Handler):
 
     Attach to ``logging.getLogger("openai._base_client")`` to capture
     retry events across all OpenAI API calls (TTS, LLM, embeddings).
-
-    Args:
-        call_store: Store to persist call records.
     """
-
-    def __init__(self, call_store: SQLiteCallStore) -> None:
-        super().__init__()
-        self._store = call_store
-        self.session_id: str = ""
 
     def emit(self, record: logging.LogRecord) -> None:
         m = _PATTERN.search(record.getMessage())
@@ -379,25 +506,18 @@ class OpenAIRetryHandler(logging.Handler):
         delay_sec = m.group(2)
         module, operation = _ENDPOINT_MAP.get(endpoint, ("unknown", endpoint))
 
-        call_record = CallRecord(
-            session_id=self.session_id,
-            timestamp=utc_now_str(),
-            module=module,
-            operation=operation,
-            model="",
-            elapsed_ms=0.0,
+        record_call(
+            module,
+            operation,
+            "",
+            0.0,
             status="retry",
             metadata=f'{{"endpoint": "{endpoint}", "retry_delay_sec": {delay_sec}}}',
-            turn_index=self._store.current_turn_index,
         )
-        try:
-            self._store.record(call_record)
-        except Exception:
-            pass
 
 
 class TrackedTTS(ITTS):
-    """ITTS wrapper that records per-call execution data to an SQLiteCallStore.
+    """ITTS wrapper that records per-call execution data via ``record_call``.
 
     Transparent drop-in: all ITTS methods delegate to the inner TTS,
     with timing and status recorded around ``synthesize`` and across the
@@ -406,16 +526,13 @@ class TrackedTTS(ITTS):
 
     Args:
         inner: The underlying TTS implementation.
-        call_store: Store to persist call records.
     """
 
     _STALL_GAP_MS = 500.0  # 청크 간 공백이 이 값 이상이면 stalled — 네트워크 스톨
     _SLOW_HEADROOM_SEC = 0.0  # (수신 오디오 − 경과 시간) 최소값이 이 값 미만이면 slow — 실시간 미달
 
-    def __init__(self, inner: ITTS, call_store: SQLiteCallStore) -> None:
+    def __init__(self, inner: ITTS) -> None:
         self._inner = inner
-        self._store = call_store
-        self.session_id: str = ""
 
     @property
     def output_sample_rate(self) -> int:
@@ -536,38 +653,21 @@ class TrackedTTS(ITTS):
         status: str = "ok",
         metadata: str | None = None,
     ) -> None:
-        record = CallRecord(
-            session_id=self.session_id,
-            timestamp=utc_now_str(),
-            module="tts",
-            operation=operation,
-            model=self._inner.model_name,
-            elapsed_ms=elapsed_ms,
-            status=status,
-            metadata=metadata,
-            turn_index=self._store.current_turn_index,
-        )
-        try:
-            self._store.record(record)
-        except Exception:
-            logger.warning("Failed to record TTS call", exc_info=True)
+        record_call("tts", operation, self._inner.model_name, elapsed_ms, status=status, metadata=metadata)
 
 
 class TrackedEmbedder(IEmbedder):
-    """IEmbedder wrapper that records per-call execution data to an SQLiteCallStore.
+    """IEmbedder wrapper that records per-call execution data via ``record_call``.
 
     Transparent drop-in: all IEmbedder methods delegate to the inner
     embedder, with timing recorded around ``embed`` and ``embed_batch``.
 
     Args:
         inner: The underlying embedder implementation.
-        call_store: Store to persist call records.
     """
 
-    def __init__(self, inner: IEmbedder, call_store: SQLiteCallStore) -> None:
+    def __init__(self, inner: IEmbedder) -> None:
         self._inner = inner
-        self._store = call_store
-        self.session_id: str = ""
 
     def embed(self, text: str) -> np.ndarray:
         t0 = time.monotonic()
@@ -601,18 +701,4 @@ class TrackedEmbedder(IEmbedder):
         status: str = "ok",
         metadata: str | None = None,
     ) -> None:
-        record = CallRecord(
-            session_id=self.session_id,
-            timestamp=utc_now_str(),
-            module="embedder",
-            operation=operation,
-            model=self._inner.model_name,
-            elapsed_ms=elapsed_ms,
-            status=status,
-            metadata=metadata,
-            turn_index=self._store.current_turn_index,
-        )
-        try:
-            self._store.record(record)
-        except Exception:
-            logger.warning("Failed to record embedder call", exc_info=True)
+        record_call("embedder", operation, self._inner.model_name, elapsed_ms, status=status, metadata=metadata)

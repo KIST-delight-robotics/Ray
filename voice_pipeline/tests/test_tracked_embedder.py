@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from voice_pipeline.tests.fakes import RecordingCallStore
-from voice_pipeline.trace import TrackedEmbedder
+from voice_pipeline.trace import TrackedEmbedder, install, set_session
 from voice_pipeline.types import IEmbedder
 
 
@@ -37,8 +37,9 @@ class TestTrackedEmbedder:
     def setup(self) -> tuple[TrackedEmbedder, RecordingCallStore, _FakeEmbedder]:
         inner = _FakeEmbedder()
         store = RecordingCallStore()
-        wrapper = TrackedEmbedder(inner, store)
-        wrapper.session_id = "sess-1"
+        install(call_store=store)
+        wrapper = TrackedEmbedder(inner)
+        set_session("sess-1")
         return wrapper, store, inner
 
     def test_embed_passthrough(self, setup: tuple[TrackedEmbedder, RecordingCallStore, _FakeEmbedder]) -> None:
@@ -88,17 +89,18 @@ class TestTrackedEmbedder:
         inner = _FakeEmbedder()
         store = MagicMock()
         store.record.side_effect = RuntimeError("db error")
-        wrapper = TrackedEmbedder(inner, store)
+        wrapper = TrackedEmbedder(inner)
         result = wrapper.embed("test")
         assert result.shape == (4,)
 
     def test_session_id_mutable(self) -> None:
         inner = _FakeEmbedder()
         store = RecordingCallStore()
-        wrapper = TrackedEmbedder(inner, store)
-        wrapper.session_id = "s1"
+        install(call_store=store)
+        wrapper = TrackedEmbedder(inner)
+        set_session("s1")
         wrapper.embed("a")
-        wrapper.session_id = "s2"
+        set_session("s2")
         wrapper.embed("b")
         assert store.records[0].session_id == "s1"
         assert store.records[1].session_id == "s2"

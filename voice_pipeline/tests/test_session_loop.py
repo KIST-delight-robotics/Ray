@@ -14,7 +14,7 @@ from voice_pipeline.adapters.tts_openai import OpenAITTS
 from voice_pipeline.generator import GeneratorState, ResponseData
 from voice_pipeline.session_loop import Phase, SessionLoop, _PendingTruncation
 from voice_pipeline.tests.fakes import RecordingTraceStore
-from voice_pipeline.trace import PipelineTrace
+from voice_pipeline.trace import PipelineTrace, install, set_session
 from voice_pipeline.turn_detector import TurnDecision
 from voice_pipeline.types import AudioFrame, WordTimestamp
 
@@ -1134,7 +1134,8 @@ def _make_session_loop_with_trace(
     """Create an SessionLoop with RecordingTraceStore."""
     orch, mocks = _make_session_loop(monkeypatch)
     store = RecordingTraceStore()
-    orch._trace_store = store
+    install(trace_store=store)
+    set_session("test-session")
     orch._session_id = "test-session"
     mocks["generator"].trace = PipelineTrace(run_id=1, pipeline_mode="full", prepare_ts=time.monotonic())
     return orch, mocks, store
@@ -1305,7 +1306,6 @@ class TestPipelineTraceTimestamps:
         trace = mocks["generator"].trace
         assert trace.turn_shift_ts > 0
         assert trace.begin_streaming_ts > 0
-        assert trace.session_id != ""
 
     def test_playback_started_sets_trace_timestamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
         orch, mocks, store = _make_session_loop_with_trace(monkeypatch)

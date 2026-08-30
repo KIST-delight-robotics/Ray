@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 from voice_pipeline.history import ConversationHistory, HistoryTurn, SQLiteStorageBackend
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.settings import HISTORY_TOKEN_BUDGET, SUMMARY_MAX_TOKENS
-from voice_pipeline.trace import CallRecord, SQLiteCallStore
+from voice_pipeline.trace import record_call
 from voice_pipeline.types import ILLM, TokenCounter, utc_now_str
 
 if TYPE_CHECKING:
@@ -702,7 +702,6 @@ class HistorySummarizer:
         token_counter: TokenCounter,
         history_budget_tokens: int,
         *,
-        call_store: SQLiteCallStore | None = None,
         session_id: str = "",
         summary_backend: SQLiteStorageBackend | None = None,
     ) -> None:
@@ -714,8 +713,7 @@ class HistorySummarizer:
             token_counter: 요약 블록 토큰 계산용 카운터.
             history_budget_tokens: ContextBuilder의 히스토리 예산
                 (트리거 판정 기준).
-            call_store: 요약 호출 기록 스토어. ``None``이면 기록 안 함.
-            session_id: call record 및 요약 영속화에 쓸 세션 ID.
+            session_id: 요약 영속화(다음 세션 이월)에 쓸 세션 ID.
             summary_backend: 요약 영속화 대상 히스토리 백엔드. 스왑 성공 시
                 다음 세션의 이월(carryover) 로딩을 위해 저장한다.
                 ``None``이면 저장 안 함.
@@ -723,7 +721,6 @@ class HistorySummarizer:
         self._llm = llm
         self._token_counter = token_counter
         self._trigger_tokens = int(history_budget_tokens * self._TRIGGER_RATIO)
-        self._call_store = call_store
         self._session_id = session_id
         self._summary_backend = summary_backend
 
@@ -868,23 +865,9 @@ class HistorySummarizer:
             logger.warning("Failed to persist rolling summary", exc_info=True)
 
     def _record_call(self, status: str, elapsed_ms: float) -> None:
-        if self._call_store is None:
-            return
-        try:
-            self._call_store.record(
-                CallRecord(
-                    session_id=self._session_id,
-                    timestamp=utc_now_str(),
-                    module="history_summarizer",
-                    operation="summarize",
-                    model=getattr(self._llm, "model", "unknown"),
-                    elapsed_ms=elapsed_ms,
-                    status=status,
-                    turn_index=self._call_store.current_turn_index,
-                )
-            )
-        except Exception:
-            logger.debug("Failed to record summarizer call", exc_info=True)
+        record_call(
+            "history_summarizer", "summarize", getattr(self._llm, "model", "unknown"), elapsed_ms, status=status
+        )
 
 
 def _starts_exchange(turn: HistoryTurn) -> bool:

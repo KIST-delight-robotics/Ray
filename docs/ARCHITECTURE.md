@@ -370,7 +370,7 @@ voice_pipeline/
 ├── history.py         # ConversationHistory + SQLiteStorageBackend
 ├── text_session.py    # 텍스트 전용 세션 (eval --text)
 ├── greeting_audio.py  # 인사/작별 오디오 사전 생성
-├── trace.py           # PipelineTrace/CallRecord + SQLite 스토어 + Tracked 래퍼 (관측용)
+├── trace.py           # 기록 API(record_call/save_turn, logging식) + PipelineTrace/CallRecord + SQLite 스토어
 ├── types.py           # IASR/ILLM/ITTS/IEmbedder + 계약 타입(스트림·결과), AudioFrame/TokenCounter
 ├── settings.py        # 오디오 형식, DB 경로, 토큰 예산
 ├── adapters/          # 외부 경계 — 벤더·하드웨어·외부 모델 래퍼

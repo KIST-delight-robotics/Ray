@@ -10,6 +10,7 @@ import pytest
 from voice_pipeline.history import HistoryTurn
 from voice_pipeline.prompt import HistorySummarizer
 from voice_pipeline.tests.fakes import RecordingCallStore
+from voice_pipeline.trace import install, set_session
 from voice_pipeline.types import LLMMetrics, LLMResult, LLMStream, Usage
 
 _JOIN_TIMEOUT = 5.0
@@ -86,7 +87,6 @@ def _make_summarizer(
     *,
     budget: int = 100,
     keep_recent: int = 4,
-    call_store: RecordingCallStore | None = None,
     summary_backend: FakeSummaryBackend | None = None,
 ) -> HistorySummarizer:
     monkeypatch.setattr(HistorySummarizer, "_KEEP_RECENT_TURNS", keep_recent)
@@ -94,7 +94,6 @@ def _make_summarizer(
         llm,
         _word_counter,
         budget,
-        call_store=call_store,
         session_id="test-session",
         summary_backend=summary_backend,
     )
@@ -247,8 +246,9 @@ class TestFailureHandling:
 
     def test_hard_cap_hit_discards_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
         store = RecordingCallStore()
+        install(call_store=store)
         llm = FakeLLM(output_tokens=HistorySummarizer._HARD_CAP_TOKENS)
-        s = _make_summarizer(llm, monkeypatch, budget=100, keep_recent=4, call_store=store)
+        s = _make_summarizer(llm, monkeypatch, budget=100, keep_recent=4)
         s.maybe_schedule(_make_turns(10))
         _join(s)
 
@@ -309,8 +309,10 @@ class TestPersistence:
 class TestObservability:
     def test_call_recorded_on_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         store = RecordingCallStore()
+        install(call_store=store)
+        set_session("test-session")
         llm = FakeLLM()
-        s = _make_summarizer(llm, monkeypatch, budget=100, keep_recent=4, call_store=store)
+        s = _make_summarizer(llm, monkeypatch, budget=100, keep_recent=4)
         s.maybe_schedule(_make_turns(10))
         _join(s)
 

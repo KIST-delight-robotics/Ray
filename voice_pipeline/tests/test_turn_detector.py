@@ -13,6 +13,7 @@ import numpy as np
 from voice_pipeline.adapters.turngpt import SyncTurnGPTAdapter, TurnGPTWrapper
 from voice_pipeline.adapters.vap import ThreadedVAP, VAPResult
 from voice_pipeline.tests.fakes import RecordingCallStore
+from voice_pipeline.trace import current_turn, install, set_session
 from voice_pipeline.turn_detector import TurnDecision, TurnDetector, _TurnState
 from voice_pipeline.types import IEmbedder
 
@@ -291,6 +292,8 @@ class TestTurnShiftPrepareDefer:
     def test_fresh_similar_change_records_skip_and_shifts(self):
         """유사한 신규 변화는 skip을 기록하고 같은 프레임에서 shift가 진행된다."""
         store = RecordingCallStore()
+        install(call_store=store)
+        set_session("s")
         mock_vap = MagicMock(spec=ThreadedVAP)
         mock_vap.latest_result = VAPResult(0.2, 0.2, False)
         mock_turngpt = MagicMock(spec=TurnGPTWrapper)
@@ -299,8 +302,6 @@ class TestTurnShiftPrepareDefer:
             mock_vap,
             SyncTurnGPTAdapter(mock_turngpt),
             _make_embedder_mock(similarity=0.95),
-            call_store=store,
-            session_id="s",
         )
         detector._silence_elapsed_sec = 3.0
         detector._prev_asr_text = "is there."
@@ -424,24 +425,25 @@ class TestExchangeIndex:
     def _detector(self, store: RecordingCallStore) -> TurnDetector:
         mock_vap = MagicMock(spec=ThreadedVAP)
         adapter = SyncTurnGPTAdapter(MagicMock(spec=TurnGPTWrapper))
-        return TurnDetector(mock_vap, adapter, _make_embedder_mock(), call_store=store)
+        return TurnDetector(mock_vap, adapter, _make_embedder_mock())
 
     def test_counter_tracks_exchange_across_turns(self):
         store = RecordingCallStore()
+        install(call_store=store)
         detector = self._detector(store)
 
         # Exchange 0: user turn and its generation share index 0.
-        assert store.current_turn_index == 0  # seeded at construction
+        assert current_turn() == 0  # seeded at construction
         detector.commit("first")  # user→robot; generation of exchange 0
-        assert store.current_turn_index == 0
+        assert current_turn() == 0
 
         detector.reset()  # entering user turn of exchange 1
-        assert store.current_turn_index == 1
+        assert current_turn() == 1
         detector.commit("second")  # generation of exchange 1
-        assert store.current_turn_index == 1
+        assert current_turn() == 1
 
         detector.reset()  # exchange 2
-        assert store.current_turn_index == 2
+        assert current_turn() == 2
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +663,8 @@ class TestSimilarityGateRecording:
         turngpt_prob: float = 0.5,
     ) -> tuple[TurnDetector, RecordingCallStore]:
         store = RecordingCallStore()
+        install(call_store=store)
+        set_session("sess-1")
         mock_vap = MagicMock(spec=ThreadedVAP)
         mock_vap.latest_result = vap_result
         mock_turngpt = MagicMock(spec=TurnGPTWrapper)
@@ -669,8 +673,6 @@ class TestSimilarityGateRecording:
             mock_vap,
             SyncTurnGPTAdapter(mock_turngpt),
             _make_embedder_mock(similarity=similarity),
-            call_store=store,
-            session_id="sess-1",
         )
         return detector, store
 

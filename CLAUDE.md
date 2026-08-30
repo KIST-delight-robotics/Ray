@@ -111,8 +111,8 @@ Some modules (VAP, TurnGPT, Wakeword etc.) wrap externally cloned model reposito
   one file in `adapters/`. Internal logic → extend an existing top-level file, or add one new
   file. A new subpackage only for an optional subsystem like `memory/`. No per-module
   `exceptions.py` / `__init__.py` re-exports / README.
-- **Dependency direction**: `adapters/` imports only `types`, `settings` (and `trace` for call
-  recording). Top-level modules may import each other one-way (`session_loop → generator →
+- **Dependency direction**: `adapters/` imports only `types`, `settings`, and `trace` (the
+  recording API — used like `logging`, never injected). Top-level modules may import each other one-way (`session_loop → generator →
   prompt → history`); never the reverse, and never `adapters → top-level logic`. `wiring.py`
   is the only place that knows every component. `evaluation → voice_pipeline`, never the reverse.
 - **Entry-point wiring**: production (`__main__.py`) and eval (`evaluation/run.py`) share the component graph via `voice_pipeline/wiring.py` (`build_components()` + `ProcessComponents.create_session()`). Production code exposes only neutral injection points (paths, toggles, callbacks) — never eval-specific behavior or branches. Dependency direction: `evaluation → voice_pipeline`, never the reverse.
@@ -121,6 +121,10 @@ Some modules (VAP, TurnGPT, Wakeword etc.) wrap externally cloned model reposito
   Values shared by several modules (audio format, DB path, token budgets) live in `settings.py`.
   Never reach into another module's private class variable.
 - **Logging**: `voice_pipeline.*` namespace (`voice_pipeline.asr`, `voice_pipeline.session_loop`, etc.)
+- **Tracing**: `trace.py` is a module-level API like `logging` — `record_call(...)` for an external
+  call, `save_turn(...)` for a turn; `session_id`/`turn_index` come from `set_session`/`set_turn`
+  context, never from constructor parameters. No-op when no sink is installed. Tests use the
+  `call_log` / `turn_log` fixtures (`tests/conftest.py`).
 
 
 ## Concurrency Model

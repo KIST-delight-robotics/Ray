@@ -19,6 +19,7 @@ from voice_pipeline.generator import GeneratorState, ResponseData, SpeechGenerat
 from voice_pipeline.history import ConversationHistory
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.settings import FRAME_DURATION_MS
+from voice_pipeline.trace import save_turn
 from voice_pipeline.turn_detector import TurnDecision, TurnDetector
 from voice_pipeline.types import IASR, AudioFrame, TokenCounter, WordTimestamp
 
@@ -125,7 +126,6 @@ class SessionLoop:
         memory_storage: SQLiteMemoryStorage | None = None,
         session_id: str | None = None,
         token_counter: TokenCounter | None = None,
-        trace_store: object | None = None,
         shutdown_event: threading.Event | None = None,
         on_turn_complete: Callable[[float, str], None] | None = None,
         on_turn_shift: Callable[[float, str], None] | None = None,
@@ -155,8 +155,6 @@ class SessionLoop:
                 ``None``이면 utterance 저장 skip.
             token_counter: 토큰 카운터 콜러블. memory utterance 토큰 수
                 계산용. ``None``이면 0.
-            trace_store: pipeline latency trace store. ``None``이면
-                trace 저장 skip.
             shutdown_event: 프로세스 전역 종료 시그널. ``None``이면
                 ``request_stop()``으로만 중단 가능.
             on_turn_complete: 턴 완료 시 호출되는 콜백.
@@ -180,7 +178,6 @@ class SessionLoop:
         self._memory_storage = memory_storage
         self._session_id = session_id
         self._token_counter = token_counter
-        self._trace_store = trace_store
         self._shutdown_event = shutdown_event
         self._on_turn_complete_cb = on_turn_complete
         self._on_turn_shift_cb = on_turn_shift
@@ -630,7 +627,6 @@ class SessionLoop:
 
         trace = self._generator.trace
         if trace is not None:
-            trace.session_id = self._session_id or ""
             trace.turn_shift_ts = self._turn_shift_time
             trace.begin_streaming_ts = self._begin_streaming_time
 
@@ -928,9 +924,7 @@ class SessionLoop:
     # ------------------------------------------------------------------
 
     def _save_trace(self, outcome: str) -> None:
-        """Persist the current pipeline trace with the given outcome."""
-        if self._trace_store is None:
-            return
+        """현재 턴의 pipeline trace에 결과를 채워 저장한다 (싱크 없으면 no-op)."""
         trace = self._generator.trace
         if trace is None:
             return
@@ -939,14 +933,7 @@ class SessionLoop:
         trace.speculative_attempts = self._speculative_attempts
         if self._user_msg_id is not None:
             trace.user_msg_id = self._user_msg_id
-        if not trace.session_id:
-            trace.session_id = self._session_id or ""
-        try:
-            self._trace_store.save(trace)
-            if outcome != "cancelled":
-                logger.debug("Pipeline trace: %s", trace.summary())
-        except Exception:
-            logger.warning("Failed to save pipeline trace", exc_info=True)
+        save_turn(trace)
         self._speculative_attempts = 0
 
     def _get_response_text(self) -> str:

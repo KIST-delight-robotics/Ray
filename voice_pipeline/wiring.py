@@ -22,6 +22,7 @@ from typing import Any, Literal
 import torch
 from silero_vad import load_silero_vad
 
+from voice_pipeline import trace
 from voice_pipeline.adapters.asr_google import GoogleCloudASR
 from voice_pipeline.adapters.audio_input import AudioInput
 from voice_pipeline.adapters.cpp_bridge import CppBridge
@@ -79,8 +80,6 @@ class ProcessComponents:
     token_counter: TokenCounter
     embedder: TrackedEmbedder
     memory_storage: SQLiteMemoryStorage
-    trace_store: SQLiteTraceStore
-    call_store: SQLiteCallStore
     retry_handler: OpenAIRetryHandler
     vector_index: NumpyVectorIndex
     audio_queue: queue.Queue[AudioFrame]
@@ -117,17 +116,13 @@ class ProcessComponents:
         self.stop_threaded()
 
         session_id = str(uuid.uuid4())
-        # VAP 스레드는 프로세스 수명 — 세션마다 재생성 대신 session_id 리바인드 + reset.
-        self.vap.session_id = session_id
+        trace.set_session(session_id)  # 이후 호출/턴 기록에 이 세션 ID가 찍힌다
+        # VAP 스레드는 프로세스 수명 — 세션마다 재생성 대신 reset().
         self.vap.reset()
         self.turngpt.reset()
         self.reset_vad()
 
-        self.embedder.session_id = session_id
-        self.tts.session_id = session_id
-        self.retry_handler.session_id = session_id
-
-        threaded_turngpt = ThreadedTurnGPT(self.turngpt, call_store=self.call_store, session_id=session_id)
+        threaded_turngpt = ThreadedTurnGPT(self.turngpt)
         self._prev_threaded.append(threaded_turngpt)
 
         history = ConversationHistory(self.storage, self.token_counter)
@@ -139,14 +134,11 @@ class ProcessComponents:
             self.embedder,
             vad_fn=self.vad_fn,
             vad_reset_fn=self.reset_vad,
-            call_store=self.call_store,
-            session_id=session_id,
         )
         summarizer = HistorySummarizer(
             self.summary_llm,
             self.token_counter,
             HISTORY_TOKEN_BUDGET,
-            call_store=self.call_store,
             session_id=session_id,
             summary_backend=self.storage,
         )
@@ -177,7 +169,6 @@ class ProcessComponents:
             memory_storage=memory_storage,
             session_id=session_id,
             token_counter=self.token_counter,
-            trace_store=self.trace_store,
             shutdown_event=self.shutdown_event,
             **session_loop_kwargs,
         )
@@ -279,16 +270,14 @@ def build_components(
     token_counter = create_token_counter(llm.model)
 
     memory_storage = SQLiteMemoryStorage(db_path)
-    trace_store = SQLiteTraceStore(db_path)
-    call_store = SQLiteCallStore(db_path)
+    trace.install(SQLiteCallStore(db_path), SQLiteTraceStore(db_path))
     # VAP runs its own inference thread for the process lifetime; sessions
-    # rebind it via reset() + session_id rather than recreating it (model
-    # load + warmup is expensive).
-    vap = ThreadedVAP(MaAIVAPModel(raw_tts.output_sample_rate), call_store=call_store)
-    retry_handler = OpenAIRetryHandler(call_store)
+    # rebind it via reset() rather than recreating it (model load + warmup is expensive).
+    vap = ThreadedVAP(MaAIVAPModel(raw_tts.output_sample_rate))
+    retry_handler = OpenAIRetryHandler()
     logging.getLogger("openai._base_client").addHandler(retry_handler)
-    tts = TrackedTTS(raw_tts, call_store)
-    embedder = TrackedEmbedder(create_embedder(expected_dimension=_DEFAULT_DIMENSION), call_store)
+    tts = TrackedTTS(raw_tts)
+    embedder = TrackedEmbedder(create_embedder(expected_dimension=_DEFAULT_DIMENSION))
 
     vector_index = NumpyVectorIndex()
     ids, vectors = memory_storage.load_all_embeddings()
@@ -317,8 +306,6 @@ def build_components(
         token_counter=token_counter,
         embedder=embedder,
         memory_storage=memory_storage,
-        trace_store=trace_store,
-        call_store=call_store,
         retry_handler=retry_handler,
         vector_index=vector_index,
         audio_queue=audio_queue,

@@ -22,8 +22,8 @@ import numpy as np
 from voice_pipeline.adapters.turngpt import SyncTurnGPTAdapter, ThreadedTurnGPT
 from voice_pipeline.adapters.vap import ThreadedVAP, VAPResult
 from voice_pipeline.settings import FRAME_DURATION_MS
-from voice_pipeline.trace import CallRecord, SQLiteCallStore
-from voice_pipeline.types import AudioFrame, IEmbedder, utc_now_str
+from voice_pipeline.trace import record_call, set_turn
+from voice_pipeline.types import AudioFrame, IEmbedder
 
 
 @dataclass(frozen=True)
@@ -86,8 +86,6 @@ class TurnDetector:
             시점에 호출 — 직전 사용자 발화가 남긴 VAD 내부 상태가 다음 턴의
             조용한 발화 감지를 막는 것을 방지. STREAMING 구간은 VAD 결과를
             쓰지 않으므로 리셋 워밍업 비용이 없는 시점.
-        call_store: 유사도 게이트 판정 기록용 call store. ``None``이면 기록 안 함.
-        session_id: call record에 기록할 세션 ID.
     """
 
     # VAP turn-shift 판정 (Path 1)
@@ -121,16 +119,12 @@ class TurnDetector:
         embedder: IEmbedder,
         vad_fn: Callable[[AudioFrame], float] | None = None,
         vad_reset_fn: Callable[[], None] | None = None,
-        call_store: SQLiteCallStore | None = None,
-        session_id: str = "",
     ) -> None:
         self._vap = vap
         self._turngpt = turngpt
         self._embedder = embedder
         self._vad_fn = vad_fn
         self._vad_reset_fn = vad_reset_fn
-        self._call_store = call_store
-        self._session_id = session_id
 
         self._frame_duration_sec = FRAME_DURATION_MS / 1000.0
 
@@ -138,10 +132,8 @@ class TurnDetector:
         self._turn_state = _TurnState.USER_TURN
         self._dialog_parts: list[str] = []
         self._turn_index = 0
-        # Seed the shared exchange counter so call records of the first turn
-        # (before any commit) are stamped turn_index=0.
-        if self._call_store is not None:
-            self._call_store.set_turn_index(0)
+        # 첫 턴(commit 전)의 호출 기록이 turn_index=0 으로 찍히도록 컨텍스트 초기화.
+        set_turn(0)
 
         # Per-frame tracking (reset between turns)
         self._prev_asr_text: str = ""
@@ -278,8 +270,7 @@ class TurnDetector:
         # Generation (LLM/TTS) for the exchange that just ended runs during
         # this ROBOT_TURN — attribute its call records to that exchange, not
         # the next user turn that will reuse the incremented index.
-        if self._call_store is not None:
-            self._call_store.set_turn_index(self._turn_index - 1)
+        set_turn(self._turn_index - 1)
         if self._vad_reset_fn is not None:
             try:
                 self._vad_reset_fn()
@@ -293,9 +284,8 @@ class TurnDetector:
         Does NOT clear dialog_parts (TurnGPT context persists across turns).
         """
         self._turn_state = _TurnState.USER_TURN
-        # Entering the next user turn: stamp its exchange index onto records.
-        if self._call_store is not None:
-            self._call_store.set_turn_index(self._turn_index)
+        # 다음 사용자 턴 진입: 이후 기록은 이 exchange 인덱스로.
+        set_turn(self._turn_index)
         self._reset_per_frame_state()
 
     def _reset_per_frame_state(self) -> None:
@@ -441,11 +431,8 @@ class TurnDetector:
         prev_text: str,
         new_text: str,
     ) -> None:
-        """Record a similarity-gate decision to the call store (if configured)."""
-        if self._call_store is None:
-            return
-        # turn_index lives on the CallRecord column (below), not in metadata —
-        # report.py groups all call records by that column.
+        """Record a similarity-gate decision (no-op without a trace sink)."""
+        # turn_index는 metadata가 아니라 컬럼으로 — report.py가 그 컬럼으로 묶는다.
         metadata = json.dumps(
             {
                 "similarity": round(similarity, 4),
@@ -456,21 +443,9 @@ class TurnDetector:
             },
             ensure_ascii=False,
         )
-        try:
-            self._call_store.record(
-                CallRecord(
-                    session_id=self._session_id,
-                    timestamp=utc_now_str(),
-                    module="similarity_gate",
-                    operation=operation,
-                    model="embedder",
-                    elapsed_ms=elapsed_ms,
-                    metadata=metadata,
-                    turn_index=self._turn_index,
-                )
-            )
-        except Exception:
-            logger.warning("Similarity gate record failed", exc_info=True)
+        record_call(
+            "similarity_gate", operation, "embedder", elapsed_ms, metadata=metadata, turn_index=self._turn_index
+        )
 
     def _text_similarity(self, a: str, b: str) -> tuple[float, float]:
         """Cosine similarity between two texts via the embedder.

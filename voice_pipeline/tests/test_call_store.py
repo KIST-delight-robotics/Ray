@@ -149,13 +149,6 @@ class TestSQLiteCallStore:
         assert row["turn_index"] == 2
         conn.close()
 
-    def test_turn_index_counter(self) -> None:
-        store = self._make_store()
-        assert store.current_turn_index == 0
-        store.set_turn_index(5)
-        assert store.current_turn_index == 5
-        store.close()
-
     def test_thread_safety(self) -> None:
         store = self._make_store()
         errors: list[Exception] = []

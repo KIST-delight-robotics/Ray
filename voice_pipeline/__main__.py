@@ -30,6 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
+from voice_pipeline import trace
 from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEventType
 from voice_pipeline.adapters.led import LEDState
 from voice_pipeline.adapters.llm_openai import OpenAILLM
@@ -304,9 +305,8 @@ def main() -> None:
         wakeword.close()
         led.close()
         components.memory_storage.close()
-        components.trace_store.close()
         logging.getLogger("openai._base_client").removeHandler(components.retry_handler)
-        components.call_store.close()
+        trace.close()
         logger.info("Pipeline stopped")
 
 

@@ -21,8 +21,8 @@ from typing import Protocol
 import numpy as np
 import onnxruntime as ort
 
-from voice_pipeline.trace import CallRecord, SQLiteCallStore
-from voice_pipeline.types import AudioFrame, utc_now_str
+from voice_pipeline.trace import CallRecord, capture_call, write_calls
+from voice_pipeline.types import AudioFrame
 
 try:
     import torch
@@ -459,17 +459,14 @@ class ThreadedVAP:
     Args:
         model: The synchronous VAP inference model (``infer`` + ``reset``).
         frame_rate: Target inference rate in Hz. Defaults to 10.
-        call_store: Optional call store for latency recording. Records are
-            buffered in memory and flushed on ``reset()`` / ``stop()``.
-        session_id: Session identifier stamped onto call records (mutable).
+        추론 스레드에서 SQLite를 건드리지 않도록 호출 기록은 메모리에 모아 두고
+        ``reset()`` / ``stop()`` 에서 한 번에 쓴다.
     """
 
     def __init__(
         self,
         model: _VAPModel,
         frame_rate: int = 10,
-        call_store: SQLiteCallStore | None = None,
-        session_id: str = "",
     ) -> None:
         self._model = model
         self._interval = 1.0 / frame_rate
@@ -479,8 +476,6 @@ class ThreadedVAP:
         # main-thread reset(), since both touch the model's internal state.
         self._infer_lock = threading.Lock()
         self._latest_result = VAPResult(0.0, 0.0, False)
-        self._call_store = call_store
-        self.session_id = session_id
         self._call_records: list[CallRecord] = []
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True, name="threaded-vap")
@@ -540,34 +535,19 @@ class ThreadedVAP:
 
             elapsed = time.monotonic() - start
             remaining = self._interval - elapsed
-            if audio_pairs and self._call_store is not None:
+            if audio_pairs:
                 status = "ok" if remaining > 0 else "overrun"
-                record = CallRecord(
-                    session_id=self.session_id,
-                    timestamp=utc_now_str(),
-                    module="vap",
-                    operation="feed_audio",
-                    model="maai-vap",
-                    elapsed_ms=elapsed * 1000,
-                    status=status,
-                    turn_index=self._call_store.current_turn_index,
-                )
-                with self._buffer_lock:
-                    self._call_records.append(record)
+                record = capture_call("vap", "feed_audio", "maai-vap", elapsed * 1000, status=status)
+                if record is not None:
+                    with self._buffer_lock:
+                        self._call_records.append(record)
 
             if remaining > 0:
                 self._stop_event.wait(remaining)
 
     def _flush_call_records(self) -> None:
-        """Drain buffered call records to the store (safe across threads)."""
-        if not self._call_store:
-            return
+        """Drain buffered call records to the trace sink (safe across threads)."""
         with self._buffer_lock:
             records = self._call_records[:]
             self._call_records.clear()
-        for record in records:
-            try:
-                self._call_store.record(record)
-            except Exception:
-                logger.warning("Failed to flush VAP call records", exc_info=True)
-                return
+        write_calls(records)

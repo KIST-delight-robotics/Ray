@@ -6,7 +6,7 @@ import json
 import logging
 
 from voice_pipeline.tests.fakes import RecordingCallStore
-from voice_pipeline.trace import OpenAIRetryHandler
+from voice_pipeline.trace import OpenAIRetryHandler, install, set_session
 
 
 def _emit(handler: OpenAIRetryHandler, message: str) -> None:
@@ -26,8 +26,9 @@ def _emit(handler: OpenAIRetryHandler, message: str) -> None:
 class TestOpenAIRetryHandler:
     def test_parses_tts_retry(self) -> None:
         store = RecordingCallStore()
-        handler = OpenAIRetryHandler(store)
-        handler.session_id = "sess-1"
+        install(call_store=store)
+        handler = OpenAIRetryHandler()
+        set_session("sess-1")
 
         _emit(handler, "Retrying request to /audio/speech in 0.387022 seconds")
 
@@ -43,7 +44,8 @@ class TestOpenAIRetryHandler:
 
     def test_parses_llm_retry(self) -> None:
         store = RecordingCallStore()
-        handler = OpenAIRetryHandler(store)
+        install(call_store=store)
+        handler = OpenAIRetryHandler()
 
         _emit(handler, "Retrying request to /responses in 0.412858 seconds")
 
@@ -54,7 +56,8 @@ class TestOpenAIRetryHandler:
 
     def test_parses_embeddings_retry(self) -> None:
         store = RecordingCallStore()
-        handler = OpenAIRetryHandler(store)
+        install(call_store=store)
+        handler = OpenAIRetryHandler()
 
         _emit(handler, "Retrying request to /embeddings in 1.5 seconds")
 
@@ -65,7 +68,8 @@ class TestOpenAIRetryHandler:
 
     def test_unknown_endpoint(self) -> None:
         store = RecordingCallStore()
-        handler = OpenAIRetryHandler(store)
+        install(call_store=store)
+        handler = OpenAIRetryHandler()
 
         _emit(handler, "Retrying request to /v1/something in 0.5 seconds")
 
@@ -76,7 +80,8 @@ class TestOpenAIRetryHandler:
 
     def test_ignores_non_retry_message(self) -> None:
         store = RecordingCallStore()
-        handler = OpenAIRetryHandler(store)
+        install(call_store=store)
+        handler = OpenAIRetryHandler()
 
         _emit(handler, "HTTP Request: POST https://api.openai.com/v1/audio/speech")
 
@@ -84,11 +89,12 @@ class TestOpenAIRetryHandler:
 
     def test_session_id_propagated(self) -> None:
         store = RecordingCallStore()
-        handler = OpenAIRetryHandler(store)
-        handler.session_id = "s1"
+        install(call_store=store)
+        handler = OpenAIRetryHandler()
+        set_session("s1")
 
         _emit(handler, "Retrying request to /audio/speech in 0.5 seconds")
-        handler.session_id = "s2"
+        set_session("s2")
         _emit(handler, "Retrying request to /audio/speech in 0.5 seconds")
 
         assert store.records[0].session_id == "s1"
@@ -100,7 +106,7 @@ class TestOpenAIRetryHandler:
 
         store = MagicMock()
         store.record.side_effect = RuntimeError("db error")
-        handler = OpenAIRetryHandler(store)
+        handler = OpenAIRetryHandler()
 
         _emit(handler, "Retrying request to /audio/speech in 0.5 seconds")
         # No exception raised
@@ -108,8 +114,9 @@ class TestOpenAIRetryHandler:
     def test_integrates_with_logger(self) -> None:
         """Handler works when attached to a real logger."""
         store = RecordingCallStore()
-        handler = OpenAIRetryHandler(store)
-        handler.session_id = "sess-1"
+        install(call_store=store)
+        handler = OpenAIRetryHandler()
+        set_session("sess-1")
 
         logger = logging.getLogger("openai._base_client.test")
         logger.addHandler(handler)

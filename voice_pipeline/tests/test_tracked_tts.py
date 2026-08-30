@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from voice_pipeline.tests.fakes import RecordingCallStore
-from voice_pipeline.trace import TrackedTTS
+from voice_pipeline.trace import TrackedTTS, install, set_session
 from voice_pipeline.types import ITTS, TTSStream
 
 
@@ -43,8 +43,9 @@ class TestTrackedTTS:
     def setup(self) -> tuple[TrackedTTS, RecordingCallStore]:
         inner = _FakeTTS()
         store = RecordingCallStore()
-        wrapper = TrackedTTS(inner, store)
-        wrapper.session_id = "sess-1"
+        install(call_store=store)
+        wrapper = TrackedTTS(inner)
+        set_session("sess-1")
         return wrapper, store
 
     def test_synthesize_passthrough(self, setup: tuple[TrackedTTS, RecordingCallStore]) -> None:
@@ -71,8 +72,9 @@ class TestTrackedTTS:
     def test_synthesize_records_error(self) -> None:
         inner = _FailingTTS(RuntimeError("API error"))
         store = RecordingCallStore()
-        wrapper = TrackedTTS(inner, store)
-        wrapper.session_id = "sess-1"
+        install(call_store=store)
+        wrapper = TrackedTTS(inner)
+        set_session("sess-1")
 
         with pytest.raises(RuntimeError):
             wrapper.synthesize("test")
@@ -86,7 +88,8 @@ class TestTrackedTTS:
     def test_synthesize_records_timeout(self) -> None:
         inner = _FailingTTS(RuntimeError("TTS timeout (5.0s): connection timed out"))
         store = RecordingCallStore()
-        wrapper = TrackedTTS(inner, store)
+        install(call_store=store)
+        wrapper = TrackedTTS(inner)
 
         with pytest.raises(RuntimeError):
             wrapper.synthesize("test")
@@ -109,17 +112,18 @@ class TestTrackedTTS:
         inner = _FakeTTS()
         store = MagicMock()
         store.record.side_effect = RuntimeError("db error")
-        wrapper = TrackedTTS(inner, store)
+        wrapper = TrackedTTS(inner)
         stream = wrapper.synthesize("test")
         assert list(stream)
 
     def test_session_id_mutable(self) -> None:
         inner = _FakeTTS()
         store = RecordingCallStore()
-        wrapper = TrackedTTS(inner, store)
-        wrapper.session_id = "s1"
+        install(call_store=store)
+        wrapper = TrackedTTS(inner)
+        set_session("s1")
         wrapper.synthesize("a")
-        wrapper.session_id = "s2"
+        set_session("s2")
         wrapper.synthesize("b")
         assert store.records[0].session_id == "s1"
         assert store.records[1].session_id == "s2"
@@ -153,8 +157,9 @@ def _one_sec_chunk() -> bytes:
 class TestStreamMonitoring:
     def _make(self, inner: ITTS) -> tuple[TrackedTTS, RecordingCallStore]:
         store = RecordingCallStore()
-        wrapper = TrackedTTS(inner, store)
-        wrapper.session_id = "sess-1"
+        install(call_store=store)
+        wrapper = TrackedTTS(inner)
+        set_session("sess-1")
         return wrapper, store
 
     def _stream_record(self, store: RecordingCallStore):
