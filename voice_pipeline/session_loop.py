@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import enum
 import logging
+import math
 import queue
 import re
 import threading
@@ -11,27 +13,68 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from voice_pipeline.audio.constants import FRAME_DURATION_MS
-from voice_pipeline.core.interfaces import (
-    IASR,
-    IConversationHistory,
-    ICppBridge,
-    ILEDController,
-    IMemoryStorage,
-    ISpeechGenerator,
-    ITurnDetector,
-)
-from voice_pipeline.core.types import (
-    AudioFrame,
-    CppEventType,
-    GeneratorState,
-    LEDState,
-    Phase,
-    ResponseData,
-    TokenCounter,
-    TurnDecision,
-)
-from voice_pipeline.tts.utterance_truncator import truncate_by_ratio, truncate_by_timestamps
+from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEventType
+from voice_pipeline.adapters.led import LEDController, LEDState
+from voice_pipeline.generator import GeneratorState, ResponseData, SpeechGenerator
+from voice_pipeline.history import ConversationHistory
+from voice_pipeline.memory.storage import SQLiteMemoryStorage
+from voice_pipeline.settings import FRAME_DURATION_MS
+from voice_pipeline.turn_detector import TurnDecision, TurnDetector
+from voice_pipeline.types import IASR, AudioFrame, TokenCounter, WordTimestamp
+
+
+class Phase(enum.Enum):
+    """SessionLoop conversation phase (single source of truth).
+
+    Replaces the former ``PlaybackState`` + ``awaiting_response`` pair so
+    that mutually-exclusive states cannot drift.
+
+    LISTENING — user turn; receiving input (detector USER_TURN).
+    AWAITING  — turn_shift fired, response not yet sent to the bridge;
+                cancel still possible (detector PENDING). No bridge audio.
+    STREAMING — audio sent to the bridge (begin_streaming committed),
+                playback not yet confirmed; no robot_audio/clock yet
+                (detector ROBOT_TURN). interrupt/cancel boundary is here:
+                everything from STREAMING on is interrupt territory.
+    PLAYING   — playback_started received, clock running; robot_audio
+                available for full VAP interrupt (detector ROBOT_TURN).
+    STOPPING  — interrupt sent to C++, awaiting stop confirmation.
+    """
+
+    LISTENING = "listening"
+    AWAITING = "awaiting"
+    STREAMING = "streaming"
+    PLAYING = "playing"
+    STOPPING = "stopping"
+
+
+def truncate_by_timestamps(
+    text: str,
+    stop_position_sec: float,
+    timestamps: list[WordTimestamp],
+) -> str:
+    """Return the portion of text spoken before the stop point using word timestamps."""
+    if not timestamps:
+        return ""
+    spoken = [ts.word for ts in timestamps if ts.start_sec < stop_position_sec]
+    return " ".join(spoken)
+
+
+def truncate_by_ratio(
+    text: str,
+    stop_position_sec: float,
+    total_duration_sec: float,
+) -> str:
+    """Return the estimated portion of text spoken before the stop point using duration ratio."""
+    if not text:
+        return ""
+    if total_duration_sec <= 0 or stop_position_sec >= total_duration_sec:
+        return text
+    ratio = stop_position_sec / total_duration_sec
+    words = text.split()
+    count = math.ceil(ratio * len(words))
+    return " ".join(words[:count])
+
 
 logger = logging.getLogger("voice_pipeline.session_loop")
 
@@ -41,7 +84,7 @@ class SessionComponents:
     """Per-session objects created by the session factory."""
 
     session_loop: SessionLoop
-    history: IConversationHistory
+    history: ConversationHistory
     session_id: str
 
 
@@ -72,14 +115,14 @@ class SessionLoop:
     def __init__(
         self,
         asr: IASR,
-        turn_detector: ITurnDetector,
-        speech_generator: ISpeechGenerator,
-        cpp_bridge: ICppBridge,
-        history: IConversationHistory,
-        led: ILEDController,
+        turn_detector: TurnDetector,
+        speech_generator: SpeechGenerator,
+        cpp_bridge: CppBridge,
+        history: ConversationHistory,
+        led: LEDController,
         audio_queue: queue.Queue[AudioFrame],
         tts_sample_rate: int,
-        memory_storage: IMemoryStorage | None = None,
+        memory_storage: SQLiteMemoryStorage | None = None,
         session_id: str | None = None,
         token_counter: TokenCounter | None = None,
         trace_store: object | None = None,
@@ -307,7 +350,7 @@ class SessionLoop:
             return
         import wave
 
-        from voice_pipeline.audio.constants import CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH
+        from voice_pipeline.settings import CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH
 
         try:
             with wave.open(self._record_path, "wb") as wf:

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from voice_pipeline.embedding.embedder import SentenceTransformerEmbedder
+from voice_pipeline.adapters.embedder import SentenceTransformerEmbedder
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex

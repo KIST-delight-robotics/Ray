@@ -8,11 +8,11 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from voice_pipeline.core.interfaces import IEmbedder
 from voice_pipeline.memory.retriever import MemoryRetriever
-from voice_pipeline.memory.storage import InMemoryMemoryStorage
+from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Episode
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
+from voice_pipeline.types import IEmbedder
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -112,9 +112,9 @@ _NOW_PATH = "voice_pipeline.memory.retriever.datetime"
 def _setup(
     episodes: list[Episode] | None = None,
     query_vec: np.ndarray | None = None,
-) -> tuple[MemoryRetriever, InMemoryMemoryStorage, NumpyVectorIndex]:
+) -> tuple[MemoryRetriever, SQLiteMemoryStorage, NumpyVectorIndex]:
     """Create a retriever with pre-populated storage and vector index."""
-    storage = InMemoryMemoryStorage(dimension=_DIM)
+    storage = SQLiteMemoryStorage(":memory:", dimension=_DIM)
     index = NumpyVectorIndex()
     embedder = _FakeEmbedder(query_vec)
 
@@ -433,7 +433,7 @@ class TestSlotAllocation:
 class TestRetainedBuffer:
     def _make_retriever_with_episodes(
         self,
-    ) -> tuple[MemoryRetriever, InMemoryMemoryStorage, NumpyVectorIndex]:
+    ) -> tuple[MemoryRetriever, SQLiteMemoryStorage, NumpyVectorIndex]:
         v = _vec(1.0, 0.0)
         # Autouse fixture already applies max_memories=5, min_new_slots=2, retained_ttl=3.
         eps = [
@@ -841,7 +841,7 @@ class TestEdgeCases:
             def model_name(self) -> str:
                 return "failing"
 
-        storage = InMemoryMemoryStorage(dimension=_DIM)
+        storage = SQLiteMemoryStorage(":memory:", dimension=_DIM)
         index = NumpyVectorIndex()
         retriever = MemoryRetriever(storage, index, _FailingEmbedder())
 

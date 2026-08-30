@@ -116,7 +116,7 @@ class VADScores:
 
 
 def run_maai_vap(frames: list[bytes], video_id: str) -> VADScores:
-    from voice_pipeline.turn_taking.maai_vap import MaAIVAPModel
+    from voice_pipeline.adapters.vap import MaAIVAPModel
 
     vap = MaAIVAPModel(tts_sample_rate=24000)
 

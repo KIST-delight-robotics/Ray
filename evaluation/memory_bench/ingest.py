@@ -27,14 +27,14 @@ from evaluation.memory_bench.common import (
 from evaluation.memory_bench.datasets import load_dataset
 from evaluation.memory_bench.datasets.longmemeval import sample_per_type as lme_sample_per_type
 from evaluation.memory_bench.types import Conversation
-from voice_pipeline.core.interfaces import IEmbedder
-from voice_pipeline.embedding.embedder import create_embedder
-from voice_pipeline.llm.llm import OpenAILLM
-from voice_pipeline.llm.token_counter import TokenCounter, create_token_counter
+from voice_pipeline.adapters.embedder import create_embedder
+from voice_pipeline.adapters.llm_openai import OpenAILLM
+from voice_pipeline.adapters.token_counter import TokenCounter, create_token_counter
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.writer import MemoryWriter
+from voice_pipeline.types import IEmbedder
 
 logger = logging.getLogger("eval.memory_bench")
 

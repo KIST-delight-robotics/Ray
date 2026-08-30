@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from voice_pipeline.core.types import LLMMetrics, LLMResult, Usage
-from voice_pipeline.history.conversation_history import ConversationHistory
-from voice_pipeline.history.storage_backend import MemoryStorageBackend
+from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.text_session import TextSession
+from voice_pipeline.types import LLMMetrics, LLMResult, Usage
 
 
 def _token_counter(text: str) -> int:
@@ -56,7 +55,7 @@ class FakeLLM:
 
 
 def _make_session(llm: FakeLLM | None = None, **kwargs) -> tuple[TextSession, ConversationHistory]:
-    history = ConversationHistory(MemoryStorageBackend(), _token_counter)
+    history = ConversationHistory(SQLiteStorageBackend(":memory:"), _token_counter)
     session = TextSession(
         llm=llm or FakeLLM(),
         history=history,

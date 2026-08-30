@@ -7,10 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from voice_pipeline.core.interfaces import ILLM
-from voice_pipeline.core.types import TokenCounter
-from voice_pipeline.embedding.embedder import SentenceTransformerEmbedder
-from voice_pipeline.llm.llm import OpenAILLM
+from voice_pipeline.adapters.embedder import SentenceTransformerEmbedder
+from voice_pipeline.adapters.llm_openai import OpenAILLM
 from voice_pipeline.memory.prompts import PROFILE_SCHEMA
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Profile
@@ -22,6 +20,7 @@ from voice_pipeline.tests.memory.conftest import (
     CONVERSATION_TRIVIAL,
     populate_utterances,
 )
+from voice_pipeline.types import ILLM, TokenCounter
 
 pytestmark = pytest.mark.requires_api
 

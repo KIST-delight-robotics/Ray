@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from voice_pipeline.embedding.embedder import SentenceTransformerEmbedder
+from voice_pipeline.adapters.embedder import SentenceTransformerEmbedder
 
 MODEL = "all-MiniLM-L6-v2"
 OUT_DIR = Path(__file__).parent

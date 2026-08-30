@@ -43,7 +43,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from voice_pipeline.turn_taking.maai_vap import MaAIVAPModel  # noqa: E402
+from voice_pipeline.adapters.vap import MaAIVAPModel  # noqa: E402
 
 _DEFAULT_TOKENIZER_PATH = "models/turngpt/tokenizer"
 
@@ -307,7 +307,7 @@ def create_vap_variant(
     import torch
 
     torch.set_num_threads(pt_threads)
-    from voice_pipeline.tts.openai_tts import OpenAITTS
+    from voice_pipeline.adapters.tts_openai import OpenAITTS
 
     tts_sample_rate = OpenAITTS.OUTPUT_SAMPLE_RATE
 
@@ -357,7 +357,7 @@ def create_turngpt_variant(
     tokenizer_path: str = "",
 ):
     """Create a TurnGPT wrapper for the given variant."""
-    from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
+    from voice_pipeline.adapters.turngpt import TurnGPTWrapper
 
     tok = tokenizer_path or _DEFAULT_TOKENIZER_PATH
 

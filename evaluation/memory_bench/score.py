@@ -32,9 +32,9 @@ from evaluation.memory_bench.common import (
 from evaluation.memory_bench.datasets import longmemeval as lme
 from evaluation.memory_bench.datasets.locomo import CATEGORY_NAMES
 from evaluation.memory_bench.prompts import JUDGE_SCHEMA, build_judge_messages, gold_display
-from voice_pipeline.core.interfaces import ILLM
-from voice_pipeline.llm.llm import OpenAILLM
+from voice_pipeline.adapters.llm_openai import OpenAILLM
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
+from voice_pipeline.types import ILLM
 
 logger = logging.getLogger("eval.memory_bench")
 

@@ -21,6 +21,7 @@ try:
     _asound.snd_lib_error_set_handler(_alsa_error_handler)
 except Exception:
     _asound = None
+import enum
 import queue
 import signal
 import threading
@@ -29,13 +30,24 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
-from voice_pipeline.bridge.cpp_bridge import CppBridge
-from voice_pipeline.core.types import AudioFrame, CppEventType, LEDState, SystemMode
-from voice_pipeline.llm.llm import OpenAILLM
+from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEventType
+from voice_pipeline.adapters.led import LEDState
+from voice_pipeline.adapters.llm_openai import OpenAILLM
+from voice_pipeline.adapters.wakeword import WakewordDetector
+from voice_pipeline.greeting_audio import ensure_greeting_audio
 from voice_pipeline.memory.writer import MemoryWriter
-from voice_pipeline.tts.greeting_audio import ensure_greeting_audio
-from voice_pipeline.wakeword.wakeword import WakewordDetector
+from voice_pipeline.types import AudioFrame
 from voice_pipeline.wiring import build_components
+
+
+class SystemMode(enum.Enum):
+    """Top-level state machine modes."""
+
+    SLEEP = "sleep"
+    GREETING = "greeting"
+    ACTIVE = "active"
+    FAREWELL = "farewell"
+
 
 logger = logging.getLogger("voice_pipeline")
 

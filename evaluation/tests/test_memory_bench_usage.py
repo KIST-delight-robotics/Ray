@@ -6,8 +6,7 @@ from collections.abc import Generator
 from typing import Any
 
 from evaluation.memory_bench.common import UsageTrackingLLM
-from voice_pipeline.core.interfaces import ILLM
-from voice_pipeline.core.types import LLMMetrics, LLMResult, LLMStream, Usage
+from voice_pipeline.types import ILLM, LLMMetrics, LLMResult, LLMStream, Usage
 
 _DEFAULT_USAGE = Usage(100, 20, 5)
 

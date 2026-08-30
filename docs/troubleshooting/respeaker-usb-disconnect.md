@@ -19,7 +19,7 @@ disconnect/재열거(re-enumerate)되며, 마이크 캡처가 멈춰 ASR이 동�
 - **장애 시 연결**: Huasheng USB2.0 HUB (`214b:7250`) 경유
   - 허브 = USB 경로 `2-1`, 같은 허브에 Logitech Unifying Receiver(`046d:c52b`) = `2-1.1`
   - ReSpeaker = 허브 포트 2(`2-1.2`) 또는 포트 4(`2-1.4`)
-- **캡처 경로**: `voice_pipeline/audio/audio_input.py` (PyAudio, `_DEVICE_INDEX=1`, 6ch)
+- **캡처 경로**: `voice_pipeline/adapters/audio_input.py` (PyAudio, `_DEVICE_INDEX=1`, 6ch)
 
 ## Symptom
 

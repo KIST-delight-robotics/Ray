@@ -14,9 +14,9 @@ import struct
 import time
 import wave
 
-from voice_pipeline.audio.audio_input import AudioInput
-from voice_pipeline.audio.constants import CHANNELS, FRAME_DURATION_MS, SAMPLE_RATE, SAMPLE_WIDTH
-from voice_pipeline.core.types import AudioFrame
+from voice_pipeline.adapters.audio_input import AudioInput
+from voice_pipeline.settings import CHANNELS, FRAME_DURATION_MS, SAMPLE_RATE, SAMPLE_WIDTH
+from voice_pipeline.types import AudioFrame
 
 
 def list_devices() -> None:

@@ -17,7 +17,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
-from voice_pipeline.embedding.embedder import SentenceTransformerEmbedder
+from voice_pipeline.adapters.embedder import SentenceTransformerEmbedder
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Episode

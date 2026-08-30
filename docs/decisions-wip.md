@@ -95,6 +95,18 @@
 - **후보 수 상한(10) 제거 → 캡 도달까지 lazy 페이지 워크**: 최초 구현의 후보 조회 상한은 토큰 캡과 별개로 바인딩될 수 있는 의미 섞인 상수였다 (에피소드 0건 세션도 슬롯을 소모 → 캡이 남았는데 블록이 짧아지는 케이스). 세션 하나 확인 비용(인덱스 조회+포맷+토큰 카운트)이 밀리초 미만이고 워크는 캡 바인딩에서 멈추므로 상한의 실익이 없음 — 세션 목록은 전량 조회(GROUP BY라 어차피 전체 스캔), 에피소드 로딩만 페이지 단위 lazy로 전환해 페이지 크기(20)를 동작에 영향 없는 순수 배치 상수로 강등. 시간 기준 컷오프 대안은 기각 — "항상 이월 + 간격은 타임스탬프로 전달" 철학과 어긋나고, 세션 헤더가 이미 날짜를 나른다. 에피소드 토큰 수 사전 저장(컬럼 추가) 대안도 기각 — 계산이 병목이 아니고, 토크나이저 교체 시 낡아지며, 캡 판정 대상은 헤더 포함 포맷 텍스트라 합산만으로는 부정확.
 - **SQLite 히스토리 백엔드에 내부 락 추가**: 기존에는 ConversationHistory의 락이 유일한 직렬화 지점이었는데, 요약 영속화로 summarizer 워커 스레드가 같은 커넥션에 쓰는 두 번째 writer가 됐다. SQLiteMemoryStorage와 같은 패턴으로 백엔드 자체를 스레드 안전하게 전환.
 
+## 파이썬 구조 정리 — 규칙 기준 분리에서 경계 기준 분리로
+
+- **문제 진단**: 15개 패키지(13.5k줄)에 모듈마다 `__init__` + `exceptions.py` + README + 인터페이스 + `tests/<module>/`를 똑같이 붙이는 규칙이 있어, 200줄짜리와 2,000줄짜리가 같은 무게로 보였다. 18개 인터페이스 중 12개가 구현체 1개, 예외 18개 중 7개는 raise조차 안 되고 `except`로 잡는 곳은 프로덕션 전체에 1곳(`except Exception`이 폴백 정책). 반복된 정리 시도가 효과가 없던 이유는 같은 규칙 아래서 재배치만 했기 때문 — 규칙 자체를 바꿔야 했다.
+- **분리 기준은 "언제 건드리나"**: import 그래프가 이미 진짜 경계를 보여줬다 — 외부 것을 감싼 모듈(ASR/TTS/LLM/VAP/TurnGPT/bridge/audio/led)은 `core`만 의존하는 반면, 내부 로직(context/generation/history/memory)은 규칙을 어기며 서로 import하고 있었다. 그래서 외부 래퍼는 `adapters/`에 파일 하나씩(역할이 아니라 결합 방식으로 묶음 — "벤더·하드웨어를 바꿀 때만 연다"), 내부 로직은 top-level 파일로 뭉쳤다(`generator`, `prompt`, `history`). 13k줄에 15개 패키지 트리는 10만 줄짜리 구조다.
+- **인터페이스는 벤더 교체 대상만 (IASR/ILLM/ITTS/IEmbedder)**: 나머지는 구체 타입 주입. Python은 mock에 ABC가 필요 없다(`Mock(spec=Class)`). 인터페이스 hop 하나가 처음 읽는 사람에게 파일 하나를 더 열게 한다.
+- **커스텀 예외 전부 삭제 → `RuntimeError(원인 메시지) from exc`**: 호출자가 종류별로 처리하지 않고(`except Exception`), 예외에 실린 데이터도 없고, 벤더 예외 은닉은 RuntimeError로도 된다. 종류 구분이 실제로 필요해지면 그때 클래스 하나 추가.
+- **인메모리 테스트 더블 제거**: `MemoryStorageBackend`/`InMemoryMemoryStorage`는 SQLite `:memory:`로 대체(두 백엔드 모두 단일 커넥션이라 동작). 검증용으로 리스트에 쌓아야 하는 call/trace 스토어는 `tests/fakes.py`로 이동 — 테스트 더블은 테스트가 소유한다.
+- **공유 상수는 `settings.py`**: 토큰 예산(`_MAX_HISTORY_TOKENS`, `_HARD_CAP_TOKENS`)을 wiring이 다른 모듈의 private 클래스 변수로 꺼내 쓰고 있었다. "중앙 설정 없음" 규칙은 벤더 파라미터엔 맞지만 여러 모듈이 공유하는 값엔 안 맞는다. 클래스 변수는 테스트 monkeypatch를 위해 남기고 초기값만 settings에서 가져온다.
+- **타입은 만들어 내는 모듈이 소유**: `core/types.py` 27개 중 17개가 파일 한두 곳에서만 쓰였다(`Phase`는 session_loop만, `SystemMode`는 __main__만). "경계를 넘는 타입은 core에" 규칙이 소유자가 명확한 타입까지 끌어모은 것. `types.py`에는 벤더 인터페이스와 그 시그니처가 참조하는 계약 타입(스트림·결과·LLMMetrics), 공통 별칭만 남기고 나머지는 생산자로 보냈다(`TurnDecision → turn_detector`, `ResponseData → generator`, `VAPResult → adapters/vap`, …). 방향은 전부 소비자 → 생산자라 순환 없음. 남긴 기준: 소유자에 두면 어색한 의존이 생기는 것 — `LLMMetrics`를 `llm_openai`에 두면 history가 OpenAI 어댑터를 import하게 된다.
+- **이번에 하지 않은 것**: `session_id`/`call_store`가 생성자마다 들어가는 트레이싱 주입 정리. `adapters/vap.py`·`turngpt.py`가 `trace.py`에 런타임 의존하는 것도 그 잔재. 동작 리팩터라 구조 이동(동작 변경 0)과 분리했다.
+- **병합 도구의 함정**: ast 기반으로 파일을 합칠 때 첫 body 문장의 데코레이터(`@pytest.fixture`)와, 삭제 범위 사이에 끼어 있던 모듈 상수(`_CALL_COLUMNS`)가 유실됐다. 대규모 이동 후에는 반드시 전체 테스트 수를 전후 비교할 것.
+
 ## 차후 고려
 
 - **음악 댄스 메인 로봇 통합**: `music_dance/`는 현재 독립 실행(시리얼 포트 단독 점유). 메인 로봇의 한 모드로 통합 시 분석 코어(analyzer/timeline) 재사용 전제. 실시간(마이크) 입력이 필요해지면 HPSS(lookahead 필요) 재설계.

@@ -23,8 +23,7 @@ import time
 
 # Project imports
 sys.path.insert(0, ".")
-from voice_pipeline.bridge.cpp_bridge import CppBridge
-from voice_pipeline.core.types import CppEventType
+from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEventType
 
 # ---------------------------------------------------------------------------
 # Helpers

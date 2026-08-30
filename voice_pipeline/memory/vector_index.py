@@ -8,70 +8,13 @@ from __future__ import annotations
 
 import logging
 import threading
-from abc import ABC, abstractmethod
 
 import numpy as np
 
 logger = logging.getLogger("voice_pipeline.memory")
 
 
-class IVectorIndex(ABC):
-    """In-memory vector index for similarity search.
-
-    Implementations may use exact search (numpy) or approximate
-    nearest neighbors (hnswlib, etc.).
-    """
-
-    @abstractmethod
-    def add(self, id: int, vector: np.ndarray) -> None:
-        """Add or update a vector.
-
-        Args:
-            id: Episode database ID.
-            vector: 1-D float32 vector.
-        """
-
-    @abstractmethod
-    def remove(self, id: int) -> None:
-        """Remove a vector by ID. No-op if ID not found.
-
-        Args:
-            id: Episode database ID to remove.
-        """
-
-    @abstractmethod
-    def search(self, query: np.ndarray, top_k: int) -> list[tuple[int, float]]:
-        """Find the most similar vectors.
-
-        Args:
-            query: 1-D float32 query vector.
-            top_k: Maximum number of results.
-
-        Returns:
-            List of (id, similarity) tuples, sorted by similarity
-            descending. Similarity is cosine similarity in [−1, 1].
-            Implementations may omit results below a relevance floor,
-            so fewer than ``top_k`` results can be returned even when
-            the index holds more vectors.
-        """
-
-    @abstractmethod
-    def load(self, ids: list[int], vectors: np.ndarray) -> None:
-        """Bulk-load vectors, replacing any existing index contents.
-
-        Called at startup to populate from DB.
-
-        Args:
-            ids: Episode IDs, length N.
-            vectors: 2-D float32 array of shape (N, dimension).
-        """
-
-    @abstractmethod
-    def __len__(self) -> int:
-        """Number of vectors in the index."""
-
-
-class NumpyVectorIndex(IVectorIndex):
+class NumpyVectorIndex:
     """Exact cosine similarity search using numpy.
 
     Suitable for small-to-medium collections (< ~10k vectors).

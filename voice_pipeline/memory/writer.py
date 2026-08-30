@@ -13,8 +13,6 @@ from typing import Any
 
 import numpy as np
 
-from voice_pipeline.core.interfaces import ILLM, IEmbedder, IMemoryStorage
-from voice_pipeline.core.types import TokenCounter
 from voice_pipeline.memory.prompts import (
     EPISODE_DEDUP_SCHEMA,
     EPISODE_EXTRACTION_SCHEMA,
@@ -27,8 +25,10 @@ from voice_pipeline.memory.prompts import (
     build_profile_merge_messages,
     format_profile_schema,
 )
+from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Episode, Profile
-from voice_pipeline.memory.vector_index import IVectorIndex
+from voice_pipeline.memory.vector_index import NumpyVectorIndex
+from voice_pipeline.types import ILLM, IEmbedder, TokenCounter
 
 logger = logging.getLogger("voice_pipeline.memory")
 
@@ -48,8 +48,8 @@ class MemoryWriter:
 
     def __init__(
         self,
-        storage: IMemoryStorage,
-        vector_index: IVectorIndex,
+        storage: SQLiteMemoryStorage,
+        vector_index: NumpyVectorIndex,
         embedder: IEmbedder,
         llm: ILLM,
         token_counter: TokenCounter,

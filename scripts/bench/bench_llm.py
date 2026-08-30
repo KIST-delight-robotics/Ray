@@ -41,14 +41,12 @@ import sys
 import time
 from dataclasses import dataclass, field
 
-from voice_pipeline.context.context_builder import ContextBuilder
-from voice_pipeline.core.types import LLMMetrics
-from voice_pipeline.history.conversation_history import ConversationHistory
-from voice_pipeline.history.storage_backend import MemoryStorageBackend
-from voice_pipeline.llm.llm import OpenAILLM
-from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
-from voice_pipeline.llm.token_counter import create_token_counter
+from voice_pipeline.adapters.llm_openai import OpenAILLM
+from voice_pipeline.adapters.token_counter import create_token_counter
+from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
+from voice_pipeline.prompt import DEFAULT_SYSTEM_PROMPT, ContextBuilder
+from voice_pipeline.types import LLMMetrics
 
 # ---------------------------------------------------------------------------
 # Benchmark configuration — EDIT HERE
@@ -224,7 +222,7 @@ def _build_context(variant: InputVariant) -> tuple[ContextBuilder, MemoryReadRes
     """
     token_counter = create_token_counter("gpt-4o")
 
-    backend = MemoryStorageBackend()
+    backend = SQLiteStorageBackend(":memory:")
     history = ConversationHistory(backend, token_counter)
     history.new_session("bench")
 

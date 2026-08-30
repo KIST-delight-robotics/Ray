@@ -34,9 +34,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from voice_pipeline.core.interfaces import ITTS
-from voice_pipeline.tts.elevenlabs_tts import ElevenLabsTTS
-from voice_pipeline.tts.openai_tts import OpenAITTS
+from voice_pipeline.adapters.tts_elevenlabs import ElevenLabsTTS
+from voice_pipeline.adapters.tts_openai import OpenAITTS
+from voice_pipeline.types import ITTS
 
 _TEXTS = {
     "short": "Sure, I can help you with that.",

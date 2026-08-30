@@ -11,8 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from voice_pipeline.core.interfaces import ILLM, IEmbedder
-from voice_pipeline.core.types import LLMResult, LLMStream
+from voice_pipeline.types import ILLM, IEmbedder, LLMResult, LLMStream
 
 CONFIG_FILENAME = "config.json"
 ANSWERS_FILENAME = "answers.jsonl"

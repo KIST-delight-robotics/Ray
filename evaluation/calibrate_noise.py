@@ -53,7 +53,7 @@ except Exception:
 
 from evaluation.bed_audio import _read_wav_mono, _voiced_rms
 from evaluation.noise_bed import NoiseBed
-from voice_pipeline.audio.audio_input import AudioInput
+from voice_pipeline.adapters.audio_input import AudioInput
 
 _PEAK_CEILING = 0.95
 _SETTLE_SEC = 0.5

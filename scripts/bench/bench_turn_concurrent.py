@@ -33,7 +33,7 @@ from bench_turn_model import (  # noqa: E402
     numpy_to_pcm16,
 )
 
-from voice_pipeline.turn_taking.maai_vap import MaAIVAPModel  # noqa: E402
+from voice_pipeline.adapters.vap import MaAIVAPModel  # noqa: E402
 
 
 @dataclass
@@ -65,10 +65,10 @@ def run_concurrent_benchmark(
     n_inputs = len(all_inputs)
 
     # --- Create models ---
-    from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
+    from voice_pipeline.adapters.turngpt import TurnGPTWrapper
 
     print("  Loading VAP (maai-full-onnx)...")
-    from voice_pipeline.tts.openai_tts import OpenAITTS
+    from voice_pipeline.adapters.tts_openai import OpenAITTS
 
     MaAIVAPModel._FRAME_RATE = vap_frame_rate
     MaAIVAPModel._ORT_THREADS = vap_ort_threads

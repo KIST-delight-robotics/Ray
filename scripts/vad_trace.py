@@ -37,15 +37,15 @@ import numpy as np
 import torch
 from silero_vad import load_silero_vad
 
-from voice_pipeline.audio.audio_input import AudioInput
-from voice_pipeline.audio.constants import (
+from voice_pipeline.adapters.audio_input import AudioInput
+from voice_pipeline.adapters.vap import MaAIVAPModel
+from voice_pipeline.settings import (
     CHANNELS,
     FRAME_DURATION_MS,
     SAMPLE_RATE,
     SAMPLE_WIDTH,
 )
-from voice_pipeline.core.types import AudioFrame
-from voice_pipeline.turn_taking.maai_vap import MaAIVAPModel
+from voice_pipeline.types import AudioFrame
 
 # Silence ALSA's chatty C-level warnings (mirrors other hardware scripts).
 _alsa_error_handler = ctypes.CFUNCTYPE(

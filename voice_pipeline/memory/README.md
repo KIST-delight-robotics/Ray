@@ -37,12 +37,11 @@ on_session_end callback -> write_executor.submit(...)
 | File | Role |
 |------|------|
 | `types.py` | `Episode`, `Profile`, `MemoryReadResult` dataclasses |
-| `storage.py` | `SQLiteMemoryStorage` (production), `InMemoryMemoryStorage` (test) |
+| `storage.py` | `SQLiteMemoryStorage` (테스트는 `":memory:"` 경로) |
 | `vector_index.py` | `NumpyVectorIndex` -- exact cosine search, numpy matrix, < 10k vectors |
 | `retriever.py` | `MemoryRetriever` -- hybrid search, RRF fusion, salience ranking, retained buffer |
 | `writer.py` | `MemoryWriter` -- episode/profile extraction pipeline (3-4 LLM calls per session) |
 | `prompts.py` | LLM prompts + JSON schemas for extraction, merge, dedup |
-| `exceptions.py` | `MemoryStorageError`, `MemoryWriteError` |
 
 
 ## Storage Schema
@@ -129,18 +128,13 @@ All three access `SQLiteMemoryStorage` and `NumpyVectorIndex` concurrently, guar
 | `db_path` | (필수) | SQLite 파일 경로. WAL recovery + FTS5 초기화 수행. |
 | `dimension` | `384` | episode embedding 벡터 차원 (`load_all_embeddings` shape 검증). keyword-only. |
 
-## `InMemoryMemoryStorage.__init__` 인자
-
-| 인자 | Default | 의미 |
-|---|---|---|
-| `dimension` | `384` | 테스트용 embedding 차원. |
 
 ## `MemoryRetriever.__init__` 인자
 
 | 인자 | Default | 의미 |
 |---|---|---|
-| `storage` | (필수) | IMemoryStorage 구현체. |
-| `vector_index` | (필수) | IVectorIndex 구현체. |
+| `storage` | (필수) | `SQLiteMemoryStorage`. |
+| `vector_index` | (필수) | `NumpyVectorIndex`. |
 | `embedder` | (필수) | IEmbedder 구현체 (query embedding). |
 
 ### `MemoryRetriever` 클래스 변수
@@ -160,8 +154,8 @@ All three access `SQLiteMemoryStorage` and `NumpyVectorIndex` concurrently, guar
 
 | 인자 | Default | 의미 |
 |---|---|---|
-| `storage` | (필수) | IMemoryStorage. |
-| `vector_index` | (필수) | IVectorIndex. |
+| `storage` | (필수) | `SQLiteMemoryStorage`. |
+| `vector_index` | (필수) | `NumpyVectorIndex`. |
 | `embedder` | (필수) | IEmbedder. |
 | `llm` | (필수) | ILLM (에피소드/프로필 추출용). |
 | `token_counter` | (필수) | `Callable[[str], int]`. 프로필 슬롯 토큰 측정. |

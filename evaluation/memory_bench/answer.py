@@ -39,14 +39,14 @@ from evaluation.memory_bench.production_answer import (
 )
 from evaluation.memory_bench.prompts import format_memories, format_profile
 from evaluation.memory_bench.types import TIMESTAMP_FORMAT, Conversation, QAItem
-from voice_pipeline.core.interfaces import ILLM, IEmbedder
-from voice_pipeline.embedding.embedder import create_embedder
-from voice_pipeline.llm.llm import OpenAILLM
-from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
+from voice_pipeline.adapters.embedder import create_embedder
+from voice_pipeline.adapters.llm_openai import OpenAILLM
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.types import MemoryReadResult, Profile
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
+from voice_pipeline.prompt import DEFAULT_SYSTEM_PROMPT
+from voice_pipeline.types import ILLM, IEmbedder
 
 logger = logging.getLogger("eval.memory_bench")
 

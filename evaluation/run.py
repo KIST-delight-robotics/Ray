@@ -43,8 +43,8 @@ except Exception:
 
 from evaluation.noise_bed import NoiseBed
 from evaluation.question_player import QuestionPlayer
-from voice_pipeline.core.types import AudioFrame
 from voice_pipeline.session_loop import SessionComponents
+from voice_pipeline.types import AudioFrame
 from voice_pipeline.wiring import build_components
 
 logger = logging.getLogger("eval")
@@ -169,7 +169,7 @@ def _inject_seeds(seed_data, memory_storage, vector_index, embedder, token_count
     Returns:
         dict[int, str]: Mapping from session index to session_id.
     """
-    from voice_pipeline.llm.llm import OpenAILLM as _OpenAILLM
+    from voice_pipeline.adapters.llm_openai import OpenAILLM as _OpenAILLM
     from voice_pipeline.memory.writer import MemoryWriter
 
     write_llm = _OpenAILLM(
