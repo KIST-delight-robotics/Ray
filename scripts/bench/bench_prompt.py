@@ -23,21 +23,13 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from voice_pipeline.core.interfaces import ILLM, ITTS
-from voice_pipeline.core.types import (
-    GeneratorState,
-    LLMResult,
-    LLMStream,
-    TTSStream,
-    WordTimestamp,
-)
-from voice_pipeline.generation.speech_generator import SpeechGenerator
-from voice_pipeline.history.conversation_history import ConversationHistory
-from voice_pipeline.history.storage_backend import MemoryStorageBackend
-from voice_pipeline.llm.llm import OpenAILLM
-from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
-from voice_pipeline.llm.token_counter import create_token_counter
-from voice_pipeline.tts.openai_tts import OpenAITTS
+from voice_pipeline.adapters.llm_openai import OpenAILLM
+from voice_pipeline.adapters.token_counter import create_token_counter
+from voice_pipeline.adapters.tts_openai import OpenAITTS
+from voice_pipeline.generator import GeneratorState, SpeechGenerator
+from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
+from voice_pipeline.prompt import DEFAULT_SYSTEM_PROMPT
+from voice_pipeline.types import ILLM, ITTS, LLMResult, LLMStream, TTSStream, WordTimestamp
 
 # ---------------------------------------------------------------------------
 # Harness — capture wrappers and a minimal SpeechGenerator runner
@@ -130,7 +122,7 @@ def build_generator(
 ) -> SpeechGenerator:
     """Wire a production SpeechGenerator with an in-memory history."""
     token_counter = create_token_counter("gpt-4o")
-    history = ConversationHistory(MemoryStorageBackend(), token_counter)
+    history = ConversationHistory(SQLiteStorageBackend(":memory:"), token_counter)
     history.new_session("bench_prompt")
     for role, text in history_turns or []:
         if role == "user":
@@ -484,7 +476,7 @@ def main() -> None:
     if prompt_text:
         print(f"\n[Custom prompt]\n{prompt_text}\n")
     else:
-        from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
+        from voice_pipeline.prompt import DEFAULT_SYSTEM_PROMPT
 
         print(f"\n[Default prompt]\n{DEFAULT_SYSTEM_PROMPT}\n")
         prompt_text = None  # use default

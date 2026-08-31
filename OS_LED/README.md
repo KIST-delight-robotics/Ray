@@ -341,5 +341,5 @@ OS_LED/
 └── legacy/                  # (추가 예정, 보존용) 구설계 GPIO23/24 — 어떤 Pi에도 설치 금지
 ```
 
-RAY 저장소 연동 지점: `voice_pipeline/led/arbiter_client.py`(소켓 클라이언트),
-`voice_pipeline/led/led_controller.py`(RAY LED 연출 — rpi5_ws2812, 데몬과 동일 인코딩).
+RAY 저장소 연동 지점: `voice_pipeline/adapters/led.py`(RAY 쪽 소켓 클라이언트 + LED 연출 — rpi5_ws2812, 데몬과 동일 인코딩).
+

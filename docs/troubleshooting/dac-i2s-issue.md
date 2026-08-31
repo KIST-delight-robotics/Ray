@@ -12,7 +12,7 @@ Raspberry Pi 5에서 RPi DAC+ (PCM5122, I2S)와 WS2812 LED (SPI0)를 함께 운�
 - **OS**: Ubuntu 24.04, kernel 6.8.0-1053-raspi
 - **DAC**: RPi DAC+ (TI PCM5122, I2C addr 0x4c, 외부 오실레이터 없음)
 - **LED**: WS2812 스트립, SPI0 (`/dev/spidev0.0`) — `rpi5_ws2812` 라이브러리 (SPI DMA 사용)
-  - `scripts/hardware/led.py`, `voice_pipeline/led/led_controller.py`(DirectLedController) 모두 `spi_bus=0, spi_device=0`
+  - `scripts/hardware/led.py`, `voice_pipeline/adapters/led.py`(DirectLedController) 모두 `spi_bus=0, spi_device=0`
 - **Audio stack**: PipeWire 1.0.5, WirePlumber 0.4.17
 - **Overlay**: `dtoverlay=rpi-dacplus`, `dtparam=spi=on`
 - **I2S driver**: `designware_i2s`, `snd_soc_iqaudio_dac`, `snd_soc_pcm512x_i2c`

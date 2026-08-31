@@ -14,6 +14,7 @@ import pytest
 
 import voice_pipeline.wiring as wiring
 from voice_pipeline.session_loop import SessionComponents
+from voice_pipeline.trace import record_call
 from voice_pipeline.wiring import ProcessComponents
 
 _SESSION_CLASSES = [
@@ -47,8 +48,6 @@ def _make_components() -> ProcessComponents:
         token_counter=MagicMock(return_value=1),
         embedder=MagicMock(),
         memory_storage=MagicMock(),
-        trace_store=MagicMock(),
-        call_store=MagicMock(),
         retry_handler=MagicMock(),
         vector_index=MagicMock(),
         audio_queue=MagicMock(),
@@ -78,15 +77,13 @@ class TestCreateSession:
         assert result.session_loop is session_mocks["SessionLoop"].return_value
         assert result.history is session_mocks["ConversationHistory"].return_value
 
-    def test_session_id_stamped_on_tracked_singletons(self, session_mocks):
+    def test_session_id_set_on_trace_context(self, session_mocks, call_log):
         comps = _make_components()
 
         result = comps.create_session()
+        record_call("tts", "synthesize", "m", 1.0)
 
-        assert comps.tts.session_id == result.session_id
-        assert comps.embedder.session_id == result.session_id
-        assert comps.retry_handler.session_id == result.session_id
-        assert comps.vap.session_id == result.session_id
+        assert call_log.records[0].session_id == result.session_id
 
     def test_models_reset_before_assembly(self, session_mocks):
         comps = _make_components()

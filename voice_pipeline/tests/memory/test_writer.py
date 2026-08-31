@@ -8,12 +8,11 @@ from typing import Any
 
 import numpy as np
 
-from voice_pipeline.core.interfaces import ILLM, IEmbedder
-from voice_pipeline.core.types import LLMResult, LLMStream
-from voice_pipeline.memory.storage import InMemoryMemoryStorage
+from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Profile
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.writer import MemoryWriter
+from voice_pipeline.types import ILLM, IEmbedder, LLMResult, LLMStream
 
 # ---------------------------------------------------------------------------
 # Test infrastructure
@@ -102,10 +101,10 @@ def _apply_writer_overrides(monkeypatch, **overrides: Any) -> None:
 
 def _make_writer(
     llm_responses: list[str],
-    storage: InMemoryMemoryStorage | None = None,
+    storage: SQLiteMemoryStorage | None = None,
     embedder: IEmbedder | None = None,
-) -> tuple[MemoryWriter, InMemoryMemoryStorage, NumpyVectorIndex, FakeLLM]:
-    st = storage or InMemoryMemoryStorage(dimension=_DIM)
+) -> tuple[MemoryWriter, SQLiteMemoryStorage, NumpyVectorIndex, FakeLLM]:
+    st = storage or SQLiteMemoryStorage(":memory:", dimension=_DIM)
     vi = NumpyVectorIndex()
     emb = embedder or FakeEmbedder()
     llm = FakeLLM(llm_responses)
@@ -115,7 +114,7 @@ def _make_writer(
 
 
 def _add_utterances(
-    storage: InMemoryMemoryStorage,
+    storage: SQLiteMemoryStorage,
     session_id: str = _SESSION_ID,
     count: int = 4,
 ) -> None:
@@ -598,7 +597,7 @@ class TestErrorHandling:
             def generate(self, messages, tools=None, response_format=None):
                 raise RuntimeError("LLM down")
 
-        storage = InMemoryMemoryStorage(dimension=_DIM)
+        storage = SQLiteMemoryStorage(":memory:", dimension=_DIM)
         vi = NumpyVectorIndex()
         emb = FakeEmbedder()
         counter = lambda text: len(text.split())  # noqa: E731
@@ -633,7 +632,7 @@ class TestEpisodePromptOverride:
     """episode_system_prompt 주입점 (평가에서 프롬프트 변형 실험용)."""
 
     def test_override_replaces_system_prompt(self) -> None:
-        st = InMemoryMemoryStorage(dimension=_DIM)
+        st = SQLiteMemoryStorage(":memory:", dimension=_DIM)
         llm = FakeLLM(['{"episodes": []}'])
         writer = MemoryWriter(
             st,

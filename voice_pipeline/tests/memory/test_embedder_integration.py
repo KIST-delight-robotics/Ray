@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from voice_pipeline.embedding.embedder import SentenceTransformerEmbedder
+from voice_pipeline.adapters.embedder import SentenceTransformerEmbedder
 
 pytestmark = pytest.mark.requires_model
 

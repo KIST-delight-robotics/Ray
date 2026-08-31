@@ -1,11 +1,10 @@
-"""Shared component wiring for pipeline entry points.
+"""컴포넌트 조립 — 프로덕션(``__main__``)과 eval(``evaluation.run``)이 같은 그래프를 쓴다.
 
-프로덕션(``__main__``)과 eval(``evaluation.run``)이 같은 컴포넌트 그래프를 쓰도록
-프로세스 수준 조립(모델·클라이언트·스토어)과 세션 수준 조립을 한 곳에 모은다.
+프로세스 수준(모델·클라이언트·스토어, ``build_components``)과 세션 수준(``create_session``)을
+한 곳에 모은다. TTS 벤더 선택(``create_tts``)도 여기.
 
-규율: 이 모듈과 파이프라인 모듈에는 **중립적 주입점**(경로·토글·콜백 전달)만 둔다.
-eval 전용 동작(측정·채점 로직)은 evaluation 패키지에 있어야 하며, 여기에 eval을
-아는 분기를 넣지 않는다. 의존 방향은 ``evaluation → voice_pipeline`` 단방향.
+규율: 이 모듈과 파이프라인 모듈에는 **중립적 주입점**(경로·토글·콜백)만 둔다. eval 전용 동작은
+evaluation 패키지에 있어야 하며, 의존 방향은 ``evaluation → voice_pipeline`` 단방향.
 """
 
 from __future__ import annotations
@@ -18,42 +17,35 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from silero_vad import load_silero_vad
 
-from voice_pipeline.asr.asr import GoogleCloudASR
-from voice_pipeline.audio.audio_input import AudioInput
-from voice_pipeline.audio.constants import SAMPLE_RATE
-from voice_pipeline.bridge.cpp_bridge import CppBridge
-from voice_pipeline.context.context_builder import ContextBuilder
-from voice_pipeline.context.history_summarizer import HistorySummarizer
-from voice_pipeline.core.interfaces import ITTS, IStorageBackend
-from voice_pipeline.core.types import AudioFrame
-from voice_pipeline.embedding.embedder import create_embedder
-from voice_pipeline.generation.speech_generator import SpeechGenerator
-from voice_pipeline.history.conversation_history import ConversationHistory
-from voice_pipeline.history.storage_backend import create_storage_backend
-from voice_pipeline.led.led_controller import LEDController
-from voice_pipeline.llm.llm import OpenAILLM
-from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
-from voice_pipeline.llm.token_counter import TokenCounter, create_token_counter
+from voice_pipeline import trace
+from voice_pipeline.adapters.asr_google import GoogleCloudASR
+from voice_pipeline.adapters.audio_input import AudioInput
+from voice_pipeline.adapters.cpp_bridge import CppBridge
+from voice_pipeline.adapters.embedder import create_embedder
+from voice_pipeline.adapters.led import LEDController
+from voice_pipeline.adapters.llm_openai import OpenAILLM
+from voice_pipeline.adapters.token_counter import TokenCounter, create_token_counter
+from voice_pipeline.adapters.tts_elevenlabs import ElevenLabsTTS
+from voice_pipeline.adapters.tts_openai import OpenAITTS
+from voice_pipeline.adapters.turngpt import ThreadedTurnGPT, TurnGPTWrapper
+from voice_pipeline.adapters.vap import MaAIVAPModel, ThreadedVAP
+from voice_pipeline.generator import SpeechGenerator
+from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.memory.retriever import MemoryRetriever
-from voice_pipeline.memory.storage import _DEFAULT_DB_PATH, _DEFAULT_DIMENSION, SQLiteMemoryStorage
+from voice_pipeline.memory.storage import _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
+from voice_pipeline.prompt import DEFAULT_SYSTEM_PROMPT, HistorySummarizer
 from voice_pipeline.session_loop import SessionComponents, SessionLoop
+from voice_pipeline.settings import DEFAULT_DB_PATH, HISTORY_TOKEN_BUDGET, SAMPLE_RATE, SUMMARY_MAX_TOKENS
 from voice_pipeline.text_session import TextSession
-from voice_pipeline.trace.openai_retry_handler import OpenAIRetryHandler
-from voice_pipeline.trace.trace_store import SQLiteCallStore, SQLiteTraceStore
-from voice_pipeline.trace.tracked_embedder import TrackedEmbedder
-from voice_pipeline.trace.tracked_tts import TrackedTTS
-from voice_pipeline.tts.factory import create_tts
-from voice_pipeline.turn_taking.maai_vap import MaAIVAPModel
-from voice_pipeline.turn_taking.threaded_turngpt import ThreadedTurnGPT
-from voice_pipeline.turn_taking.threaded_vap import ThreadedVAP
-from voice_pipeline.turn_taking.turn_detector import TurnDetector
-from voice_pipeline.turn_taking.turngpt import TurnGPTWrapper
+from voice_pipeline.trace import OpenAIRetryHandler, SQLiteCallStore, SQLiteTraceStore, TrackedEmbedder, TrackedTTS
+from voice_pipeline.turn_detector import TurnDetector
+from voice_pipeline.types import ITTS, AudioFrame
 
 logger = logging.getLogger("voice_pipeline.wiring")
 
@@ -83,13 +75,11 @@ class ProcessComponents:
     reset_vad: Callable[[], None]
     bridge: CppBridge
     led: LEDController
-    storage: IStorageBackend
+    storage: SQLiteStorageBackend
     executor: ThreadPoolExecutor
     token_counter: TokenCounter
     embedder: TrackedEmbedder
     memory_storage: SQLiteMemoryStorage
-    trace_store: SQLiteTraceStore
-    call_store: SQLiteCallStore
     retry_handler: OpenAIRetryHandler
     vector_index: NumpyVectorIndex
     audio_queue: queue.Queue[AudioFrame]
@@ -126,17 +116,13 @@ class ProcessComponents:
         self.stop_threaded()
 
         session_id = str(uuid.uuid4())
-        # VAP 스레드는 프로세스 수명 — 세션마다 재생성 대신 session_id 리바인드 + reset.
-        self.vap.session_id = session_id
+        trace.set_session(session_id)  # 이후 호출/턴 기록에 이 세션 ID가 찍힌다
+        # VAP 스레드는 프로세스 수명 — 세션마다 재생성 대신 reset().
         self.vap.reset()
         self.turngpt.reset()
         self.reset_vad()
 
-        self.embedder.session_id = session_id
-        self.tts.session_id = session_id
-        self.retry_handler.session_id = session_id
-
-        threaded_turngpt = ThreadedTurnGPT(self.turngpt, call_store=self.call_store, session_id=session_id)
+        threaded_turngpt = ThreadedTurnGPT(self.turngpt)
         self._prev_threaded.append(threaded_turngpt)
 
         history = ConversationHistory(self.storage, self.token_counter)
@@ -148,14 +134,11 @@ class ProcessComponents:
             self.embedder,
             vad_fn=self.vad_fn,
             vad_reset_fn=self.reset_vad,
-            call_store=self.call_store,
-            session_id=session_id,
         )
         summarizer = HistorySummarizer(
             self.summary_llm,
             self.token_counter,
-            ContextBuilder._MAX_HISTORY_TOKENS,
-            call_store=self.call_store,
+            HISTORY_TOKEN_BUDGET,
             session_id=session_id,
             summary_backend=self.storage,
         )
@@ -186,7 +169,6 @@ class ProcessComponents:
             memory_storage=memory_storage,
             session_id=session_id,
             token_counter=self.token_counter,
-            trace_store=self.trace_store,
             shutdown_event=self.shutdown_event,
             **session_loop_kwargs,
         )
@@ -206,7 +188,7 @@ class ProcessComponents:
         history = ConversationHistory(self.storage, self.token_counter)
         memory_storage = self.memory_storage if memory_enabled else None
         retriever = MemoryRetriever(self.memory_storage, self.vector_index, self.embedder) if memory_enabled else None
-        return TextSession(
+        session = TextSession(
             llm=self.llm,
             history=history,
             token_counter=self.token_counter,
@@ -216,11 +198,13 @@ class ProcessComponents:
             load_session_context=load_session_context,
             history_backend=self.storage,
         )
+        trace.set_session(session.session_id)  # 텍스트 모드의 호출 기록에도 세션 ID를 찍는다
+        return session
 
 
 def build_components(
     *,
-    db_path: str = _DEFAULT_DB_PATH,
+    db_path: str = DEFAULT_DB_PATH,
     led_enabled: bool | None = None,
     language_code: str = "en-US",
 ) -> ProcessComponents:
@@ -246,7 +230,7 @@ def build_components(
         model="gpt-5.4-mini",
         temperature=0.3,
         reasoning_effort="none",
-        max_tokens=HistorySummarizer._HARD_CAP_TOKENS,
+        max_tokens=SUMMARY_MAX_TOKENS,
         tools=[],
     )
     raw_tts = create_tts()
@@ -283,25 +267,21 @@ def build_components(
         led_enabled = os.environ.get("LED_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
     led = LEDController(enabled=led_enabled)
 
-    storage = create_storage_backend("sqlite", db_path=db_path)
+    storage = SQLiteStorageBackend(db_path)
     executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
     token_counter = create_token_counter(llm.model)
 
     memory_storage = SQLiteMemoryStorage(db_path)
-    trace_store = SQLiteTraceStore(db_path)
-    call_store = SQLiteCallStore(db_path)
+    trace.install(SQLiteCallStore(db_path), SQLiteTraceStore(db_path))
     # VAP runs its own inference thread for the process lifetime; sessions
-    # rebind it via reset() + session_id rather than recreating it (model
-    # load + warmup is expensive).
-    vap = ThreadedVAP(MaAIVAPModel(raw_tts.output_sample_rate), call_store=call_store)
-    retry_handler = OpenAIRetryHandler(call_store)
+    # rebind it via reset() rather than recreating it (model load + warmup is expensive).
+    vap = ThreadedVAP(MaAIVAPModel(raw_tts.output_sample_rate))
+    retry_handler = OpenAIRetryHandler()
     logging.getLogger("openai._base_client").addHandler(retry_handler)
-    tts = TrackedTTS(raw_tts, call_store)
+    tts = TrackedTTS(raw_tts)
     # local_files_only: 부팅 시 HF 허브 왕복 생략(−3.4s) + 네트워크 미준비 상태에서도 기동.
     # 새 기기 첫 실행은 캐시가 없어 실패한다 — docs/SETUP.md의 모델 캐시 부트스트랩 참고.
-    embedder = TrackedEmbedder(
-        create_embedder(expected_dimension=_DEFAULT_DIMENSION, local_files_only=True), call_store
-    )
+    embedder = TrackedEmbedder(create_embedder(expected_dimension=_DEFAULT_DIMENSION, local_files_only=True))
 
     vector_index = NumpyVectorIndex()
     ids, vectors = memory_storage.load_all_embeddings()
@@ -330,11 +310,32 @@ def build_components(
         token_counter=token_counter,
         embedder=embedder,
         memory_storage=memory_storage,
-        trace_store=trace_store,
-        call_store=call_store,
         retry_handler=retry_handler,
         vector_index=vector_index,
         audio_queue=audio_queue,
         audio_input=audio_input,
         shutdown_event=threading.Event(),
     )
+
+
+_DEFAULT_VENDOR: Literal["openai", "elevenlabs"] = "elevenlabs"  # 기본 TTS vendor
+
+
+def create_tts(vendor: Literal["openai", "elevenlabs"] = _DEFAULT_VENDOR) -> ITTS:
+    """Factory: create an ITTS instance for *vendor*.
+
+    Args:
+        vendor: ``"openai"``이면 OpenAITTS, ``"elevenlabs"``이면 ElevenLabsTTS.
+
+    Returns:
+        Configured ITTS implementation.
+
+    Raises:
+        ValueError: On unknown vendor name.
+    """
+    if vendor == "openai":
+        return OpenAITTS()
+    elif vendor == "elevenlabs":
+        return ElevenLabsTTS()
+    else:
+        raise ValueError(f"Unknown TTS vendor: {vendor!r}")

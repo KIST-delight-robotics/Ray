@@ -14,9 +14,9 @@ import logging
 import queue
 import time
 
-from voice_pipeline.audio.audio_input import AudioInput
-from voice_pipeline.core.types import AudioFrame
-from voice_pipeline.wakeword.wakeword import WakewordDetector
+from voice_pipeline.adapters.audio_input import AudioInput
+from voice_pipeline.adapters.wakeword import WakewordDetector
+from voice_pipeline.types import AudioFrame
 
 logging.basicConfig(
     level=logging.INFO,

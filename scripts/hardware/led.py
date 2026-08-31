@@ -21,8 +21,8 @@ strip.set_brightness(BRIGHTNESS)
 # -- 여기서부터 원하는 대로 수정 --
 
 # 전체 끄기
-strip.set_all_pixels(Color(0, 0, 0))
-strip.show()
+# strip.set_all_pixels(Color(0, 0, 0))
+# strip.show()
 
 # 전체 켜기
 # strip.set_all_pixels(Color(233, 233, 50))
@@ -38,11 +38,11 @@ strip.show()
 # strip.show()
 
 # ring(8~23) 켜기
-# for i in range(BAR_COUNT, LED_COUNT):
-#     strip.set_pixel_color(i, Color(0, 255, 0))
-# strip.show()
+for i in range(BAR_COUNT, LED_COUNT):
+    strip.set_pixel_color(i, Color(0, 255, 0))
+strip.show()
 
 # 3초 후 모두 끄기
-time.sleep(3)
-strip.set_all_pixels(Color(0, 0, 0))
-strip.show()
+# time.sleep(3)
+# strip.set_all_pixels(Color(0, 0, 0))
+# strip.show()

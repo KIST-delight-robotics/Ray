@@ -38,16 +38,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from voice_pipeline.context.context_builder import ContextBuilder
-from voice_pipeline.context.formatters import parse_citation_tag, strip_urls
-from voice_pipeline.core.interfaces import (
-    ILLM,
-    IConversationHistory,
-    IMemoryRetriever,
-    IMemoryStorage,
-    IStorageBackend,
-)
-from voice_pipeline.core.types import LLMMetrics, TokenCounter
+from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
+from voice_pipeline.memory.retriever import MemoryRetriever
+from voice_pipeline.memory.storage import SQLiteMemoryStorage
+from voice_pipeline.prompt import ContextBuilder, parse_citation_tag, strip_urls
+from voice_pipeline.types import ILLM, LLMMetrics, TokenCounter
 
 if TYPE_CHECKING:
     from voice_pipeline.memory.types import MemoryReadResult
@@ -80,14 +75,14 @@ class TextSession:
         self,
         *,
         llm: ILLM,
-        history: IConversationHistory,
+        history: ConversationHistory,
         token_counter: TokenCounter,
         system_prompt: str,
-        memory_storage: IMemoryStorage | None = None,
-        retriever: IMemoryRetriever | None = None,
+        memory_storage: SQLiteMemoryStorage | None = None,
+        retriever: MemoryRetriever | None = None,
         session_id: str | None = None,
         load_session_context: bool = True,
-        history_backend: IStorageBackend | None = None,
+        history_backend: SQLiteStorageBackend | None = None,
     ) -> None:
         self._llm = llm
         self._history = history

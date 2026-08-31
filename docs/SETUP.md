@@ -115,7 +115,7 @@ production wiring은 부팅 시 네트워크 의존을 없애기 위해 **로컬
 
 ```bash
 # 임베딩 모델 (HF 허브 → ~/.cache/huggingface). local_files_only=False로 1회 로드
-uv run python -c "from voice_pipeline.embedding.embedder import create_embedder; create_embedder(expected_dimension=384)"
+uv run python -c "from voice_pipeline.adapters.embedder import create_embedder; create_embedder(expected_dimension=384)"
 # tiktoken 인코딩 사전 (→ $TIKTOKEN_CACHE_DIR). ray.env의 경로와 같아야 한다
 mkdir -p ~/.cache/tiktoken
 TIKTOKEN_CACHE_DIR=~/.cache/tiktoken uv run python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"

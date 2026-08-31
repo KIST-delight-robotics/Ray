@@ -8,21 +8,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from voice_pipeline.core.types import (
-    AudioFrame,
-    CppEvent,
-    CppEventType,
-    GeneratorState,
-    LEDState,
-    Phase,
-    PipelineTrace,
-    ResponseData,
-    TurnDecision,
-    WordTimestamp,
-)
-from voice_pipeline.session_loop import SessionLoop, _PendingTruncation
-from voice_pipeline.trace.trace_store import InMemoryTraceStore
-from voice_pipeline.tts.openai_tts import OpenAITTS
+from voice_pipeline.adapters.cpp_bridge import CppEvent, CppEventType
+from voice_pipeline.adapters.led import LEDState
+from voice_pipeline.adapters.tts_openai import OpenAITTS
+from voice_pipeline.generator import GeneratorState, ResponseData
+from voice_pipeline.session_loop import Phase, SessionLoop, _PendingTruncation
+from voice_pipeline.tests.fakes import RecordingTraceStore
+from voice_pipeline.trace import PipelineTrace, install, set_session
+from voice_pipeline.turn_detector import TurnDecision
+from voice_pipeline.types import AudioFrame, WordTimestamp
 
 # ---------------------------------------------------------------------------
 # Fixture helper
@@ -1136,11 +1130,12 @@ class TestUtteranceStorage:
 
 def _make_session_loop_with_trace(
     monkeypatch: pytest.MonkeyPatch,
-) -> tuple[SessionLoop, dict[str, MagicMock], InMemoryTraceStore]:
-    """Create an SessionLoop with InMemoryTraceStore."""
+) -> tuple[SessionLoop, dict[str, MagicMock], RecordingTraceStore]:
+    """Create an SessionLoop with RecordingTraceStore."""
     orch, mocks = _make_session_loop(monkeypatch)
-    store = InMemoryTraceStore()
-    orch._trace_store = store
+    store = RecordingTraceStore()
+    install(trace_store=store)
+    set_session("test-session")
     orch._session_id = "test-session"
     mocks["generator"].trace = PipelineTrace(run_id=1, pipeline_mode="full", prepare_ts=time.monotonic())
     return orch, mocks, store
@@ -1311,7 +1306,6 @@ class TestPipelineTraceTimestamps:
         trace = mocks["generator"].trace
         assert trace.turn_shift_ts > 0
         assert trace.begin_streaming_ts > 0
-        assert trace.session_id != ""
 
     def test_playback_started_sets_trace_timestamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
         orch, mocks, store = _make_session_loop_with_trace(monkeypatch)

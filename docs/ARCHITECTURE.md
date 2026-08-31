@@ -104,7 +104,7 @@ SLEEP ──(wakeword)──▶ GREETING ──(playback done)──▶ ACTIVE �
 | Input | Assembled context (message list), optional tool definitions |
 | Output | `LLMStream` — streaming text chunks, `.result` provides `LLMResult` (text, tool_calls, metrics) after consumption |
 | Metrics | `LLMMetrics` captured per call: Usage (input/output/cached/reasoning tokens), model, latency_ms, ttft_ms |
-| Tools | `tools` parameter: `None` = config defaults, `[]` = disabled. Tool definitions + token costs managed in `llm/tools.py` |
+| Tools | `tools` parameter: `None` = config defaults, `[]` = disabled. Tool definitions + token costs managed in `adapters/llm_openai.py` |
 | Interface | Vendor-swappable via `ILLM` abstraction |
 
 
@@ -125,10 +125,10 @@ SLEEP ──(wakeword)──▶ GREETING ──(playback done)──▶ ACTIVE �
 | Role | Compute the spoken portion of text at barge-in |
 | Input | Original text, playback stop position, (optional) word-level timestamps |
 | Output | Truncated text |
-| Strategies | **TimestampTruncator**: precise truncation using word-level timestamps (stateless) |
-|            | **DurationRatioTruncator**: estimation from playback duration ratio. Requires `total_duration_sec` at construction time — a new instance per response. |
-| Strategy selection | Orchestrator selects based on whether `ResponseData` has timestamps (see section 2.16) |
-| Note | Strategy interface (`IUtteranceTruncator`). Independent of TTS implementation. |
+| Strategies | `truncate_by_timestamps`: word-level timestamps로 정확히 절단 |
+|            | `truncate_by_ratio`: 재생 시간 비율로 추정 |
+| Strategy selection | SessionLoop이 `ResponseData`에 timestamps가 있는지로 선택 (section 2.16) |
+| Note | `session_loop.py`의 순수 함수. TTS 구현과 독립. |
 
 
 ### 2.10 ContextBuilder
@@ -151,7 +151,7 @@ SLEEP ──(wakeword)──▶ GREETING ──(playback done)──▶ ACTIVE �
 | Message format | OpenAI Responses API input format. Each message = one DB row. `turn_id` groups multi-message turns (tool calls). |
 | Token tracking | `token_count` pre-computed at save time (LLM `output_tokens` or tiktoken fallback). `metrics_json` stores full LLM call metadata. |
 | Read paths | `get_messages()` → flat list for LLM input (memory only). `get_turns()` → grouped by turn_id for ContextBuilder budgeting. |
-| Backend | `SQLiteStorageBackend` (production, WAL mode) / `MemoryStorageBackend` (tests) |
+| Backend | `SQLiteStorageBackend` (WAL mode). Tests use the `":memory:"` path |
 | Threading | `threading.Lock` on all public methods. Writes from main thread, reads from background thread. |
 
 
@@ -219,7 +219,7 @@ SLEEP ──(wakeword)──▶ GREETING ──(playback done)──▶ ACTIVE �
 | Role | ACTIVE mode conversation loop. Frame-driven. Controls module execution flow based on TurnDecision. |
 | Input | audio_queue (received from SessionManager) |
 | Internal state | PlaybackState (`idle`/`playing`/`stop_pending`), `awaiting_response` flag, current ResponseData, sent audio buffer, pending truncation |
-| Dependencies | IASR, ITurnDetector, ISpeechGenerator, ICppBridge, IConversationHistory, IUtteranceTruncator, ILEDController |
+| Dependencies | IASR, TurnDetector, SpeechGenerator, CppBridge, ConversationHistory, LEDController (벤더 교체 대상인 ASR만 인터페이스) |
 
 **Per-frame loop (never blocks):**
 
@@ -356,68 +356,30 @@ Future extension:
 
 ## 5. Directory Structure
 
+기준: **밖의 것을 감싸면 `adapters/`에 파일 하나, 안의 로직은 top-level 파일**. 패키지는 선택 가능한
+서브시스템(`memory/`)만. 읽는 순서는 `voice_pipeline/__init__.py` docstring 참조.
+
 ```
 voice_pipeline/
-├── core/
-│   ├── types.py                 # Shared data types (TurnDecision, ResponseData, etc.)
-│   ├── interfaces.py            # All module interfaces
-│   ├── exceptions.py            # PipelineError base
-│   └── config.py                # Dataclass-based configuration
-│
-├── audio/
-│   ├── audio_input.py           # Mic capture → audio_queue
-│   └── exceptions.py
-│
-├── wakeword/
-│   ├── wakeword.py              # Wakeword detection (Silero VAD + Google STT)
-│   └── exceptions.py
-│
-├── asr/
-│   ├── asr.py                   # ASR interface implementation
-│   └── exceptions.py
-│
-├── turn_taking/
-│   ├── vap.py                   # VAP wrapper
-│   ├── turngpt.py               # TurnGPT wrapper
-│   ├── turn_detector.py         # Combined turn decision
-│   └── exceptions.py
-│
-├── llm/
-│   ├── llm.py                   # LLM interface implementation
-│   ├── prompts.py               # Prompt template management
-│   ├── tools.py                 # Tool definitions & execution
-│   └── exceptions.py
-│
-├── tts/
-│   ├── tts.py                   # TTS interface implementation
-│   ├── utterance_truncator.py   # Barge-in text truncation strategies
-│   └── exceptions.py
-│
-├── context/
-│   └── context_builder.py       # LLM context assembly
-│
-├── history/
-│   ├── conversation_history.py  # Per-session conversation history
-│   ├── storage_backend.py       # Persistence (memory / file / DB)
-│   └── exceptions.py
-│
-├── generation/
-│   ├── speech_generator.py      # ContextBuilder → LLM → TTS orchestration
-│   └── exceptions.py
-│
-├── bridge/
-│   ├── cpp_bridge.py            # C++ WebSocket communication
-│   └── exceptions.py
-│
-├── led/
-│   └── led_controller.py        # LED interface + implementations
-│
-├── orchestrator/
-│   ├── orchestrator.py          # ACTIVE mode conversation loop
-│   └── exceptions.py
-│
-└── session/
-    └── session_manager.py       # Top-level state machine
+├── __main__.py        # 모드 루프 (SLEEP → GREETING → ACTIVE → FAREWELL)
+├── wiring.py          # 컴포넌트 조립 (프로세스/세션 수준), TTS 벤더 선택
+├── session_loop.py    # ACTIVE 프레임 루프 — ASR, 턴 감지, 재생, barge-in
+├── generator.py       # SpeechGenerator (ContextBuilder → LLM → TTS) + SentenceDetector
+├── prompt.py          # DEFAULT_SYSTEM_PROMPT, 블록 포매터, ContextBuilder, HistorySummarizer
+├── turn_detector.py   # VAP + TurnGPT + VAD 결합 판정
+├── history.py         # ConversationHistory + SQLiteStorageBackend
+├── text_session.py    # 텍스트 전용 세션 (eval --text)
+├── greeting_audio.py  # 인사/작별 오디오 사전 생성
+├── trace.py           # 기록 API(record_call/save_turn, logging식) + PipelineTrace/CallRecord + SQLite 스토어
+├── types.py           # IASR/ILLM/ITTS/IEmbedder + 계약 타입(스트림·결과), AudioFrame/TokenCounter
+├── settings.py        # 오디오 형식, DB 경로, 토큰 예산
+├── adapters/          # 외부 경계 — 벤더·하드웨어·외부 모델 래퍼
+│   ├── audio_input.py   asr_google.py   wakeword.py
+│   ├── llm_openai.py    tts_openai.py   tts_elevenlabs.py   token_counter.py
+│   ├── vap.py           turngpt.py      embedder.py
+│   └── cpp_bridge.py    led.py
+├── memory/            # 장기 기억 서브시스템 (storage, retriever, writer, vector_index)
+└── tests/             # adapters/ · memory/ · integration/ + top-level test_<file>.py
 ```
 
 Test structure and development conventions are documented in CLAUDE.md.
@@ -438,18 +400,14 @@ Test structure and development conventions are documented in CLAUDE.md.
 ### Log namespaces
 
 ```
-voice_pipeline.audio        # AudioInput
-voice_pipeline.wakeword     # WakewordDetector
-voice_pipeline.asr          # ASR streaming
-voice_pipeline.turn_taking  # TurnDetector, VAP, TurnGPT
-voice_pipeline.generation   # SpeechGenerator
-voice_pipeline.llm          # LLM API calls
-voice_pipeline.tts          # TTS synthesis
-voice_pipeline.bridge       # CppBridge WebSocket
-voice_pipeline.led          # LED controller
-voice_pipeline.orchestrator # Frame loop, turn handling, barge-in
-voice_pipeline.session      # SessionManager state transitions
-voice_pipeline.core         # TTSStream
+voice_pipeline                  # 모드 전환 (__main__)
+voice_pipeline.session_loop     # 프레임 루프, 턴 처리, barge-in
+voice_pipeline.generator        # SpeechGenerator
+voice_pipeline.prompt           # ContextBuilder, HistorySummarizer
+voice_pipeline.turn_detector    # TurnDetector
+voice_pipeline.history / .memory / .trace / .wiring / .text_session / .types
+voice_pipeline.audio / .wakeword / .asr / .llm / .tts / .bridge / .led / .embedding
+voice_pipeline.adapters.vap / .adapters.turngpt
 ```
 
 ### Error propagation summary
@@ -477,7 +435,7 @@ voice_pipeline.core         # TTSStream
 ## 8. Open Design Questions
 
 - ~~ConversationHistory StorageBackend selection~~ → SQLite write-through (resolved)
-- ~~ContextBuilder tool definition integration~~ → Tool token costs in `llm/tools.py`, deducted from budget (resolved)
+- ~~ContextBuilder tool definition integration~~ → Tool token costs in `adapters/llm_openai.py`, deducted from budget (resolved)
 - RAG / long-term memory design (see `docs/ray-memory-design.md`)
 - LED behavior definition (which state → which color/animation)
 - LED control location (Python direct vs C++ relay)

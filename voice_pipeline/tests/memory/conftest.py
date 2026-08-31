@@ -6,9 +6,9 @@ import os
 
 import pytest
 
-from voice_pipeline.embedding.embedder import SentenceTransformerEmbedder
-from voice_pipeline.llm.llm import OpenAILLM
-from voice_pipeline.llm.token_counter import create_token_counter
+from voice_pipeline.adapters.embedder import SentenceTransformerEmbedder
+from voice_pipeline.adapters.llm_openai import OpenAILLM
+from voice_pipeline.adapters.token_counter import create_token_counter
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Episode
 from voice_pipeline.memory.vector_index import NumpyVectorIndex

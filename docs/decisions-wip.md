@@ -103,6 +103,27 @@
 - **`HF_HUB_OFFLINE=1`은 대안이 아니다**: `file_name`을 명시해도 sentence-transformers가 `/api/models/.../tree/main` 조회를 시도해 `OfflineModeIsEnabled`로 죽는다(2회 재현). 환경변수 한 줄로 끝날 것 같지만 부팅 시 크래시 루프를 만든다 — 생성자 인자 `local_files_only`만 동작.
 - **부팅 시 임포트 13s의 구성 (측정)**: CPU 5.7s(torch 2.2 / openai 0.65 / google.cloud.speech 0.63) + SD 콜드 I/O 3.3s(터치되는 페이지 `.so` 126MB + `.pyc` 28MB, 전체 556MB 중) + 경합 4.2s(gdm 자동로그인→GNOME Shell 기동이 +23.6~35.7s로 임포트 구간과 정확히 겹침). 네트워크 사용은 0건(`connect()` 가로채기로 확인). torch는 silero_vad(onnx 모드여도 최상위 임포트)·텐서 변환·sentence_transformers 세 갈래로 묶여 제거 불가. google/openai lazy import는 기각 — 기동 시 클라이언트를 생성하므로 임포트만 미룰 수 없고, 생성까지 미루면 첫 웨이크워드 응답이 1~2s 느려진다(부팅 1회 vs 매 대화의 교환).
 - **부팅 시 시계 신뢰 불가**: RTC 배터리가 없어 부팅 후 ~30–40s 동안 시계가 며칠 틀리다 NTP로 점프한다(로그 파일명·타임스탬프가 파일 중간에서 점프). 부팅 타임라인 진단은 `journalctl -o short-monotonic`으로만.
+## 파이썬 구조 정리 — 규칙 기준 분리에서 경계 기준 분리로
+
+- **문제 진단**: 15개 패키지(13.5k줄)에 모듈마다 `__init__` + `exceptions.py` + README + 인터페이스 + `tests/<module>/`를 똑같이 붙이는 규칙이 있어, 200줄짜리와 2,000줄짜리가 같은 무게로 보였다. 18개 인터페이스 중 12개가 구현체 1개, 예외 18개 중 7개는 raise조차 안 되고 `except`로 잡는 곳은 프로덕션 전체에 1곳(`except Exception`이 폴백 정책). 반복된 정리 시도가 효과가 없던 이유는 같은 규칙 아래서 재배치만 했기 때문 — 규칙 자체를 바꿔야 했다.
+- **분리 기준은 "언제 건드리나"**: import 그래프가 이미 진짜 경계를 보여줬다 — 외부 것을 감싼 모듈(ASR/TTS/LLM/VAP/TurnGPT/bridge/audio/led)은 `core`만 의존하는 반면, 내부 로직(context/generation/history/memory)은 규칙을 어기며 서로 import하고 있었다. 그래서 외부 래퍼는 `adapters/`에 파일 하나씩(역할이 아니라 결합 방식으로 묶음 — "벤더·하드웨어를 바꿀 때만 연다"), 내부 로직은 top-level 파일로 뭉쳤다(`generator`, `prompt`, `history`). 13k줄에 15개 패키지 트리는 10만 줄짜리 구조다.
+- **인터페이스는 벤더 교체 대상만 (IASR/ILLM/ITTS/IEmbedder)**: 나머지는 구체 타입 주입. Python은 mock에 ABC가 필요 없다(`Mock(spec=Class)`). 인터페이스 hop 하나가 처음 읽는 사람에게 파일 하나를 더 열게 한다.
+- **커스텀 예외 전부 삭제 → `RuntimeError(원인 메시지) from exc`**: 호출자가 종류별로 처리하지 않고(`except Exception`), 예외에 실린 데이터도 없고, 벤더 예외 은닉은 RuntimeError로도 된다. 종류 구분이 실제로 필요해지면 그때 클래스 하나 추가.
+- **인메모리 테스트 더블 제거**: `MemoryStorageBackend`/`InMemoryMemoryStorage`는 SQLite `:memory:`로 대체(두 백엔드 모두 단일 커넥션이라 동작). 검증용으로 리스트에 쌓아야 하는 call/trace 스토어는 `tests/fakes.py`로 이동 — 테스트 더블은 테스트가 소유한다.
+- **공유 상수는 `settings.py`**: 토큰 예산(`_MAX_HISTORY_TOKENS`, `_HARD_CAP_TOKENS`)을 wiring이 다른 모듈의 private 클래스 변수로 꺼내 쓰고 있었다. "중앙 설정 없음" 규칙은 벤더 파라미터엔 맞지만 여러 모듈이 공유하는 값엔 안 맞는다. 클래스 변수는 테스트 monkeypatch를 위해 남기고 초기값만 settings에서 가져온다.
+- **타입은 만들어 내는 모듈이 소유**: `core/types.py` 27개 중 17개가 파일 한두 곳에서만 쓰였다(`Phase`는 session_loop만, `SystemMode`는 __main__만). "경계를 넘는 타입은 core에" 규칙이 소유자가 명확한 타입까지 끌어모은 것. `types.py`에는 벤더 인터페이스와 그 시그니처가 참조하는 계약 타입(스트림·결과·LLMMetrics), 공통 별칭만 남기고 나머지는 생산자로 보냈다(`TurnDecision → turn_detector`, `ResponseData → generator`, `VAPResult → adapters/vap`, …). 방향은 전부 소비자 → 생산자라 순환 없음. 남긴 기준: 소유자에 두면 어색한 의존이 생기는 것 — `LLMMetrics`를 `llm_openai`에 두면 history가 OpenAI 어댑터를 import하게 된다.
+- **이번에 하지 않은 것**: `session_id`/`call_store`가 생성자마다 들어가는 트레이싱 주입 정리. 동작 리팩터라 구조 이동(동작 변경 0)과 분리했다 — 다음 항목(트레이싱)에서 처리.
+- **병합 도구의 함정**: ast 기반으로 파일을 합칠 때 첫 body 문장의 데코레이터(`@pytest.fixture`)와, 삭제 범위 사이에 끼어 있던 모듈 상수(`_CALL_COLUMNS`)가 유실됐다. 대규모 이동 후에는 반드시 전체 테스트 수를 전후 비교할 것.
+
+## 트레이싱 — 주입에서 logging식 모듈 API로
+
+- **문제**: CallRecord 하나를 채우려면 emitter마다 싱크(`call_store` 생성자 주입 6곳), `session_id`(생성자 3곳 + wiring이 세션마다 속성 4개에 대입), `turn_index`(스토어를 우체통으로 써서 `set_turn_index`/`current_turn_index`로 되읽기)가 필요했다. 같은 레코드의 두 컨텍스트 필드가 다른 경로로 전파되고, `if self._call_store is not None` 가드가 15곳.
+- **관찰**: 트레이싱은 logging과 같은 모양이다 — fire-and-forget, 컨텍스트는 "지금 진행 중인 것", 싱크는 프로세스에 하나. 아무도 logger를 주입하지 않는데 트레이싱만 DI 규칙을 적용해서 9개 객체에 `session_id`를 밀어 넣게 됐다. 명시적 주입이 원인이었다.
+- **채택**: `trace.py` 모듈 전역 API. `install()`(wiring, 1회), `set_session()`(세션마다), `set_turn()`(TurnDetector), `record_call()` / `save_turn()`. 싱크 없으면 no-op이라 가드가 사라진다. 저장 형식(두 테이블)은 불변 — 기록 경로만 바뀜.
+- **핫패스 버퍼링은 유지**: VAP(10Hz)·TurnGPT 추론 스레드는 SQLite 쓰기를 피해야 해서 기록을 모아 `reset()/stop()`에서 쓴다. 이때 `turn_index`는 **캡처 시점** 값이어야 하므로(flush 시점이면 세션 전체가 마지막 턴으로 찍힘) `capture_call()`(스탬프만) + `write_calls()`(나중에 쓰기)를 분리했다. 비동기 writer 스레드 대안은 기각 — 테스트 단언이 경합하게 되고 얻는 건 균일성뿐.
+- **`pipeline_traces.turn_index` 추가**: 두 테이블의 조인 키가 `session_id`뿐이었다. `save_turn`이 저장 시점의 턴을 찍는다 — `_save_trace`는 completed/truncated/cancelled 모두 `turn_detector.reset()` 이전(해당 exchange 안)에서 호출되므로 그 턴의 call_records와 같은 값. 기존 DB는 `ALTER TABLE`로 무손실 추가(`call_records.turn_index`와 같은 패턴).
+- **전역 상태 트레이드오프**: 프로세스당 세션 하나가 전제(현 아키텍처·eval 모두 순차). 동시 세션이 필요해지면 내부를 `contextvars`로 바꾸되 API는 불변. 테스트는 autouse `trace.reset()`으로 격리하고, 검증은 `call_log`/`turn_log` 픽스처 — logging의 `caplog`과 같은 패턴. 결과적으로 이전(생성자에 fake 주입)보다 테스트 코드가 짧아졌다.
+- **`HistorySummarizer.session_id`는 남김**: 트레이싱이 아니라 롤링 요약 영속화(다음 세션 이월)의 키라서 정당한 인자다. "session_id가 보이면 전부 트레이싱 잔재"가 아니다.
 
 ## 차후 고려
 

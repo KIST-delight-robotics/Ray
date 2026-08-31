@@ -2,7 +2,7 @@
 
 Tests the complete voice pipeline flow with mocked external boundaries:
   Real: SessionLoop, SpeechGenerator, ContextBuilder,
-        ConversationHistory, TurnDetector, MemoryStorageBackend
+        ConversationHistory, TurnDetector, SQLiteStorageBackend
   Mocked: ASR, LLM, TTS, CppBridge, VAP, TurnGPT, Wakeword, AudioInput, LED
 
 Scenarios:
@@ -26,40 +26,22 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from voice_pipeline.audio.constants import FRAME_SIZE_BYTES
-from voice_pipeline.core.interfaces import (
-    IASR,
-    ILLM,
-    ITTS,
-    IVAP,
-    ICppBridge,
-    IEmbedder,
-    ILEDController,
-    ITurnGPT,
-)
-from voice_pipeline.core.types import (
-    AudioFrame,
-    CppEvent,
-    CppEventType,
-    LEDState,
-    LLMResult,
-    LLMStream,
-    TTSStream,
-    VAPResult,
-    WordTimestamp,
-)
-from voice_pipeline.generation.speech_generator import SpeechGenerator
-from voice_pipeline.history.conversation_history import ConversationHistory
-from voice_pipeline.history.storage_backend import MemoryStorageBackend
-from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
+from voice_pipeline.adapters.cpp_bridge import CppEvent, CppEventType
+from voice_pipeline.adapters.led import LEDState
+from voice_pipeline.adapters.tts_openai import OpenAITTS
+from voice_pipeline.adapters.turngpt import SyncTurnGPTAdapter, TurnGPTWrapper
+from voice_pipeline.adapters.vap import ThreadedVAP, VAPResult
+from voice_pipeline.generator import SpeechGenerator
+from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.memory.retriever import MemoryRetriever
-from voice_pipeline.memory.storage import InMemoryMemoryStorage
+from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Episode
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
+from voice_pipeline.prompt import DEFAULT_SYSTEM_PROMPT
 from voice_pipeline.session_loop import SessionLoop
-from voice_pipeline.tts.openai_tts import OpenAITTS
-from voice_pipeline.turn_taking.threaded_turngpt import SyncTurnGPTAdapter
-from voice_pipeline.turn_taking.turn_detector import TurnDetector
+from voice_pipeline.settings import FRAME_SIZE_BYTES
+from voice_pipeline.turn_detector import TurnDetector
+from voice_pipeline.types import IASR, ILLM, ITTS, AudioFrame, IEmbedder, LLMResult, LLMStream, TTSStream, WordTimestamp
 
 # ---------------------------------------------------------------------------
 # Configs tuned for fast deterministic testing
@@ -192,7 +174,7 @@ class FakeTTS(ITTS):
         return TTSStream(gen(), timestamps_fn=ts_fn)
 
 
-class FakeVAP(IVAP):
+class FakeVAP:
     """VAP mock: always indicates user is not speaking, robot-favoring probs."""
 
     def feed_audio(self, user_audio: AudioFrame, robot_audio: AudioFrame | None = None) -> None:
@@ -206,7 +188,7 @@ class FakeVAP(IVAP):
         pass
 
 
-class InterruptableVAP(IVAP):
+class InterruptableVAP:
     """VAP mock that can switch between quiet and interrupting."""
 
     def __init__(self) -> None:
@@ -225,7 +207,7 @@ class InterruptableVAP(IVAP):
         pass
 
 
-class FakeTurnGPT(ITurnGPT):
+class FakeTurnGPT:
     """TurnGPT mock returning a fixed high probability."""
 
     def predict(self, dialog_text: str) -> float:
@@ -235,7 +217,7 @@ class FakeTurnGPT(ITurnGPT):
         pass
 
 
-class ScriptedBridge(ICppBridge):
+class ScriptedBridge:
     """CppBridge mock with deterministic event generation.
 
     Auto-generates PLAYBACK_STARTED on send_stream_start(),
@@ -283,7 +265,7 @@ class ScriptedBridge(ICppBridge):
             return None
 
 
-class FakeLED(ILEDController):
+class FakeLED:
     """LED mock that records state transitions."""
 
     def __init__(self) -> None:
@@ -314,8 +296,8 @@ def _make_session_loop(
     *,
     llm: ILLM | None = None,
     tts: ITTS | None = None,
-    vap: IVAP | None = None,
-    turngpt: ITurnGPT | None = None,
+    vap: ThreadedVAP | None = None,
+    turngpt: TurnGPTWrapper | None = None,
     executor: ThreadPoolExecutor | None = None,
 ) -> tuple[SessionLoop, ConversationHistory, SpeechGenerator, TurnDetector]:
     """Wire up a full SessionLoop with real internal modules."""
@@ -325,7 +307,7 @@ def _make_session_loop(
     _tts = tts or FakeTTS()
     _executor = executor or ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
 
-    storage = MemoryStorageBackend()
+    storage = SQLiteStorageBackend(":memory:")
     history = ConversationHistory(storage, _simple_token_counter)
     history.new_session("test-session")
 
@@ -825,7 +807,7 @@ def _make_memory_session_loop(
     SessionLoop,
     ConversationHistory,
     SpeechGenerator,
-    InMemoryMemoryStorage,
+    SQLiteMemoryStorage,
     MemoryRetriever,
 ]:
     """Wire up a full SessionLoop with memory modules enabled.
@@ -838,12 +820,12 @@ def _make_memory_session_loop(
     executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
 
     # Conversation history
-    conv_storage = MemoryStorageBackend()
+    conv_storage = SQLiteStorageBackend(":memory:")
     history = ConversationHistory(conv_storage, _simple_token_counter)
     history.new_session(session_id)
 
     # Memory infra
-    memory_storage = InMemoryMemoryStorage(dimension=_DIM)
+    memory_storage = SQLiteMemoryStorage(":memory:", dimension=_DIM)
     vector_index = NumpyVectorIndex()
     # Fake embedder의 텍스트 간 유사도는 의미 없는 난수라 relevance floor를 끔(-1 = 전부 통과) —
     # 시드된 에피소드가 항상 검색되게 함. floor 동작 자체는 vector_index 유닛 테스트가 검증.

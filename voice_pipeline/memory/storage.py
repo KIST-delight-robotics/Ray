@@ -1,7 +1,6 @@
 """Memory storage implementations.
 
 SQLiteMemoryStorage: production backend using the shared ray.db.
-InMemoryMemoryStorage: in-memory backend for unit tests.
 """
 
 from __future__ import annotations
@@ -16,16 +15,14 @@ from typing import Any
 
 import numpy as np
 
-from voice_pipeline.core.interfaces import IMemoryStorage
 from voice_pipeline.memory.types import Episode, Profile
 
 logger = logging.getLogger("voice_pipeline.memory")
 
 _DEFAULT_DIMENSION = 384  # 기본 embedding 차원 (all-MiniLM-L6-v2 기준)
-_DEFAULT_DB_PATH = "data/ray.db"  # 기본 SQLite 파일 경로 (History/Trace와 공유)
 
 
-class SQLiteMemoryStorage(IMemoryStorage):
+class SQLiteMemoryStorage:
     """SQLite-backed memory storage.
 
     Opens its own connection to the shared DB file (WAL mode allows
@@ -525,223 +522,3 @@ class SQLiteMemoryStorage(IMemoryStorage):
             citation_count=row[6],
             embedding=embedding,
         )
-
-
-class InMemoryMemoryStorage(IMemoryStorage):
-    """In-memory storage backend for unit tests.
-
-    Simple list-based implementation. BM25 search is approximated
-    by case-insensitive word overlap counting.
-    """
-
-    def __init__(self, dimension: int = _DEFAULT_DIMENSION) -> None:
-        self._dimension = dimension
-        self._episodes: dict[int, Episode] = {}
-        self._profiles: dict[int, Profile] = {}
-        self._utterances: list[dict[str, Any]] = []
-        self._processed: set[str] = set()
-        self._next_episode_id = 1
-        self._next_profile_id = 1
-
-    # --- Episode ---
-
-    def add_episode(self, episode: Episode) -> int | None:
-        """Persist a new episode."""
-        eid = self._next_episode_id
-        self._next_episode_id += 1
-        stored = Episode(
-            id=eid,
-            text=episode.text,
-            timestamp=episode.timestamp,
-            session_id=episode.session_id,
-            importance=episode.importance,
-            last_cited_at=episode.last_cited_at,
-            citation_count=episode.citation_count,
-            embedding=episode.embedding.copy() if episode.embedding is not None else None,
-        )
-        self._episodes[eid] = stored
-        return eid
-
-    def get_episode(self, episode_id: int) -> Episode | None:
-        """Retrieve a single episode by ID."""
-        ep = self._episodes.get(episode_id)
-        if ep is None:
-            return None
-        return Episode(
-            id=ep.id,
-            text=ep.text,
-            timestamp=ep.timestamp,
-            session_id=ep.session_id,
-            importance=ep.importance,
-            last_cited_at=ep.last_cited_at,
-            citation_count=ep.citation_count,
-            embedding=ep.embedding.copy() if ep.embedding is not None else None,
-        )
-
-    def get_episodes_by_ids(self, ids: list[int]) -> list[Episode]:
-        """Retrieve multiple episodes by ID."""
-        results = []
-        for eid in ids:
-            ep = self.get_episode(eid)
-            if ep is not None:
-                results.append(ep)
-        return results
-
-    def get_episodes_by_session_ids(self, session_ids: list[str]) -> dict[str, list[Episode]]:
-        """Retrieve episodes grouped by session ID."""
-        sid_set = set(session_ids)
-        result: dict[str, list[Episode]] = {}
-        for ep in self._episodes.values():
-            if ep.session_id in sid_set:
-                copy = Episode(
-                    id=ep.id,
-                    text=ep.text,
-                    timestamp=ep.timestamp,
-                    session_id=ep.session_id,
-                    importance=ep.importance,
-                    last_cited_at=ep.last_cited_at,
-                    citation_count=ep.citation_count,
-                    embedding=ep.embedding.copy() if ep.embedding is not None else None,
-                )
-                result.setdefault(ep.session_id, []).append(copy)
-        for episodes in result.values():
-            episodes.sort(key=lambda e: e.timestamp)
-        return result
-
-    def update_episode_cited(self, episode_id: int, cited_at: str) -> None:
-        """Update the last_cited_at timestamp for an episode."""
-        ep = self._episodes.get(episode_id)
-        if ep is not None:
-            ep.last_cited_at = cited_at
-
-    def update_episode_embedding(self, episode_id: int, embedding: np.ndarray) -> None:
-        """Update the embedding vector for an episode."""
-        ep = self._episodes.get(episode_id)
-        if ep is not None:
-            ep.embedding = embedding.astype(np.float32).copy()
-
-    def search_bm25(self, query: str, top_k: int) -> list[tuple[int, float]]:
-        """Approximate BM25 via word overlap counting."""
-        query_words = set(query.lower().split())
-        if not query_words:
-            return []
-        scored: list[tuple[int, float]] = []
-        for eid, ep in self._episodes.items():
-            doc_words = set(ep.text.lower().split())
-            overlap = len(query_words & doc_words)
-            if overlap > 0:
-                scored.append((eid, float(overlap)))
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:top_k]
-
-    # --- Profile ---
-
-    def get_all_profiles(self) -> list[Profile]:
-        """Load all user profile slots."""
-        return [
-            Profile(
-                id=p.id,
-                topic=p.topic,
-                sub_topic=p.sub_topic,
-                content=p.content,
-                updated_at=p.updated_at,
-            )
-            for p in self._profiles.values()
-        ]
-
-    def upsert_profile(self, profile: Profile) -> int | None:
-        """Insert or update a profile slot."""
-        if profile.id is not None and profile.id in self._profiles:
-            self._profiles[profile.id] = Profile(
-                id=profile.id,
-                topic=profile.topic,
-                sub_topic=profile.sub_topic,
-                content=profile.content,
-                updated_at=profile.updated_at,
-            )
-            return profile.id
-        pid = self._next_profile_id
-        self._next_profile_id += 1
-        self._profiles[pid] = Profile(
-            id=pid,
-            topic=profile.topic,
-            sub_topic=profile.sub_topic,
-            content=profile.content,
-            updated_at=profile.updated_at,
-        )
-        return pid
-
-    def delete_profile(self, profile_id: int) -> None:
-        """Delete a profile slot."""
-        self._profiles.pop(profile_id, None)
-
-    # --- Utterance ---
-
-    def add_utterance(self, session_id: str, role: str, text: str, timestamp: str, token_count: int = 0) -> None:
-        """Store a conversation utterance."""
-        self._utterances.append(
-            {
-                "session_id": session_id,
-                "role": role,
-                "text": text,
-                "timestamp": timestamp,
-                "token_count": token_count,
-            }
-        )
-
-    def get_utterances(self, session_id: str) -> list[tuple[str, str, str, int]]:
-        """Retrieve all utterances for a session."""
-        return [
-            (u["role"], u["text"], u["timestamp"], u["token_count"])
-            for u in self._utterances
-            if u["session_id"] == session_id
-        ]
-
-    def get_recent_sessions(
-        self,
-        limit: int | None = None,
-        exclude_session_id: str | None = None,
-    ) -> list[tuple[str, str]]:
-        """Return recent sessions based on utterance timestamps."""
-        sessions: dict[str, str] = {}
-        for u in self._utterances:
-            sid = u["session_id"]
-            if sid == exclude_session_id:
-                continue
-            if sid not in sessions or u["timestamp"] < sessions[sid]:
-                sessions[sid] = u["timestamp"]
-        ordered = sorted(sessions.items(), key=lambda x: x[1], reverse=True)
-        return ordered[:limit]
-
-    # --- Session processing status ---
-
-    def mark_session_processed(
-        self,
-        session_id: str,
-        *,
-        duration_ms: float | None = None,
-        episode_count: int | None = None,
-    ) -> None:
-        """Record that memory extraction has been attempted."""
-        self._processed.add(session_id)
-
-    def get_processed_session_ids(self, session_ids: list[str]) -> set[str]:
-        """Check which sessions have been processed."""
-        return self._processed & set(session_ids)
-
-    # --- Lifecycle ---
-
-    def load_all_embeddings(self) -> tuple[list[int], np.ndarray]:
-        """Load all episode embeddings."""
-        ids = []
-        vecs = []
-        for eid, ep in self._episodes.items():
-            if ep.embedding is not None:
-                ids.append(eid)
-                vecs.append(ep.embedding)
-        if not ids:
-            return [], np.empty((0, self._dimension), dtype=np.float32)
-        return ids, np.stack(vecs).astype(np.float32)
-
-    def close(self) -> None:
-        """No-op for in-memory backend."""

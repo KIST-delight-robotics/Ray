@@ -8,9 +8,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from voice_pipeline.core.interfaces import IEmbedder, IMemoryRetriever, IMemoryStorage
+from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Episode, MemoryReadResult
-from voice_pipeline.memory.vector_index import IVectorIndex
+from voice_pipeline.memory.vector_index import NumpyVectorIndex
+from voice_pipeline.types import IEmbedder
 
 logger = logging.getLogger("voice_pipeline.memory")
 
@@ -27,7 +28,7 @@ class _RetainedEntry:
     ttl: int
 
 
-class MemoryRetriever(IMemoryRetriever):
+class MemoryRetriever:
     """Hybrid search retriever with RRF fusion and retained buffer.
 
     Searches episodes via vector similarity and BM25, fuses results
@@ -49,8 +50,8 @@ class MemoryRetriever(IMemoryRetriever):
 
     def __init__(
         self,
-        storage: IMemoryStorage,
-        vector_index: IVectorIndex,
+        storage: SQLiteMemoryStorage,
+        vector_index: NumpyVectorIndex,
         embedder: IEmbedder,
         *,
         now_fn: Callable[[], datetime] | None = None,

@@ -14,9 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from voice_pipeline.context.formatters import format_memory_block, format_profile_block, parse_citation_tag
-from voice_pipeline.llm.prompts import DEFAULT_SYSTEM_PROMPT
 from voice_pipeline.memory.types import MemoryReadResult, Profile
+from voice_pipeline.prompt import DEFAULT_SYSTEM_PROMPT, format_memory_block, format_profile_block, parse_citation_tag
 
 PRODUCTION_MAX_TOKENS = 256  # 프로덕션 OpenAILLM 설정과 동일 (wiring.py)
 

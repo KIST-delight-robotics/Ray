@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import enum
 import logging
+import math
 import queue
 import re
 import threading
@@ -11,27 +13,69 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from voice_pipeline.audio.constants import FRAME_DURATION_MS
-from voice_pipeline.core.interfaces import (
-    IASR,
-    IConversationHistory,
-    ICppBridge,
-    ILEDController,
-    IMemoryStorage,
-    ISpeechGenerator,
-    ITurnDetector,
-)
-from voice_pipeline.core.types import (
-    AudioFrame,
-    CppEventType,
-    GeneratorState,
-    LEDState,
-    Phase,
-    ResponseData,
-    TokenCounter,
-    TurnDecision,
-)
-from voice_pipeline.tts.utterance_truncator import truncate_by_ratio, truncate_by_timestamps
+from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEventType
+from voice_pipeline.adapters.led import LEDController, LEDState
+from voice_pipeline.generator import GeneratorState, ResponseData, SpeechGenerator
+from voice_pipeline.history import ConversationHistory
+from voice_pipeline.memory.storage import SQLiteMemoryStorage
+from voice_pipeline.settings import FRAME_DURATION_MS
+from voice_pipeline.trace import save_turn
+from voice_pipeline.turn_detector import TurnDecision, TurnDetector
+from voice_pipeline.types import IASR, AudioFrame, TokenCounter, WordTimestamp
+
+
+class Phase(enum.Enum):
+    """SessionLoop conversation phase (single source of truth).
+
+    Replaces the former ``PlaybackState`` + ``awaiting_response`` pair so
+    that mutually-exclusive states cannot drift.
+
+    LISTENING — user turn; receiving input (detector USER_TURN).
+    AWAITING  — turn_shift fired, response not yet sent to the bridge;
+                cancel still possible (detector PENDING). No bridge audio.
+    STREAMING — audio sent to the bridge (begin_streaming committed),
+                playback not yet confirmed; no robot_audio/clock yet
+                (detector ROBOT_TURN). interrupt/cancel boundary is here:
+                everything from STREAMING on is interrupt territory.
+    PLAYING   — playback_started received, clock running; robot_audio
+                available for full VAP interrupt (detector ROBOT_TURN).
+    STOPPING  — interrupt sent to C++, awaiting stop confirmation.
+    """
+
+    LISTENING = "listening"
+    AWAITING = "awaiting"
+    STREAMING = "streaming"
+    PLAYING = "playing"
+    STOPPING = "stopping"
+
+
+def truncate_by_timestamps(
+    text: str,
+    stop_position_sec: float,
+    timestamps: list[WordTimestamp],
+) -> str:
+    """Return the portion of text spoken before the stop point using word timestamps."""
+    if not timestamps:
+        return ""
+    spoken = [ts.word for ts in timestamps if ts.start_sec < stop_position_sec]
+    return " ".join(spoken)
+
+
+def truncate_by_ratio(
+    text: str,
+    stop_position_sec: float,
+    total_duration_sec: float,
+) -> str:
+    """Return the estimated portion of text spoken before the stop point using duration ratio."""
+    if not text:
+        return ""
+    if total_duration_sec <= 0 or stop_position_sec >= total_duration_sec:
+        return text
+    ratio = stop_position_sec / total_duration_sec
+    words = text.split()
+    count = math.ceil(ratio * len(words))
+    return " ".join(words[:count])
+
 
 logger = logging.getLogger("voice_pipeline.session_loop")
 
@@ -41,7 +85,7 @@ class SessionComponents:
     """Per-session objects created by the session factory."""
 
     session_loop: SessionLoop
-    history: IConversationHistory
+    history: ConversationHistory
     session_id: str
 
 
@@ -72,17 +116,16 @@ class SessionLoop:
     def __init__(
         self,
         asr: IASR,
-        turn_detector: ITurnDetector,
-        speech_generator: ISpeechGenerator,
-        cpp_bridge: ICppBridge,
-        history: IConversationHistory,
-        led: ILEDController,
+        turn_detector: TurnDetector,
+        speech_generator: SpeechGenerator,
+        cpp_bridge: CppBridge,
+        history: ConversationHistory,
+        led: LEDController,
         audio_queue: queue.Queue[AudioFrame],
         tts_sample_rate: int,
-        memory_storage: IMemoryStorage | None = None,
+        memory_storage: SQLiteMemoryStorage | None = None,
         session_id: str | None = None,
         token_counter: TokenCounter | None = None,
-        trace_store: object | None = None,
         shutdown_event: threading.Event | None = None,
         on_turn_complete: Callable[[float, str], None] | None = None,
         on_turn_shift: Callable[[float, str], None] | None = None,
@@ -112,8 +155,6 @@ class SessionLoop:
                 ``None``이면 utterance 저장 skip.
             token_counter: 토큰 카운터 콜러블. memory utterance 토큰 수
                 계산용. ``None``이면 0.
-            trace_store: pipeline latency trace store. ``None``이면
-                trace 저장 skip.
             shutdown_event: 프로세스 전역 종료 시그널. ``None``이면
                 ``request_stop()``으로만 중단 가능.
             on_turn_complete: 턴 완료 시 호출되는 콜백.
@@ -137,7 +178,6 @@ class SessionLoop:
         self._memory_storage = memory_storage
         self._session_id = session_id
         self._token_counter = token_counter
-        self._trace_store = trace_store
         self._shutdown_event = shutdown_event
         self._on_turn_complete_cb = on_turn_complete
         self._on_turn_shift_cb = on_turn_shift
@@ -307,7 +347,7 @@ class SessionLoop:
             return
         import wave
 
-        from voice_pipeline.audio.constants import CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH
+        from voice_pipeline.settings import CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH
 
         try:
             with wave.open(self._record_path, "wb") as wf:
@@ -587,7 +627,6 @@ class SessionLoop:
 
         trace = self._generator.trace
         if trace is not None:
-            trace.session_id = self._session_id or ""
             trace.turn_shift_ts = self._turn_shift_time
             trace.begin_streaming_ts = self._begin_streaming_time
 
@@ -885,9 +924,7 @@ class SessionLoop:
     # ------------------------------------------------------------------
 
     def _save_trace(self, outcome: str) -> None:
-        """Persist the current pipeline trace with the given outcome."""
-        if self._trace_store is None:
-            return
+        """현재 턴의 pipeline trace에 결과를 채워 저장한다 (싱크 없으면 no-op)."""
         trace = self._generator.trace
         if trace is None:
             return
@@ -896,14 +933,7 @@ class SessionLoop:
         trace.speculative_attempts = self._speculative_attempts
         if self._user_msg_id is not None:
             trace.user_msg_id = self._user_msg_id
-        if not trace.session_id:
-            trace.session_id = self._session_id or ""
-        try:
-            self._trace_store.save(trace)
-            if outcome != "cancelled":
-                logger.debug("Pipeline trace: %s", trace.summary())
-        except Exception:
-            logger.warning("Failed to save pipeline trace", exc_info=True)
+        save_turn(trace)
         self._speculative_attempts = 0
 
     def _get_response_text(self) -> str:

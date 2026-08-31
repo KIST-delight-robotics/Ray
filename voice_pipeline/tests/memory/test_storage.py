@@ -1,8 +1,4 @@
-"""Tests for IMemoryStorage implementations.
-
-Uses a mixin pattern so the same test suite runs against both
-InMemoryMemoryStorage and SQLiteMemoryStorage.
-"""
+"""Tests for SQLiteMemoryStorage implementations."""
 
 from __future__ import annotations
 
@@ -11,7 +7,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 import pytest
 
-from voice_pipeline.core.interfaces import IMemoryStorage
+from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Episode, Profile
 
 
@@ -52,10 +48,10 @@ def _make_profile(
 
 
 class _StorageTests(ABC):
-    """Shared tests for all IMemoryStorage implementations."""
+    """Shared tests for all SQLiteMemoryStorage implementations."""
 
     @abstractmethod
-    def make_storage(self) -> IMemoryStorage:
+    def make_storage(self) -> SQLiteMemoryStorage:
         """Create a fresh storage instance."""
 
     # --- Episode CRUD ---
@@ -342,19 +338,12 @@ class _StorageTests(ABC):
 # ---------------------------------------------------------------------------
 
 
-class TestInMemoryMemoryStorage(_StorageTests):
-    def make_storage(self) -> IMemoryStorage:
-        from voice_pipeline.memory.storage import InMemoryMemoryStorage
-
-        return InMemoryMemoryStorage(dimension=384)
-
-
 class TestSQLiteMemoryStorage(_StorageTests):
     @pytest.fixture(autouse=True)
     def _setup_db(self, tmp_path: object) -> None:
         self._db_path = str(tmp_path / "test_memory.db")  # type: ignore[operator]
 
-    def make_storage(self) -> IMemoryStorage:
+    def make_storage(self) -> SQLiteMemoryStorage:
         from voice_pipeline.memory.storage import SQLiteMemoryStorage
 
         return SQLiteMemoryStorage(self._db_path)
@@ -367,7 +356,7 @@ class TestSQLiteMemoryStoragePersistence:
     def _setup_db(self, tmp_path: object) -> None:
         self._db_path = str(tmp_path / "test_memory.db")  # type: ignore[operator]
 
-    def _make_storage(self) -> IMemoryStorage:
+    def _make_storage(self) -> SQLiteMemoryStorage:
         from voice_pipeline.memory.storage import SQLiteMemoryStorage
 
         return SQLiteMemoryStorage(self._db_path)

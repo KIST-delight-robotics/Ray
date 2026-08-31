@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from voice_pipeline.core.types import TokenCounter
 from voice_pipeline.memory.types import Episode, Profile
+from voice_pipeline.types import TokenCounter
 
 # ---------------------------------------------------------------------------
 # Profile schema

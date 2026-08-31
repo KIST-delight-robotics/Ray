@@ -25,8 +25,8 @@ from pathlib import Path
 
 import numpy as np
 
-from voice_pipeline.tts.elevenlabs_tts import ElevenLabsTTS
-from voice_pipeline.tts.greeting_audio import synthesize_to_wav
+from voice_pipeline.adapters.tts_elevenlabs import ElevenLabsTTS
+from voice_pipeline.greeting_audio import synthesize_to_wav
 
 # (manifest/파일명용 이름, ElevenLabs voice ID). 이름은 score.py by_voice 집계와
 # 파일명(`<id>_<name>.wav`)에 쓰임. 연령·성별·억양을 골고루 섞어 화자 다양성 확보.

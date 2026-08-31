@@ -140,7 +140,7 @@ def build_report(results_dir: Path) -> dict:
             # One pass over the session's call records, bucketed by the
             # turn_index column → per-turn stage summaries, similarity-gate
             # events, and API issue counts. (turn_index is the exchange the
-            # call belongs to; see ICallStore.current_turn_index.)
+            # call belongs to; see voice_pipeline.trace.set_turn.)
             rows = conn.execute(
                 "SELECT module, operation, elapsed_ms, status, metadata, turn_index "
                 "FROM call_records WHERE session_id = ? ORDER BY id",
