@@ -8,6 +8,7 @@ Wants=ray-cpp.service
 
 [Service]
 Type=simple
+# 설치 시(→ ~/.config/systemd/user/) 아래 경로들(%h/KIST_RAY/Ray)을 이 기기의 실제 저장소 경로로 바꾼다.
 WorkingDirectory=%h/KIST_RAY/Ray
 EnvironmentFile=%h/.config/ray/ray.env
 # `uv run ray` 대신 venv 바이너리를 직접 호출한다. uv run은 실행 전 lock/venv 동기화를
