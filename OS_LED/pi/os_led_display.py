@@ -75,7 +75,7 @@ TRANSITION_FRAMES = 90          # 1.5 s at 60 fps for the white → rainbow bloo
 
 # Boot hold — continue ATtiny's white breathing instead of blooming into the
 # rainbow, so 부팅 애니메이션 → RAY LED 로 곧장 넘어간다. Values mirror the
-# firmware (HANDOFF §2 "모든 ATtiny 애니메이션은 순백, 포물선 idx*(N-idx) 근사,
+# firmware (OS_LED/README.md §3.1 "모든 ATtiny 애니메이션은 순백, 포물선 idx*(N-idx) 근사,
 # PULSE_MIN=16~PULSE_MAX=255, 한 호흡 주기 ≈ 2.0 s") — they must stay in sync or
 # the hand-off becomes visible as a brightness/rate jump.
 BREATH_PERIOD_S   = 2.0
