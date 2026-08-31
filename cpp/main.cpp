@@ -2176,11 +2176,7 @@ void gyro_test() {
 
 
 void initialize_robot_posture() {
-    // MPU6050 초기화
-    if (wiringPiSetup() == -1) {
-        std::cerr << "WiringPi 초기화 실패!" << std::endl;
-        return;
-    }
+    // MPU6050 초기화 — I2C만 사용하므로 wiringPiSetup()(GPIO 매핑, /dev/gpiomem 권한 필요)은 호출하지 않는다
     int fd = wiringPiI2CSetup(MPU6050_ADDR);
     if (fd == -1) {
         std::cerr << "MPU6050 I2C 연결 실패!" << std::endl;
@@ -2199,6 +2195,75 @@ void initialize_robot_posture() {
     const int adjustment_increment = 3;       // 모터 위치 조정 증분 (펄스)
     bool tension_satisfied = false;
     const int sample_count = 3;
+
+    // ---- 이완 단계: 와이어 텐션을 전부 푼 뒤 기지 상태에서 캘리브레이션 시작 ----
+    {
+        const int   REL_STEP  = cfg_robot.calib_release_step_tick;
+        const float REL_NOISE = (float)cfg_robot.calib_release_noise_g;
+        const int   REL_QUIET = cfg_robot.calib_release_quiet_steps;
+
+        // 판정용 읽기는 10샘플 평균 — 스텝별 3샘플 평균은 노이즈(3축 변화합
+        // 0.03~0.06g)가 임계를 항상 넘어 이완 완료 판정이 불가능했다 (실측).
+        const int REL_SAMPLES = 10;
+        auto read_accel_avg = [&](float& ax, float& ay, float& az) {
+            long sx = 0, sy = 0, sz = 0;
+            for (int i = 0; i < REL_SAMPLES; i++) {
+                sx += read_raw_data(fd, 0x3B);
+                sy += read_raw_data(fd, 0x3D);
+                sz += read_raw_data(fd, 0x3F);
+                delay(10);
+            }
+            ax = (sx / REL_SAMPLES) / 16384.0f;
+            ay = (sy / REL_SAMPLES) / 16384.0f;
+            az = (sz / REL_SAMPLES) / 16384.0f;
+        };
+
+        // 한 모터를 자이로 변화가 멎을 때까지 푼다(+ 방향 = 조임의 반대).
+        // 스텝 단위 비교는 노이즈에 묻히므로, 윈도우(REL_QUIET 스텝 = REL_QUIET×REL_STEP 틱)
+        // 단위로 푼 뒤 윈도우 시작 대비 변화로 판정한다. 팽팽하면 100틱당 ~0.1g+ 변화.
+        // 반환: 이번 턴에 유의미한 자세 변화가 있었는지.
+        auto release_motor = [&](int idx, const char* name) -> bool {
+            bool moved = false;
+            float bx, by, bz, cx, cy, cz;
+            read_accel_avg(bx, by, bz);
+            while (true) {
+                for (int i = 0; i < REL_QUIET; i++) {
+                    target_position[idx] += REL_STEP;
+                    dxl_driver->writeGoalPosition(target_position);
+                    delay(30);
+                }
+                delay(150);  // 윈도우 끝 정착 대기
+                read_accel_avg(cx, cy, cz);
+                float d = std::fabs(cx - bx) + std::fabs(cy - by) + std::fabs(cz - bz);
+                if (d < REL_NOISE) break;
+                moved = true;
+                bx = cx; by = cy; bz = cz;
+            }
+            std::cout << "[RELEASE] " << name << " → " << target_position[idx]
+                      << (moved ? " (이완 진행)" : " (변화 없음)") << std::endl;
+            return moved;
+        };
+
+        std::cout << "이완 단계: 텐션 해제 시작" << std::endl;
+        int rel_round = 0;
+        while (true) {
+            rel_round++;
+            bool any = false;
+            any |= release_motor(1, "roll_r");
+            any |= release_motor(2, "roll_l");
+            any |= release_motor(0, "pitch");
+            std::cout << "[RELEASE] 라운드 " << rel_round
+                      << (any ? " — 변화 있음, 반복" : " — 전 모터 이완 완료") << std::endl;
+            if (!any) break;
+        }
+
+        // mouth: 턱 움직임은 자이로로 감지 불가 → 고정량 이완
+        target_position[4] += cfg_robot.calib_release_mouth_tick;
+        dxl_driver->writeGoalPosition(target_position);
+        delay(200);
+        std::cout << "[RELEASE] mouth +" << cfg_robot.calib_release_mouth_tick
+                  << "틱 고정 이완 → " << target_position[4] << std::endl;
+    }
 
     std::cout << "Roll 조정" << std::endl;
 
@@ -2430,6 +2495,7 @@ void initialize_robot_posture() {
     }
     logf.setf(std::ios::unitbuf);
     logf << "t_ms,mouth_goal,raw_current_LSB,current_mA,abs_delta_raw_LSB,abs_delta_mA,thr_raw_LSB\n";
+    const unsigned int t0_ms = millis();
 
     // ---- 설정값 ----
     const float mA_per_LSB   = 2.69f;
@@ -2439,7 +2505,7 @@ void initialize_robot_posture() {
     const int   MAX_STEPS    = 600;
 
     const int   MOUTH_STEP_TICK    = 3;
-    const int   MOUTH_BACKOFF_TICK = 15;
+    const int   MOUTH_BACKOFF_TICK = cfg_robot.calib_mouth_backoff_tick;  // 장력점에서 되돌리는 양 (config)
 
     // 자동학습 파라미터
     const int   LEARN_STEPS      = 25;
@@ -2508,7 +2574,7 @@ void initialize_robot_posture() {
         float d_mA   = d_raw   * mA_per_LSB;
 
         // 학습 중 thr 미확정이므로 -1 기록
-        logf << millis() << "," << target_position[4] << ","
+        logf << (millis() - t0_ms) << "," << target_position[4] << ","
             << cur_raw << "," << cur_mA << ","
             << d_raw << "," << d_mA << ","
             << -1 << "\n";
@@ -2542,7 +2608,7 @@ void initialize_robot_posture() {
         float cur_mA = cur_raw * mA_per_LSB;
         float d_mA   = d_raw   * mA_per_LSB;
 
-        logf << millis() << "," << target_position[4] << ","
+        logf << (millis() - t0_ms) << "," << target_position[4] << ","
             << cur_raw << "," << cur_mA << ","
             << d_raw << "," << d_mA << ","
             << thr_raw << "\n";
@@ -2575,6 +2641,14 @@ void initialize_robot_posture() {
     g_home.home_roll_l = target_position[2];
     g_home.home_yaw    = target_position[3];
     g_home.home_mouth  = target_position[4];
+
+    std::cout << "\n===== 캘리브레이션 결과 — config.toml [robot.unitN]에 기입 =====" << std::endl
+              << "default_pitch   = " << g_home.home_pitch  << std::endl
+              << "default_roll_r  = " << g_home.home_roll_r << std::endl
+              << "default_roll_l  = " << g_home.home_roll_l << std::endl
+              << "default_yaw     = " << g_home.home_yaw    << std::endl
+              << "default_mouth   = " << g_home.home_mouth  << std::endl
+              << "================================================================" << std::endl;
 
     finish_adjust_ready = true;
 
@@ -2834,24 +2908,46 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // 초기 자세로 이동
-    if (cfg_dxl.operating_mode == 1)
-        move_to_initial_position_velctrl();
-    else {
-        dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
-        move_to_initial_position_posctrl();
-        dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
+    // 시작 시 config 홈으로 이동하지 않는다 — 전원 인가 시점의 실제 자세에서 출발해
+    // 아래 initialize_robot_posture()가 매 실행마다 수평/장력 기준으로 홈을 재설정한다.
+    // (config의 [robot.unitN] 값은 참고 기록용. 2026-08-31 운용 방침)
+    {
+        std::vector<MotorState> cal_state;
+        if (!dxl_driver->readAllState(cal_state) || cal_state.size() < 5) {
+            std::cerr << "[CALIB] 현재 모터 위치 읽기 실패 — 종료합니다" << std::endl;
+            cleanup_dynamixel();
+            return -1;
+        }
+        g_home.home_pitch  = cal_state[0].position;
+        g_home.home_roll_r = cal_state[1].position;
+        g_home.home_roll_l = cal_state[2].position;
+        g_home.home_yaw    = cal_state[3].position;
+        g_home.home_mouth  = cal_state[4].position;
+        std::cout << "[CALIB] 현재 자세를 임시 홈으로 사용:"
+                  << " pitch="  << g_home.home_pitch
+                  << " roll_r=" << g_home.home_roll_r
+                  << " roll_l=" << g_home.home_roll_l
+                  << " yaw="    << g_home.home_yaw
+                  << " mouth="  << g_home.home_mouth << std::endl;
     }
+    // 원본 (캘리브레이션 후 복원):
+    // if (cfg_dxl.operating_mode == 1)
+    //     move_to_initial_position_velctrl();
+    // else {
+    //     dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
+    //     move_to_initial_position_posctrl();
+    //     dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
+    // }
 
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // LED 밝기 GPIO PWM 초기화
     initialize_led_pwm();
 
-    // 자이로센서를 이용한 로봇 초기자세 설정
-    // dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
-    // initialize_robot_posture();
-    // dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
+    // 자이로센서를 이용한 로봇 초기자세 설정 — 매 실행 시 캘리브레이션 (운용 방침)
+    dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
+    initialize_robot_posture();
+    dxl_driver->setProfile(cfg_dxl.profile_velocity, cfg_dxl.profile_acceleration);
 
     // gyro_test();
 

@@ -41,6 +41,14 @@ mouth_pitch_compensation = 0.58   # pitch에 따른 입 움직임 보상 (값↑
 max_mouth = 0
 min_mouth = 300                    # 최대 mouth movement size in DXL dimension
 
+# ===== 캘리브레이션 이완 단계 =====
+# 시작 시 roll/pitch 와이어를 자이로 변화가 멎을 때까지 풀고, mouth는 고정량만 푼 뒤 조정 시작
+calib_release_step_tick   = 20     # 이완 스텝 크기(틱). 클수록 빨리 품
+calib_release_noise_g     = 0.05   # 윈도우당 3축 가속도 변화합(g) 임계 — 미만이면 이완 완료
+calib_release_quiet_steps = 5      # 윈도우당 스텝 수 (윈도우 = quiet_steps × step_tick 틱)
+calib_release_mouth_tick  = 250    # mouth 고정 이완량(틱) — 턱은 자이로로 감지 불가
+calib_mouth_backoff_tick  = 60     # mouth 장력점 감지 후 되돌리는 양(틱). 입이 과하게 벌어지면 키울 것
+
 # 머리 올릴 시: back 0.7692(=1/1.3), pitch 0.5882(=1/1.7), min 400
 # 안 올릴 시: back 1.0, pitch 1.0, min 350
 
@@ -77,8 +85,8 @@ default_yaw     = 3600
 default_mouth   = 1980
 
 [robot.unit4]
-default_pitch   = 3500
-default_roll_r  = 750
-default_roll_l  = 2700
-default_yaw     = 2560
-default_mouth   = 940
+default_pitch   = 4478
+default_roll_r  = 65
+default_roll_l  = 2186
+default_yaw     = 3540
+default_mouth   = 848
