@@ -67,7 +67,10 @@ SPI_HZ            = 6_500_000
 LED_ZERO          = 0b1100_0000  # WS2812 "0": ~308 ns high
 LED_ONE           = 0b1111_1100  # WS2812 "1": ~923 ns high
 PREAMBLE_BYTES    = 42           # leading zeros ≈ 52 µs reset/latch (rpi5_ws2812 PREAMBLE)
-HANDOFF_WAIT_S    = 0.3         # ATtiny releases PB1 within ~80 ms of READY HIGH
+HANDOFF_WAIT_S    = 1.2         # safety margin before first SPI write. Nominal
+                                # firmware releases PB1 within ~80 ms of READY HIGH,
+                                # but waiting longer only prolongs the ATtiny's frozen
+                                # full-white frame — never a bus conflict.
 FRAME_DT_S        = 1 / 60
 ROT_PER_FRAME     = 0.005
 BRIGHTNESS        = 0.25        # runtime brightness — caps current ~360 mA
@@ -297,17 +300,32 @@ def main():
                     # touch the bus, then bloom black → rainbow back in (서서히).
                     print("arbiter: client released — settling before resume", flush=True)
                     time.sleep(RESUME_SETTLE_S)
+                    # `paused` set must always mean "this loop is not writing SPI":
+                    # the arbiter grants ACQUIRE the moment it sees `paused`, so it
+                    # has to be cleared BEFORE the first write of the resume, not
+                    # after the fade-in. Clear first, then re-check pause_req — an
+                    # ACQUIRE that slipped in during the settle re-parks untouched.
+                    paused.clear()
                     if pause_req.is_set():
-                        continue             # RAY re-acquired during settle
+                        paused.set()         # RAY re-acquired during settle
+                        continue
                     spi.writebytes2(black)   # clean baseline regardless of last frame
+                    interrupted = False
                     for i in range(FADE_IN_FRAMES):
                         if pause_req.is_set():
+                            interrupted = True
                             break            # RAY re-acquired mid-fade
                         t = (i + 1) / FADE_IN_FRAMES
                         spi.writebytes2(encode_frame(rainbow(phase, BRIGHTNESS * t)))
                         phase = (phase + ROT_PER_FRAME) % 1.0
                         time.sleep(FRAME_DT_S)
-                    paused.clear()
+                    if interrupted:
+                        # Mid-fade re-acquire: black out and re-park right away.
+                        # No fade-out — the strip never reached the full rainbow.
+                        spi.writebytes2(black)
+                        paused.set()
+                        print("arbiter: client re-acquired mid-fade — yielding", flush=True)
+                        continue
                     # Skip both the boot breathing hold and the bloom: RAY was
                     # already up, so the rainbow here means "RAY went away".
                     frame_count = BOOT_HOLD_FRAMES + TRANSITION_FRAMES
