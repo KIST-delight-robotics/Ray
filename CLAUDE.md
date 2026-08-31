@@ -48,6 +48,7 @@ Top-level only — for module details, inspect the folder directly (every module
 - `cpp/` — C++ audio playback + motor control process (see **C++ Process** below)
 - `evaluation/` — E2E evaluation pipeline (audio prep, run, report, score, dashboard)
 - `scripts/` — dev utilities, benchmarks (`bench/`), hardware checks (`hardware/`)
+- `boot/` — 부팅 시퀀스 일체: OS_LED 서브시스템, systemd 자동실행 유닛, 준비 완료 차임 (see `boot/README.md`)
 - `docs/` — project docs (see **Documentation** below)
 - `data/` — datasets and runtime data. Gitignored as a whole, but a few required files are
   tracked (e.g. `data/segments/`, `data/eval/questions.json`). `git add` refuses paths under

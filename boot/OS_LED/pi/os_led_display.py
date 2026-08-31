@@ -47,6 +47,7 @@ A PREAMBLE_BYTES run of leading zeros (~52 µs LOW) provides the reset/latch.
 SPI must be enabled in /boot/firmware/config.txt (`dtparam=spi=on`).
 """
 import colorsys
+import math
 import os
 import signal
 import socket
@@ -81,10 +82,14 @@ TRANSITION_FRAMES = 90          # 1.5 s at 60 fps for the white → rainbow bloo
 # firmware (OS_LED/README.md §3.1 "모든 ATtiny 애니메이션은 순백, 포물선 idx*(N-idx) 근사,
 # PULSE_MIN=16~PULSE_MAX=255, 한 호흡 주기 ≈ 2.0 s") — they must stay in sync or
 # the hand-off becomes visible as a brightness/rate jump.
-BREATH_PERIOD_S   = 2.0
-BREATH_FRAMES     = round(BREATH_PERIOD_S / FRAME_DT_S)   # 120 frames @60 fps
-BREATH_MIN        = 16 / 255    # PULSE_MIN
-BREATH_MAX        = 1.0         # PULSE_MAX (ATtiny's frozen hand-off frame)
+# RAY 대기(SLEEPING) 디밍과 동일 스펙: 4.0 s 사인 곡선, 밝기 0.15~1.0.
+# ATtiny 펌웨어도 같은 색/속도의 노란 호흡으로 변경됨 — 세 구간(ATtiny → Pi → RAY)이
+# 하나의 호흡으로 이어져 보이도록 유지할 것.
+BREATH_PERIOD_S   = 4.0
+BREATH_FRAMES     = round(BREATH_PERIOD_S / FRAME_DT_S)   # 240 frames @60 fps
+BREATH_MIN        = 0.15        # RAY BreathingAnimation._MIN_BRIGHTNESS와 동일
+BREATH_MAX        = 1.0         # ATtiny's frozen hand-off frame
+BREATH_COLOR      = (233, 233, 50)   # RAY 대기 색과 동일 (ATtiny도 동일 색)
 # How long to keep breathing before deciding RAY isn't coming. RAY normally
 # acquires ~25–50 s after this daemon starts (model loading dominates), so this
 # is generous. Rounded to whole breaths so the hold always ends at a peak —
@@ -116,22 +121,21 @@ def encode_frame(pixels):
 
 
 def breath_level(frame_i):
-    """ATtiny's breathing curve: parabolic idx*(N-idx), starting at the peak.
+    """RAY 대기 디밍과 동일한 사인 호흡, 피크에서 시작.
 
-    frame_i 0 → BREATH_MAX, so the first Pi-driven frame matches the full-white
-    frame ATtiny latched at hand-off (no visible jump).
+    frame_i 0 → BREATH_MAX: 첫 Pi 프레임이 ATtiny가 핸드오프 때 정지시킨
+    최대 밝기 프레임과 일치해 눈에 띄는 점프가 없다.
     """
-    n = BREATH_FRAMES
-    half = n // 2
-    idx = (frame_i + half) % n          # phase-shift so frame 0 lands on the peak
-    tri = idx * (n - idx) / (half * half)   # 0..1, peaks at idx == half
-    return BREATH_MIN + (BREATH_MAX - BREATH_MIN) * tri
+    t = frame_i * FRAME_DT_S
+    phase = (math.sin(2 * math.pi * t / BREATH_PERIOD_S + math.pi / 2) + 1) / 2
+    return BREATH_MIN + (BREATH_MAX - BREATH_MIN) * phase
 
 
 def white_frame(level):
-    """Pure white on the whole chain (G=R=B), like every ATtiny animation."""
-    v = int(max(0.0, min(1.0, level)) * 255)
-    return [(v, v, v)] * NUM_LEDS
+    """부팅 호흡 프레임: 체인 전체를 BREATH_COLOR(노랑)로, ATtiny 애니메이션과 동일."""
+    lv = max(0.0, min(1.0, level))
+    r, g, b = (int(c * lv) for c in BREATH_COLOR)
+    return [(r, g, b)] * NUM_LEDS
 
 
 def rainbow(phase, brightness=BRIGHTNESS, saturation=1.0, tail_brightness=0.0):

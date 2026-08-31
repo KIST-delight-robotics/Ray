@@ -24,6 +24,7 @@ except Exception:
 import enum
 import queue
 import signal
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -140,6 +141,30 @@ def _wait_playback(
 # ---------------------------------------------------------------------------
 
 
+READY_CHIME_PATH = "boot/sounds/ready.oga"  # 준비 완료 차임 (파일 없으면 무음)
+
+
+def _play_ready_chime() -> None:
+    """파이프라인 준비 완료(웨이크워드 대기 진입) 시점에 차임을 1회 재생.
+
+    부팅 사운드의 의미를 "전원 들어옴"이 아니라 "말 걸어도 됨"으로 통일한다
+    (구 boot-chime.service는 PipeWire 기동 직후 울려 캘리브레이션 중 뜬금없었음).
+    best-effort: 파일이 없거나 재생 실패해도 파이프라인 기동은 계속한다.
+    """
+    path = Path(READY_CHIME_PATH)
+    if not path.exists():
+        logger.warning("Ready chime not found: %s", path)
+        return
+    try:
+        subprocess.Popen(
+            ["pw-play", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        logger.warning("Ready chime playback failed", exc_info=True)
+
+
 def main() -> None:
     """Launch the voice pipeline."""
     _setup_logging()
@@ -187,6 +212,7 @@ def main() -> None:
     logger.info("Pipeline starting")
     bridge.connect()
     audio_input.start()
+    _play_ready_chime()
     try:
         while not shutdown_event.is_set():
             # ---- SLEEP ----
