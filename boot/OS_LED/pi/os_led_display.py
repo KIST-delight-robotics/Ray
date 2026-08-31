@@ -138,6 +138,23 @@ def white_frame(level):
     return [(r, g, b)] * NUM_LEDS
 
 
+RAY_BAR_LEDS = 8   # RAY 프레임 레이아웃: bar 8개(앞) + ring 16개(뒤).
+                   # voice_pipeline/adapters/led.py 의 _BAR_COUNT와 반드시 일치.
+
+
+def handoff_frame(level, t):
+    """부팅 호흡(전체 노랑, 밝기 level) → RAY SLEEPING 첫 프레임으로 t(0→1) 보간.
+
+    RAY의 첫 프레임은 bar 꺼짐 + ring을 BREATH_MIN(0.15) 노랑으로 그리므로,
+    같은 프레임까지 페이드해 파킹하면 인수 순간에 검정 공백 없이 이어진다."""
+    tt = max(0.0, min(1.0, t))
+    bar_lv = level * (1.0 - tt)
+    ring_lv = level + (BREATH_MIN - level) * tt
+    bar = tuple(int(c * bar_lv) for c in BREATH_COLOR)
+    ring = tuple(int(c * ring_lv) for c in BREATH_COLOR)
+    return [bar] * RAY_BAR_LEDS + [ring] * (NUM_LEDS - RAY_BAR_LEDS)
+
+
 def rainbow(phase, brightness=BRIGHTNESS, saturation=1.0, tail_brightness=0.0):
     # Only LEDs 1–RAINBOW_LEDS show the idle rainbow. The rest of the chain
     # (LEDs RAINBOW_LEDS+1 .. end) are off in steady state, but tail_brightness
@@ -287,14 +304,17 @@ def main():
                 # over — the one transition this whole design tries to hide.
                 boot_level = breath_level(frame_count) if frame_count < BOOT_HOLD_FRAMES else None
                 for i in range(FADE_OUT_FRAMES):
-                    scale = 1.0 - (i + 1) / FADE_OUT_FRAMES
+                    t = (i + 1) / FADE_OUT_FRAMES
                     if boot_level is None:
-                        frame = rainbow(phase, BRIGHTNESS * scale)
+                        frame = rainbow(phase, BRIGHTNESS * (1.0 - t))
                     else:
-                        frame = white_frame(boot_level * scale)
+                        # 부팅 호흡 → RAY 첫 프레임(bar off, ring 0.15)으로 보간.
+                        # 검정으로 껐다 켜면 인수 순간이 깜박여 보인다.
+                        frame = handoff_frame(boot_level, t)
                     spi.writebytes2(encode_frame(frame))
                     time.sleep(FRAME_DT_S)
-                spi.writebytes2(black)
+                if boot_level is None:
+                    spi.writebytes2(black)   # 무지개 경로만 소등 파킹
                 paused.set()                 # tell the arbiter the pause is committed
 
             # --- RAY owns the strip: do not touch SPI at all ---

@@ -366,6 +366,13 @@ class LEDController:
             self._driver = driver
             self._strip = driver.get_strip()
             self._strip.set_brightness(self._brightness)
+            # 인수 직후 SLEEPING 첫 프레임을 즉시 그린다: SPI 오픈 시 라인 글리치로
+            # 스트립이 임의 색(흰 반짝 등)을 래치해도 바로 덮어써지고, 애니메이션
+            # 스레드가 돌기 전까지 공백이 없다. OS_LED 데몬도 같은 프레임으로 페이드해
+            # 파킹하므로(handoff_frame) 부팅 호흡 → RAY 호흡이 끊김 없이 이어진다.
+            self._apply_frame(
+                BreathingAnimation().render(0, self._BAR_COUNT, self._RING_COUNT)
+            )
             logger.info(
                 "LED strip initialized: %d LEDs (bar=%d, ring=%d), brightness=%.2f",
                 self._LED_COUNT,
