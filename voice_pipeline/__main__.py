@@ -143,6 +143,12 @@ def _wait_playback(
 
 READY_CHIME_PATH = "boot/sounds/ready.oga"  # 준비 완료 차임 (파일 없으면 무음)
 
+# 기동 시 C++ 연결 대기 상한. 부팅 캘리브레이션(이완·수평·장력)이 끝나야 cpp 서버가
+# 열리는데 소요 시간이 와이어 상태에 따라 크게 변한다 — 짧게 포기하고 죽으면 systemd
+# 재시작으로 모델 로딩(~40s)을 통째로 다시 하므로, 여기서 참을성 있게 기다린다.
+_STARTUP_CONNECT_TIMEOUT_SEC = 90.0
+_STARTUP_CONNECT_RETRY_DELAY_SEC = 3.0
+
 
 def _play_ready_chime() -> None:
     """파이프라인 준비 완료(웨이크워드 대기 진입) 시점에 차임을 1회 재생.
@@ -212,7 +218,19 @@ def main() -> None:
     session_started = False
 
     logger.info("Pipeline starting")
-    bridge.connect()
+    # 첫 연결만 인내 모드: cpp가 캘리브레이션 중이면 서버가 아직 안 열려 있다.
+    # (세션 중 재연결은 GREETING의 3회 시도 → 실패 시 SLEEP 복귀 정책 그대로)
+    _startup_deadline = time.monotonic() + _STARTUP_CONNECT_TIMEOUT_SEC
+    while True:
+        try:
+            bridge.connect()
+            break
+        except Exception:
+            remain = _startup_deadline - time.monotonic()
+            if remain <= 0 or shutdown_event.is_set():
+                raise
+            logger.info("C++ 서버 대기 중 (잔여 %.0f초) — 캘리브레이션이 끝나면 열립니다", remain)
+            shutdown_event.wait(_STARTUP_CONNECT_RETRY_DELAY_SEC)
     audio_input.start()
     _play_ready_chime()
     try:

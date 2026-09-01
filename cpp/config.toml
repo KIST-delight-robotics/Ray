@@ -91,4 +91,4 @@ default_roll_l  = 2186
 default_yaw     = 3560
 default_mouth   = 848
 calib_ax_offset = 0.036   # 육안 수평일 때의 Ax(g) — 센서 장착 기울기 보정 (기기별, 생략 시 0).
-                          # 측정법: 토크 온 + Wizard로 roll 육안 수평 후 가속도 20회 평균 (2026-09-01)
+                          # 측정법: 토크 온 + Wizard로 수평을 맞춘 후 가속도 20회 평균 (2026-09-01)
