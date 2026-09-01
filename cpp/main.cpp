@@ -2186,6 +2186,10 @@ void initialize_robot_posture() {
     std::cout << "MPU6050 데이터 수집 시작..." << std::endl;
 
     std::vector<int32_t> target_position = {g_home.home_pitch, g_home.home_roll_r, g_home.home_roll_l, g_home.home_yaw, g_home.home_mouth};
+
+    // 센서 장착 기울기 보정: roll 판정은 (Ax − offset) 기준. offset = 육안 수평일 때의 Ax.
+    const float AX_OFFSET = (float)cfg_robot.calib_ax_offset;
+    std::cout << "[CALIB] calib_ax_offset = " << AX_OFFSET << " g" << std::endl;
     bool Roll_L_adjust_flag = 0;
     bool Roll_R_adjust_flag = 0;
     bool Pitch_adjust_flag = 0;
@@ -2292,7 +2296,7 @@ void initialize_robot_posture() {
     int avg_accel_z = sum_accel_z / sample_count;
     
     // 5-2. 평균 센서값을 g 단위로 변환
-    float Ax = avg_accel_x / 16384.0;
+    float Ax = avg_accel_x / 16384.0 - AX_OFFSET;
     float Ay = avg_accel_y / 16384.0;
     float Az = avg_accel_z / 16384.0;
 
@@ -2313,7 +2317,7 @@ void initialize_robot_posture() {
             avg_accel_x = sum_accel_x / sample_count;
             avg_accel_y = sum_accel_y / sample_count;
             avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0;
+            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
             Ay = avg_accel_y / 16384.0;
             Az = avg_accel_z / 16384.0;
 
@@ -2336,7 +2340,7 @@ void initialize_robot_posture() {
             avg_accel_x = sum_accel_x / sample_count;
             avg_accel_y = sum_accel_y / sample_count;
             avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0;
+            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
             Ay = avg_accel_y / 16384.0;
             Az = avg_accel_z / 16384.0;
 
@@ -2359,7 +2363,7 @@ void initialize_robot_posture() {
             avg_accel_x = sum_accel_x / sample_count;
             avg_accel_y = sum_accel_y / sample_count;
             avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0;
+            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
             Ay = avg_accel_y / 16384.0;
             Az = avg_accel_z / 16384.0;
 
@@ -2382,7 +2386,7 @@ void initialize_robot_posture() {
             avg_accel_x = sum_accel_x / sample_count;
             avg_accel_y = sum_accel_y / sample_count;
             avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0;
+            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
             Ay = avg_accel_y / 16384.0;
             Az = avg_accel_z / 16384.0;
 
@@ -2403,7 +2407,7 @@ void initialize_robot_posture() {
     avg_accel_x = sum_accel_x / sample_count;
     avg_accel_y = sum_accel_y / sample_count;
     avg_accel_z = sum_accel_z / sample_count;
-    Ax = avg_accel_x / 16384.0;
+    Ax = avg_accel_x / 16384.0 - AX_OFFSET;
     Ay = avg_accel_y / 16384.0;
     Az = avg_accel_z / 16384.0;
     //pitch 조정 -일 때 생각해서 예외 처리 실행해야할 듯 
@@ -2423,7 +2427,7 @@ void initialize_robot_posture() {
             avg_accel_x = sum_accel_x / sample_count;
             avg_accel_y = sum_accel_y / sample_count;
             avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0;
+            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
             Ay = avg_accel_y / 16384.0;
             Az = avg_accel_z / 16384.0;
 
@@ -2449,7 +2453,7 @@ void initialize_robot_posture() {
             avg_accel_x = sum_accel_x / sample_count;
             avg_accel_y = sum_accel_y / sample_count;
             avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0;
+            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
             Ay = avg_accel_y / 16384.0;
             Az = avg_accel_z / 16384.0;
 
@@ -2472,7 +2476,7 @@ void initialize_robot_posture() {
             avg_accel_x = sum_accel_x / sample_count;
             avg_accel_y = sum_accel_y / sample_count;
             avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0;
+            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
             Ay = avg_accel_y / 16384.0;
             Az = avg_accel_z / 16384.0;
 
