@@ -506,7 +506,7 @@ void move_to_initial_position_velctrl() {
 // LED 밝기 = RP1 하드웨어 PWM (sysfs /sys/class/pwm). GPIO13 = PWM1 = pwmchip0 채널1.
 // softPwm(~100Hz, CPU 토글, 플리커)을 대체. 캐리어(예 20kHz)는 부팅 시 systemd 서비스
 // (led-pwm.service → /usr/local/bin/led-pwm-setup.sh)가 export+period+enable+권한까지 설정하고,
-// 여기서는 duty_cycle(ns)만 쓴다. 설정: scripts/hardware/setup_led_hwpwm.sh (sudo 1회 + 재부팅).
+// 여기서는 duty_cycle(ns)만 쓴다. 설정: boot/led-pwm/setup.sh (sudo 1회 + 재부팅).
 // led_pwm_pin < 0 이면 비활성(기존 의미 유지).
 static const char* LED_PWM_DUTY   = "/sys/class/pwm/pwmchip0/pwm1/duty_cycle";
 static const char* LED_PWM_PERIOD = "/sys/class/pwm/pwmchip0/pwm1/period";

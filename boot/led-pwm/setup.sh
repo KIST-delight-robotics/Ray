@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# LED 밝기를 RP1 하드웨어 PWM(GPIO13 = PWM1)으로 전환하기 위한 1회 시스템 설정.
-# softPwm(~100Hz, 플리커)을 대체 → 캐리어 20kHz 무플리커.
+# RP1 하드웨어 PWM LED 준비 — 1회 시스템 설정 (20kHz 캐리어, 무플리커).
+#   PWM0 (GPIO12, 물리 32번) = 하부 LED — voice_pipeline/adapters/led.py가 링 밝기를 미러
+#   PWM1 (GPIO13, 물리 33번) = 예비 (구 전방 LED 밝기 — cpp가 duty 사용)
 #
 # 하는 일:
 #   1) /boot/firmware/config.txt 에 pwm-2chan 오버레이 추가 (GPIO12=PWM0, GPIO13=PWM1)
+#   1b) pwm0-clk-fix.dtbo 설치 (clk_pwm0 rate=0 → xosc 50MHz 수정)
 #   2) gpio 그룹 생성 + 현재 사용자 추가 (Ray가 비root로 PWM 제어 가능하게)
-#   3) 부팅 시 pwmchip0 채널1 export+period+enable+권한을 잡는 systemd 서비스 설치/활성화
-#   4) 재부팅 안내
+#   3) 부팅 시 pwmchip0 채널 0·1 export+period+enable+권한을 잡는 led-pwm.service 설치/활성화
+#   4) 재부팅 안내 (오버레이 반영에 재부팅 1회 필요)
 #
-# 사용: sudo bash scripts/hardware/setup_led_hwpwm.sh   (그 후 sudo reboot)
+# 사용: sudo bash boot/led-pwm/setup.sh   (그 후 sudo reboot)
 set -euo pipefail
 
 PWM_HZ=20000                       # LED PWM 캐리어 주파수 (20kHz → 무플리커·무버즈)

@@ -125,20 +125,23 @@ TIKTOKEN_CACHE_DIR=~/.cache/tiktoken uv run python -c "import tiktoken; tiktoken
 
 ## 8. API 인증 설정
 
-### Google Cloud (ASR)
-
-GCP 콘솔에서 서비스 계정 키(JSON)를 발급받고, 파일 경로를 환경변수에 등록한다.
-
-```bash
-# 파일 경로에 맞게 수정
-echo 'export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json' >> ~/.bashrc
-source ~/.bashrc
-```
-
-### OpenAI (LLM, TTS)
+키는 **`~/.config/ray/ray.env` 한 곳**에 둔다 — systemd 자동실행(`boot/systemd/*.service`)이
+`EnvironmentFile`로 이 파일을 읽는다. bashrc에만 넣으면 자동실행이 키를 못 받으므로,
+수동 실행(`uv run ray`)용 셸 환경은 bashrc에서 이 파일을 소싱해 맞춘다.
 
 ```bash
-echo 'export OPENAI_API_KEY=sk-...' >> ~/.bashrc
+mkdir -p ~/.config/ray
+cat > ~/.config/ray/ray.env <<'EOF'
+RAY_UNIT=unitN                     # cpp/config.toml [robot.unitN] 선택 (필수)
+OPENAI_API_KEY=sk-...
+ELEVENLABS_API_KEY=...
+GOOGLE_APPLICATION_CREDENTIALS=/home/<user>/<service-account>.json   # GCP 콘솔에서 발급
+TIKTOKEN_CACHE_DIR=/home/<user>/.cache/tiktoken
+EOF
+chmod 600 ~/.config/ray/ray.env
+
+# 수동 실행(uv run ray)도 같은 값을 쓰도록 셸에 소싱
+echo 'set -a; . ~/.config/ray/ray.env; set +a' >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -220,3 +223,22 @@ sudo systemctl restart NetworkManager
 ```
 
 > `iw` 명령이 없으면 `sudo apt install iw`로 설치하거나, 설정 파일 생성 후 NetworkManager 재시작으로 대체 가능.
+
+
+## 12. 기기별 로봇 값 (`cpp/config.toml`의 `[robot.unitN]`)
+
+새 기기는 자기 유닛 섹션이 있어야 기동한다 (`RAY_UNIT` 환경변수로 선택, 없으면 즉시 실패):
+
+- **`default_pitch/roll_r/roll_l/yaw/mouth`** — 모터 홈 참고값. pitch/roll/mouth는 매 부팅
+  자이로 캘리브레이션이 재설정하므로 기록용이고, **`default_yaw`는 실제 사용된다**
+  (자이로로 못 잡는 축이라 캘리브레이션이 이 값으로 정렬). 정면을 보는 틱 값을 넣을 것.
+- **`calib_ax_offset`** — 센서 장착 기울기 보정 (생략 시 0). 측정법: 토크 온 상태에서
+  Dynamixel Wizard로 roll goal을 조정해 육안 수평을 만든 뒤, MPU6050 가속도 Ax를
+  20회 평균한 값 (cpp `gyro_test()`를 임시 활성화하거나 간단한 I2C 리더 사용).
+  캘리브레이션 후에도 한쪽으로 일정하게 기울면 이 값이 원인이다.
+
+
+## 13. 다음 단계 — 부팅 자동실행·LED
+
+여기까지가 기본 환경이다. 부팅 시퀀스 일체(LED 하드웨어 PWM, OS_LED 데몬, systemd 자동실행,
+기기별 캘리브레이션 값)는 [boot/README.md](../boot/README.md)의 "새 기기 설치 절차"를 따른다.

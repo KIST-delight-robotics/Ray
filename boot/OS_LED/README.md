@@ -184,7 +184,7 @@ Pi 실행 중           → ATtiny가 PB1을 INPUT(high-Z)으로 풀고, Pi가 S
 | `system.conf.d/10-os-led.conf` | `DefaultTimeoutStopSec=10s` — hung 서비스가 ATtiny 종료 타임아웃(30 s)을 넘기지 않게 캡 |
 
 **혼동 금지**: `led-pwm.service`는 OS_LED가 아니라 로봇 몸체 LED(C++ Ray, GPIO13 하드웨어
-PWM)용 별개 시스템이다 (`scripts/hardware/setup_led_hwpwm.sh` 참고).
+PWM)용 별개 시스템이다 (`boot/led-pwm/setup.sh` 참고).
 
 ### 5.1 `os_led_display.py` — 디스플레이 + 소유권 arbiter
 

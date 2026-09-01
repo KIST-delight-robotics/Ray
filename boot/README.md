@@ -12,7 +12,7 @@
 | ~+13s | Pi가 스트립 인수, **같은 노란 호흡을 이어서** 표시 | `os-led-display` 데몬 |
 | ~+14s | C++ 기동 → 모터 토크 온 → 자이로 캘리브레이션 (이완→수평→장력) | `ray-cpp.service` |
 | ~+27s+ | 캘리브레이션 완료, WebSocket 서버 오픈 | ray-cpp |
-| ~+52s | 파이썬 파이프라인 준비 → LED를 RAY가 인수(노란 호흡 유지) → **준비 완료 차임** → 웨이크워드 대기 | `ray-python.service` |
+| ~+52s | 파이썬 파이프라인 준비 → LED를 RAY가 인수(노란 호흡 유지) + **하부 LED 점등(0.3s 램프)** → **준비 완료 차임** → 웨이크워드 대기 | `ray-python.service` |
 
 호흡은 세 구간(ATtiny → Pi 데몬 → RAY)이 같은 색(233,233,50)·같은 속도(4.0s 사인, 밝기 0.15~1.0)로
 이어지도록 맞춰져 있다. 소리는 "준비 완료" 시점에 한 번만 난다 — 값을 바꾸면 세 곳을 함께 바꿀 것
@@ -23,11 +23,17 @@
 데몬이 내려가며 ATtiny 종료 호흡이 이어받는다.
 (초기 인수 테스트용이던 무지개 표시는 실운용에 불필요해 제거, 2026-09)
 
+**하부 LED** (RP1 하드웨어 PWM 채널0 = GPIO12): RAY가 링을 그리는 동안
+`voice_pipeline/adapters/led.py`가 매 프레임 링 밝기를 duty로 미러한다 — 호흡·대화·페이드가
+전부 하부에도 따라온다. 첫 점등만 0.3 s 램프(인수 페이드 동안은 데몬이 링을 그려 하부가
+꺼져 있으므로). 밝기 상한은 `_LOWER_LED_MAX_PCT`. PWM1(GPIO13)은 예비.
+
 ## 구성요소
 
 | 경로 | 역할 | 설치 위치 |
 |---|---|---|
 | `OS_LED/` | 전원/부팅 LED 서브시스템 (ATtiny 펌웨어 지식 + Pi 데몬). 상세: [OS_LED/README.md](OS_LED/README.md) | `sudo bash OS_LED/pi/install.sh` |
+| `led-pwm/` | RP1 하드웨어 PWM 준비 — config.txt 오버레이, gpio 그룹, `led-pwm.service`(부팅 시 채널 0·1 export). PWM0=하부 LED, PWM1=예비 | `sudo bash led-pwm/setup.sh` + **재부팅 1회** |
 | `systemd/ray-cpp.service` | C++(모터·오디오) 부팅 자동실행. 시작 시 자이로 캘리브레이션 수행 | `~/.config/systemd/user/` (경로 수정 후 복사) |
 | `systemd/ray-python.service` | 파이썬 파이프라인 부팅 자동실행 | `~/.config/systemd/user/` (경로 수정 후 복사) |
 | `sounds/ready.oga` | 준비 완료 차임. `voice_pipeline/__main__.py`의 `READY_CHIME_PATH`가 참조 | 저장소 그대로 사용 (WorkingDirectory 기준 상대경로) |
@@ -37,30 +43,25 @@
 기본 환경(uv, 모델, API 키 등)은 [docs/SETUP.md](../docs/SETUP.md) 를 먼저 따른다. 그 다음:
 
 ```bash
-# 1. OS_LED 데몬 + 전원 훅
+# 1. LED 하드웨어 PWM 준비 (config.txt 오버레이 — 이 단계만 재부팅 필요)
+sudo bash boot/led-pwm/setup.sh
+sudo reboot   # 재부팅 후 이어서 진행
+
+# 2. OS_LED 데몬 + 전원 훅
 sudo bash boot/OS_LED/pi/install.sh
 
-# 2. systemd user 유닛 — 파일 내 경로(%h/KIST_RAY/Ray)를 이 기기의 저장소 경로로 바꿔 복사
+# 3. systemd user 유닛 — 파일 내 경로(%h/KIST_RAY/Ray)를 이 기기의 저장소 경로로 바꿔 복사
 mkdir -p ~/.config/systemd/user
 sed 's|%h/KIST_RAY/Ray|%h/<저장소경로>|g' boot/systemd/ray-cpp.service    > ~/.config/systemd/user/ray-cpp.service
 sed 's|%h/KIST_RAY/Ray|%h/<저장소경로>|g' boot/systemd/ray-python.service > ~/.config/systemd/user/ray-python.service
-
-# 3. 환경 파일 (API 키, RAY_UNIT, tiktoken 캐시 경로)
-mkdir -p ~/.config/ray
-cat > ~/.config/ray/ray.env <<'EOF'
-RAY_UNIT=unitN
-OPENAI_API_KEY=...
-ELEVENLABS_API_KEY=...
-GOOGLE_APPLICATION_CREDENTIALS=/home/<user>/...json
-TIKTOKEN_CACHE_DIR=/home/<user>/.cache/tiktoken
-EOF
-chmod 600 ~/.config/ray/ray.env
 
 # 4. 부팅 자동실행 (GUI 없는 구성에서도 user 매니저가 뜨도록 linger 필수)
 loginctl enable-linger $USER
 systemctl --user daemon-reload
 systemctl --user enable ray-cpp.service ray-python.service
 ```
+
+기기별 로봇 값(`[robot.unitN]` 홈·센서 오프셋)은 [docs/SETUP.md](../docs/SETUP.md)의 해당 절을 따른다.
 
 ## 소리 (준비 완료 차임)
 
