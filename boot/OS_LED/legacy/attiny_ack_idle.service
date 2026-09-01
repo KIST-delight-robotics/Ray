@@ -1,0 +1,13 @@
+[Unit]
+Description=Hold ATtiny85 shutdown acknowledge GPIO low while Pi is running
+After=local-fs.target
+Conflicts=attiny_shutdown_ack.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/attiny_ack_idle.sh
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

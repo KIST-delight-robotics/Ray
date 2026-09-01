@@ -28,6 +28,9 @@ echo "==> system shutdown timeout cap"
 mkdir -p /etc/systemd/system.conf.d
 install -m 644 "$HERE/system-fast-shutdown.conf" /etc/systemd/system.conf.d/10-os-led.conf
 
+echo "==> poweroff ACK shutdown hook (tells ATtiny 'real poweroff, not reboot')"
+install -m 755 "$HERE/os-led-poweroff-ack" /usr/lib/systemd/system-shutdown/os-led-poweroff-ack
+
 echo "==> reload + enable + restart"
 systemctl daemon-reexec
 systemctl daemon-reload

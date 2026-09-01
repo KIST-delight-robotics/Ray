@@ -1,0 +1,25 @@
+#!/bin/sh
+# os-led-poweroff-ack — systemd system-shutdown hook.
+# Installed to /usr/lib/systemd/system-shutdown/ by pi/install.sh; systemd
+# runs it at the very end of shutdown (after every service, including
+# os-led-display, has already stopped) with $1 = poweroff|reboot|halt|kexec.
+#
+# Real poweroff/halt: pulse READY (GPIO17) HIGH for 300 ms. The ATtiny85 is
+# breathing in its "Pi went down without a touch" wait; a short READY pulse
+# tells it "this shutdown is final, not a reboot" so it fades the ring out
+# immediately instead of waiting out the reboot window.
+# Reboot: do nothing — READY comes back HIGH (and stays high) when the
+# daemon starts, which the firmware reads as boot completion.
+#
+# The pulse width must sit inside the firmware's ACK window:
+#   ACK_PULSE_MIN_MS (60) <= 300 < READY_BOOT_HOLD_MS (600)
+
+case "$1" in
+    poweroff|halt) ;;
+    *) exit 0 ;;
+esac
+
+GPIOCHIP=/dev/gpiochip4
+[ -e "$GPIOCHIP" ] || GPIOCHIP=/dev/gpiochip0
+
+exec /usr/bin/gpioset -m time -u 300000 "$GPIOCHIP" 17=1
