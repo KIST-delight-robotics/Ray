@@ -103,10 +103,11 @@ class TestLifecycle:
         mocks["asr"].stop.assert_called_once()
         mocks["generator"].reset.assert_called_once()
 
-        # LED sequence: IDLE (start) → OFF (end)
+        # LED sequence: IDLE (start) — 세션 종료 시에도 IDLE 유지
+        # (작별 인사 재생 동안 꺼져 보이지 않도록; SLEEPING 전환은 main 루프 담당)
         led_calls = [c.args[0] for c in mocks["led"].set_state.call_args_list]
         assert led_calls[0] == LEDState.IDLE
-        assert led_calls[-1] == LEDState.OFF
+        assert led_calls[-1] == LEDState.IDLE
 
     def test_start_session_resets_internal_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """run() resets all internal state from a previous session."""

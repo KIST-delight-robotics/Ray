@@ -337,7 +337,8 @@ class SessionLoop:
         self._asr.stop()
         self._saved_memory_results = list(self._generator.memory_results)
         self._generator.reset()
-        self._set_led(LEDState.OFF)
+        # LED는 IDLE 그대로 둔다: 세션 종료 직후 main이 작별 인사를 재생하는 동안
+        # 불이 꺼져 있으면 어색하다. 재생이 끝나면 main 루프가 SLEEPING으로 바꾼다.
         self._pending_truncation = None
         self._save_recording()
         logger.info("SessionLoop ended")

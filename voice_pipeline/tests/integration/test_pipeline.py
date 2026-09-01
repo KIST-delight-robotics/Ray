@@ -399,7 +399,7 @@ class TestSingleTurnConversation:
 
         # LED transitions: IDLE (start) → OFF (end)
         assert LEDState.IDLE in led.states
-        assert led.states[-1] == LEDState.OFF
+        assert led.states[-1] == LEDState.IDLE  # 세션 종료 후에도 켜진 채 유지 (작별 인사 중 소등 방지)
 
     def test_conversation_history_context_passed_to_llm(self) -> None:
         """Verify that ContextBuilder includes system prompt and user message."""
@@ -660,7 +660,7 @@ class TestSessionTimeout:
         # No messages generated
         assert len(history.get_messages()) == 0
         # LED ended at OFF (session end)
-        assert led.states[-1] == LEDState.OFF
+        assert led.states[-1] == LEDState.IDLE  # 세션 종료 후에도 켜진 채 유지 (작별 인사 중 소등 방지)
 
 
 # ---------------------------------------------------------------------------
@@ -697,7 +697,7 @@ class TestExternalStop:
             generator.reset()
             stopper.join(timeout=2.0)
 
-        assert led.states[-1] == LEDState.OFF
+        assert led.states[-1] == LEDState.IDLE  # 세션 종료 후에도 켜진 채 유지 (작별 인사 중 소등 방지)
 
 
 # ---------------------------------------------------------------------------
