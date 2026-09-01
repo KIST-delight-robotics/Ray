@@ -309,6 +309,8 @@ static uint8_t breath_level(uint8_t idx) {
     return PULSE_MIN + (uint8_t)scaled;
 }
 
+static void ramp_breath_to_peak_at(uint8_t idx, uint8_t step_ms);
+
 /* Smooth breath while waiting for READY HIGH. Escape paths besides
  * 5-min timeout: 5 s emergency hold → force_reset; 45 s grace + fresh
  * touch → re-pulse J2; 90 s+ → auto re-pulse J2 every 30 s. */
