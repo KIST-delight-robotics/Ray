@@ -18,6 +18,7 @@ struct DynamixelConfig {
     uint8_t operating_mode;
     uint8_t return_delay_time;
     uint32_t profile_velocity_homing;
+    uint32_t profile_velocity_calib;   // 캘리브레이션 판정 루프용 (time-based: goal 도달 시간 ms — 작을수록 기민)
     uint32_t profile_velocity;
     uint32_t profile_acceleration;
     std::vector<uint16_t> pos_p_gain;
@@ -51,10 +52,9 @@ struct RobotConfig {
     double wait_mode_rpy_ratio;
     double control_motor_rpy_ratio;
 
-    // 캘리브레이션 이완 단계 (옵션 — config에 없으면 기본값)
+    // 캘리브레이션 (옵션 — config에 없으면 기본값)
     int    calib_release_step_tick;
     double calib_release_noise_g;
-    int    calib_release_quiet_steps;
     int    calib_release_mouth_tick;
     int    calib_mouth_backoff_tick;
 };
@@ -133,6 +133,7 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
     ok &= REQ(dxl_node, "operating_mode",   cfg_dxl.operating_mode);
     ok &= REQ(dxl_node, "return_delay_time",cfg_dxl.return_delay_time);
     ok &= REQ(dxl_node, "profile_velocity_homing", cfg_dxl.profile_velocity_homing);
+    cfg_dxl.profile_velocity_calib = dxl_node["profile_velocity_calib"].value_or(uint32_t{100});
     ok &= REQ(dxl_node, "profile_velocity",     cfg_dxl.profile_velocity);
     ok &= REQ(dxl_node, "profile_acceleration", cfg_dxl.profile_acceleration);
     ok &= REQ_VEC(dxl_node, "pos_p_gain",   cfg_dxl.pos_p_gain);
@@ -183,11 +184,10 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
     ok &= REQ(robot_node, "wait_mode_rpy_ratio",     cfg_robot.wait_mode_rpy_ratio);
     ok &= REQ(robot_node, "control_motor_rpy_ratio",  cfg_robot.control_motor_rpy_ratio);
 
-    // 캘리브레이션 이완 단계 (옵션 — 생략 시 기본값)
-    cfg_robot.calib_release_step_tick   = robot_node["calib_release_step_tick"].value_or(20);
+    // 캘리브레이션 (옵션 — 생략 시 기본값)
+    cfg_robot.calib_release_step_tick = robot_node["calib_release_step_tick"].value_or(100);
     cfg_robot.calib_release_noise_g     = robot_node["calib_release_noise_g"].value_or(0.05);
-    cfg_robot.calib_release_quiet_steps = robot_node["calib_release_quiet_steps"].value_or(5);
-    cfg_robot.calib_release_mouth_tick  = robot_node["calib_release_mouth_tick"].value_or(100);
+    cfg_robot.calib_release_mouth_tick  = robot_node["calib_release_mouth_tick"].value_or(250);
     cfg_robot.calib_mouth_backoff_tick  = robot_node["calib_mouth_backoff_tick"].value_or(45);
 
     if (!ok) return false;

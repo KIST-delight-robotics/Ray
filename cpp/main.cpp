@@ -2197,13 +2197,21 @@ void initialize_robot_posture() {
     const int sample_count = 3;
 
     // ---- 이완 단계: 와이어 텐션을 전부 푼 뒤 기지 상태에서 캘리브레이션 시작 ----
+    // 프로파일: main이 걸어준 homing(느린 이동용, time-based ms)을 그대로 사용.
+    // 한 스텝 = REL_STEP 틱을 단일 goal로 풀고, 프로파일 시간 + 정착을 기다린 뒤
+    // 스텝 시작 대비 자이로 변화로 판정 1회 — 이동 완료 후 읽으므로 판정이 깨끗하다.
     {
-        const int   REL_STEP  = cfg_robot.calib_release_step_tick;
-        const float REL_NOISE = (float)cfg_robot.calib_release_noise_g;
-        const int   REL_QUIET = cfg_robot.calib_release_quiet_steps;
+        const int   REL_STEP    = cfg_robot.calib_release_step_tick;
+        const float REL_NOISE   = (float)cfg_robot.calib_release_noise_g;
+        // 단일 goal 이동의 완료 대기 시간:
+        //   t3(프로파일 시간) = profile_velocity_homing — time-based 모드에서 goal 도달시간
+        // + TxOnly 전달·모터 제어주기 ≈ 5ms
+        // + 와이어 구동 헤드의 잔진동 정착 마진 (임의 설정)
+        const int   SETTLE_MARGIN_MS = 145;
+        const int   MOVE_WAIT_MS = (int)cfg_dxl.profile_velocity_homing + 5 + SETTLE_MARGIN_MS;
 
-        // 판정용 읽기는 10샘플 평균 — 스텝별 3샘플 평균은 노이즈(3축 변화합
-        // 0.03~0.06g)가 임계를 항상 넘어 이완 완료 판정이 불가능했다 (실측).
+        // 판정용 읽기는 10샘플 평균 — 3샘플 평균은 노이즈(3축 변화합 0.03~0.06g)가
+        // 임계를 항상 넘어 이완 완료 판정이 불가능했다 (실측).
         const int REL_SAMPLES = 10;
         auto read_accel_avg = [&](float& ax, float& ay, float& az) {
             long sx = 0, sy = 0, sz = 0;
@@ -2219,20 +2227,15 @@ void initialize_robot_posture() {
         };
 
         // 한 모터를 자이로 변화가 멎을 때까지 푼다(+ 방향 = 조임의 반대).
-        // 스텝 단위 비교는 노이즈에 묻히므로, 윈도우(REL_QUIET 스텝 = REL_QUIET×REL_STEP 틱)
-        // 단위로 푼 뒤 윈도우 시작 대비 변화로 판정한다. 팽팽하면 100틱당 ~0.1g+ 변화.
         // 반환: 이번 턴에 유의미한 자세 변화가 있었는지.
         auto release_motor = [&](int idx, const char* name) -> bool {
             bool moved = false;
             float bx, by, bz, cx, cy, cz;
             read_accel_avg(bx, by, bz);
             while (true) {
-                for (int i = 0; i < REL_QUIET; i++) {
-                    target_position[idx] += REL_STEP;
-                    dxl_driver->writeGoalPosition(target_position);
-                    delay(30);
-                }
-                delay(150);  // 윈도우 끝 정착 대기
+                target_position[idx] += REL_STEP;
+                dxl_driver->writeGoalPosition(target_position);
+                delay(MOVE_WAIT_MS);
                 read_accel_avg(cx, cy, cz);
                 float d = std::fabs(cx - bx) + std::fabs(cy - by) + std::fabs(cz - bz);
                 if (d < REL_NOISE) break;
@@ -2243,6 +2246,13 @@ void initialize_robot_posture() {
                       << (moved ? " (이완 진행)" : " (변화 없음)") << std::endl;
             return moved;
         };
+
+        // yaw를 설정 홈으로 먼저 이동·정착 — target의 yaw는 config 값이고 나머지 축은
+        // 현재 위치 그대로라, 이 write로는 yaw만 움직인다. 이동 중 흔들림이 이완
+        // 판정의 자이로 기준값을 오염시키지 않도록 완료를 기다린다.
+        dxl_driver->writeGoalPosition(target_position);
+        delay(MOVE_WAIT_MS);
+        std::cout << "[CALIB] yaw 설정 홈(" << target_position[3] << ")으로 정렬 완료" << std::endl;
 
         std::cout << "이완 단계: 텐션 해제 시작" << std::endl;
         int rel_round = 0;
@@ -2257,13 +2267,16 @@ void initialize_robot_posture() {
             if (!any) break;
         }
 
-        // mouth: 턱 움직임은 자이로로 감지 불가 → 고정량 이완
+        // mouth: 턱 움직임은 자이로로 감지 불가 → 고정량 이완 (slow 프로파일이 부드러움 담당)
         target_position[4] += cfg_robot.calib_release_mouth_tick;
         dxl_driver->writeGoalPosition(target_position);
-        delay(200);
+        delay(MOVE_WAIT_MS);
         std::cout << "[RELEASE] mouth +" << cfg_robot.calib_release_mouth_tick
                   << "틱 고정 이완 → " << target_position[4] << std::endl;
     }
+
+    // 판정 루프 구간: 기민한 프로파일로 전환 — 3틱 스텝의 센서 피드백 랙을 줄인다.
+    dxl_driver->setProfile(cfg_dxl.profile_velocity_calib, cfg_dxl.profile_acceleration);
 
     std::cout << "Roll 조정" << std::endl;
 
@@ -2620,10 +2633,11 @@ void initialize_robot_posture() {
         }
 
         if (hit >= HIT_COUNT) {
-            // goal 기준 backoff (present 없으니 기존 방식)
+            // goal 기준 backoff (present 없으니 기존 방식) — 느린 프로파일로 전환 후 단일 write
+            dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
             target_position[4] += MOUTH_BACKOFF_TICK;
             dxl_driver->writeGoalPosition(target_position);
-            delay(150);
+            delay(cfg_dxl.profile_velocity_homing + 5 + 145);  // t3 + 전달·제어주기 + 잔진동 마진 (이완 단계와 동일 산식)
 
             mouth_adjust_flag = true;
             break;
@@ -2921,13 +2935,15 @@ int main(int argc, char* argv[]) {
         g_home.home_pitch  = cal_state[0].position;
         g_home.home_roll_r = cal_state[1].position;
         g_home.home_roll_l = cal_state[2].position;
-        g_home.home_yaw    = cal_state[3].position;
+        // yaw는 중력(자이로)으로 기준을 잡을 수 없으므로 현재값이 아니라 설정값을 홈으로 쓴다.
+        // 전원 인가 시 머리가 돌아가 있어도 항상 config의 정면 기준으로 복귀한다.
+        g_home.home_yaw    = cfg_robot.default_yaw;
         g_home.home_mouth  = cal_state[4].position;
-        std::cout << "[CALIB] 현재 자세를 임시 홈으로 사용:"
+        std::cout << "[CALIB] 현재 자세를 임시 홈으로 사용 (yaw만 설정값):"
                   << " pitch="  << g_home.home_pitch
                   << " roll_r=" << g_home.home_roll_r
                   << " roll_l=" << g_home.home_roll_l
-                  << " yaw="    << g_home.home_yaw
+                  << " yaw="    << g_home.home_yaw << "(config)"
                   << " mouth="  << g_home.home_mouth << std::endl;
     }
     // 원본 (캘리브레이션 후 복원):

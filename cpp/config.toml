@@ -11,8 +11,9 @@ is_time_based = true    # true: Time-based, false: Velocity-based
 operating_mode = 4      # 1: Velocity, 3: Position, 4: Extended Position, 16: PWM
 return_delay_time = 0
 
-profile_velocity_homing = 1000   # 기기 부팅 시 초기 위치로 이동할 때 속도
+profile_velocity_homing = 500   # 기기 부팅 시 초기 위치로 이동할 때 속도
 profile_velocity = 60
+profile_velocity_calib = 100   # 캘리브레이션 판정 루프용 (time-based: goal 도달 시간 ms)
 profile_acceleration = 0
 
 pos_p_gain = [500, 500, 500, 500, 500]
@@ -43,9 +44,8 @@ min_mouth = 300                    # 최대 mouth movement size in DXL dimension
 
 # ===== 캘리브레이션 이완 단계 =====
 # 시작 시 roll/pitch 와이어를 자이로 변화가 멎을 때까지 풀고, mouth는 고정량만 푼 뒤 조정 시작
-calib_release_step_tick   = 20     # 이완 스텝 크기(틱). 클수록 빨리 품
-calib_release_noise_g     = 0.05   # 윈도우당 3축 가속도 변화합(g) 임계 — 미만이면 이완 완료
-calib_release_quiet_steps = 5      # 윈도우당 스텝 수 (윈도우 = quiet_steps × step_tick 틱)
+calib_release_step_tick   = 100    # 이완 1스텝 풀기 양(틱). 한 스텝 = 이만큼 풀고 자이로 판정 1회
+calib_release_noise_g     = 0.05   # 스텝당 3축 가속도 변화합(g) 임계 — 미만이면 이완 완료
 calib_release_mouth_tick  = 250    # mouth 고정 이완량(틱) — 턱은 자이로로 감지 불가
 calib_mouth_backoff_tick  = 60     # mouth 장력점 감지 후 되돌리는 양(틱). 입이 과하게 벌어지면 키울 것
 
@@ -88,5 +88,5 @@ default_mouth   = 1980
 default_pitch   = 4478
 default_roll_r  = 65
 default_roll_l  = 2186
-default_yaw     = 3540
+default_yaw     = 3560
 default_mouth   = 848
