@@ -44,21 +44,25 @@ usermod -aG gpio "$TARGET_USER"
 echo "[3/4] 부팅 PWM 준비 스크립트 + systemd 서비스 설치 (${PWM_HZ}Hz)"
 cat > /usr/local/bin/led-pwm-setup.sh <<EOF
 #!/bin/sh
-# 부팅 시 pwmchip0 채널1(GPIO13)을 export하고 period/enable/권한 설정.
+# 부팅 시 pwmchip0 채널0(GPIO12, 하부 LED)·채널1(GPIO13)을 export하고 period/enable/권한 설정.
 CHIP=/sys/class/pwm/pwmchip0
-[ -e "\$CHIP/pwm1" ] || echo 1 > "\$CHIP/export"
+for CH in 0 1; do
+    [ -e "\$CHIP/pwm\$CH" ] || echo \$CH > "\$CHIP/export"
+done
 sleep 0.3
-echo $PERIOD_NS > "\$CHIP/pwm1/period"
-echo 0          > "\$CHIP/pwm1/duty_cycle"
-echo 1          > "\$CHIP/pwm1/enable"
-chgrp gpio "\$CHIP/pwm1/duty_cycle" "\$CHIP/pwm1/period" "\$CHIP/pwm1/enable"
-chmod g+rw "\$CHIP/pwm1/duty_cycle" "\$CHIP/pwm1/period" "\$CHIP/pwm1/enable"
+for CH in 0 1; do
+    echo $PERIOD_NS > "\$CHIP/pwm\$CH/period"
+    echo 0          > "\$CHIP/pwm\$CH/duty_cycle"
+    echo 1          > "\$CHIP/pwm\$CH/enable"
+    chgrp gpio "\$CHIP/pwm\$CH/duty_cycle" "\$CHIP/pwm\$CH/period" "\$CHIP/pwm\$CH/enable"
+    chmod g+rw "\$CHIP/pwm\$CH/duty_cycle" "\$CHIP/pwm\$CH/period" "\$CHIP/pwm\$CH/enable"
+done
 EOF
 chmod +x /usr/local/bin/led-pwm-setup.sh
 
 cat > /etc/systemd/system/led-pwm.service <<'EOF'
 [Unit]
-Description=LED hardware PWM (GPIO13/PWM1) export+enable
+Description=LED hardware PWM (GPIO12/PWM0 하부, GPIO13/PWM1) export+enable
 After=multi-user.target
 
 [Service]

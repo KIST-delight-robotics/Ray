@@ -18,6 +18,7 @@ import os
 import socket
 import threading
 import time
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger("voice_pipeline.led")
@@ -290,6 +291,12 @@ class LEDController:
     _CLOSE_JOIN_TIMEOUT_SEC = 2.0  # close 시 애니메이션 스레드 종료 대기 (초)
     _TRANSITION_SEC = 0.3  # 상태 전환 크로스페이드 시간 (초)
     _TRANSITION_STEPS = 10  # 크로스페이드 보간 스텝 수
+    # 하부 LED (RP1 하드웨어 PWM 채널0 = GPIO12): 링 세그먼트 밝기를 매 프레임 duty로 미러.
+    # 모든 출력이 _apply_frame을 통과하므로 호흡·정적·크로스페이드가 자동으로 따라온다.
+    # 실측(2026-09-01, unit4): duty 10~100% 전 구간 선형 조광 확인 — 문턱 매핑 불필요.
+    # sysfs가 없으면(setup 미실행 기기) noop.
+    _LOWER_LED_PWM_DIR = "/sys/class/pwm/pwmchip0/pwm0"
+    _LOWER_LED_MAX_PCT = 100  # 링 최대 밝기일 때의 duty (%) — 하부 밝기 상한
 
     # 상태별 애니메이션 맵 (단색 플레이스홀더)
     _ANIMATIONS: dict[LEDState, LEDAnimation] = {
@@ -309,6 +316,8 @@ class LEDController:
         self._stop_event = threading.Event()
         self._state_changed = threading.Event()
         self._last_frame: list[RGB] | None = None  # 마지막으로 실제 쓴 프레임 (크로스페이드 기점)
+        self._lower_led_period: int | None = None  # pwm0 주기(ns). None = 하부 LED 미러 비활성
+        self._lower_led_duty = -1  # 마지막으로 쓴 duty (동일 값 재쓰기 방지)
 
         # Hardware strip (None = noop fallback). When a real strip is used we
         # first borrow it from the OS_LED daemon (shared SPI bus).
@@ -373,9 +382,15 @@ class LEDController:
             # 스트립이 임의 색(흰 반짝 등)을 래치해도 바로 덮어써지고, 애니메이션
             # 스레드가 돌기 전까지 공백이 없다. OS_LED 데몬도 같은 프레임으로 페이드해
             # 파킹하므로(handoff_frame) 부팅 호흡 → RAY 호흡이 끊김 없이 이어진다.
-            self._apply_frame(
-                BreathingAnimation().render(0, self._BAR_COUNT, self._RING_COUNT)
-            )
+            self._apply_frame(BreathingAnimation().render(0, self._BAR_COUNT, self._RING_COUNT))
+            # 하부 LED 미러 활성화 — period를 캐시하면 이후 _apply_frame마다 duty만 쓴다.
+            # 로딩 중에는 스트립 인수 전이라 하부도 꺼져 있다.
+            try:
+                self._lower_led_period = int((Path(self._LOWER_LED_PWM_DIR) / "period").read_text())
+                logger.info("Lower LED mirror enabled (period=%dns)", self._lower_led_period)
+            except OSError:
+                self._lower_led_period = None
+                logger.debug("Lower LED PWM unavailable (suppressed)", exc_info=True)
             logger.info(
                 "LED strip initialized: %d LEDs (bar=%d, ring=%d), brightness=%.2f",
                 self._LED_COUNT,
@@ -429,6 +444,7 @@ class LEDController:
             except Exception:
                 logger.debug("Close fade error (suppressed)", exc_info=True)
         self._apply_off()
+        self._mirror_lower_led(self._off_frame())
         # Fully close our SPI device BEFORE releasing the token, so no RAY-side
         # write can overlap the daemon's breathing resume on the shared bus.
         self._close_strip()
@@ -502,6 +518,7 @@ class LEDController:
             self._strip.set_pixel_color(i, _Color(r, g, b))
         self._strip.show()
         self._last_frame = frame
+        self._mirror_lower_led(frame)
 
     def _crossfade(self, start: list[RGB], end: list[RGB], abort=None) -> None:
         """start → end 프레임을 _TRANSITION_SEC에 걸쳐 선형 보간해 쓴다.
@@ -533,3 +550,28 @@ class LEDController:
             self._strip.show()
         except Exception:
             logger.debug("Error turning off LEDs (suppressed)", exc_info=True)
+
+    def _mirror_lower_led(self, frame: list[RGB]) -> None:
+        """링 세그먼트 밝기를 하부 LED(PWM0) duty로 미러. 미러 비활성이면 noop."""
+        if self._lower_led_period is None:
+            return
+        ring = frame[self._BAR_COUNT :]
+        level = max((max(px) for px in ring), default=0) / 255
+        duty = int(self._lower_led_period * self._LOWER_LED_MAX_PCT * level) // 100
+        if duty == self._lower_led_duty:
+            return
+        try:
+            duty_file = Path(self._LOWER_LED_PWM_DIR) / "duty_cycle"
+            if self._lower_led_duty < 0 and duty > 0:
+                # 첫 점등 램프: 인수 페이드(0.7초)는 데몬이 그려서 미러가 볼 수 없어
+                # 하부가 꺼진 채 시작한다 — 합류 순간 "팍" 켜지지 않게 0 → 목표로
+                # 0.3초에 걸쳐 올린다. 애니메이션 스레드에서 실행되므로 프레임과 충돌 없음.
+                for i in range(1, 11):
+                    duty_file.write_text(str(duty * i // 10))
+                    time.sleep(0.03)
+            else:
+                duty_file.write_text(str(duty))
+            self._lower_led_duty = duty
+        except OSError:
+            logger.debug("Lower LED PWM write failed (suppressed)", exc_info=True)
+            self._lower_led_period = None  # 반복 실패 방지 — 미러 비활성화

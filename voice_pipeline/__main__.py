@@ -199,6 +199,8 @@ def main() -> None:
         shutdown_event.set()
 
     signal.signal(signal.SIGINT, _handle_signal)
+    # systemd stop은 SIGTERM을 보낸다 — 미등록이면 정리(LED 소등, 히스토리 저장) 없이 즉사한다
+    signal.signal(signal.SIGTERM, _handle_signal)
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, _handle_signal)
 
