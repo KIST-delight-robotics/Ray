@@ -158,14 +158,14 @@ _CONNECT_RETRY_INTERVAL_S = 0.25
 
 
 class OSLedArbiterClient:
-    """Borrows the WS2812 strip from the OS_LED rainbow daemon."""
+    """Borrows the WS2812 strip from the OS_LED daemon (노란 호흡 담당)."""
 
     def __init__(self, sock_path: str = CONTROL_SOCK) -> None:
         self._sock_path = sock_path
         self._conn: socket.socket | None = None
 
     def acquire(self) -> None:
-        """Borrow the strip from the rainbow daemon.
+        """Borrow the strip from the OS_LED daemon.
 
         Blocks until the daemon has faded out and stopped driving SPI, so RAY
         can take over without interleaved frames. A missing/unreachable daemon
@@ -190,7 +190,7 @@ class OSLedArbiterClient:
             logger.warning("OS_LED arbiter did not grant — proceeding anyway")
         conn.settimeout(None)
         self._conn = conn
-        logger.info("OS_LED strip acquired from rainbow daemon")
+        logger.info("OS_LED strip acquired from OS_LED daemon")
 
     def _connect_with_retry(self) -> socket.socket | None:
         """Connect to the arbiter socket, retrying while it is merely absent.
@@ -230,7 +230,7 @@ class OSLedArbiterClient:
                 return None
 
     def release(self) -> None:
-        """Return the strip — the daemon fades the rainbow back in."""
+        """Return the strip — the daemon resumes its yellow breathing."""
         if self._conn is None:
             return
         with contextlib.suppress(OSError):
@@ -238,7 +238,7 @@ class OSLedArbiterClient:
         with contextlib.suppress(OSError):
             self._conn.close()
         self._conn = None
-        logger.info("OS_LED strip released back to rainbow daemon")
+        logger.info("OS_LED strip released back to OS_LED daemon")
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +288,8 @@ class LEDController:
     _BRIGHTNESS = 1.0  # LED 전체 밝기 (0.0=꺼짐, 1.0=최대)
     _NOOP_SLEEP_SEC = 0.1  # 애니메이션 없을 때 스레드 폴링 간격 (초)
     _CLOSE_JOIN_TIMEOUT_SEC = 2.0  # close 시 애니메이션 스레드 종료 대기 (초)
+    _TRANSITION_SEC = 0.3  # 상태 전환 크로스페이드 시간 (초)
+    _TRANSITION_STEPS = 10  # 크로스페이드 보간 스텝 수
 
     # 상태별 애니메이션 맵 (단색 플레이스홀더)
     _ANIMATIONS: dict[LEDState, LEDAnimation] = {
@@ -306,9 +308,10 @@ class LEDController:
         self._tick = 0
         self._stop_event = threading.Event()
         self._state_changed = threading.Event()
+        self._last_frame: list[RGB] | None = None  # 마지막으로 실제 쓴 프레임 (크로스페이드 기점)
 
         # Hardware strip (None = noop fallback). When a real strip is used we
-        # first borrow it from the OS_LED rainbow daemon (shared SPI bus).
+        # first borrow it from the OS_LED daemon (shared SPI bus).
         self._strip: Any = None
         self._driver: Any = None
         self._arbiter = OSLedArbiterClient()
@@ -354,7 +357,7 @@ class LEDController:
         if _WS2812SpiDriver is None:
             logger.info("rpi5_ws2812 not available — LED controller running in noop mode")
             return
-        # Borrow the shared strip from the OS_LED rainbow daemon before opening
+        # Borrow the shared strip from the OS_LED daemon before opening
         # SPI, so the two processes never drive the bus at the same time.
         self._arbiter.acquire()
         try:
@@ -381,7 +384,7 @@ class LEDController:
                 self._brightness,
             )
         except Exception as exc:
-            self._arbiter.release()  # hand the strip back to the rainbow daemon
+            self._arbiter.release()  # hand the strip back to the OS_LED daemon
             raise RuntimeError(f"Failed to initialize LED strip: {exc}") from exc
 
     # ------------------------------------------------------------------
@@ -419,11 +422,17 @@ class LEDController:
         self._thread.join(timeout=self._CLOSE_JOIN_TIMEOUT_SEC)
         if self._thread.is_alive():
             logger.warning("LED animation thread did not exit within timeout")
+        # 즉시 소등하면 종료가 "툭 꺼짐"으로 보인다 — 마지막 프레임에서 검정으로 페이드.
+        if self._strip is not None and self._last_frame is not None:
+            try:
+                self._crossfade(self._last_frame, self._off_frame())
+            except Exception:
+                logger.debug("Close fade error (suppressed)", exc_info=True)
         self._apply_off()
         # Fully close our SPI device BEFORE releasing the token, so no RAY-side
-        # write can overlap the daemon's rainbow fade-in on the shared bus.
+        # write can overlap the daemon's breathing resume on the shared bus.
         self._close_strip()
-        # Hand the strip back: the daemon fades the rainbow back in.
+        # Hand the strip back: the daemon resumes its yellow breathing.
         self._arbiter.release()
         logger.debug("LED controller closed")
 
@@ -443,9 +452,11 @@ class LEDController:
     # ------------------------------------------------------------------
 
     def _animation_loop(self) -> None:
+        prev_state: LEDState | None = None
         while not self._stop_event.is_set():
             with self._lock:
-                anim = self._animations.get(self._state)
+                state = self._state
+                anim = self._animations.get(state)
                 tick = self._tick
                 self._tick += 1
 
@@ -456,6 +467,16 @@ class LEDController:
 
             try:
                 frame = anim.render(tick, self._BAR_COUNT, self._RING_COUNT)
+                # 상태가 바뀐 첫 프레임은 즉시 점프 대신 이전 화면에서 크로스페이드
+                # (예: 호흡 → 대화 정적 최대 밝기). 부팅 첫 프레임(prev_state None)은
+                # OS_LED 데몬이 이미 같은 프레임으로 페이드해 파킹했으므로 제외.
+                if prev_state is not None and state != prev_state and self._last_frame is not None:
+                    self._crossfade(
+                        self._last_frame,
+                        frame,
+                        abort=lambda st=state: self._stop_event.is_set() or self._state != st,
+                    )
+                prev_state = state
                 self._apply_frame(frame)
             except Exception:
                 logger.debug("Animation render error (suppressed)", exc_info=True)
@@ -480,6 +501,29 @@ class LEDController:
         for i, (r, g, b) in enumerate(frame):
             self._strip.set_pixel_color(i, _Color(r, g, b))
         self._strip.show()
+        self._last_frame = frame
+
+    def _crossfade(self, start: list[RGB], end: list[RGB], abort=None) -> None:
+        """start → end 프레임을 _TRANSITION_SEC에 걸쳐 선형 보간해 쓴다.
+
+        상태 전환이 즉시 점프로 보이지 않게 하는 용도. ``abort``가 True를
+        반환하면 중단한다 (전환 중 또 다른 상태 변경 대응).
+        """
+        step_dt = self._TRANSITION_SEC / self._TRANSITION_STEPS
+        for i in range(1, self._TRANSITION_STEPS + 1):
+            if abort is not None and abort():
+                return
+            t = i / self._TRANSITION_STEPS
+            frame = [
+                (
+                    int(s0[0] + (e0[0] - s0[0]) * t),
+                    int(s0[1] + (e0[1] - s0[1]) * t),
+                    int(s0[2] + (e0[2] - s0[2]) * t),
+                )
+                for s0, e0 in zip(start, end, strict=True)
+            ]
+            self._apply_frame(frame)
+            time.sleep(step_dt)
 
     def _apply_off(self) -> None:
         if self._strip is None:

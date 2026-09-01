@@ -2,37 +2,32 @@
 """
 os_led_display.py — Pi-side OS_LED display + SPI ownership arbiter.
 
+동작 규칙은 하나다: **이 데몬이 스트립을 잡고 있는 동안엔 항상 노란 호흡**
+(233,233,50 · 4.0 s 사인 · 밝기 0.15~1.0 — ATtiny 부팅 호흡, RAY 대기 호흡과 동일).
+
 On startup:
   1. Drive READY (BCM GPIO17) HIGH so the ATtiny releases PB1 (WS2812 DIN)
-     to high-Z. ATtiny's last frame is full white (PULSE_MAX = 255) — the
-     strip latches that while we set up SPI.
-  2. Sleep briefly to let ATtiny release the line. ATtiny needs only a few
-     dozen ms after seeing READY HIGH, so keep this short.
-  3. Drive WS2812 continuing the ATtiny's white breathing (same parabolic
-     curve / 2.0 s period / PULSE_MIN..PULSE_MAX levels), starting at the
-     peak so it picks up exactly where ATtiny's frozen full-white frame
-     left off. The hand-off is invisible: the boot animation just keeps
-     going, now driven by the Pi.
-  4. Normally RAY acquires the strip during this hold and the boot
-     breathing hands straight over to the RAY pattern — no rainbow at all.
-     If RAY never shows up within BOOT_WHITE_HOLD_S, bloom white → rainbow
-     (TRANSITION_FRAMES ≈ 1.5 s) and rotate at ~60 fps thereafter, so
-     "Pi is up but RAY is dead" still looks different from a normal boot.
+     to high-Z. ATtiny's last frame is the breath peak — the strip latches
+     that while we set up SPI.
+  2. Sleep briefly to let ATtiny release the line.
+  3. 노란 호흡을 피크 위상부터 이어서 구동 — ATtiny가 정지시킨 프레임과 첫
+     Pi 프레임이 일치해 인수가 보이지 않는다.
 
 Ownership arbiter (so RAY can borrow the strip):
   This daemon is the single Pi-side owner of /dev/spidev0.0. The RAY voice
   pipeline must NOT open SPI while this daemon is running — instead it
   connects to the control socket (CONTROL_SOCK) and borrows the strip:
 
-    RAY → "ACQUIRE\n"   : daemon fades the rainbow out to black, stops
-                          writing SPI, then replies "GRANTED\n". RAY may
-                          now drive the strip itself.
-    RAY → "RELEASE\n"   : (or simply closing the socket / crashing) the
-    or socket close       daemon fades black → rainbow back in.
+    RAY → "ACQUIRE\n"   : 호흡을 RAY 첫 프레임(bar off, ring 0.15)으로 보간
+                          페이드한 뒤 SPI 쓰기를 멈추고 "GRANTED\n" 응답.
+    RAY → "RELEASE\n"   : (or simply closing the socket / crashing) 소등 유지.
+    or socket close       재획득 시 검정 → RAY 첫 프레임으로 페이드.
 
-  Only one side writes SPI at a time, so frames never interleave. A RAY
-  crash drops the socket, which the daemon treats as RELEASE → the rainbow
-  always comes back (the strip stays 1:1 with the real Pi state).
+  Only one side writes SPI at a time, so frames never interleave.
+  반납 후에는 소등을 유지한다(개발 중 RAY를 끄면 LED도 꺼짐). RAY 재시작이면
+  재획득 페이드로 돌아오고, 시스템 종료면 곧 SIGTERM으로 이 데몬이 내려가며
+  ATtiny 종료 호흡(0부터 램프업)이 이어받는다 — 무지개 같은 별도 상태 표시는
+  없다 (초기 인수 테스트용이었고 실운용에선 불필요해 제거, 2026-09).
 
 On SIGTERM (e.g. `systemctl stop`):
   - Black out the ring and drop READY LOW for a clean handoff back to the
@@ -46,7 +41,6 @@ A PREAMBLE_BYTES run of leading zeros (~52 µs LOW) provides the reset/latch.
 
 SPI must be enabled in /boot/firmware/config.txt (`dtparam=spi=on`).
 """
-import colorsys
 import math
 import os
 import signal
@@ -59,7 +53,6 @@ import spidev
 from gpiozero import OutputDevice
 
 NUM_LEDS          = 24          # total LEDs in the series chain
-RAINBOW_LEDS      = 8           # idle rainbow shows only on LEDs 1–8; 9–24 stay off
 # WS2812 encoding matched byte-for-byte to rpi5_ws2812 (the library RAY drives the
 # strip with), which is proven stable on this hardware. 6.5 MHz SPI, each WS2812 bit
 # encoded as one SPI byte (8 SPI bits). The hand-rolled 3.2 MHz / 4-bit encoding was
@@ -73,15 +66,8 @@ HANDOFF_WAIT_S    = 1.2         # safety margin before first SPI write. Nominal
                                 # but waiting longer only prolongs the ATtiny's frozen
                                 # full-white frame — never a bus conflict.
 FRAME_DT_S        = 1 / 60
-ROT_PER_FRAME     = 0.005
-BRIGHTNESS        = 0.25        # runtime brightness — caps current ~360 mA
-TRANSITION_FRAMES = 90          # 1.5 s at 60 fps for the white → rainbow bloom
 
-# Boot hold — continue ATtiny's white breathing instead of blooming into the
-# rainbow, so 부팅 애니메이션 → RAY LED 로 곧장 넘어간다. Values mirror the
-# firmware (OS_LED/README.md §3.1 "모든 ATtiny 애니메이션은 순백, 포물선 idx*(N-idx) 근사,
-# PULSE_MIN=16~PULSE_MAX=255, 한 호흡 주기 ≈ 2.0 s") — they must stay in sync or
-# the hand-off becomes visible as a brightness/rate jump.
+# 호흡 스펙 — 펌웨어와 반드시 동기 유지 (틀어지면 인수 순간 밝기/속도 점프가 보인다).
 # RAY 대기(SLEEPING) 디밍과 동일 스펙: 4.0 s 사인 곡선, 밝기 0.15~1.0.
 # ATtiny 펌웨어도 같은 색/속도의 노란 호흡으로 변경됨 — 세 구간(ATtiny → Pi → RAY)이
 # 하나의 호흡으로 이어져 보이도록 유지할 것.
@@ -91,16 +77,11 @@ BREATH_MIN        = 0.15        # RAY BreathingAnimation._MIN_BRIGHTNESS와 동�
 BREATH_MAX        = 1.0         # ATtiny's frozen hand-off frame
 BREATH_COLOR      = (233, 233, 50)   # RAY 대기 색과 동일 (ATtiny도 동일 색)
 # How long to keep breathing before deciding RAY isn't coming. RAY normally
-# acquires ~25–50 s after this daemon starts (model loading dominates), so this
-# is generous. Rounded to whole breaths so the hold always ends at a peak —
-# the bloom below starts at full white, so ending anywhere else would jump.
-BOOT_WHITE_HOLD_S = 150.0
-BOOT_HOLD_FRAMES  = BREATH_FRAMES * round(BOOT_WHITE_HOLD_S / BREATH_PERIOD_S)
 
 # Ownership arbiter
 CONTROL_SOCK      = "/run/os-led.sock"  # RAY connects here to borrow the strip
-FADE_OUT_FRAMES   = 18          # ~0.3 s rainbow → black when RAY acquires
-FADE_IN_FRAMES    = 90          # ~1.5 s black → rainbow when RAY releases (서서히)
+FADE_OUT_FRAMES   = 42          # ~0.7 s 호흡 → RAY 첫 프레임 보간 (인수 시).
+                                # 0.3 s에서는 bar 8구가 "툭 꺼짐"으로 보였다.
 GRANT_WAIT_S      = 2.0         # max wait for the main loop to confirm the pause
 RESUME_SETTLE_S   = 0.25        # wait after release before resuming, so the client
                                 # has fully closed its SPI fd (no overlap on the bus)
@@ -131,7 +112,7 @@ def breath_level(frame_i):
     return BREATH_MIN + (BREATH_MAX - BREATH_MIN) * phase
 
 
-def white_frame(level):
+def breath_frame(level):
     """부팅 호흡 프레임: 체인 전체를 BREATH_COLOR(노랑)로, ATtiny 애니메이션과 동일."""
     lv = max(0.0, min(1.0, level))
     r, g, b = (int(c * lv) for c in BREATH_COLOR)
@@ -153,23 +134,6 @@ def handoff_frame(level, t):
     bar = tuple(int(c * bar_lv) for c in BREATH_COLOR)
     ring = tuple(int(c * ring_lv) for c in BREATH_COLOR)
     return [bar] * RAY_BAR_LEDS + [ring] * (NUM_LEDS - RAY_BAR_LEDS)
-
-
-def rainbow(phase, brightness=BRIGHTNESS, saturation=1.0, tail_brightness=0.0):
-    # Only LEDs 1–RAINBOW_LEDS show the idle rainbow. The rest of the chain
-    # (LEDs RAINBOW_LEDS+1 .. end) are off in steady state, but tail_brightness
-    # lets them render as white at a given level so the boot hand-off can fade
-    # them out smoothly (ATtiny's frozen white → off) instead of snapping off.
-    px = []
-    tail = int(max(0.0, min(1.0, tail_brightness)) * 255)
-    for i in range(NUM_LEDS):
-        if i >= RAINBOW_LEDS:
-            px.append((tail, tail, tail))
-            continue
-        h = (i / RAINBOW_LEDS + phase) % 1.0   # full spectrum spread across the lit LEDs
-        r, g, b = colorsys.hsv_to_rgb(h, saturation, brightness)
-        px.append((int(r * 255), int(g * 255), int(b * 255)))
-    return px
 
 
 # ---------------------------------------------------------------------------
@@ -291,100 +255,53 @@ def main():
     # Start the ownership arbiter (RAY borrows the strip through this).
     threading.Thread(target=_control_server, name="os-led-arbiter", daemon=True).start()
 
-    phase = 0.0
     frame_count = 0
+    had_client = False   # RAY가 한 번이라도 인수했으면 True — 이후 반납 시 소등 유지
     try:
         while True:
-            # --- yield to RAY: fade rainbow → black, then stop writing SPI ---
+            # --- yield to RAY: 현재 화면 → RAY 첫 프레임으로 보간 후 SPI 정지 ---
             if pause_req.is_set() and not paused.is_set():
                 print("arbiter: client acquired — fading out, releasing SPI", flush=True)
-                # Fade out whatever is actually on screen: during the boot hold
-                # that's the white breathing, afterwards the rainbow. Fading the
-                # wrong one snaps brightness/colour at the exact moment RAY takes
-                # over — the one transition this whole design tries to hide.
-                boot_level = breath_level(frame_count) if frame_count < BOOT_HOLD_FRAMES else None
+                # 호흡(부팅) 또는 검정(재획득)을 RAY 첫 프레임(bar off, ring 0.15)으로
+                # 보간. 검정으로 껐다 켜면 인수 순간이 깜박여 보인다.
+                level = 0.0 if had_client else breath_level(frame_count)
                 for i in range(FADE_OUT_FRAMES):
                     t = (i + 1) / FADE_OUT_FRAMES
-                    if boot_level is None:
-                        frame = rainbow(phase, BRIGHTNESS * (1.0 - t))
-                    else:
-                        # 부팅 호흡 → RAY 첫 프레임(bar off, ring 0.15)으로 보간.
-                        # 검정으로 껐다 켜면 인수 순간이 깜박여 보인다.
-                        frame = handoff_frame(boot_level, t)
-                    spi.writebytes2(encode_frame(frame))
+                    spi.writebytes2(encode_frame(handoff_frame(level, t)))
                     time.sleep(FRAME_DT_S)
-                if boot_level is None:
-                    spi.writebytes2(black)   # 무지개 경로만 소등 파킹
                 paused.set()                 # tell the arbiter the pause is committed
+                had_client = True
 
             # --- RAY owns the strip: do not touch SPI at all ---
             if paused.is_set():
                 if not pause_req.is_set():
-                    # RAY released. Wait for its SPI fd to fully close before we
-                    # touch the bus, then bloom black → rainbow back in (서서히).
-                    print("arbiter: client released — settling before resume", flush=True)
+                    # RAY released (수동 정지·크래시·시스템 종료). 호흡을 재개하지 않고
+                    # 소등 유지 — 개발 중 RAY를 꺼두면 LED도 꺼진다. RAY가 재획득하면
+                    # 검정 → ring 0.15 페이드로 다시 인수하고, 시스템 종료면 곧 SIGTERM으로
+                    # 이 데몬이 내려가며 ATtiny 종료 호흡(0부터 램프업)이 이어받는다.
+                    print("arbiter: client released — strip dark until next acquire", flush=True)
                     time.sleep(RESUME_SETTLE_S)
                     # `paused` set must always mean "this loop is not writing SPI":
                     # the arbiter grants ACQUIRE the moment it sees `paused`, so it
-                    # has to be cleared BEFORE the first write of the resume, not
-                    # after the fade-in. Clear first, then re-check pause_req — an
-                    # ACQUIRE that slipped in during the settle re-parks untouched.
+                    # has to be cleared BEFORE the first write. Clear first, then
+                    # re-check pause_req — an ACQUIRE that slipped in during the
+                    # settle re-parks untouched.
                     paused.clear()
                     if pause_req.is_set():
                         paused.set()         # RAY re-acquired during settle
                         continue
-                    spi.writebytes2(black)   # clean baseline regardless of last frame
-                    interrupted = False
-                    for i in range(FADE_IN_FRAMES):
-                        if pause_req.is_set():
-                            interrupted = True
-                            break            # RAY re-acquired mid-fade
-                        t = (i + 1) / FADE_IN_FRAMES
-                        spi.writebytes2(encode_frame(rainbow(phase, BRIGHTNESS * t)))
-                        phase = (phase + ROT_PER_FRAME) % 1.0
-                        time.sleep(FRAME_DT_S)
-                    if interrupted:
-                        # Mid-fade re-acquire: black out and re-park right away.
-                        # No fade-out — the strip never reached the full rainbow.
-                        spi.writebytes2(black)
-                        paused.set()
-                        print("arbiter: client re-acquired mid-fade — yielding", flush=True)
-                        continue
-                    # Skip both the boot breathing hold and the bloom: RAY was
-                    # already up, so the rainbow here means "RAY went away".
-                    frame_count = BOOT_HOLD_FRAMES + TRANSITION_FRAMES
-                    print("arbiter: rainbow resumed", flush=True)
+                    spi.writebytes2(black)
                     continue
                 time.sleep(FRAME_DT_S)
                 continue
 
-            # --- boot hold: keep breathing ATtiny's white, waiting for RAY ---
-            if frame_count < BOOT_HOLD_FRAMES:
-                spi.writebytes2(encode_frame(white_frame(breath_level(frame_count))))
-                frame_count += 1
+            # --- 소등 대기: RAY가 한 번 잡았다 놓은 뒤에는 재획득까지 그리지 않음 ---
+            if had_client:
                 time.sleep(FRAME_DT_S)
                 continue
 
-            if frame_count == BOOT_HOLD_FRAMES:
-                print(
-                    f"RAY did not acquire within {BOOT_WHITE_HOLD_S:.0f}s "
-                    "— blooming into the rainbow", flush=True
-                )
-
-            # --- fallback: bloom white → rainbow, then rotate ---
-            bloom_i = frame_count - BOOT_HOLD_FRAMES
-            if bloom_i < TRANSITION_FRAMES:
-                t = bloom_i / TRANSITION_FRAMES
-                cur_brightness = 1.0 - (1.0 - BRIGHTNESS) * t
-                cur_saturation = t
-                tail_brightness = 1.0 - t   # LEDs 9–24: white → off over the bloom
-            else:
-                cur_brightness = BRIGHTNESS
-                cur_saturation = 1.0
-                tail_brightness = 0.0
-
-            spi.writebytes2(encode_frame(rainbow(phase, cur_brightness, cur_saturation, tail_brightness)))
-            phase = (phase + ROT_PER_FRAME) % 1.0
+            # --- 부팅 상태: 노란 호흡 (첫 인수까지) ---
+            spi.writebytes2(encode_frame(breath_frame(breath_level(frame_count))))
             frame_count += 1
             time.sleep(FRAME_DT_S)
     except KeyboardInterrupt:
