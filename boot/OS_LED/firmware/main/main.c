@@ -91,7 +91,6 @@
 #define SHUTDOWN_TIMEOUT_MS  30000UL
 #define COLD_BOOT_TIMEOUT_MS  90000UL  /* 12V auto-power-on: wait this long for READY before falling back to IDLE */
 #define SELF_DOWN_TIMEOUT_MS 120000UL  /* no-touch READY drop: max wait for reboot-return / poweroff ACK */
-#define SHUTDOWN_ACK_WAIT_MS  60000UL  /* touch-initiated poweroff: max wait for the hook's ACK before J2 works */
 #define READY_BOOT_HOLD_MS      600    /* READY high this long = Pi genuinely up → release LED line */
 #define ACK_PULSE_MIN_MS         60    /* READY pulse in [MIN, HOLD) = poweroff ACK from Pi shutdown hook */
 
@@ -439,63 +438,6 @@ static uint8_t wait_pi_off_or_timeout(uint32_t timeout_ms) {
  * sustained press. Returns 0 if Pi unexpectedly comes up (auto-adopt).
  * If touch stays HIGH > DRAIN_TIMEOUT_MS (TTP223 likely glitched), force a
  * soft reset so the chip re-cals from scratch. */
-/* Touch-initiated poweroff 직후: 스트립은 이미 꺼졌지만 Pi는 10~20 s 더 종료 중이다.
- * 이 창에서 J2를 펄스하면 죽어가는 OS가 삼켜 "부팅 LED만 뜨고 Pi는 안 켜지는" 헛발이
- * 된다. 그래서 poweroff ACK(전원 훅의 300 ms READY 펄스)가 올 때까지 J2를 보류하고,
- * 그 사이 부팅 터치(BOOT_TOUCH_HOLD_MS)는 큐로 기억한다. 큐되면 PULSE_MIN 상시 점등으로
- * "접수됨"을 표시한다. 반환 1 = 부팅 터치 큐됨 (호출부가 J2+부팅 진행).
- * ACK가 SHUTDOWN_ACK_WAIT_MS 안에 안 오면(훅 미설치/고장) 그 시점엔 Pi가 꺼졌다고
- * 보고 큐 상태 그대로 반환한다 — J2가 정상 동작하는 시점이다. */
-static uint8_t wait_poweroff_ack_queue_boot(void) {
-    uint32_t elapsed = 0;
-    uint8_t queued = 0;
-    uint16_t held = 0;
-
-    while (elapsed < SHUTDOWN_ACK_WAIT_MS) {
-        _delay_ms(TOUCH_POLL_MS);
-        wdt_reset();
-        elapsed += TOUCH_POLL_MS;
-
-        if (touch_active()) {
-            held += TOUCH_POLL_MS;
-            if (held >= EMERGENCY_HOLD_MS) force_reset();
-            if (!queued && held >= BOOT_TOUCH_HOLD_MS) {
-                queued = 1;
-                show(PULSE_MIN);   /* 부팅 예약 접수 표시 (은은한 상시 점등) */
-            }
-        } else {
-            held = 0;
-        }
-
-        if (pi_ready()) {
-            /* READY 상승 — ACK 펄스(짧음)인지 Pi 생존(유지)인지 분류 */
-            uint16_t high_ms = 0;
-            while (pi_ready() && high_ms < READY_BOOT_HOLD_MS) {
-                _delay_ms(TOUCH_POLL_MS);
-                wdt_reset();
-                high_ms += TOUCH_POLL_MS;
-                elapsed += TOUCH_POLL_MS;
-            }
-            if (high_ms >= READY_BOOT_HOLD_MS) return 0;    /* Pi 살아있음 — IDLE adopt가 처리 */
-            if (high_ms >= ACK_PULSE_MIN_MS) {
-                /* poweroff 확정. ACK는 커널이 멈추기 직전에 오므로, 곧바로 J2를
-                 * 누르면 마지막 찰나에 삼켜질 수 있다 — 완전 정지까지 2 s 정착 대기
-                 * (이 사이 들어오는 부팅 터치도 계속 큐로 받는다). */
-                for (uint16_t settle = 0; settle < 2000; settle += TOUCH_POLL_MS) {
-                    _delay_ms(TOUCH_POLL_MS);
-                    wdt_reset();
-                    if (!queued && touch_active()) {
-                        held += TOUCH_POLL_MS;
-                        if (held >= BOOT_TOUCH_HOLD_MS) { queued = 1; show(PULSE_MIN); }
-                    }
-                }
-                return queued;
-            }
-        }
-    }
-    return queued;
-}
-
 static uint8_t wait_sustained_touch_or_pi_up(uint16_t hold_ms) {
     uint32_t drain_elapsed = 0;
     while (touch_active()) {
@@ -646,19 +588,16 @@ running_after_recovery:
             }
             fade_down();
         } else {
-            /* Touch-initiated shutdown: breath then fade out, 이어서 poweroff ACK까지
-             * 대기. 이 사이 들어온 부팅 터치는 큐로 기억했다가 종료 확정 후 실행한다
-             * (종료 중 J2 펄스는 OS가 삼켜 헛발이 되므로). */
+            /* Touch-initiated shutdown: breath then fade out. The hook's
+             * poweroff ACK arrives later, during IDLE, where pi_ready_adopt's
+             * 600 ms hold filters it out.
+             * 알려진 한계: Pi가 아직 종료 중일 때(ACK 전) 부팅 터치를 하면 J2가
+             * OS에 삼켜져 부팅 호흡만 돌고 45~90 s 재시도까지 Pi가 안 켜진다.
+             * ACK 대기+터치 큐잉으로 고치려던 시도(2026-09-01)는 실기기에서
+             * 예약 표시등 고정 + J2 불발 회귀를 일으켜 원복 — 재도전 시 기기 옆에서
+             * LED 상태 코드로 디버깅할 것. */
             pulse_for_ms(SHUTDOWN_PULSE_MS);
             fade_down();
-            if (wait_poweroff_ack_queue_boot()) {
-                fade_up(1);
-                if (pulse_until_ready_or_timeout(BOOT_TIMEOUT_MS, 1)) {
-                    led_release_ownership();
-                    goto running_after_recovery;
-                }
-                fade_down();
-            }
         }
     }
 }
