@@ -51,6 +51,7 @@
 #include <avr/interrupt.h>
 #include <util/delay.h>
 #include <stdint.h>
+#include <avr/eeprom.h>
 
 #define NUM_LEDS                 24
 #define FADE_STEPS               64     /* main eased phase steps        */
@@ -92,6 +93,8 @@
 #define COLD_BOOT_TIMEOUT_MS  90000UL  /* 12V auto-power-on: wait this long for READY before falling back to IDLE */
 #define SELF_DOWN_TIMEOUT_MS 120000UL  /* no-touch READY drop: max wait for reboot-return / poweroff ACK */
 #define READY_BOOT_HOLD_MS      600    /* READY high this long = Pi genuinely up → release LED line */
+#define SHUTDOWN_IGNORE_BACKSTOP_MS 25000UL /* touch poweroff: ACK를 못 봐도 이 시간이면 완전 정지로 간주 */
+#define ACK_SETTLE_MS            2000  /* ACK 후 커널 완전 정지까지 여유 — 이 전에 J2를 쏘면 삼켜질 수 있음 */
 #define ACK_PULSE_MIN_MS         60    /* READY pulse in [MIN, HOLD) = poweroff ACK from Pi shutdown hook */
 
 #define TTP223_CAL_MS       1500
@@ -105,6 +108,64 @@
 #define DRAIN_TIMEOUT_MS            10000UL  /* if touch stuck HIGH this long, force_reset */
 
 static uint8_t led_buf[NUM_LEDS * 3];
+
+/* ─── EEPROM 블랙박스 ──────────────────────────────────────────
+ * 512 B EEPROM에 이벤트 링버퍼를 남긴다. 로봇 보드에는 플래시 배선이 없어
+ * 실기기 디버깅 수단이 없으므로, 문제 재현 후 칩을 프로그래머 보드로 옮겨
+ *   avrdude ... -U eeprom:r:log.bin:r
+ * 로 덤프해 되짚는 블랙박스다. (EESAVE 퓨즈를 설정하면 재플래시에도 보존 — make fuses)
+ * 레이아웃: [0]=magic 0xA5, [1]=다음 쓰기 슬롯, [2..]=슬롯당 2 B {event, arg}. */
+#define BB_MAGIC       0xA5
+#define BB_SLOTS       250
+#define BB_BASE        2
+
+#define EV_POWERON     0x01   /* arg = MCUSR 리셋 원인 (bit0 PORF, 1 EXTRF, 2 BORF, 3 WDRF) */
+#define EV_IDLE        0x02
+#define EV_BOOT_J2     0x03   /* J2 펄스 발사 */
+#define EV_RUNNING     0x04   /* LED 라인 반납, Pi 동작 확인 */
+#define EV_TOUCH_OFF   0x05   /* 터치 종료 시작 */
+#define EV_SELF_DOWN   0x06   /* 무터치 READY 드랍 (리부트/소프트 종료) */
+#define EV_ACK         0x07   /* poweroff ACK 감지, arg = 펄스폭/10 ms */
+#define EV_ACK_MISSED  0x08   /* 백스톱 타임아웃 — ACK를 끝내 못 봄 */
+#define EV_REBOOT_BACK 0x09   /* READY 유지 — 리부트 복귀로 판정 */
+#define EV_FADE_OUT    0x0A   /* 최종 소등 */
+
+static void bb_log(uint8_t event, uint8_t arg) {
+    uint8_t slot = eeprom_read_byte((uint8_t*)1);
+    if (eeprom_read_byte((uint8_t*)0) != BB_MAGIC || slot >= BB_SLOTS) {
+        eeprom_update_byte((uint8_t*)0, BB_MAGIC);
+        slot = 0;
+    }
+    uint16_t addr = BB_BASE + (uint16_t)slot * 2;
+    eeprom_update_byte((uint8_t*)addr, event);
+    eeprom_update_byte((uint8_t*)(addr + 1), arg);
+    eeprom_update_byte((uint8_t*)1, (uint8_t)((slot + 1) % BB_SLOTS));
+}
+
+/* ─── 비차단 ACK 감시자 ────────────────────────────────────────
+ * 종료 연출(호흡/페이드) 도중에도 READY를 놓치지 않기 위한 누적식 펄스 분류기.
+ * 애니메이션 루프들이 스텝마다 ack_poll(dt)을 불러주면, 블로킹 측정 없이
+ * 상승→하강 에지에서 펄스폭을 분류한다. ACK가 연출 중에 도착해도 잡힌다
+ * (예전에는 연출 3.7 s가 사각지대라 ACK를 놓치면 복불복이 났다). */
+static uint16_t ack_high_ms = 0;
+static uint8_t  ack_seen = 0;
+
+static void ack_watch_reset(void) {
+    ack_high_ms = 0;
+    ack_seen = 0;
+}
+
+static void ack_poll(uint8_t dt_ms) {
+    if (pi_ready()) {
+        if (ack_high_ms < 60000) ack_high_ms += dt_ms;
+    } else {
+        if (ack_high_ms >= ACK_PULSE_MIN_MS && ack_high_ms < READY_BOOT_HOLD_MS && !ack_seen) {
+            ack_seen = 1;
+            bb_log(EV_ACK, (uint8_t)(ack_high_ms / 10));
+        }
+        ack_high_ms = 0;
+    }
+}
 
 /* Debounced pi_ready — filters glitches/noise on the GPIO17 wire so a
  * brief EMI spike or jumper bounce doesn't fake "Pi died" and trigger an
@@ -177,7 +238,10 @@ static void show(uint8_t level) {
  * Phase 1. pulse_j2=0 plays the same animation without touching J2 — used when
  * the Pi is already booting on its own (12V auto-power-on or sudo reboot). */
 static void fade_up(uint8_t pulse_j2) {
-    if (pulse_j2) PORTB |= NPN_MASK;
+    if (pulse_j2) {
+        bb_log(EV_BOOT_J2, 0);
+        PORTB |= NPN_MASK;
+    }
 
     for (uint16_t step = 0; step < FADE_STEPS; step++) {
         uint16_t prod = (uint16_t)step * (uint16_t)(2 * FADE_STEPS - step);
@@ -214,11 +278,13 @@ static void fade_down(void) {
         show((uint8_t)(255 - i));
         _delay_ms(ANTICIPATION_DIP_STEP_MS);
         wdt_reset();
+        ack_poll(ANTICIPATION_DIP_STEP_MS);
     }
     for (uint8_t i = ANTICIPATION_DEPTH; i > 0; i--) {
         show((uint8_t)(255 - i + 1));
         _delay_ms(ANTICIPATION_RIS_STEP_MS);
         wdt_reset();
+        ack_poll(ANTICIPATION_RIS_STEP_MS);
     }
     show(255);
 
@@ -229,6 +295,7 @@ static void fade_down(void) {
         show((uint8_t)(255 - darken));
         _delay_ms(FADE_STEP_MS);
         wdt_reset();
+        ack_poll(FADE_STEP_MS);
     }
     show(0);
 }
@@ -327,6 +394,7 @@ static void pulse_for_ms(uint16_t duration_ms) {
         show(breath_level(idx));
         _delay_ms(PULSE_STEP_MS);
         wdt_reset();
+        ack_poll(PULSE_STEP_MS);   /* 연출 중에도 ACK 감시 (사각지대 제거) */
         elapsed += PULSE_STEP_MS;
         idx = (uint8_t)((idx + 1) & (PULSE_STEPS - 1));
     }
@@ -504,7 +572,10 @@ static uint8_t wait_sustained_touch_or_pi_off(uint16_t hold_ms) {
 }
 
 int main(void) {
+    uint8_t reset_cause = MCUSR;   /* bit0 PORF, 1 EXTRF, 2 BORF, 3 WDRF */
+    MCUSR = 0;
     wdt_enable(WDTO_8S);
+    bb_log(EV_POWERON, reset_cause);
     _delay_ms(50);
     wdt_reset();
     pi_ready_debounce_init();
@@ -541,6 +612,7 @@ int main(void) {
 
     for (;;) {
         /* ─── IDLE ─── */
+        bb_log(EV_IDLE, 0);
         uint8_t want_boot = wait_sustained_touch_or_pi_up(BOOT_TOUCH_HOLD_MS);
         if (!want_boot) {
             led_release_ownership();
@@ -565,6 +637,7 @@ int main(void) {
 
 running_after_recovery:
         /* ─── RUNNING → SHUTDOWN (retry on daemon failure) ─── */
+        bb_log(EV_RUNNING, 0);
         pi_self_booting = 0;
         for (;;) {
             uint8_t got_touch = wait_sustained_touch_or_pi_off(SHUTDOWN_TOUCH_HOLD_MS);
@@ -582,22 +655,47 @@ running_after_recovery:
              * Breathe while the Pi tells us which it was:
              *  - poweroff → shutdown hook pulses READY 300 ms → fade out NOW
              *  - reboot   → READY comes back and stays HIGH → hand line back */
+            bb_log(EV_SELF_DOWN, 0);
             if (self_down_wait_classify()) {
                 led_release_ownership();
                 goto running_after_recovery;
             }
             fade_down();
         } else {
-            /* Touch-initiated shutdown: breath then fade out. The hook's
-             * poweroff ACK arrives later, during IDLE, where pi_ready_adopt's
-             * 600 ms hold filters it out.
-             * 알려진 한계: Pi가 아직 종료 중일 때(ACK 전) 부팅 터치를 하면 J2가
-             * OS에 삼켜져 부팅 호흡만 돌고 45~90 s 재시도까지 Pi가 안 켜진다.
-             * ACK 대기+터치 큐잉으로 고치려던 시도(2026-09-01)는 실기기에서
-             * 예약 표시등 고정 + J2 불발 회귀를 일으켜 원복 — 재도전 시 기기 옆에서
-             * LED 상태 코드로 디버깅할 것. */
+            /* Touch-initiated shutdown. Pi가 종료를 마칠 때까지(ACK + 정착 2 s,
+             * 또는 백스톱 25 s) 터치를 무시한다 — 이 창에서 J2를 쏘면 죽어가는
+             * OS가 삼켜 헛발이 되기 때문. ACK 감시는 종료 연출 중에도 ack_poll로
+             * 이어지므로 사각지대가 없고, 무시 구간이 끝나면 IDLE로 돌아가
+             * 터치 0.5 s = 정상 부팅이 된다. (터치 큐잉 방식은 폐기 — 상태 표시
+             * 없는 대기가 제품 UX로 부적절, 2026-09) */
+            bb_log(EV_TOUCH_OFF, 0);
+            ack_watch_reset();
             pulse_for_ms(SHUTDOWN_PULSE_MS);
             fade_down();
+            bb_log(EV_FADE_OUT, 0);
+            uint32_t ignore_elapsed = 0;
+            uint16_t emerg_held = 0;
+            while (!ack_seen && ignore_elapsed < SHUTDOWN_IGNORE_BACKSTOP_MS) {
+                _delay_ms(TOUCH_POLL_MS);
+                wdt_reset();
+                ack_poll(TOUCH_POLL_MS);
+                ignore_elapsed += TOUCH_POLL_MS;
+                if (touch_active()) {          /* 무시 — 단 5 s 비상 리셋 탈출구는 유지 */
+                    emerg_held += TOUCH_POLL_MS;
+                    if (emerg_held >= EMERGENCY_HOLD_MS) force_reset();
+                } else {
+                    emerg_held = 0;
+                }
+            }
+            if (ack_seen) {
+                /* ACK는 커널 완전 정지 직전 신호 — J2가 확실히 듣도록 2 s 정착 */
+                for (uint16_t st = 0; st < ACK_SETTLE_MS; st += TOUCH_POLL_MS) {
+                    _delay_ms(TOUCH_POLL_MS);
+                    wdt_reset();
+                }
+            } else {
+                bb_log(EV_ACK_MISSED, 0);
+            }
         }
     }
 }

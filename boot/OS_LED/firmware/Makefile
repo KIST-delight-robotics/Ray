@@ -35,7 +35,7 @@ $(TARGET).hex: $(TARGET).elf
 
 fuses:
 	$(AVRDUDE) $(AVRDUDE_PROG) $(AVRDUDE_PART) \
-	    -U lfuse:w:0xE1:m -U hfuse:w:0xDF:m -U efuse:w:0xFF:m
+	    -U lfuse:w:0xE1:m -U hfuse:w:0xD7:m -U efuse:w:0xFF:m  # hfuse 0xD7 = EESAVE 설정 (재플래시 시 EEPROM 블랙박스 보존)
 
 flash: $(TARGET).hex
 	$(AVRDUDE) $(AVRDUDE_PROG) $(AVRDUDE_PART) -e
