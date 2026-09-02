@@ -49,6 +49,7 @@
 #include "../common/ws2812.h"
 #include <avr/wdt.h>
 #include <avr/interrupt.h>
+#include <avr/pgmspace.h>
 #include <util/delay.h>
 #include <stdint.h>
 #include <avr/eeprom.h>
@@ -300,13 +301,25 @@ static void fade_down(void) {
     show(0);
 }
 
-/* Parabolic ease curve, peaks at idx = PULSE_PEAK_IDX. Returns brightness
- * in [PULSE_MIN, PULSE_MAX]. Approximates a sine breath — slow change at
- * peak/trough, faster in the middle — without trig or LUT. */
+/* 사인 호흡 LUT — RAY BreathingAnimation·Pi 데몬과 동일 파형.
+ * 이전의 포물선 근사(idx·(128−idx))는 피크에서만 미분이 0이라 최저점에서
+ * "튕기듯" 꺾여 RAY의 사인 호흡과 스케줄이 달라 보였다. 사인은 양 끝
+ * 모두에서 머무른다. 생성식:
+ *   level(idx) = PULSE_MIN + (PULSE_MAX−PULSE_MIN) · (sin(2π·idx/128 − π/2)+1)/2
+ * (idx 0 = 최저 PULSE_MIN, 64 = 피크 PULSE_MAX — 기존 위상 규약 유지) */
+static const uint8_t breath_lut[PULSE_STEPS] PROGMEM = {
+     38,  38,  39,  39,  40,  41,  43,  44,  46,  48,  51,  53,  56,  59,  63,  66,
+     70,  74,  78,  82,  86,  91,  95, 100, 105, 110, 115, 120, 125, 131, 136, 141,
+    146, 152, 157, 162, 168, 173, 178, 183, 188, 193, 198, 202, 207, 211, 215, 219,
+    223, 227, 230, 234, 237, 240, 242, 245, 247, 249, 250, 252, 253, 254, 254, 255,
+    255, 255, 254, 254, 253, 252, 250, 249, 247, 245, 242, 240, 237, 234, 230, 227,
+    223, 219, 215, 211, 207, 202, 198, 193, 188, 183, 178, 173, 168, 162, 157, 152,
+    147, 141, 136, 131, 125, 120, 115, 110, 105, 100,  95,  91,  86,  82,  78,  74,
+     70,  66,  63,  59,  56,  53,  51,  48,  46,  44,  43,  41,  40,  39,  39,  38,
+};
+
 static uint8_t breath_level(uint8_t idx) {
-    uint16_t p = (uint16_t)idx * (uint16_t)(PULSE_STEPS - idx);
-    uint16_t scaled = (uint16_t)(((uint32_t)p * (PULSE_MAX - PULSE_MIN)) >> 12);
-    return PULSE_MIN + (uint8_t)scaled;
+    return pgm_read_byte(&breath_lut[idx & (PULSE_STEPS - 1)]);
 }
 
 static void ramp_breath_to_peak_at(uint8_t idx, uint8_t step_ms);
