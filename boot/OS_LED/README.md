@@ -331,9 +331,25 @@ sudo avrdude -c linuxspi -P /dev/spidev0.0:/dev/gpiochip4:22 -B 250 -i 100 -x di
 3. **poweroff/reboot 구분 불가** — §3.4 한계.
 4. **핸드오프 타이밍 커플링** — Pi `HANDOFF_WAIT_S=0.3` ↔ ATtiny 디바운스 80 ms ↔ 데몬
    호흡 파라미터(§5.1) ↔ arbiter `paused` clear 순서. 어느 한쪽만 고치면 충돌.
-5. **warm reboot 핸드오프 순간 짧은 깜박임** — GUI/`sudo reboot` 재시작에서만 관측, 전원버튼
-   콜드부팅은 무증상. §2.3의 소유권 전환 동시 드라이브 창과 정합. 기본 운용이 전원버튼이라
-   추적하지 않기로 결정 (2026-08-27).
+5. **핸드백 후 라인 재탈취 ×4 — 재부팅·데몬 재시작·첫 설치 시 ~4 s 깜박임** (원인 규명
+   2026-09-03, **수정 보류**). `pi_ready_stable()`의 디바운스 상태(`pi_debounce_state`)는
+   `main()`에서 한 번만 초기화되는데, `self_down_wait_classify()`·`pi_ready_adopt()`는 raw
+   `pi_ready()`만 읽고 라인을 돌려준다. 그래서 `running_after_recovery` 진입 직후
+   `wait_sustained_touch_or_pi_off()`의 첫 `pi_ready_stable()` 호출이 stale한 0을 돌려주어
+   "Pi 내려감"으로 오판 → 라인 회수 → 600 ms 홀드 → 램프 → 반납을 카운터가 5에 닿을 때까지
+   **4회 반복**한다(사이클당 ~1 s). Pi 데몬은 READY HIGH 1.2 s 후부터 SPI를 쓰므로 1.2~5 s
+   구간에서 양쪽이 동시 드라이브 → 깨진 비트가 래치돼 픽셀이 튄다. 전원버튼 콜드부팅은
+   `pulse_until_ready_or_timeout()`이 문지기를 경유해 상태가 동기화되므로 무증상 — 과거
+   "warm reboot에서만 짧은 깜박임"(2026-08-27, 추적 보류) 관측이 이것이었다.
+   - **검증**: 데몬을 멈추고 READY만 HIGH로 올리는 스크립트(SPI 미사용)로 관찰 → 최대 밝기에서
+     어두운 노랑으로 "툭" 떨어지는 톱니 4회 후 정지 확인(2026-09-03, 실기기).
+   - **수정**: `running_after_recovery:` 직후 `pi_ready_debounce_init();` 한 줄 — 이 지점은
+     어떤 경로든 READY HIGH가 확인된 상태라 부작용 없음. 재플래시가 필요해 다음 ISP 작업 때
+     함께 반영 예정.
+   - **영향 범위**: 터치 부팅/종료, 90 s 내 자동 부팅에는 없음. `sudo reboot`, 데몬 재시작,
+     새 기기 첫 설치, 부팅 90 s 초과(콜드부팅 타임아웃 → IDLE adopt)에서만 4 s 깜박임.
+     J2·PB4는 건드리지 않아 깜박임 외 부작용 없음(직렬 저항이 동시 드라이브 전류 제한,
+     EEPROM 로그 4쌍 추가만).
 6. **sleep/PCINT0 데드코드** — 펌웨어에 정의만 있고 미사용. IDLE에서 5 ms busy-poll(수 mA).
 
 ## 9. 파일 맵
