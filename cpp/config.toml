@@ -92,3 +92,10 @@ default_yaw     = 3560
 default_mouth   = 848
 calib_ax_offset = 0.036   # 육안 수평일 때의 Ax(g) — 센서 장착 기울기 보정 (기기별, 생략 시 0).
                           # 측정법: 토크 온 + Wizard로 수평을 맞춘 후 가속도 20회 평균 (2026-09-01)
+
+[robot.unit5]   # mk3 — 2026-08-31 이전 unit4에 있던 값. unit4는 새 기기가 덮어써 사용 중이라 이 기기는 unit5로 이동 (2026-09-04)
+default_pitch   = 3500
+default_roll_r  = 750
+default_roll_l  = 2700
+default_yaw     = 2560
+default_mouth   = 940
