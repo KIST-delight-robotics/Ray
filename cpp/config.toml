@@ -103,3 +103,4 @@ default_roll_r  = 750
 default_roll_l  = 2700
 default_yaw     = 2560
 default_mouth   = 940
+calib_ax_offset = 0.036   # 육안 수평일 때의 Ax(g). unit4 값을 시험 적용해 정면에서 수평 확인 (2026-09-07)
