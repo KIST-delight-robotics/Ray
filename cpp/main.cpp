@@ -2108,7 +2108,13 @@ static constexpr int MPU6050_ADDR = 0x68;
 
 // MPU6050 초기화
 void mpu6050_init(int fd) {
-    wiringPiI2CWriteReg8(fd, 0x6B, 0);
+    wiringPiI2CWriteReg8(fd, 0x6B, 0);      // PWR_MGMT_1: 슬립 해제
+    // CONFIG(0x1A) DLPF_CFG=4: 가속도 저역통과 21 Hz, 지연 8.5 ms.
+    // 정지 실측(2026-09-04, 300샘플×10 ms): 단일 σ 0.0245 → 0.0080 g, 3샘플 평균 σ 0.0146 → 0.0057,
+    // 10샘플 평균 σ 0.0082 → 0.0030. 기본값(260 Hz)에서는 정지 상태에서도 이완 판정 지표 최대가
+    // 임계 0.05에 닿았다(0.047~0.053). 5(10 Hz)·6(5 Hz)은 10샘플 기준 개선이 없고 지연만 늘어 제외.
+    // 레지스터는 전원 유지 중 남으므로 매 기동마다 명시적으로 쓴다.
+    wiringPiI2CWriteReg8(fd, 0x1A, 4);
 }
 
 // 16비트 데이터 읽기
