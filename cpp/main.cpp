@@ -2190,15 +2190,26 @@ void initialize_robot_posture() {
     // 센서 장착 기울기 보정: roll 판정은 (Ax − offset) 기준. offset = 육안 수평일 때의 Ax.
     const float AX_OFFSET = (float)cfg_robot.calib_ax_offset;
     std::cout << "[CALIB] calib_ax_offset = " << AX_OFFSET << " g" << std::endl;
-    bool Roll_L_adjust_flag = 0;
-    bool Roll_R_adjust_flag = 0;
-    bool Pitch_adjust_flag = 0;
     bool mouth_adjust_flag = 0;
 
-    const float current_threshold_mA = -20;   // 목표 전류 임계값 (mA)
     const int adjustment_increment = 3;       // 모터 위치 조정 증분 (펄스)
-    bool tension_satisfied = false;
     const int sample_count = 3;
+
+    // 판정용 정착 읽기: 10샘플 평균 — 3샘플 평균은 노이즈(3축 변화합 0.03~0.06g)가
+    // 임계를 항상 넘어 이완 완료 판정이 불가능했다 (실측). 이완 단계와 pitch 텐션 판정이 공유.
+    const int AVG_SAMPLES = 10;
+    auto read_accel_avg = [&](float& ax, float& ay, float& az) {
+        long sx = 0, sy = 0, sz = 0;
+        for (int i = 0; i < AVG_SAMPLES; i++) {
+            sx += read_raw_data(fd, 0x3B);
+            sy += read_raw_data(fd, 0x3D);
+            sz += read_raw_data(fd, 0x3F);
+            delay(10);
+        }
+        ax = (sx / AVG_SAMPLES) / 16384.0f;
+        ay = (sy / AVG_SAMPLES) / 16384.0f;
+        az = (sz / AVG_SAMPLES) / 16384.0f;
+    };
 
     // ---- 이완 단계: 와이어 텐션을 전부 푼 뒤 기지 상태에서 캘리브레이션 시작 ----
     // 프로파일: main이 걸어준 homing(느린 이동용, time-based ms)을 그대로 사용.
@@ -2213,22 +2224,6 @@ void initialize_robot_posture() {
         // + 와이어 구동 헤드의 잔진동 정착 마진 (임의 설정)
         const int   SETTLE_MARGIN_MS = 145;
         const int   MOVE_WAIT_MS = (int)cfg_dxl.profile_velocity_homing + 5 + SETTLE_MARGIN_MS;
-
-        // 판정용 읽기는 10샘플 평균 — 3샘플 평균은 노이즈(3축 변화합 0.03~0.06g)가
-        // 임계를 항상 넘어 이완 완료 판정이 불가능했다 (실측).
-        const int REL_SAMPLES = 10;
-        auto read_accel_avg = [&](float& ax, float& ay, float& az) {
-            long sx = 0, sy = 0, sz = 0;
-            for (int i = 0; i < REL_SAMPLES; i++) {
-                sx += read_raw_data(fd, 0x3B);
-                sy += read_raw_data(fd, 0x3D);
-                sz += read_raw_data(fd, 0x3F);
-                delay(10);
-            }
-            ax = (sx / REL_SAMPLES) / 16384.0f;
-            ay = (sy / REL_SAMPLES) / 16384.0f;
-            az = (sz / REL_SAMPLES) / 16384.0f;
-        };
 
         // 한 모터를 자이로 변화가 멎을 때까지 푼다(+ 방향 = 조임의 반대).
         // 반환: 이번 턴에 유의미한 자세 변화가 있었는지.
@@ -2282,209 +2277,100 @@ void initialize_robot_posture() {
     // 판정 루프 구간: 기민한 프로파일로 전환 — 3틱 스텝의 센서 피드백 랙을 줄인다.
     dxl_driver->setProfile(cfg_dxl.profile_velocity_calib, cfg_dxl.profile_acceleration);
 
+    // ---- 조정 단계 공통 ----
+    // 3샘플 즉시 읽기: roll 조정용. 오버슈트 마진(0.15 g)이 노이즈 훨씬 위라 정착 대기 불필요.
+    auto read_accel_quick = [&](float& ax, float& ay, float& az) {
+        long sx = 0, sy = 0, sz = 0;
+        for (int i = 0; i < sample_count; i++) {
+            sx += read_raw_data(fd, 0x3B);
+            sy += read_raw_data(fd, 0x3D);
+            sz += read_raw_data(fd, 0x3F);
+            delay(10);
+        }
+        ax = (sx / sample_count) / 16384.0f - AX_OFFSET;
+        ay = (sy / sample_count) / 16384.0f;
+        az = (sz / sample_count) / 16384.0f;
+    };
+    // 정착 읽기 대기: calib 프로파일 시간(time-based ms) + 전달·제어주기 + 잔진동 마진
+    const int ADJ_MOVE_WAIT_MS = (int)cfg_dxl.profile_velocity_calib + 5 + 45;
+    // 스텝 상한: 줄 끊김·미끄러짐·센서 부호 반전 시 무한 감김 방지
+    // (operating_mode 4 = Extended Position이라 위치 리밋이 없다).
+    const int ADJ_MAX_STEPS = 400;   // × 3틱 = 1200틱 ≈ 105°
+
+    // (모터 위치·속도를 읽어 도달을 확인하는 방식은 2026-09-07 실측에서 고정 대기와 동일한
+    //  평균 151 ms/스텝(타임아웃 30%)으로 이득이 없어 폐기 — 텐션 걸린 상태에서 goal ±2틱에
+    //  들어오지 않는 스텝이 많다.)
+
+    // 텐션 판정 문턱 — roll·pitch 공용. "감았을 때 이만큼 움직였다"가 곧 텐션의 증거이고,
+    // 이 각도가 되당김 후 줄 늘어남·구조 압축(프리텐션)으로 남으므로 노이즈 바로 위로 둔다.
+    // DLPF 21 Hz 기준 이동 중 3샘플 σ ≈ 0.006 g → 0.05는 8σ. (roll은 과거 0.15였는데, 이는
+    // DLPF 이전 3샘플 σ 0.015 위에 두느라 컸던 값. pitch 오버슈트가 roll 줄에 얹히므로 roll 쪽을
+    // 같은 기준으로 내려 총 압축을 맞춘다, 2026-09-07)
+    const float TENSION_G = (float)cfg_robot.calib_tension_g;
+
+    float Ax = 0, Ay = 0, Az = 0;
+    // motors를 3틱씩 당기며(−) done()이 참이 될 때까지 반복. settled=true면 이동 완료 후 10샘플.
+    auto tighten_until = [&](std::initializer_list<int> motors, const char* what,
+                             bool settled, auto done) -> bool {
+        for (int n = 0; n < ADJ_MAX_STEPS; n++) {
+            for (int m : motors) target_position[m] -= adjustment_increment;
+            dxl_driver->writeGoalPosition(target_position);
+            if (settled) {
+                delay(ADJ_MOVE_WAIT_MS);
+                read_accel_avg(Ax, Ay, Az);
+                Ax -= AX_OFFSET;
+            } else {
+                read_accel_quick(Ax, Ay, Az);
+            }
+            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
+            if (done()) return true;
+        }
+        std::cerr << "[CALIB] " << what << " 조정 상한(" << ADJ_MAX_STEPS
+                  << "스텝) 도달 — 중단. 와이어·센서 점검 필요" << std::endl;
+        return false;
+    };
+
+    const unsigned int t_roll0 = millis();
     std::cout << "Roll 조정" << std::endl;
-
-    int sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
-    for (int i = 0; i < sample_count; i++) {
-        sum_accel_x += read_raw_data(fd, 0x3B);
-        sum_accel_y += read_raw_data(fd, 0x3D);
-        sum_accel_z += read_raw_data(fd, 0x3F);
-        delay(10);  // 각 샘플 사이에 짧은 딜레이
-    }
-    int avg_accel_x = sum_accel_x / sample_count;
-    int avg_accel_y = sum_accel_y / sample_count;
-    int avg_accel_z = sum_accel_z / sample_count;
-    
-    // 5-2. 평균 센서값을 g 단위로 변환
-    float Ax = avg_accel_x / 16384.0 - AX_OFFSET;
-    float Ay = avg_accel_y / 16384.0;
-    float Az = avg_accel_z / 16384.0;
-
+    read_accel_quick(Ax, Ay, Az);
     std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
-    if (Ax > 0){
-        // Roll_L 조정
-        while(true){
-            target_position[2] -= adjustment_increment;
-            dxl_driver->writeGoalPosition(target_position);
-
-            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
-            for (int i = 0; i < sample_count; i++) {
-                sum_accel_x += read_raw_data(fd, 0x3B);
-                sum_accel_y += read_raw_data(fd, 0x3D);
-                sum_accel_z += read_raw_data(fd, 0x3F);
-                delay(10);  // 각 샘플 사이에 짧은 딜레이
-            }
-            avg_accel_x = sum_accel_x / sample_count;
-            avg_accel_y = sum_accel_y / sample_count;
-            avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
-            Ay = avg_accel_y / 16384.0;
-            Az = avg_accel_z / 16384.0;
-
-            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
-            if(Ax < -0.15) break;
-        }
-        
-        // Roll_R 조정
-        while(true){
-            target_position[1] -= adjustment_increment;
-            dxl_driver->writeGoalPosition(target_position);
-
-            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
-            for (int i = 0; i < sample_count; i++) {
-                sum_accel_x += read_raw_data(fd, 0x3B);
-                sum_accel_y += read_raw_data(fd, 0x3D);
-                sum_accel_z += read_raw_data(fd, 0x3F);
-                delay(10);  // 각 샘플 사이에 짧은 딜레이
-            }
-            avg_accel_x = sum_accel_x / sample_count;
-            avg_accel_y = sum_accel_y / sample_count;
-            avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
-            Ay = avg_accel_y / 16384.0;
-            Az = avg_accel_z / 16384.0;
-
-            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
-            if(Ax > 0.01) break;
-        }
+    // 오버슈트 → 되당김: 한쪽을 수평 너머 TENSION_G까지 당겨 슬랙을 확실히 걷은 뒤 반대쪽으로
+    // 수평 복귀. 길항 구조라 끝나면 두 줄 모두 팽팽하다.
+    if (Ax > 0) {
+        tighten_until({2}, "roll_l", false, [&]{ return Ax < -TENSION_G; });
+        tighten_until({1}, "roll_r", false, [&]{ return Ax >  0.01f; });
+    } else {
+        tighten_until({1}, "roll_r", false, [&]{ return Ax >  TENSION_G; });
+        tighten_until({2}, "roll_l", false, [&]{ return Ax < -0.01f; });
     }
-    else if (Ax <= 0){
-        while(true){
-            target_position[1] -= adjustment_increment;
-            dxl_driver->writeGoalPosition(target_position);
 
-            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
-            for (int i = 0; i < sample_count; i++) {
-                sum_accel_x += read_raw_data(fd, 0x3B);
-                sum_accel_y += read_raw_data(fd, 0x3D);
-                sum_accel_z += read_raw_data(fd, 0x3F);
-                delay(10);  // 각 샘플 사이에 짧은 딜레이
-            }
-            avg_accel_x = sum_accel_x / sample_count;
-            avg_accel_y = sum_accel_y / sample_count;
-            avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
-            Ay = avg_accel_y / 16384.0;
-            Az = avg_accel_z / 16384.0;
+    std::cout << "[CALIB] roll 단계 " << (millis() - t_roll0) << " ms" << std::endl;
 
-            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
-            if(Ax > 0.15) break;
-        }
-
-        // Roll_L 조정
-        while(true){
-            target_position[2] -= adjustment_increment;
-            dxl_driver->writeGoalPosition(target_position);
-
-            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
-            for (int i = 0; i < sample_count; i++) {
-                sum_accel_x += read_raw_data(fd, 0x3B);
-                sum_accel_y += read_raw_data(fd, 0x3D);
-                sum_accel_z += read_raw_data(fd, 0x3F);
-                delay(10);  // 각 샘플 사이에 짧은 딜레이
-            }
-            avg_accel_x = sum_accel_x / sample_count;
-            avg_accel_y = sum_accel_y / sample_count;
-            avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
-            Ay = avg_accel_y / 16384.0;
-            Az = avg_accel_z / 16384.0;
-
-            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
-            if(Ax < -0.01) break;
-        }
-    }
-    
+    const unsigned int t_pitch0 = millis();
     std::cout << "Pitch 조정" << std::endl;
+    // roll과 같은 길항 트릭. 이동 완료 후 10샘플 읽기(노이즈 ~0.003 g)로 판정한다.
+    // 목표는 항상 "수평 + TENSION_G" — 시작 자세 상대가 아니다. pitch 프리텐션은 되세우기
+    // 이동량(목표 → 수평)이므로, 목표를 수평 기준으로 고정해야 roll 감김 양과 무관하게 정확히
+    // TENSION_G가 된다. (시작 자세 상대로 두었을 때: roll 오버슈트를 0.15 → 0.05로 줄이자 머리가
+    // 앞으로 처진 채(Ay 0.11) 시작해 되세우기 0.15 g = 프리텐션이 3배로 튀었다, 2026-09-07 실측)
+    //   1. 머리가 수평보다 앞(Ay > LEVEL)이면 roll 둘로 수평까지 먼저 되당김 — 수평에 필요한 최소량
+    //   2. pitch를 수평 + TENSION_G까지 감기 — 수평 너머 이동이 텐션 증거
+    //   3. roll 둘로 수평까지 되세우기 — 이동량 = TENSION_G = 프리텐션
+    // 이전 구현은 절대 문턱 0.009(노이즈 안)와 `int now_Ay = Ay`(소수 절단 → 항상 0) 때문에
+    // 실기기에서 pitch를 3틱만 당기고 끝났다 (2026-09-04 실측: 이완 3726 → 홈 3723).
+    const float PITCH_LEVEL_G  = 0.009f;
+    const float PITCH_TARGET_G = PITCH_LEVEL_G + TENSION_G;
+    delay(ADJ_MOVE_WAIT_MS);
+    read_accel_avg(Ax, Ay, Az);
+    Ax -= AX_OFFSET;
+    std::cout << "[CALIB] pitch 시작 Ay=" << Ay << " → 목표 Ay>=" << PITCH_TARGET_G
+              << " (수평 " << PITCH_LEVEL_G << " + 텐션 " << TENSION_G << ")" << std::endl;
+    if (Ay > PITCH_LEVEL_G)
+        tighten_until({1, 2}, "roll(수평 선행)", true, [&]{ return Ay <= PITCH_LEVEL_G; });
+    tighten_until({0}, "pitch", true, [&]{ return Ay >= PITCH_TARGET_G; });
+    tighten_until({1, 2}, "roll(pitch 복귀)", true, [&]{ return Ay <= PITCH_LEVEL_G; });
+    std::cout << "[CALIB] pitch 단계 " << (millis() - t_pitch0) << " ms" << std::endl;
 
-    sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
-    for (int i = 0; i < sample_count; i++) {
-        sum_accel_x += read_raw_data(fd, 0x3B);
-        sum_accel_y += read_raw_data(fd, 0x3D);
-        sum_accel_z += read_raw_data(fd, 0x3F);
-        delay(10);  // 각 샘플 사이에 짧은 딜레이
-    }
-    avg_accel_x = sum_accel_x / sample_count;
-    avg_accel_y = sum_accel_y / sample_count;
-    avg_accel_z = sum_accel_z / sample_count;
-    Ax = avg_accel_x / 16384.0 - AX_OFFSET;
-    Ay = avg_accel_y / 16384.0;
-    Az = avg_accel_z / 16384.0;
-    //pitch 조정 -일 때 생각해서 예외 처리 실행해야할 듯 
-    if(Ay < 0.009){
-        std::cout << "Ay < 0.009" << std::endl;
-        while(true){
-            target_position[0] -= adjustment_increment;
-            dxl_driver->writeGoalPosition(target_position);
-
-            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
-            for (int i = 0; i < sample_count; i++) {
-                sum_accel_x += read_raw_data(fd, 0x3B);
-                sum_accel_y += read_raw_data(fd, 0x3D);
-                sum_accel_z += read_raw_data(fd, 0x3F);
-                delay(10);  // 각 샘플 사이에 짧은 딜레이
-            }
-            avg_accel_x = sum_accel_x / sample_count;
-            avg_accel_y = sum_accel_y / sample_count;
-            avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
-            Ay = avg_accel_y / 16384.0;
-            Az = avg_accel_z / 16384.0;
-
-            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
-            if(Ay > 0.009) break;
-        }
-    }
-    else{
-        std::cout << "Ay > 0.009" << std::endl;
-        //pitch가 이미 앞으로 당겨져 있을 경우 예외 처리
-        int now_Ay = Ay;
-        while(true){
-            target_position[0] -= adjustment_increment;
-            dxl_driver->writeGoalPosition(target_position);
-
-            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
-            for (int i = 0; i < sample_count; i++) {
-                sum_accel_x += read_raw_data(fd, 0x3B);
-                sum_accel_y += read_raw_data(fd, 0x3D);
-                sum_accel_z += read_raw_data(fd, 0x3F);
-                delay(10);  // 각 샘플 사이에 짧은 딜레이
-            }
-            avg_accel_x = sum_accel_x / sample_count;
-            avg_accel_y = sum_accel_y / sample_count;
-            avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
-            Ay = avg_accel_y / 16384.0;
-            Az = avg_accel_z / 16384.0;
-
-            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
-            if(Ay > now_Ay + 0.01) break;
-        }
-
-        while(true){
-            target_position[1] -= adjustment_increment;
-            target_position[2] -= adjustment_increment;
-            dxl_driver->writeGoalPosition(target_position);
-
-            sum_accel_x = 0, sum_accel_y = 0, sum_accel_z = 0;
-            for (int i = 0; i < sample_count; i++) {
-                sum_accel_x += read_raw_data(fd, 0x3B);
-                sum_accel_y += read_raw_data(fd, 0x3D);
-                sum_accel_z += read_raw_data(fd, 0x3F);
-                delay(10);  // 각 샘플 사이에 짧은 딜레이
-            }
-            avg_accel_x = sum_accel_x / sample_count;
-            avg_accel_y = sum_accel_y / sample_count;
-            avg_accel_z = sum_accel_z / sample_count;
-            Ax = avg_accel_x / 16384.0 - AX_OFFSET;
-            Ay = avg_accel_y / 16384.0;
-            Az = avg_accel_z / 16384.0;
-
-            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
-            if(Ay < 0.009) break;
-        }
-    }
-    
     // =============================
     // Mouth 조정 (ΔI_raw(LSB) 기반 + MAD 자동 임계값 학습)
     // - 목적: 초기 캘리브레이션 단계에서 "전류 급변" 감지 시 즉시 멈춤(Backoff)

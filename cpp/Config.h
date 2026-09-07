@@ -56,6 +56,7 @@ struct RobotConfig {
     int    calib_release_step_tick;
     double calib_release_noise_g;
     double calib_ax_offset;   // 육안 수평일 때의 Ax(g). roll 조정은 (Ax - offset) 기준
+    double calib_tension_g;         // 텐션 판정(roll·pitch 공용): 감았을 때 수평 너머로 움직여야 하는 양(g)
     int    calib_release_mouth_tick;
     int    calib_mouth_backoff_tick;
 };
@@ -189,6 +190,7 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
     cfg_robot.calib_release_step_tick = robot_node["calib_release_step_tick"].value_or(100);
     cfg_robot.calib_release_noise_g     = robot_node["calib_release_noise_g"].value_or(0.05);
     cfg_robot.calib_ax_offset           = unit_node["calib_ax_offset"].value_or(0.0);  // 기기별 — [robot.unitN]
+    cfg_robot.calib_tension_g           = robot_node["calib_tension_g"].value_or(0.05);
     cfg_robot.calib_release_mouth_tick  = robot_node["calib_release_mouth_tick"].value_or(250);
     cfg_robot.calib_mouth_backoff_tick  = robot_node["calib_mouth_backoff_tick"].value_or(45);
 
