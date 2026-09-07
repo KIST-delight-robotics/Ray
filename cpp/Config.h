@@ -187,8 +187,8 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
     ok &= REQ(robot_node, "control_motor_rpy_ratio",  cfg_robot.control_motor_rpy_ratio);
 
     // 캘리브레이션 (옵션 — 생략 시 기본값)
-    cfg_robot.calib_release_step_tick = robot_node["calib_release_step_tick"].value_or(100);
-    cfg_robot.calib_release_noise_g     = robot_node["calib_release_noise_g"].value_or(0.05);
+    cfg_robot.calib_release_step_tick = robot_node["calib_release_step_tick"].value_or(60);
+    cfg_robot.calib_release_noise_g     = robot_node["calib_release_noise_g"].value_or(0.03);
     cfg_robot.calib_ax_offset           = unit_node["calib_ax_offset"].value_or(0.0);  // 기기별 — [robot.unitN]
     cfg_robot.calib_tension_g           = robot_node["calib_tension_g"].value_or(0.05);
     cfg_robot.calib_release_mouth_tick  = robot_node["calib_release_mouth_tick"].value_or(250);

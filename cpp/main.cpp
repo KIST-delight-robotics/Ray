@@ -2223,12 +2223,15 @@ void initialize_robot_posture() {
     {
         const int   REL_STEP    = cfg_robot.calib_release_step_tick;
         const float REL_NOISE   = (float)cfg_robot.calib_release_noise_g;
-        // 단일 goal 이동의 완료 대기 시간:
-        //   t3(프로파일 시간) = profile_velocity_homing — time-based 모드에서 goal 도달시간
-        // + TxOnly 전달·모터 제어주기 ≈ 5ms
-        // + 와이어 구동 헤드의 잔진동 정착 마진 (임의 설정)
+        // 단일 goal 이동의 완료 대기 시간 = 프로파일 시간(time-based goal 도달) + TxOnly 전달·제어주기 5 ms
+        // + 와이어 구동 헤드의 잔진동 정착 마진.
+        // yaw 정렬·mouth 고정 이완은 이동량이 클 수 있어(yaw 최대 수백 틱, mouth 250틱) 홈 프로파일(500 ms).
+        // 이완 스텝(60틱)은 전용 프로파일 200 ms — 500 ms는 수천 틱 홈 이동용이라 60틱엔 과했다
+        // (스텝 750 → 450 ms, 2026-09-07).
         const int   SETTLE_MARGIN_MS = 145;
-        const int   MOVE_WAIT_MS = (int)cfg_dxl.profile_velocity_homing + 5 + SETTLE_MARGIN_MS;
+        const int   RELEASE_PROFILE_MS = 200;
+        const int   HOME_WAIT_MS = (int)cfg_dxl.profile_velocity_homing + 5 + SETTLE_MARGIN_MS;
+        const int   MOVE_WAIT_MS = RELEASE_PROFILE_MS + 5 + SETTLE_MARGIN_MS;
 
         // 한 모터를 자이로 변화가 멎을 때까지 푼다(+ 방향 = 조임의 반대).
         // 반환: 이번 턴에 유의미한 자세 변화가 있었는지.
@@ -2236,18 +2239,20 @@ void initialize_robot_posture() {
             bool moved = false;
             float bx, by, bz, cx, cy, cz;
             read_accel_avg(bx, by, bz);
+            std::string deltas;   // 스텝별 3축 변화합 — 임계(REL_NOISE) 대비 여유를 로그로 남긴다
             while (true) {
                 target_position[idx] += REL_STEP;
                 dxl_driver->writeGoalPosition(target_position);
                 delay(MOVE_WAIT_MS);
                 read_accel_avg(cx, cy, cz);
                 float d = std::fabs(cx - bx) + std::fabs(cy - by) + std::fabs(cz - bz);
+                char buf[16]; snprintf(buf, sizeof buf, "%s%.3f", deltas.empty() ? "" : " ", d); deltas += buf;
                 if (d < REL_NOISE) break;
                 moved = true;
                 bx = cx; by = cy; bz = cz;
             }
             std::cout << "[RELEASE] " << name << " → " << target_position[idx]
-                      << (moved ? " (이완 진행)" : " (변화 없음)") << std::endl;
+                      << (moved ? " (이완 진행" : " (변화 없음") << ", Δ " << deltas << ")" << std::endl;
             return moved;
         };
 
@@ -2255,8 +2260,9 @@ void initialize_robot_posture() {
         // 현재 위치 그대로라, 이 write로는 yaw만 움직인다. 이동 중 흔들림이 이완
         // 판정의 자이로 기준값을 오염시키지 않도록 완료를 기다린다.
         dxl_driver->writeGoalPosition(target_position);
-        delay(MOVE_WAIT_MS);
+        delay(HOME_WAIT_MS);
         std::cout << "[CALIB] yaw 설정 홈(" << target_position[3] << ")으로 정렬 완료" << std::endl;
+        dxl_driver->setProfile(RELEASE_PROFILE_MS, cfg_dxl.profile_acceleration);
 
         std::cout << "이완 단계: 텐션 해제 시작" << std::endl;
         int rel_round = 0;
@@ -2271,10 +2277,11 @@ void initialize_robot_posture() {
             if (!any) break;
         }
 
-        // mouth: 턱 움직임은 자이로로 감지 불가 → 고정량 이완 (slow 프로파일이 부드러움 담당)
+        // mouth: 턱 움직임은 자이로로 감지 불가 → 고정량 이완 (홈 프로파일이 부드러움 담당)
+        dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
         target_position[4] += cfg_robot.calib_release_mouth_tick;
         dxl_driver->writeGoalPosition(target_position);
-        delay(MOVE_WAIT_MS);
+        delay(HOME_WAIT_MS);
         std::cout << "[RELEASE] mouth +" << cfg_robot.calib_release_mouth_tick
                   << "틱 고정 이완 → " << target_position[4] << std::endl;
     }
@@ -2283,7 +2290,7 @@ void initialize_robot_posture() {
     dxl_driver->setProfile(cfg_dxl.profile_velocity_calib, cfg_dxl.profile_acceleration);
 
     // ---- 조정 단계 공통 ----
-    // 3샘플 읽기 (~30 ms, 이동 중): roll 조정·수평 선행용. DLPF 21 Hz 기준 이동 중 σ ≈ 0.006 g.
+    // 3샘플 읽기 (~30 ms). DLPF 21 Hz 기준 σ ≈ 0.006 g.
     auto read_accel_quick = [&](float& ax, float& ay, float& az) {
         long sx = 0, sy = 0, sz = 0;
         for (int i = 0; i < sample_count; i++) {
@@ -2296,18 +2303,36 @@ void initialize_robot_posture() {
         ay = (sy / sample_count) / 16384.0f;
         az = (sz / sample_count) / 16384.0f;
     };
-    // 이동 완료 후 10샘플 읽기 대기: calib 프로파일 시간(time-based ms) + 전달·제어주기 + 잔진동 마진.
-    // (모터 위치·속도를 읽어 도달을 확인하는 방식은 2026-09-07 실측에서 평균 151 ms/스텝, 타임아웃 30%로
-    //  고정 대기와 동일해 폐기 — 텐션 걸린 상태에서 goal ±2틱에 들어오지 않는 스텝이 많다.)
-    const int ADJ_MOVE_WAIT_MS = (int)cfg_dxl.profile_velocity_calib + 5 + 45;
+    // 스텝 주기 = calib 프로파일 시간(time-based ms). goal 하나가 끝나는 순간 다음 goal을 쓰면 모터가
+    // 멈추지 않고 일정 속도로 감긴다(연속 이동). 읽기는 각 스텝의 마지막 30 ms에 겹쳐 놓아 lag가 1스텝
+    // 미만(≈2~4틱). 이전에 goal을 35 ms마다 밀어넣던 코드는 프로파일(100 ms)보다 빨라 goal이 실제보다
+    // 3~4스텝 앞섰고, 그 lag로 오버슈트가 0.07~0.085까지 커졌다. 반대로 스텝마다 정지 후 읽기(프로파일
+    // + 50 ms 대기)는 lag는 없지만 7 Hz 스톱앤고로 떨리고 스텝당 140 ms가 걸렸다 (모두 2026-09-07 실측).
+    // (모터 위치·속도를 읽어 도달을 확인하는 방식은 고정 대기와 동일한 151 ms/스텝, 타임아웃 30%로 폐기.)
+    const int STEP_PERIOD_MS   = (int)cfg_dxl.profile_velocity_calib;
+    const int STEP_READ_MS     = sample_count * 10;                       // 3샘플 × 10 ms
+    const int STEP_PRE_READ_MS = std::max(0, STEP_PERIOD_MS - STEP_READ_MS);
+    // 단계 경계(시작값 측정)에서만: 직전 이동이 완전히 끝나고 잔진동이 죽은 뒤 읽는다.
+    const int SETTLE_WAIT_MS = STEP_PERIOD_MS + 5 + 45;
+    auto read_accel_settled = [&](float& ax, float& ay, float& az) {
+        delay(SETTLE_WAIT_MS);
+        read_accel_quick(ax, ay, az);
+    };
+    float Ax = 0, Ay = 0, Az = 0;
+    // 연속 이동 한 스텝: goal 쓰기 → 이동 대부분 대기 → 이동 끝자락에 3샘플 읽기.
+    auto step_and_read = [&]() {
+        dxl_driver->writeGoalPosition(target_position);
+        delay(STEP_PRE_READ_MS);
+        read_accel_quick(Ax, Ay, Az);
+    };
 
-    // 스텝 폭. 정밀 감기 6틱 = 0.004 g = 0.2°로 10샘플 노이즈(σ 0.003 g ≈ 17틱)보다 작아 3틱과
-    // 정밀도 차이가 없고 시간은 절반. 빨리 감기 10틱은 슬랙(이완 후 200~400틱) 구간 전용.
+    // 스텝 폭. 정밀 감기 6틱 = 0.004 g = 0.2°로 읽기 노이즈(σ 0.006 g ≈ 10틱)보다 작아 3틱과 정밀도
+    // 차이가 없고 시간은 절반. 빨리 감기 10틱은 roll 슬랙(이완 후 200~400틱) 구간 전용.
     const int   FINE_STEP_TICK = 6;
     const int   FAST_STEP_TICK = 10;
-    // 빨리 감기 종료 조건: 축 값이 시작 대비 이만큼 변한 3샘플 읽기가 2회 연속 (3σ × 2회 → 오경보 무시 수준).
-    // 이동 중 읽기라 goal이 실제보다 3~4스텝(30~40틱 ≈ 0.02 g) 앞서므로, 정밀 감기로 넘어가는 시점의
-    // 실제 이동은 ≈ 0.04 g — roll 문턱 0.05 안이다.
+    // 빨리 감기 종료 조건: Ax가 시작 대비 이만큼 변한 읽기가 2회 연속 (3σ × 2회 → 오경보 무시 수준).
+    // pitch에는 빨리 감기를 두지 않는다: 머리 구조상 토크가 풀리면 앞으로 기울어 pitch 줄은 슬랙이 적게
+    // 생기고, 수평 선행이 그마저 대부분 걷어 정밀 감기만으로 충분하다.
     const float MOVE_TRIGGER_G = 0.02f;
     // 스텝 상한: 줄 끊김·미끄러짐·센서 부호 반전 시 무한 감김 방지 (Extended Position이라 위치 리밋 없음).
     const int   FINE_MAX_STEPS = 200;   // × 6틱 = 1200틱 ≈ 105°
@@ -2320,20 +2345,16 @@ void initialize_robot_posture() {
     // 조건이 정하므로 roll 오버슈트 크기는 좌우 프리텐션에만 영향 — 좌우로 밀어 유격이 있으면 올릴 것.
     const float TENSION_G = (float)cfg_robot.calib_tension_g;
 
-    float Ax = 0, Ay = 0, Az = 0;
-
-    // 빨리 감기: 줄이 헐거운 동안 큰 스텝으로 감는다. axis(0=Ax, 1=Ay)가 시작 대비 MOVE_TRIGGER_G
-    // 이상 변한 읽기가 2회 연속이면 머리가 움직이기 시작한 것 → 반환(정밀 감기로).
-    auto take_up_slack = [&](std::initializer_list<int> motors, int axis, const char* what) {
+    // 빨리 감기 (roll 전용): 줄이 헐거운 동안 큰 스텝. Ax가 시작 대비 MOVE_TRIGGER_G 이상 변한 읽기가
+    // 2회 연속이면 머리가 움직이기 시작한 것 → 반환(정밀 감기로).
+    auto take_up_slack = [&](int motor, const char* what) {
         read_accel_quick(Ax, Ay, Az);
-        const float base = (axis == 0) ? Ax : Ay;
+        const float base = Ax;
         int hits = 0;
         for (int n = 1; n <= FAST_MAX_STEPS; n++) {
-            for (int m : motors) target_position[m] -= FAST_STEP_TICK;
-            dxl_driver->writeGoalPosition(target_position);
-            read_accel_quick(Ax, Ay, Az);
-            const float v = (axis == 0) ? Ax : Ay;
-            hits = (std::fabs(v - base) >= MOVE_TRIGGER_G) ? hits + 1 : 0;
+            target_position[motor] -= FAST_STEP_TICK;
+            step_and_read();
+            hits = (std::fabs(Ax - base) >= MOVE_TRIGGER_G) ? hits + 1 : 0;
             if (hits >= 2) {
                 std::cout << "[CALIB] " << what << " 빨리 감기 " << n << "스텝(" << n * FAST_STEP_TICK
                           << "틱) → 정밀 감기" << std::endl;
@@ -2344,18 +2365,13 @@ void initialize_robot_posture() {
                   << "스텝) 도달 — 중단. 와이어·센서 점검 필요" << std::endl;
     };
 
-    // 정밀 감기: motors를 FINE_STEP_TICK씩 당기며(−) done()이 참이 될 때까지. settled=true면 이동 완료 후 10샘플.
-    auto tighten_until = [&](std::initializer_list<int> motors, const char* what, bool settled, auto done) {
+    // 정밀 감기: motors를 step_tick씩 당기며(−) done()이 참이 될 때까지 연속 이동.
+    // roll 둘을 함께 당기는 되세우기는 머리 속도가 2배라 같은 lag(시간)에 지나치는 양도 2배 —
+    // 스텝을 절반(3틱)으로 줘 머리 속도를 다른 단계와 맞춘다 (6틱으로는 프리텐션 0.082, 2026-09-07 실측).
+    auto tighten_until = [&](std::initializer_list<int> motors, const char* what, int step_tick, auto done) {
         for (int n = 0; n < FINE_MAX_STEPS; n++) {
-            for (int m : motors) target_position[m] -= FINE_STEP_TICK;
-            dxl_driver->writeGoalPosition(target_position);
-            if (settled) {
-                delay(ADJ_MOVE_WAIT_MS);
-                read_accel_avg(Ax, Ay, Az);
-                Ax -= AX_OFFSET;
-            } else {
-                read_accel_quick(Ax, Ay, Az);
-            }
+            for (int m : motors) target_position[m] -= step_tick;
+            step_and_read();
             std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
             if (done()) return;
         }
@@ -2365,20 +2381,20 @@ void initialize_robot_posture() {
 
     const unsigned int t_roll0 = millis();
     std::cout << "Roll 조정" << std::endl;
-    read_accel_quick(Ax, Ay, Az);
+    read_accel_settled(Ax, Ay, Az);
     std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
     // 오버슈트 → 되당김: 한쪽을 수평 너머 TENSION_G까지 당겨 슬랙을 확실히 걷은 뒤 반대쪽으로
     // 수평 복귀. 길항 구조라 끝나면 두 줄 모두 팽팽하다. 각 줄은 빨리 감기로 슬랙을 걷은 뒤 정밀 감기.
     if (Ax > 0) {
-        take_up_slack({2}, 0, "roll_l");
-        tighten_until({2}, "roll_l", false, [&]{ return Ax < -TENSION_G; });
-        take_up_slack({1}, 0, "roll_r");
-        tighten_until({1}, "roll_r", false, [&]{ return Ax >  0.01f; });
+        take_up_slack(2, "roll_l");
+        tighten_until({2}, "roll_l", FINE_STEP_TICK, [&]{ return Ax < -TENSION_G; });
+        take_up_slack(1, "roll_r");
+        tighten_until({1}, "roll_r", FINE_STEP_TICK, [&]{ return Ax >  0.01f; });
     } else {
-        take_up_slack({1}, 0, "roll_r");
-        tighten_until({1}, "roll_r", false, [&]{ return Ax >  TENSION_G; });
-        take_up_slack({2}, 0, "roll_l");
-        tighten_until({2}, "roll_l", false, [&]{ return Ax < -0.01f; });
+        take_up_slack(1, "roll_r");
+        tighten_until({1}, "roll_r", FINE_STEP_TICK, [&]{ return Ax >  TENSION_G; });
+        take_up_slack(2, "roll_l");
+        tighten_until({2}, "roll_l", FINE_STEP_TICK, [&]{ return Ax < -0.01f; });
     }
     std::cout << "[CALIB] roll 단계 " << (millis() - t_roll0) << " ms" << std::endl;
 
@@ -2389,22 +2405,20 @@ void initialize_robot_posture() {
     // TENSION_G가 된다. (시작 자세 상대로 두었을 때: roll 오버슈트를 0.15 → 0.05로 줄이자 머리가 앞으로
     // 처진 채(Ay 0.11) 시작해 되세우기 0.15 g = 프리텐션이 3배로 튀었다, 2026-09-07 실측)
     //   1. 머리가 수평보다 앞(Ay > LEVEL)이면 roll 둘로 수평까지 먼저 되당김 — 수평에 필요한 최소량.
-    //      정밀도가 필요 없어(지나쳐도 pitch 감기가 흡수) 3샘플 읽기. 이 당김이 pitch 슬랙도 걷는다.
-    //   2. pitch를 수평 + TENSION_G까지 감기 — 수평 너머 이동이 텐션 증거. 이동 완료 후 10샘플 읽기.
-    //   3. roll 둘로 수평까지 되세우기 — 이동량 = TENSION_G = 프리텐션. 10샘플 읽기.
+    //      이 당김이 pitch 슬랙도 대부분 걷는다.
+    //   2. pitch를 수평 + TENSION_G까지 감기 — 수평 너머 이동이 텐션 증거.
+    //   3. roll 둘로 수평까지 되세우기 — 이동량 = TENSION_G = 프리텐션.
     // 이전 구현은 절대 문턱 0.009(노이즈 안)와 `int now_Ay = Ay`(소수 절단 → 항상 0) 때문에
     // 실기기에서 pitch를 3틱만 당기고 끝났다 (2026-09-04 실측: 이완 3726 → 홈 3723).
     const float PITCH_LEVEL_G  = 0.009f;
     const float PITCH_TARGET_G = PITCH_LEVEL_G + TENSION_G;
-    delay(ADJ_MOVE_WAIT_MS);
-    read_accel_avg(Ax, Ay, Az);
-    Ax -= AX_OFFSET;
+    read_accel_settled(Ax, Ay, Az);
     std::cout << "[CALIB] pitch 시작 Ay=" << Ay << " → 목표 Ay>=" << PITCH_TARGET_G
               << " (수평 " << PITCH_LEVEL_G << " + 텐션 " << TENSION_G << ")" << std::endl;
     if (Ay > PITCH_LEVEL_G)
-        tighten_until({1, 2}, "roll(수평 선행)", false, [&]{ return Ay <= PITCH_LEVEL_G; });
-    tighten_until({0}, "pitch", true, [&]{ return Ay >= PITCH_TARGET_G; });
-    tighten_until({1, 2}, "roll(pitch 복귀)", true, [&]{ return Ay <= PITCH_LEVEL_G; });
+        tighten_until({1, 2}, "roll(수평 선행)", FINE_STEP_TICK / 2, [&]{ return Ay <= PITCH_LEVEL_G; });
+    tighten_until({0}, "pitch", FINE_STEP_TICK, [&]{ return Ay >= PITCH_TARGET_G; });
+    tighten_until({1, 2}, "roll(pitch 복귀)", FINE_STEP_TICK / 2, [&]{ return Ay <= PITCH_LEVEL_G; });
     std::cout << "[CALIB] pitch 단계 " << (millis() - t_pitch0) << " ms" << std::endl;
 
     // =============================
