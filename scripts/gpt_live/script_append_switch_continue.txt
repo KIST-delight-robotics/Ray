@@ -1,0 +1,5 @@
+# 영어 전환 + 끊지 말고 계속: 언어만 바뀌고 세기는 이어지는지
+say 1부터 40까지 한국어로 천천히 세어봐. 멈추지 말고 끝까지.
+wait 10
+instructions Do not stop or restart what you are currently saying; continue exactly where you are, but from this point on say everything in English.
+wait 12

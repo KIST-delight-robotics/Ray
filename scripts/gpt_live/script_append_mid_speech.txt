@@ -1,0 +1,7 @@
+# 모델이 길게 말하는 도중 instructions.append → 곧바로 반영되는지, 말이 멈칫하는지
+say 1부터 40까지 한국어로 천천히 세어봐. 멈추지 말고 끝까지.
+wait 10
+instructions From now on speak only in English. Switch to English immediately, even in the middle of counting.
+wait 25
+say 지금 기분 어때?
+wait 10

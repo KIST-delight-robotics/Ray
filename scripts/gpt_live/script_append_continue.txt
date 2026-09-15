@@ -1,0 +1,5 @@
+# instructions.append 에 "하던 말을 끊지 말고 계속하라"를 함께 넣으면 끊김을 피할 수 있는지
+say 1부터 40까지 한국어로 천천히 세어봐. 멈추지 말고 끝까지.
+wait 10
+instructions Do not stop or restart what you are currently saying; continue exactly where you are. From now on, keep speaking Korean in a casual tone.
+wait 12

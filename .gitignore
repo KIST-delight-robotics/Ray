@@ -83,3 +83,8 @@ WiringPi/
 cpp/*.bak_*
 *.log
 /LED_handoff_bundle*/
+
+# GPT-Live 실험 산출물
+scripts/gpt_live/logs/
+scripts/gpt_live/tts_cache/
+scripts/gpt_live/*.wav

@@ -1,0 +1,5 @@
+# 현재 발화와 충돌하지 않는 instructions.append: 타입 자체가 멈추게 하는지 확인
+say 1부터 40까지 한국어로 천천히 세어봐. 멈추지 말고 끝까지.
+wait 10
+instructions Keep speaking Korean in a casual tone. Nothing else changes.
+wait 30
