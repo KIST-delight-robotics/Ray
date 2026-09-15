@@ -24,6 +24,22 @@ def _emit(handler: OpenAIRetryHandler, message: str) -> None:
 
 
 class TestOpenAIRetryHandler:
+    def test_parses_sdk3_message_without_endpoint(self) -> None:
+        """openai SDK 3.x 는 URL 없이 'Retrying request in N seconds' 만 남긴다."""
+        store = RecordingCallStore()
+        install(call_store=store)
+        handler = OpenAIRetryHandler()
+        set_session("sess-1")
+
+        _emit(handler, "Retrying request in 0.412858 seconds")
+
+        assert len(store.records) == 1
+        rec = store.records[0]
+        assert rec.module == "unknown"
+        assert rec.operation == "retry"
+        assert rec.status == "retry"
+        assert '"retry_delay_sec": 0.412858' in rec.metadata
+
     def test_parses_tts_retry(self) -> None:
         store = RecordingCallStore()
         install(call_store=store)

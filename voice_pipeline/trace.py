@@ -481,7 +481,9 @@ def save_turn(trace: PipelineTrace) -> None:
         logger.warning("Failed to save pipeline trace", exc_info=True)
 
 
-_PATTERN = re.compile(r"Retrying request to (/\S+) in ([\d.]+) seconds")
+# openai SDK 1.x: "Retrying request to /responses in 0.4 seconds"
+# openai SDK 3.x: "Retrying request in 0.4 seconds"  (엔드포인트가 로그에서 빠짐 → 모듈 귀속 불가)
+_PATTERN = re.compile(r"Retrying request(?: to (/\S+))? in ([\d.]+) seconds")
 
 _ENDPOINT_MAP: dict[str, tuple[str, str]] = {
     "/audio/speech": ("tts", "synthesize"),
@@ -502,9 +504,9 @@ class OpenAIRetryHandler(logging.Handler):
         if not m:
             return
 
-        endpoint = m.group(1)
+        endpoint = m.group(1) or ""
         delay_sec = m.group(2)
-        module, operation = _ENDPOINT_MAP.get(endpoint, ("unknown", endpoint))
+        module, operation = _ENDPOINT_MAP.get(endpoint, ("unknown", endpoint or "retry"))
 
         record_call(
             module,
