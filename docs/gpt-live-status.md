@@ -93,8 +93,9 @@ uv run ray
 "레이"/"Ray"로 깨움 → 인사 "네, 부르셨어요?"(marin) → Live 세션. 종료는 작별 인사(`end_conversation` 툴, 모델 재량) 또는 키워드("잘 가", "이제 갈게", "여기까지", "bye", …) 또는 유휴 60 s. GNOME 소리 설정 창은 닫아 둘 것.
 
 로그:
-- `logs/pipeline/<시각>.log`: `GPT-Live connected in …`, `stream_start sent (live)`, `Model started speaking`, `user:`/`assistant:` 전사, 15 s마다 `Audio lead …, max chunk gap …ms (sent, padded, dropped)`, `Ending session (…)`.
-- `logs/motion/<시각>/Standard_Log.csv`: 모터 틱(정상 40 ms 간격). `audio_sync_RESPONSES.csv`: 싱크 진단.
+- `logs/pipeline/<시각>.log`: `GPT-Live connected in …`, `LiveSessionLoop started`, `Model started speaking`, `user:`/`assistant:` 전사, 조각 간격 300 ms 이상이면 `Audio chunk gap …ms (speaking|silent, 단계)`, `Ending session (…)`, 종료 시 `Audio summary: sent, padded, dropped, max chunk gap`. 15 s 주기 `Audio lead …` 줄은 DEBUG(`voice_pipeline.live_session=DEBUG`로 켬).
+- `logs/motion/<시각>/console.log`: C++ 콘솔(cout/cerr) 복제. `[split] padded/trimmed`(시각·버퍼 잔량 포함), `[Sound] underrun`, `[MainLoop]`, `[CALIB]`.
+- `logs/motion/<시각>/Standard_Log.csv`: 모터 틱(정상 40 ms 간격, 대기 모드는 약 1 Hz로 저속 기록). `audio_sync_RESPONSES.csv`: 싱크 진단(`kEnableAudioSyncLog`).
 - 요약: `uv run python scripts/hardware/audio_sync_report.py logs/motion/<시각>/audio_sync_RESPONSES.csv`
 
 단위 테스트: `uv run --all-groups python -m pytest -q` (`uv run pytest`가 안 되면 `.venv/bin/pytest` 셔뱅이 옛 경로일 수 있음 → `uv sync --all-groups --reinstall-package pytest`).
@@ -105,8 +106,6 @@ uv run ray
 - [ ] 지연 없이 여유 늘리기: `onGetData` 선취 80→40 ms + G 450→560 실험 (`[Sound] underrun` 로그로 확인)
 - [ ] 파이썬 채우기 밴드 축소(목표 +0.1, 말 중 문턱 −0.15) — 긴 발화 사용이 있으면
 - [ ] 종료 시 `audio_end`를 "출력 무음 1 s" 판정 직후 보내기(지금은 close 뒤라 C++가 끝에 1.3 s 채움, SLEEP 전환 지연)
-- [ ] `[split]` 로그에 원시 버퍼 잔량 표기(outstanding 만으로는 "되돌릴 게 없음"과 "못 되돌림"이 구분 안 됨)
-- [ ] 정지 시점 개별 로그(말하는 중/무음/위임 중) 추가 여부 — Wi-Fi 운용일 때만
 - [ ] 프리버퍼 한 덩이로 줄이는 실험(지연 −360 ms) — 유선이면 우선
 - [ ] 검증 스크립트(store 녹음 대조 `verify_live_audio.py` / `analyze_recording.py`, 현재 세션 스크래치에만 있음) `scripts/gpt_live/`로 이관 여부. `store: true`는 OpenAI에 녹음이 30일 남으므로 실험 전용 표시 필요.
 - [ ] 2단계 커밋(위 표의 파일 일괄) — 커밋 메시지 초안: `feat(live): GPT-Live 엔진 추가 — 세션 루프, 어댑터, live 스트림 프리버퍼·헤드모션 대기, 무음 채우기, 한·영 웨이크워드, 한국어 인사`

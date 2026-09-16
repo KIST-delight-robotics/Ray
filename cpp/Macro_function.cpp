@@ -121,7 +121,7 @@ constexpr int CLS_PEAK_CONVEX_UP     = 3;
 constexpr int CLS_VALLEY_CONVEX_DOWN = 4;
 constexpr int CLS_UNKNOWN            = 5;
 
-constexpr bool DEBUG_ACCEPTED_PEAK = true;
+constexpr bool DEBUG_ACCEPTED_PEAK = false;
 
 inline float partb_nan()
 {

@@ -94,8 +94,42 @@ std::condition_variable mouth_motion_queue_cv;
 DynamixelDriver* dxl_driver = nullptr;
 DataLogger motion_logger;
 // 소리-모션 싱크 진단 로그: 모터 틱마다 모션 시계가 가정하는 오디오 위치와 실제 재생 위치를 남긴다
+constexpr bool kEnableAudioSyncLog = true;
 std::string g_motion_log_dir;
 std::ofstream g_audio_sync_log;
+
+// 콘솔 출력(cout/cerr)을 모션 로그 디렉터리의 console.log 에도 남긴다 (파이썬 로그와 대조용)
+class TeeBuf : public std::streambuf {
+public:
+    TeeBuf(std::streambuf* a, std::streambuf* b) : a_(a), b_(b) {}
+protected:
+    int overflow(int c) override {
+        if (c == traits_type::eof()) return traits_type::not_eof(c);
+        const int r1 = a_->sputc(static_cast<char>(c));
+        const int r2 = b_->sputc(static_cast<char>(c));
+        return (r1 == traits_type::eof() || r2 == traits_type::eof()) ? traits_type::eof() : c;
+    }
+    int sync() override {
+        const int r1 = a_->pubsync();
+        const int r2 = b_->pubsync();
+        return (r1 == 0 && r2 == 0) ? 0 : -1;
+    }
+private:
+    std::streambuf* a_;
+    std::streambuf* b_;
+};
+std::ofstream g_console_log;
+
+void set_motion_log_dir(const std::string& dir) {
+    g_motion_log_dir = dir;
+    if (g_console_log.is_open()) return;  // 프로세스당 한 번
+    g_console_log.open(dir + "/console.log", std::ios::app);
+    if (!g_console_log) return;
+    static TeeBuf out_tee(std::cout.rdbuf(), g_console_log.rdbuf());
+    static TeeBuf err_tee(std::cerr.rdbuf(), g_console_log.rdbuf());
+    std::cout.rdbuf(&out_tee);
+    std::cerr.rdbuf(&err_tee);
+}
 HighFreqLogger* tuning_logger = nullptr;
 
 bool g_led_pwm_ready = false;  // LED 밝기 GPIO PWM 초기화 여부
@@ -135,6 +169,7 @@ static constexpr int kLivePrebufferCycles = 2;  // live 시작 전 모을 덩이
 static constexpr int kSplitGraceMs = 450;       // stream_and_split: 기한 뒤 덩이가 차길 기다리는 상한. 넘기면 0 으로 채운다
 static constexpr int kLiveStartSlackMs = 400;   // live: 프리버퍼 두 덩이 외에 원시 버퍼에 남겨 둘 여유 (Wi-Fi 400, 유선 100~200)
 static constexpr int kSplitTrimFloorMs = 200;   // 채운 뒤 되돌리기: 원시 버퍼가 이보다 많이 남으면 앞쪽 0 샘플을 채운 만큼까지 버린다
+static constexpr int kWaitLogEvery = 25;        // 대기 모드 Standard_Log 기록 주기 (틱 수). 35 ms 틱 → 약 1 Hz
 std::vector<uint8_t> responses_stream_buffer;
 std::mutex responses_stream_buffer_mutex;
 std::condition_variable responses_stream_buffer_cv;
@@ -242,7 +277,7 @@ protected:
             m_silence_inserted_samples += static_cast<long long>(silence.size());
             {
                 std::lock_guard<std::mutex> cout_lock(cout_mutex);
-                std::cout << "[Sound] underrun: inserted 100 ms silence (total " << silenceInsertedMs() << " ms)" << std::endl;
+                std::cout << get_time_str() << " [Sound] underrun: inserted 100 ms silence (total " << silenceInsertedMs() << " ms)" << std::endl;
             }
             data.samples = silence.data();
             data.sampleCount = silence.size();
@@ -601,6 +636,7 @@ void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream) {
         std::vector<uint8_t> raw_chunk;
         size_t padded_bytes = 0;
         size_t trimmed_bytes = 0;
+        size_t buffer_after = 0;  // 이 사이클 처리 뒤 원시 버퍼 잔량 (로그용)
         {
             std::unique_lock<std::mutex> lock(*buffer_mutex);
             auto ready = [&] {
@@ -641,23 +677,24 @@ void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream) {
                     trimmed_bytes = zeros;
                 }
             }
+            buffer_after = buffer->size();
             if (raw_chunk.empty()) continue;
         }
         if (trimmed_bytes > 0) {
             total_trimmed_bytes += trimmed_bytes;
             ++trim_events;
             std::lock_guard<std::mutex> lock(cout_mutex);
-            std::cout << "[split] cycle " << cycle_num << ": trimmed " << trimmed_bytes / bytes_per_ms
+            std::cout << get_time_str() << " [split] cycle " << cycle_num << ": trimmed " << trimmed_bytes / bytes_per_ms
                       << " ms of leading silence (outstanding " << (total_padded_bytes - total_trimmed_bytes) / bytes_per_ms
-                      << " ms)" << std::endl;
+                      << " ms, buffer " << buffer_after / bytes_per_ms << " ms)" << std::endl;
         }
         if (padded_bytes > 0) {
             total_padded_bytes += padded_bytes;
             ++pad_events;
             std::lock_guard<std::mutex> lock(cout_mutex);
-            std::cout << "[split] cycle " << cycle_num << ": buffer short, padded " << padded_bytes / bytes_per_ms
-                      << " ms with silence (total " << total_padded_bytes / bytes_per_ms << " ms, " << pad_events << " events)"
-                      << std::endl;
+            std::cout << get_time_str() << " [split] cycle " << cycle_num << ": buffer short, padded " << padded_bytes / bytes_per_ms
+                      << " ms with silence (total " << total_padded_bytes / bytes_per_ms << " ms, " << pad_events
+                      << " events, buffer " << buffer_after / bytes_per_ms << " ms)" << std::endl;
         }
 
         // --- 2. 데이터 가공 ---
@@ -692,7 +729,7 @@ void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream) {
     // --- 4. 종료 처리 ---
     if (pad_events > 0) {
         std::lock_guard<std::mutex> lock(cout_mutex);
-        std::cout << "[split] stream done: padded " << total_padded_bytes / bytes_per_ms << " ms of silence in "
+        std::cout << get_time_str() << " [split] stream done: padded " << total_padded_bytes / bytes_per_ms << " ms of silence in "
                   << pad_events << " events, trimmed back " << total_trimmed_bytes / bytes_per_ms << " ms in " << trim_events
                   << " events, player underrun silence " << soundStream.silenceInsertedMs() << " ms" << std::endl;
     }
@@ -1029,7 +1066,6 @@ void generate_motion(int channels, int samplerate) {
         wait_for_next_cycle(cycle_num);
 
         if (audio_done_flag && audio_queue.empty()) {
-            std::cout << "generate motion break ------------------------" << std::endl;
             break;
         }
 
@@ -1050,7 +1086,6 @@ void generate_motion(int channels, int samplerate) {
             audio_queue_cv.wait(lock, [] { return !audio_queue.empty() || audio_done_flag || user_interruption_flag; });
 
             if ((audio_done_flag || user_interruption_flag) && audio_queue.empty()) {
-                std::cout << "generate motion break ------------------------" << std::endl;
                 break;
             }
 
@@ -1334,7 +1369,6 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
         lock.unlock();
 
         if (motion_done_flag && mouth_motion_queue.empty()) {
-            std::cout << "control_motor break1 -------------------- " << get_time_str() << std::endl;
             break;
         }
         int num_motor_updates = INTERVAL_MS / 40;
@@ -1349,19 +1383,11 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
             start_time = std::chrono::high_resolution_clock::now();
 
             soundStream.play(); // 첫 사이클에서 오디오 재생
-            if (!g_motion_log_dir.empty()) {
+            if (kEnableAudioSyncLog && !g_motion_log_dir.empty()) {
                 g_audio_sync_log.open(g_motion_log_dir + "/audio_sync_" + sanitize_filename(mode_label) + ".csv");
                 g_audio_sync_log << "elapsed_ms,cycle,tick,expected_ms,playing_ms,silence_ms\n";
             }
-            // Python에 playback_started 이벤트 전송
             send_to_python({{"type", "playback_started"}});
-            {
-                std::lock_guard<std::mutex> lock(cout_mutex);
-                std::cout << "[시간 측정] start → 오디오 재생 시작: "
-                        << std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::high_resolution_clock::now() - start_time).count()
-                        << "ms" << std::endl;
-            }
         }
 
         for (int i = 0; i < num_motor_updates; ++i) {
@@ -1980,7 +2006,7 @@ void wait_control_motor(){
 
         // 로깅
         double DXL_goal_rpy[4] = {roll_final, pitch_final, yaw_final, mouth_final};
-        motion_logger.log("WAIT", DXL_goal_rpy, target_position, current_state);
+        if (step % kWaitLogEvery == 0) motion_logger.log("WAIT", DXL_goal_rpy, target_position, current_state);  // 대기 모드는 저속 기록
         
         step ++;
         std::this_thread::sleep_until(wait_start_time + FRAME_INTERVAL * step);
@@ -2387,17 +2413,18 @@ void initialize_robot_posture() {
         for (int n = 0; n < FINE_MAX_STEPS; n++) {
             for (int m : motors) target_position[m] -= step_tick;
             step_and_read();
-            std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
-            if (done()) return;
+            if (done()) {
+                std::cout << "[CALIB] " << what << " 정밀 감기 " << n + 1 << "스텝, AX=" << Ax << " Ay=" << Ay << " Az=" << Az << std::endl;
+                return;
+            }
         }
         std::cerr << "[CALIB] " << what << " 정밀 감기 상한(" << FINE_MAX_STEPS
                   << "스텝) 도달 — 중단. 와이어·센서 점검 필요" << std::endl;
     };
 
     const unsigned int t_roll0 = millis();
-    std::cout << "Roll 조정" << std::endl;
     read_accel_settled(Ax, Ay, Az);
-    std::cout << "AX : " << Ax << " , Ay : " << Ay << " , Az : " << Az << '\n';
+    std::cout << "[CALIB] Roll 조정 시작: AX=" << Ax << " Ay=" << Ay << " Az=" << Az << std::endl;
     // 한쪽을 수평 너머 TENSION_G까지, 반대쪽으로 수평 복귀 → 두 줄 모두 팽팽
     if (Ax > 0) {
         take_up_slack(2, "roll_l");
@@ -2666,7 +2693,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
     std::string log_dir = create_log_directory();
     auto log_start_time = std::chrono::high_resolution_clock::now();
     motion_logger.start(log_start_time, log_dir);
-    g_motion_log_dir = log_dir;
+    set_motion_log_dir(log_dir);
     if (tuning_logger) tuning_logger->start(log_start_time, log_dir);
     #endif
 
@@ -2792,8 +2819,8 @@ void robot_main_loop(std::future<void> server_ready_future) {
                     responses_stream_buffer_cv.wait(lock, [&]{ return responses_stream_buffer.size() >= bytes_to_start || !is_responses_streaming || user_interruption_flag; });
                 }
                 if (stream_live) {
-                    std::cout << "[MainLoop] live stream: prebuffered " << kLivePrebufferCycles << " cycles + " << kLiveStartSlackMs
-                              << " ms slack, head motion = idle" << std::endl;
+                    std::cout << get_time_str() << " [MainLoop] live stream: prebuffered " << kLivePrebufferCycles << " cycles + "
+                              << kLiveStartSlackMs << " ms slack, head motion = idle" << std::endl;
                 }
 
                 if (!responses_stream_buffer.empty() && !user_interruption_flag) {
@@ -2919,7 +2946,7 @@ int main(int argc, char* argv[]) {
         std::string log_dir = create_log_directory();
         auto log_start_time = std::chrono::high_resolution_clock::now();
         motion_logger.start(log_start_time, log_dir);
-        g_motion_log_dir = log_dir;
+        set_motion_log_dir(log_dir);
         #ifdef MOTOR_ENABLED
         if (tuning_logger) tuning_logger->start(log_start_time, log_dir);
         #endif
@@ -2950,7 +2977,7 @@ int main(int argc, char* argv[]) {
         std::string log_dir = create_log_directory();
         auto log_start_time = std::chrono::high_resolution_clock::now();
         motion_logger.start(log_start_time, log_dir);
-        g_motion_log_dir = log_dir;
+        set_motion_log_dir(log_dir);
         #ifdef MOTOR_ENABLED
         if (tuning_logger) tuning_logger->start(log_start_time, log_dir);
         #endif

@@ -139,7 +139,8 @@ class LiveSessionLoop:
     _END_MIN_WAIT_SEC = 2.0  # 종료 결정 후 모델이 작별 인사를 시작할 여유
     _END_SILENCE_SEC = 1.0  # 출력 무음이 이만큼 이어지면 마지막 발화가 끝난 것으로 봄
     _END_MAX_WAIT_SEC = 8.0  # 무음이 안 와도 종료하는 상한
-    _LEAD_LOG_INTERVAL_SEC = 15.0  # 오디오 전송 상태(추정 밀림, 조각 도착 간격) 로그 주기
+    _LEAD_LOG_INTERVAL_SEC = 15.0  # 오디오 전송 상태(추정 밀림, 조각 도착 간격) DEBUG 로그 주기
+    _GAP_EVENT_SEC = 0.3  # 조각 도착 간격이 이 이상이면 정지 이벤트로 INFO 로그 (C++ [split] 로그와 대조용)
     # 서버 출력은 실시간보다 1~3% 짧게 온다 — 주로 무음 프레임이 빠지고, 늦게라도 오지 않는다
     # (2026-09-16 store 녹음 대조로 확인. 서버 제어 가이드 "Reflected output ranges can have gaps for dropped frames").
     # Wi-Fi 정지가 있으면 더 커진다.
@@ -211,6 +212,7 @@ class LiveSessionLoop:
         self._first_voice_logged = False
         self._last_audio_time: float | None = None
         self._max_audio_gap_sec = 0.0  # 로그 구간 내 조각 도착 최대 간격 (정상 0.1 s)
+        self._max_audio_gap_total_sec = 0.0  # 세션 전체 최대 간격 (종료 요약용)
         self._padded_sec = 0.0  # 채워 넣은 무음 누적
         self._dropped_sec = 0.0  # 버린 무음 누적
         self._last_lead_log_time = 0.0
@@ -260,14 +262,13 @@ class LiveSessionLoop:
         # 세션 전체를 스트림 하나로. live 표시: C++ 가 두 덩이를 모은 뒤 시작하고 헤드모션은 대기 모션 유지.
         self._bridge.send_stream_start(live=True)
         self._stream_open = True
-        logger.info("stream_start sent (live)")
         self._led.set_state(LEDState.IDLE)
 
         now = time.monotonic()
         self._last_frame_time = now
         self._last_transcript_time = now
         self._last_lead_log_time = now
-        logger.info("LiveSessionLoop started")
+        logger.info("LiveSessionLoop started (stream_start sent, live)")
 
     def _finish(self, *, graceful: bool) -> None:
         if self._phase == Phase.DONE:
@@ -283,6 +284,13 @@ class LiveSessionLoop:
                 self._bridge.send_audio_end()
             except Exception:
                 logger.warning("audio_end send failed", exc_info=True)
+        logger.info(
+            "Audio summary: sent %.0fs, padded %.1fs, dropped %.1fs, max chunk gap %.0fms",
+            self._audio_sent_sec,
+            self._padded_sec,
+            self._dropped_sec,
+            self._max_audio_gap_total_sec * 1000,
+        )
         logger.info("LiveSessionLoop ended (%s)", self._exit_reason or "unknown")
 
     # ------------------------------------------------------------------
@@ -379,9 +387,14 @@ class LiveSessionLoop:
         now = time.monotonic()
         if self._first_audio_time is None:
             self._first_audio_time = now
-            logger.info("First output audio from GPT-Live")
         if self._last_audio_time is not None:
-            self._max_audio_gap_sec = max(self._max_audio_gap_sec, now - self._last_audio_time)
+            gap = now - self._last_audio_time
+            self._max_audio_gap_sec = max(self._max_audio_gap_sec, gap)
+            self._max_audio_gap_total_sec = max(self._max_audio_gap_total_sec, gap)
+            if gap >= self._GAP_EVENT_SEC:
+                speaking = self._last_voice_time is not None and self._last_audio_time - self._last_voice_time < 0.5
+                state = "speaking" if speaking else "silent"
+                logger.info("Audio chunk gap %.0fms (%s, %s)", gap * 1000, state, self._phase.name)
         self._last_audio_time = now
 
         chunk_sec = len(pcm) / (self._live_rate * 2)
@@ -521,4 +534,4 @@ class LiveSessionLoop:
         ctx = f"{self._context_ratio * 100:.1f}%" if self._context_ratio is not None else "?"
         # lead: 보낸 오디오 − 경과 시간 (정상 0 근처, 음수면 서버가 뒤처짐). gap: 조각 도착 최대 간격 (정상 100 ms).
         msg = "Audio lead %.2fs, max chunk gap %.0fms (sent %.0fs, padded %.1fs, dropped %.1fs), context %s"
-        logger.info(msg, lead, gap_ms, self._audio_sent_sec, self._padded_sec, self._dropped_sec, ctx)
+        logger.debug(msg, lead, gap_ms, self._audio_sent_sec, self._padded_sec, self._dropped_sec, ctx)

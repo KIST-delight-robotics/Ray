@@ -246,7 +246,7 @@ class GPTLiveSession:
         self._stop.clear()
         self._receiver = threading.Thread(target=self._receive_loop, daemon=True, name="gpt-live-recv")
         self._receiver.start()
-        logger.info("GPT-Live session started: %s", started.session_id)
+        logger.debug("GPT-Live session started: %s", started.session_id)
         return started
 
     def close(self, *, graceful: bool = True) -> None:
@@ -263,7 +263,7 @@ class GPTLiveSession:
             except Exception:
                 logger.debug("session.close send failed (suppressed)", exc_info=True)
         self._abort()
-        logger.info("GPT-Live session closed")
+        logger.debug("GPT-Live session closed")
 
     def _abort(self) -> None:
         self._stop.set()
