@@ -67,7 +67,12 @@ def _cache_key(tts: ITTS, text: str) -> str:
     return hashlib.sha256(source.encode()).hexdigest()[:8]
 
 
-def ensure_greeting_audio(tts: ITTS) -> GreetingAudioPaths:
+def ensure_greeting_audio(
+    tts: ITTS,
+    *,
+    greeting_text: str | None = None,
+    farewell_text: str | None = None,
+) -> GreetingAudioPaths:
     """Ensure greeting/farewell WAV files exist, generating with TTS if needed.
 
     Derives filenames from a hash of the TTS voice_id and text, so that any
@@ -76,6 +81,8 @@ def ensure_greeting_audio(tts: ITTS) -> GreetingAudioPaths:
 
     Args:
         tts: TTS instance to synthesize audio.
+        greeting_text: 인사 문구. None 이면 모듈 기본값.
+        farewell_text: 작별 문구. None 이면 모듈 기본값.
 
     Returns:
         GreetingAudioPaths with resolved file paths.
@@ -84,8 +91,8 @@ def ensure_greeting_audio(tts: ITTS) -> GreetingAudioPaths:
     paths: dict[str, str] = {}
 
     items = (
-        ("greeting", _GREETING_TEXT, _FALLBACK_GREETING_PATH),
-        ("farewell", _FAREWELL_TEXT, _FALLBACK_FAREWELL_PATH),
+        ("greeting", greeting_text if greeting_text is not None else _GREETING_TEXT, _FALLBACK_GREETING_PATH),
+        ("farewell", farewell_text if farewell_text is not None else _FAREWELL_TEXT, _FALLBACK_FAREWELL_PATH),
     )
 
     for label, text, fallback in items:

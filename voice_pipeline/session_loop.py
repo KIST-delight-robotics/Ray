@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEventType
 from voice_pipeline.adapters.led import LEDController, LEDState
@@ -77,14 +78,21 @@ def truncate_by_ratio(
     return " ".join(words[:count])
 
 
+if TYPE_CHECKING:
+    from voice_pipeline.live_session import LiveSessionLoop
+
 logger = logging.getLogger("voice_pipeline.session_loop")
 
 
 @dataclass
 class SessionComponents:
-    """Per-session objects created by the session factory."""
+    """Per-session objects created by the session factory.
 
-    session_loop: SessionLoop
+    ``session_loop`` 은 엔진에 따라 :class:`SessionLoop`(cascade) 또는
+    :class:`~voice_pipeline.live_session.LiveSessionLoop`(live). 둘 다 ``run()``/``request_stop()`` 을 가진다.
+    """
+
+    session_loop: SessionLoop | LiveSessionLoop
     history: ConversationHistory
     session_id: str
 

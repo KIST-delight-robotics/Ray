@@ -230,6 +230,14 @@ class TestSendMethods:
         assert sent == {"type": "stream_start"}
         bridge.disconnect()
 
+    def test_send_stream_start_live(self, make_bridge, mock_conn: MagicMock) -> None:
+        """live 스트림은 필드를 실어 보내고, 기본은 필드 없음(기존 C++ 동작 유지)."""
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
+        bridge.send_stream_start(live=True)
+        sent = json.loads(mock_conn.send.call_args[0][0])
+        assert sent == {"type": "stream_start", "live": True}
+        bridge.disconnect()
+
     def test_send_audio_end(self, make_bridge, mock_conn: MagicMock) -> None:
         bridge = _connect_with_mock(make_bridge(), mock_conn)
         bridge.send_audio_end()

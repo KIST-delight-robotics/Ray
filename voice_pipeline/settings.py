@@ -9,10 +9,19 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
+# 대화 엔진. cascade = ASR + 턴테이킹 + LLM + TTS 체인, live = GPT-Live 하나로 대체(live_session.py)
+ENGINE: Literal["cascade", "live"] = "live"
+
 SAMPLE_RATE = 16000  # 샘플레이트 (Hz). Google STT, VAP 모델 등이 가정하는 값
 CHANNELS = 1  # 마이크 채널 수 (mono)
 SAMPLE_WIDTH = 2  # 샘플당 바이트 수 (16-bit PCM = 2). LINEAR16 인코딩
 FRAME_DURATION_MS = 30  # 한 프레임 길이 (ms). turn_detector/orchestrator 시간축 단위
+
+# C++ 재생 프로세스가 기대하는 출력 오디오 형식 (cpp/main.cpp AUDIO_SAMPLE_RATE 와 일치). mono 16-bit PCM.
+# TTS 어댑터와 GPT-Live 세션은 이 레이트로 오디오를 만들어 브리지로 보낸다.
+BRIDGE_SAMPLE_RATE = 24000
 
 # Derived
 FRAME_SIZE_SAMPLES = SAMPLE_RATE * FRAME_DURATION_MS // 1000  # 480

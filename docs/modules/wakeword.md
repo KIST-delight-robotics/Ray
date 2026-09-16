@@ -10,7 +10,7 @@ feed_audio(frame) → bool
   ├── 1. Rechunk: 480-sample frames → 512-sample VAD chunks
   ├── 2. Silero VAD: speech probability per chunk
   ├── 3. State machine: IDLE → SPEECH → TRAILING → recognition
-  └── 4. Google STT recognize() + word-boundary keyword match
+  └── 4. Google STT recognize() (ko-KR + en-US) + keyword match (영문 단어 경계 / 한글 부분 문자열)
 ```
 
 ## Usage
@@ -18,7 +18,7 @@ feed_audio(frame) → bool
 ```python
 from voice_pipeline.adapters.wakeword import WakewordDetector
 
-detector = WakewordDetector(language_code="en-US")
+detector = WakewordDetector()
 
 # In your audio loop:
 for frame in audio_frames:
@@ -30,7 +30,7 @@ for frame in audio_frames:
 
 | 인자 | Default | 의미 |
 |------|---------|------|
-| `language_code` | `"en-US"` | Google STT BCP-47 언어 코드 |
+| `language_code` | `"ko-KR"` | Google STT 주 언어 (BCP-47). ko-KR 주 + en-US 대안이 한·영 모두 가장 잘 잡았다 |
 
 ## 클래스 변수
 
@@ -38,7 +38,8 @@ for frame in audio_frames:
 
 | 변수 | 값 | 의미 |
 |------|------|------|
-| `_KEYWORDS` | `("ray",)` | 감지할 트리거 단어 목록 |
+| `_KEYWORDS` | `("ray", "레이")` | 감지할 트리거 단어 목록. 영문은 단어 경계, 한글은 부분 문자열 매칭(레이야) |
+| `_ALTERNATIVE_LANGUAGE_CODES` | `("ko-KR", "en-US")` | 주 언어와 함께 인식할 언어. 주 언어는 제외해 보낸다 (최대 3) |
 | `_VAD_CHUNK_SAMPLES` | `512` | VAD 입력 청크 샘플 수 |
 | `_VAD_CHUNK_BYTES` | `1024` | 파생: 청크 바이트 수 (16-bit mono) |
 | `_VAD_CHUNK_DURATION_MS` | `32` | 파생: 청크 길이 (512 @ 16kHz) |

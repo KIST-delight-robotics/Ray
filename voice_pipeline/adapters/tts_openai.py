@@ -37,7 +37,16 @@ class OpenAITTS(ITTS):
     _TIMEOUT_SEC = 5.0  # 합성 응답 대기 최대 시간 (초)
     _CHUNK_SIZE = 4096  # 스트리밍 오디오 버퍼 크기 (바이트)
 
-    def __init__(self) -> None:
+    def __init__(self, *, voice: str | None = None, model: str | None = None) -> None:
+        """
+        Args:
+            voice: 음성 프리셋. None 이면 클래스 기본값(``_VOICE``).
+            model: TTS 모델. None 이면 클래스 기본값(``_MODEL``).
+        """
+        if voice is not None:
+            self._VOICE = voice
+        if model is not None:
+            self._MODEL = model
         self._client = openai.OpenAI(
             max_retries=self._MAX_RETRIES,
             timeout=self._TIMEOUT_SEC,

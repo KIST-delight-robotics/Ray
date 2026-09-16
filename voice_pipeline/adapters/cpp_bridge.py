@@ -163,10 +163,18 @@ class CppBridge:
     # CppBridge send methods
     # ------------------------------------------------------------------
 
-    def send_stream_start(self) -> None:
-        """Signal that audio streaming is about to begin."""
+    def send_stream_start(self, *, live: bool = False) -> None:
+        """Signal that audio streaming is about to begin.
+
+        Args:
+            live: GPT-Live 스트림 표시. C++ 는 두 덩이(720 ms)가 찰 때까지 시계를 시작하지 않고,
+                오디오 기반 헤드모션 생성 대신 대기 모션을 유지한다. False 면 기존 TTS 스트림 동작.
+        """
         self._guard_connected()
-        self._send_json({"type": "stream_start"})
+        msg: dict = {"type": "stream_start"}
+        if live:
+            msg["live"] = True
+        self._send_json(msg)
 
     def send_audio(self, audio: bytes) -> None:
         """Send audio data for playback."""

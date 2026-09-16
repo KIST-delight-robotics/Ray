@@ -3,7 +3,8 @@
 처음 읽는 순서 — 한 턴이 흐르는 뼈대:
   __main__.py       모드 루프 (SLEEP → GREETING → ACTIVE → FAREWELL), 프로세스 수명
   wiring.py         컴포넌트 조립 (프로세스 수준 / 세션 수준)
-  session_loop.py   ACTIVE 세션의 프레임 루프 — ASR, 턴 감지, 재생, barge-in
+  session_loop.py   ACTIVE 세션의 프레임 루프 — ASR, 턴 감지, 재생, barge-in (cascade 엔진)
+  live_session.py   ACTIVE 세션의 프레임 루프 — GPT-Live 하나로 듣기·말하기·위임 (live 엔진, settings.ENGINE)
   generator.py      응답 생성 (ContextBuilder → LLM → TTS, 백그라운드)
   prompt.py         LLM 입력 조립 + 롤링 요약
 

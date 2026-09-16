@@ -304,6 +304,16 @@ class TestKeywordMatching:
 
         assert not self._trigger_recognition(det, mock_vad_model, mock_stt_client, "array of items")
 
+    def test_korean_keyword_matches_with_particle(self, detector, mock_vad_model, mock_stt_client):
+        """한글 키워드는 조사가 붙어도(레이야) 부분 문자열로 잡는다."""
+        assert self._trigger_recognition(detector, mock_vad_model, mock_stt_client, "레이야 안녕")
+
+    def test_korean_keyword_bare(self, detector, mock_vad_model, mock_stt_client):
+        assert self._trigger_recognition(detector, mock_vad_model, mock_stt_client, "레이")
+
+    def test_unrelated_korean_does_not_match(self, detector, mock_vad_model, mock_stt_client):
+        assert not self._trigger_recognition(detector, mock_vad_model, mock_stt_client, "오늘 날씨 좋다")
+
     def test_multiple_keywords(self, mock_vad_model, mock_stt_client, monkeypatch):
         """Multiple keywords: match on any one."""
         keywords = ("ray", "hello")
@@ -652,6 +662,22 @@ class TestPhraseHints:
     def test_recognition_config_max_alternatives(self, detector):
         """Recognition config should request multiple alternatives."""
         assert detector._recognition_config.max_alternatives == 5
+
+    def test_recognition_config_includes_korean_hint_and_alternative_language(self, detector):
+        """기본 주 언어 ko-KR, 대안은 en-US."""
+        config = detector._recognition_config
+        assert config.language_code == "ko-KR"
+        assert "레이" in config.speech_contexts[0].phrases
+        assert list(config.alternative_language_codes) == ["en-US"]
+
+    def test_alternative_language_excludes_primary(self, mock_vad_model, mock_stt_client):
+        """주 언어가 en-US 이면 대안에서 en-US 가 빠지고 ko-KR 만 남는다."""
+        with (
+            patch("voice_pipeline.adapters.wakeword.load_silero_vad", return_value=mock_vad_model),
+            patch("voice_pipeline.adapters.wakeword.speech.SpeechClient", return_value=mock_stt_client),
+        ):
+            det = _make_detector(language_code="en-US")
+        assert list(det._recognition_config.alternative_language_codes) == ["ko-KR"]
 
 
 # ---------------------------------------------------------------------------

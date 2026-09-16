@@ -93,6 +93,9 @@ std::condition_variable mouth_motion_queue_cv;
 #ifdef MOTOR_ENABLED
 DynamixelDriver* dxl_driver = nullptr;
 DataLogger motion_logger;
+// 소리-모션 싱크 진단 로그: 모터 틱마다 모션 시계가 가정하는 오디오 위치와 실제 재생 위치를 남긴다
+std::string g_motion_log_dir;
+std::ofstream g_audio_sync_log;
 HighFreqLogger* tuning_logger = nullptr;
 
 bool g_led_pwm_ready = false;  // LED 밝기 GPIO PWM 초기화 여부
@@ -125,6 +128,13 @@ std::atomic<bool> server_ready_fired{false};
 
 // 스트리밍 데이터 처리를 위한 전역 변수
 std::atomic<bool> is_responses_streaming(false);
+// GPT-Live 스트림 여부 (stream_start 의 "live": true). live 면 헤드모션 생성을 끄고 프리버퍼를 더 모은다.
+// 아래 상수들의 근거·실측은 docs/gpt-live-status.md §4 참고.
+std::atomic<bool> stream_live(false);
+static constexpr int kLivePrebufferCycles = 2;  // live 시작 전 모을 덩이 수 (×INTERVAL_MS)
+static constexpr int kSplitGraceMs = 450;       // stream_and_split: 기한 뒤 덩이가 차길 기다리는 상한. 넘기면 0 으로 채운다
+static constexpr int kLiveStartSlackMs = 400;   // live: 프리버퍼 두 덩이 외에 원시 버퍼에 남겨 둘 여유 (Wi-Fi 400, 유선 100~200)
+static constexpr int kSplitTrimFloorMs = 200;   // 채운 뒤 되돌리기: 원시 버퍼가 이보다 많이 남으면 앞쪽 0 샘플을 채운 만큼까지 버린다
 std::vector<uint8_t> responses_stream_buffer;
 std::mutex responses_stream_buffer_mutex;
 std::condition_variable responses_stream_buffer_cv;
@@ -209,6 +219,12 @@ public:
     void clearBuffer() {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_samples.clear();  // 저장된 샘플 데이터 초기화
+        m_silence_inserted_samples = 0;
+    }
+
+    // 큐가 비어 onGetData 가 내보낸 무음 누계(ms). 싱크 진단용.
+    long long silenceInsertedMs() const {
+        return m_silence_inserted_samples.load() * 1000LL / (static_cast<long long>(m_sampleRate) * m_channelCount);
     }
 
 protected:
@@ -221,8 +237,13 @@ protected:
                 return false;
             }
 
-            // 버퍼에 데이터가 없을 때 무음 재생
+            // 버퍼가 비었을 때 무음 재생 (폴백 — 정상이면 stream_and_split 이 채워서 여기 오지 않는다)
             static std::vector<sf::Int16> silence(m_sampleRate * m_channelCount / 10, 0); // 0.1초 분량의 무음
+            m_silence_inserted_samples += static_cast<long long>(silence.size());
+            {
+                std::lock_guard<std::mutex> cout_lock(cout_mutex);
+                std::cout << "[Sound] underrun: inserted 100 ms silence (total " << silenceInsertedMs() << " ms)" << std::endl;
+            }
             data.samples = silence.data();
             data.sampleCount = silence.size();
             return true;
@@ -249,6 +270,7 @@ protected:
 private:
     std::vector<sf::Int16> m_samples;
     std::vector<sf::Int16> m_chunkSamples;
+    std::atomic<long long> m_silence_inserted_samples{0};
     unsigned int m_channelCount;
     unsigned int m_sampleRate;
     std::mutex m_mutex;
@@ -559,6 +581,13 @@ void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream) {
     int channels = sfinfo.channels;
     int samplerate = sfinfo.samplerate;
     const size_t bytes_per_interval = samplerate * channels * sizeof(sf::Int16) * INTERVAL_MS / 1000;
+    const size_t bytes_per_ms = samplerate * channels * sizeof(sf::Int16) / 1000;
+    const size_t frame_bytes = sizeof(sf::Int16) * channels;
+    const size_t trim_floor_bytes = bytes_per_ms * kSplitTrimFloorMs;
+    size_t total_padded_bytes = 0;
+    size_t total_trimmed_bytes = 0;
+    int pad_events = 0;
+    int trim_events = 0;
 
     for (int cycle_num = -2; ; ++cycle_num) {
         if (user_interruption_flag) {
@@ -568,12 +597,21 @@ void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream) {
         wait_for_next_cycle(cycle_num);
 
         // --- 1. 데이터 획득 ---
+        // 기한 + kSplitGraceMs 까지 기다리고, 모자라면 0 으로 채운다. cycle < 0 은 프리버퍼 구간이라 찰 때까지 기다린다.
         std::vector<uint8_t> raw_chunk;
+        size_t padded_bytes = 0;
+        size_t trimmed_bytes = 0;
         {
             std::unique_lock<std::mutex> lock(*buffer_mutex);
-            buffer_cv->wait(lock, [&] {
-                return buffer->size() >= bytes_per_interval || !(*is_streaming_flag) || user_interruption_flag;
-            });
+            auto ready = [&] {
+                return buffer->size() >= bytes_per_interval || !(*is_streaming_flag) || user_interruption_flag.load();
+            };
+            if (cycle_num < 0) {
+                buffer_cv->wait(lock, ready);
+            } else {
+                const auto grace_deadline = start_time + std::chrono::milliseconds(INTERVAL_MS * cycle_num + kSplitGraceMs);
+                buffer_cv->wait_until(lock, grace_deadline, ready);
+            }
 
             if (!(*is_streaming_flag) && buffer->empty()) {
                 break;
@@ -581,10 +619,45 @@ void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream) {
 
             size_t size_to_take = std::min(buffer->size(), bytes_per_interval);
             size_to_take -= size_to_take % (sizeof(sf::Int16) * channels);
-            if (size_to_take == 0) continue;
-
             raw_chunk.assign(buffer->begin(), buffer->begin() + size_to_take);
             buffer->erase(buffer->begin(), buffer->begin() + size_to_take);
+
+            // 유예까지도 모자람 → 0 채움 (스트림 종료 뒤 꼬리는 제외)
+            if (*is_streaming_flag && !user_interruption_flag && raw_chunk.size() < bytes_per_interval) {
+                padded_bytes = bytes_per_interval - raw_chunk.size();
+                raw_chunk.resize(bytes_per_interval, 0);
+            }
+
+            // 채운 만큼 되돌리기: 바닥(kSplitTrimFloorMs) 위의 앞쪽 0 샘플만 버린다
+            const size_t outstanding = total_padded_bytes - total_trimmed_bytes;
+            if (outstanding > 0 && *is_streaming_flag && buffer->size() > trim_floor_bytes) {
+                size_t limit = std::min(outstanding, buffer->size() - trim_floor_bytes);
+                limit -= limit % frame_bytes;
+                size_t zeros = 0;
+                while (zeros < limit && (*buffer)[zeros] == 0) ++zeros;
+                zeros -= zeros % frame_bytes;
+                if (zeros > 0) {
+                    buffer->erase(buffer->begin(), buffer->begin() + zeros);
+                    trimmed_bytes = zeros;
+                }
+            }
+            if (raw_chunk.empty()) continue;
+        }
+        if (trimmed_bytes > 0) {
+            total_trimmed_bytes += trimmed_bytes;
+            ++trim_events;
+            std::lock_guard<std::mutex> lock(cout_mutex);
+            std::cout << "[split] cycle " << cycle_num << ": trimmed " << trimmed_bytes / bytes_per_ms
+                      << " ms of leading silence (outstanding " << (total_padded_bytes - total_trimmed_bytes) / bytes_per_ms
+                      << " ms)" << std::endl;
+        }
+        if (padded_bytes > 0) {
+            total_padded_bytes += padded_bytes;
+            ++pad_events;
+            std::lock_guard<std::mutex> lock(cout_mutex);
+            std::cout << "[split] cycle " << cycle_num << ": buffer short, padded " << padded_bytes / bytes_per_ms
+                      << " ms with silence (total " << total_padded_bytes / bytes_per_ms << " ms, " << pad_events << " events)"
+                      << std::endl;
         }
 
         // --- 2. 데이터 가공 ---
@@ -617,6 +690,12 @@ void stream_and_split(const SF_INFO& sfinfo, CustomSoundStream& soundStream) {
     }
 
     // --- 4. 종료 처리 ---
+    if (pad_events > 0) {
+        std::lock_guard<std::mutex> lock(cout_mutex);
+        std::cout << "[split] stream done: padded " << total_padded_bytes / bytes_per_ms << " ms of silence in "
+                  << pad_events << " events, trimmed back " << total_trimmed_bytes / bytes_per_ms << " ms in " << trim_events
+                  << " events, player underrun silence " << soundStream.silenceInsertedMs() << " ms" << std::endl;
+    }
     audio_done_flag = true;
     audio_queue_cv.notify_one();
 }
@@ -1126,7 +1205,7 @@ void generate_motion(int channels, int samplerate) {
             // ============================================================
             // Head motion 생성
             // ============================================================
-            if (cfg_robot.generate_head_motion) {
+            if (cfg_robot.generate_head_motion && !stream_live) {
                 avg_grad = getSegmentAverageGrad(energy, "one2one", "abs");
                 segClass = assignClassWith1DMiddleBoundary(avg_grad, boundaries);
 
@@ -1270,6 +1349,10 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
             start_time = std::chrono::high_resolution_clock::now();
 
             soundStream.play(); // 첫 사이클에서 오디오 재생
+            if (!g_motion_log_dir.empty()) {
+                g_audio_sync_log.open(g_motion_log_dir + "/audio_sync_" + sanitize_filename(mode_label) + ".csv");
+                g_audio_sync_log << "elapsed_ms,cycle,tick,expected_ms,playing_ms,silence_ms\n";
+            }
             // Python에 playback_started 이벤트 전송
             send_to_python({{"type", "playback_started"}});
             {
@@ -1366,6 +1449,13 @@ void control_motor(CustomSoundStream& soundStream, std::string mode_label) {
             // 로깅
             double DXL_goal_rpy[4] = {roll, pitch, yaw, mouth};
             motion_logger.log(mode_label, DXL_goal_rpy, target_position, current_state);
+            if (g_audio_sync_log.is_open()) {
+                // expected = 이 틱이 가정하는 오디오 위치, 소리 내용 위치 = playing − silence
+                const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::high_resolution_clock::now() - start_time).count();
+                g_audio_sync_log << now_ms << ',' << cycle_num << ',' << i << ',' << (cycle_num * INTERVAL_MS + i * 40) << ','
+                                 << soundStream.getPlayingOffset().asMilliseconds() << ',' << soundStream.silenceInsertedMs() << '\n';
+            }
 
             if (has_log_meta) {
                 if (g_target_pos4_baseline == std::numeric_limits<int>::min()) {
@@ -2576,6 +2666,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
     std::string log_dir = create_log_directory();
     auto log_start_time = std::chrono::high_resolution_clock::now();
     motion_logger.start(log_start_time, log_dir);
+    g_motion_log_dir = log_dir;
     if (tuning_logger) tuning_logger->start(log_start_time, log_dir);
     #endif
 
@@ -2687,13 +2778,22 @@ void robot_main_loop(std::future<void> server_ready_future) {
         }
         else { // responses 스트리밍
             const size_t bytes_per_interval = sfinfo.samplerate * sfinfo.channels * sizeof(sf::Int16) * INTERVAL_MS / 1000;
+            // live: 두 덩이 + 시작 여유가 찰 때까지 대기
+            const size_t bytes_per_ms = sfinfo.samplerate * sfinfo.channels * sizeof(sf::Int16) / 1000;
+            const size_t bytes_to_start = stream_live
+                ? bytes_per_interval * kLivePrebufferCycles + bytes_per_ms * kLiveStartSlackMs
+                : bytes_per_interval;
 
             // Responses 처리
             if (!user_interruption_flag) {
                 // audio 데이터가 들어올 때까지 대기
                 {
                     std::unique_lock<std::mutex> lock(responses_stream_buffer_mutex);
-                    responses_stream_buffer_cv.wait(lock, [&]{ return responses_stream_buffer.size() >= bytes_per_interval || !is_responses_streaming || user_interruption_flag; });
+                    responses_stream_buffer_cv.wait(lock, [&]{ return responses_stream_buffer.size() >= bytes_to_start || !is_responses_streaming || user_interruption_flag; });
+                }
+                if (stream_live) {
+                    std::cout << "[MainLoop] live stream: prebuffered " << kLivePrebufferCycles << " cycles + " << kLiveStartSlackMs
+                              << " ms slack, head motion = idle" << std::endl;
                 }
 
                 if (!responses_stream_buffer.empty() && !user_interruption_flag) {
@@ -2724,6 +2824,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
         send_to_python({{"type", "playback_complete"}});
 
         // 리소스 정리
+        if (g_audio_sync_log.is_open()) g_audio_sync_log.close();
         soundStream.stop();
         soundStream.clearBuffer();
         clear_queues();
@@ -2818,6 +2919,7 @@ int main(int argc, char* argv[]) {
         std::string log_dir = create_log_directory();
         auto log_start_time = std::chrono::high_resolution_clock::now();
         motion_logger.start(log_start_time, log_dir);
+        g_motion_log_dir = log_dir;
         #ifdef MOTOR_ENABLED
         if (tuning_logger) tuning_logger->start(log_start_time, log_dir);
         #endif
@@ -2848,6 +2950,7 @@ int main(int argc, char* argv[]) {
         std::string log_dir = create_log_directory();
         auto log_start_time = std::chrono::high_resolution_clock::now();
         motion_logger.start(log_start_time, log_dir);
+        g_motion_log_dir = log_dir;
         #ifdef MOTOR_ENABLED
         if (tuning_logger) tuning_logger->start(log_start_time, log_dir);
         #endif
@@ -2941,6 +3044,7 @@ int main(int argc, char* argv[]) {
                     // stream_start, play_file, play_music, play_audio_csv → 메인 루프가 처리
                     if (type == "stream_start" || type == "play_file" || type == "play_music" || type == "play_audio_csv") {
                         user_interruption_flag = false;
+                        stream_live = false;  // play_file/music 등은 기존 동작
                         if (type == "stream_start") {
                             // 이전 버퍼 강제 비움 (stale 청크 방어)
                             {
@@ -2948,6 +3052,7 @@ int main(int argc, char* argv[]) {
                                 responses_stream_buffer.clear();
                             }
                             is_responses_streaming = true;
+                            stream_live = response.value("live", false);
                         }
                     }
                     std::lock_guard<std::mutex> lock(server_message_queue_mutex);

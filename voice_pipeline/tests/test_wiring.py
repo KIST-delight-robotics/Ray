@@ -28,8 +28,9 @@ _SESSION_CLASSES = [
 ]
 
 
-def _make_components() -> ProcessComponents:
+def _make_components(engine: str = "cascade") -> ProcessComponents:
     return ProcessComponents(
+        engine=engine,  # type: ignore[arg-type]
         language_code="en-US",
         asr=MagicMock(),
         llm=MagicMock(),
@@ -166,3 +167,42 @@ class TestCreateSession:
 
         first_summarizer.close.assert_called_once()
         assert len(comps._prev_summarizers) == 1
+
+
+class TestCreateSessionLiveEngine:
+    """engine="live" 는 GPT-Live 세션 루프를 만들고 cascade 전용 컴포넌트를 건드리지 않는다."""
+
+    def test_returns_live_session_loop(self, monkeypatch):
+        live_cls = MagicMock(name="GPTLiveSession")
+        loop_cls = MagicMock(name="LiveSessionLoop")
+        monkeypatch.setattr(wiring, "GPTLiveSession", live_cls)
+        monkeypatch.setattr(wiring, "LiveSessionLoop", loop_cls)
+        monkeypatch.setattr(wiring, "ConversationHistory", MagicMock(name="ConversationHistory"))
+        comps = _make_components(engine="live")
+        comps.vap = None
+        comps.turngpt = None
+        comps.asr = None
+
+        result = comps.create_session(tool_handlers={"x": lambda a: a})
+
+        assert result.session_loop is loop_cls.return_value
+        live_cls.assert_called_once()
+        config = live_cls.call_args.args[0]
+        assert config.backend_model == wiring._LIVE_BACKEND_MODEL
+        assert config.sample_rate == 24000
+        assert any(t["name"] == "end_conversation" for t in config.tools)
+        kwargs = loop_cls.call_args.kwargs
+        assert kwargs["live"] is live_cls.return_value
+        assert kwargs["session_id"] == result.session_id
+        assert kwargs["tool_handlers"] == {"x": kwargs["tool_handlers"]["x"]}
+
+    def test_memory_disabled_passes_none_storage(self, monkeypatch):
+        monkeypatch.setattr(wiring, "GPTLiveSession", MagicMock())
+        loop_cls = MagicMock(name="LiveSessionLoop")
+        monkeypatch.setattr(wiring, "LiveSessionLoop", loop_cls)
+        monkeypatch.setattr(wiring, "ConversationHistory", MagicMock())
+        comps = _make_components(engine="live")
+
+        comps.create_session(memory_enabled=False)
+
+        assert loop_cls.call_args.kwargs["memory_storage"] is None

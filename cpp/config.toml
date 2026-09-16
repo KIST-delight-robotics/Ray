@@ -60,7 +60,7 @@ calib_tension_g           = 0.05   # 텐션 판정 문턱, roll·pitch 공용 (0
 
 
 # motion generation
-generate_head_motion = true        # 헤드 모션 온라인 생성 여부
+generate_head_motion = true        # 헤드 모션 온라인 생성 여부. GPT-Live 스트림(stream_start live=true)은 이 값과 무관하게 대기 모션 유지
 wait_mode_rpy_ratio = 3.0           # 대기모드에서 최종 roll, pitch, yaw 값에 곱해지는 비율
 control_motor_rpy_ratio = 3.0       # 온라인 생성 시 최종 roll, pitch, yaw 값에 곱해지는 비율
 
@@ -105,4 +105,4 @@ default_roll_r  = 750
 default_roll_l  = 2700
 default_yaw     = 2560
 default_mouth   = 940
-calib_ax_offset = 0.036   # 육안 수평일 때의 Ax(g). unit4 값을 시험 적용해 정면에서 수평 확인 (2026-09-07)
+calib_ax_offset = 0.02

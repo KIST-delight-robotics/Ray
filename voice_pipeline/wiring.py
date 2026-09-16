@@ -27,6 +27,7 @@ from voice_pipeline.adapters.asr_google import GoogleCloudASR
 from voice_pipeline.adapters.audio_input import AudioInput
 from voice_pipeline.adapters.cpp_bridge import CppBridge
 from voice_pipeline.adapters.embedder import create_embedder
+from voice_pipeline.adapters.gpt_live import GPTLiveSession, LiveSessionConfig
 from voice_pipeline.adapters.led import LEDController
 from voice_pipeline.adapters.llm_openai import OpenAILLM
 from voice_pipeline.adapters.token_counter import TokenCounter, create_token_counter
@@ -36,12 +37,26 @@ from voice_pipeline.adapters.turngpt import ThreadedTurnGPT, TurnGPTWrapper
 from voice_pipeline.adapters.vap import MaAIVAPModel, ThreadedVAP
 from voice_pipeline.generator import SpeechGenerator
 from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
+from voice_pipeline.live_session import (
+    DEFAULT_BACKEND_INSTRUCTIONS,
+    DEFAULT_LIVE_INSTRUCTIONS,
+    DEFAULT_TOOLS,
+    LIVE_VOICE,
+    LiveSessionLoop,
+)
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.prompt import DEFAULT_SYSTEM_PROMPT, HistorySummarizer
 from voice_pipeline.session_loop import SessionComponents, SessionLoop
-from voice_pipeline.settings import DEFAULT_DB_PATH, HISTORY_TOKEN_BUDGET, SAMPLE_RATE, SUMMARY_MAX_TOKENS
+from voice_pipeline.settings import (
+    BRIDGE_SAMPLE_RATE,
+    DEFAULT_DB_PATH,
+    ENGINE,
+    HISTORY_TOKEN_BUDGET,
+    SAMPLE_RATE,
+    SUMMARY_MAX_TOKENS,
+)
 from voice_pipeline.text_session import TextSession
 from voice_pipeline.trace import OpenAIRetryHandler, SQLiteCallStore, SQLiteTraceStore, TrackedEmbedder, TrackedTTS
 from voice_pipeline.turn_detector import TurnDetector
@@ -52,6 +67,9 @@ logger = logging.getLogger("voice_pipeline.wiring")
 _AUDIO_QUEUE_SIZE = 300
 _VAD_INFER_INTERVAL = 3  # 3프레임(90ms)마다 추론, 사이는 캐시 반환
 _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
+_LIVE_BACKEND_MODEL = "gpt-5.4-mini"  # GPT-Live responses 위임 백엔드 (검색·함수 툴 실행 주체)
+
+Engine = Literal["cascade", "live"]
 
 
 @dataclass
@@ -62,15 +80,16 @@ class ProcessComponents:
     수명 관리(start/stop/close)는 엔트리포인트 책임 — 이 클래스는 조립만 담당한다.
     """
 
+    engine: Engine
     language_code: str
-    asr: GoogleCloudASR
+    asr: GoogleCloudASR | None  # live 엔진에서는 None (ASR 은 모델에 내장)
     llm: OpenAILLM
     summary_llm: OpenAILLM
     raw_tts: ITTS
     tts: TrackedTTS
-    vap: ThreadedVAP
-    turngpt: TurnGPTWrapper
-    silero_vad_model: Any
+    vap: ThreadedVAP | None  # live 엔진에서는 None (턴 감지 모델 미로드)
+    turngpt: TurnGPTWrapper | None
+    silero_vad_model: Any  # 웨이크워드가 쓰므로 두 엔진 모두 로드
     vad_fn: Callable[[AudioFrame], float]
     reset_vad: Callable[[], None]
     bridge: CppBridge
@@ -104,19 +123,50 @@ class ProcessComponents:
     def create_session(self, *, memory_enabled: bool = True, **session_loop_kwargs: Any) -> SessionComponents:
         """Assemble a fresh per-session component graph.
 
+        ``engine`` 에 따라 :class:`SessionLoop`(cascade) 또는 :class:`LiveSessionLoop`(live) 를 만든다.
+
         Args:
             memory_enabled: False면 memory storage/retriever 없이 조립.
-            **session_loop_kwargs: :class:`SessionLoop` 생성자로 그대로 전달되는
-                선택 인자 (``on_turn_shift`` 등 콜백, ``disable_exit_keywords``,
-                ``skip_generation``, ``record_path`` 등).
+            **session_loop_kwargs: 세션 루프 생성자로 그대로 전달되는 선택 인자
+                (cascade: ``on_turn_shift`` 등 콜백, ``disable_exit_keywords``, ``skip_generation``,
+                ``record_path`` 등 / live: ``tool_handlers``).
 
         Returns:
-            SessionLoop과 세션 단위 컴포넌트를 담은 :class:`SessionComponents`.
+            세션 루프와 세션 단위 컴포넌트를 담은 :class:`SessionComponents`.
         """
         self.stop_threaded()
 
         session_id = str(uuid.uuid4())
         trace.set_session(session_id)  # 이후 호출/턴 기록에 이 세션 ID가 찍힌다
+        history = ConversationHistory(self.storage, self.token_counter)
+        memory_storage = self.memory_storage if memory_enabled else None
+
+        if self.engine == "live":
+            live = GPTLiveSession(
+                LiveSessionConfig(
+                    instructions=DEFAULT_LIVE_INSTRUCTIONS,
+                    backend_model=_LIVE_BACKEND_MODEL,
+                    backend_instructions=DEFAULT_BACKEND_INSTRUCTIONS,
+                    tools=DEFAULT_TOOLS,
+                    voice=LIVE_VOICE,
+                    sample_rate=BRIDGE_SAMPLE_RATE,
+                )
+            )
+            live_loop = LiveSessionLoop(
+                live=live,
+                cpp_bridge=self.bridge,
+                history=history,
+                led=self.led,
+                audio_queue=self.audio_queue,
+                memory_storage=memory_storage,
+                session_id=session_id,
+                token_counter=self.token_counter,
+                shutdown_event=self.shutdown_event,
+                **session_loop_kwargs,
+            )
+            return SessionComponents(session_loop=live_loop, history=history, session_id=session_id)
+
+        assert self.asr is not None and self.vap is not None and self.turngpt is not None
         # VAP 스레드는 프로세스 수명 — 세션마다 재생성 대신 reset().
         self.vap.reset()
         self.turngpt.reset()
@@ -125,8 +175,6 @@ class ProcessComponents:
         threaded_turngpt = ThreadedTurnGPT(self.turngpt)
         self._prev_threaded.append(threaded_turngpt)
 
-        history = ConversationHistory(self.storage, self.token_counter)
-        memory_storage = self.memory_storage if memory_enabled else None
         retriever = MemoryRetriever(self.memory_storage, self.vector_index, self.embedder) if memory_enabled else None
         turn_detector = TurnDetector(
             self.vap,
@@ -207,6 +255,7 @@ def build_components(
     db_path: str = DEFAULT_DB_PATH,
     led_enabled: bool | None = None,
     language_code: str = "en-US",
+    engine: Engine = ENGINE,
 ) -> ProcessComponents:
     """Build the process-level component graph shared by all sessions.
 
@@ -215,13 +264,14 @@ def build_components(
             eval은 런별 격리 DB 경로를 전달한다.
         led_enabled: LED 하드웨어 구동 여부. ``None``이면 ``LED_ENABLED`` env로
             결정 (프로덕션 기본). eval은 ``False``를 전달한다.
-        language_code: ASR 언어 코드.
+        language_code: ASR 언어 코드 (cascade 엔진과 웨이크워드).
+        engine: 대화 엔진. ``live`` 면 ASR·VAP·TurnGPT 를 만들지 않는다 (settings.ENGINE 기본).
 
     Returns:
         조립된 :class:`ProcessComponents`. ``audio_input.start()``/``bridge.connect()``
         등 수명 시작은 호출자가 수행한다.
     """
-    asr = GoogleCloudASR(language_code=language_code)
+    asr = GoogleCloudASR(language_code=language_code) if engine == "cascade" else None
     llm = OpenAILLM(
         model="gpt-5.4-mini", temperature=0.7, reasoning_effort="none", max_tokens=256, tools=["web_search"]
     )
@@ -234,7 +284,7 @@ def build_components(
         tools=[],
     )
     raw_tts = create_tts()
-    turngpt = TurnGPTWrapper()
+    turngpt = TurnGPTWrapper() if engine == "cascade" else None
     bridge = CppBridge()
 
     silero_vad_model = load_silero_vad(onnx=True)
@@ -275,7 +325,7 @@ def build_components(
     trace.install(SQLiteCallStore(db_path), SQLiteTraceStore(db_path))
     # VAP runs its own inference thread for the process lifetime; sessions
     # rebind it via reset() rather than recreating it (model load + warmup is expensive).
-    vap = ThreadedVAP(MaAIVAPModel(raw_tts.output_sample_rate))
+    vap = ThreadedVAP(MaAIVAPModel(raw_tts.output_sample_rate)) if engine == "cascade" else None
     retry_handler = OpenAIRetryHandler()
     logging.getLogger("openai._base_client").addHandler(retry_handler)
     tts = TrackedTTS(raw_tts)
@@ -292,6 +342,7 @@ def build_components(
     audio_input = AudioInput(audio_queue)
 
     return ProcessComponents(
+        engine=engine,
         language_code=language_code,
         asr=asr,
         llm=llm,

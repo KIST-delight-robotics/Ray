@@ -39,8 +39,11 @@ class WakewordDetector:
            IDLE → SPEECH → TRAILING → IDLE transitions.
         3. When speech ends (trailing silence exceeds ``_SPEECH_PAD_MS``), accumulated
            PCM is sent to Google STT ``recognize()`` (non-streaming, synchronous).
-        4. All transcript alternatives are checked for keyword matches using
-           word-boundary regex.
+        4. All transcript alternatives are checked for keyword matches — Latin keywords
+           with word-boundary regex (``ray`` ≠ ``array``), Hangul keywords as substrings (``레이야``).
+
+    Language:
+        ``language_code`` 주 언어 + ``_ALTERNATIVE_LANGUAGE_CODES`` 대안 언어로 한·영 발화를 모두 인식한다.
 
     Error handling:
         - Initialization failures (model load, client creation) raise ``RuntimeError``.
@@ -54,8 +57,8 @@ class WakewordDetector:
         language_code: Google STT BCP-47 언어 코드.
     """
 
-    # Wakeword 키워드
-    _KEYWORDS: tuple[str, ...] = ("ray",)  # 감지할 트리거 단어 목록
+    _KEYWORDS: tuple[str, ...] = ("ray", "레이")  # 감지할 트리거 단어. 한글은 부분 문자열, 영문은 단어 경계 매칭
+    _ALTERNATIVE_LANGUAGE_CODES: tuple[str, ...] = ("ko-KR", "en-US")  # 주 언어와 함께 인식. 주 언어는 제외해 보냄
 
     # Silero VAD 모델 입력 규격
     _VAD_CHUNK_SAMPLES = 512  # VAD 입력 청크 샘플 수
@@ -72,7 +75,7 @@ class WakewordDetector:
 
     def __init__(
         self,
-        language_code: str = "en-US",
+        language_code: str = "ko-KR",  # 주 언어. en-US 주로 두면 "레이"를 "네이"로 듣는다
         vad_model: object | None = None,
     ) -> None:
         self.language_code = language_code
@@ -101,13 +104,14 @@ class WakewordDetector:
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=SAMPLE_RATE,
             language_code=language_code,
+            alternative_language_codes=[c for c in self._ALTERNATIVE_LANGUAGE_CODES if c != language_code],
             audio_channel_count=CHANNELS,
             max_alternatives=self._MAX_ALTERNATIVES,
             speech_contexts=[speech.SpeechContext(phrases=list(self._KEYWORDS))],
         )
 
         # Pre-compile keyword patterns
-        self._keyword_patterns = [re.compile(rf"\b{re.escape(kw)}\b", re.IGNORECASE) for kw in self._KEYWORDS]
+        self._keyword_patterns = [self._compile_keyword(kw) for kw in self._KEYWORDS]
 
         # Bytes per second for duration calculations (accounts for channels + sample width)
         self._bytes_per_sec = SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS
@@ -287,6 +291,13 @@ class WakewordDetector:
             self._vad_model.reset_states()
         except Exception:
             logger.warning("VAD reset_states failed", exc_info=True)
+
+    @staticmethod
+    def _compile_keyword(keyword: str) -> re.Pattern[str]:
+        """한글이 들어간 키워드는 부분 문자열, 그 외는 단어 경계로 매칭하는 패턴."""
+        if re.search(r"[가-힣]", keyword):
+            return re.compile(re.escape(keyword))
+        return re.compile(rf"\b{re.escape(keyword)}\b", re.IGNORECASE)
 
     @staticmethod
     def _bytes_to_tensor(pcm_bytes: bytes) -> torch.Tensor:

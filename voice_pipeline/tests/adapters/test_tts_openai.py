@@ -421,3 +421,16 @@ class TestClientConfig:
         assert call_kwargs["model"] == "tts-1-hd"
         assert call_kwargs["voice"] == "nova"
         assert call_kwargs["speed"] == 1.5
+
+
+class TestConstructorOverrides:
+    def test_voice_and_model_override_reflected_in_voice_id(self) -> None:
+        with patch("voice_pipeline.adapters.tts_openai.openai.OpenAI"):
+            tts = OpenAITTS(voice="marin", model="gpt-4o-mini-tts")
+        assert tts.voice_id.startswith("openai|marin|gpt-4o-mini-tts|")
+        assert tts.model_name == "gpt-4o-mini-tts"
+
+    def test_defaults_keep_class_values(self) -> None:
+        with patch("voice_pipeline.adapters.tts_openai.openai.OpenAI"):
+            tts = OpenAITTS()
+        assert tts.voice_id.startswith(f"openai|{OpenAITTS._VOICE}|{OpenAITTS._MODEL}|")

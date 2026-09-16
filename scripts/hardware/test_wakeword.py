@@ -31,7 +31,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Test wakeword detection with mic")
     parser.add_argument("--device", type=int, default=None, help="PyAudio device index")
     parser.add_argument("--keyword", type=str, default="ray", help="Wakeword to detect")
-    parser.add_argument("--language", type=str, default="en-US", help="STT language code")
+    parser.add_argument("--language", type=str, default="ko-KR", help="STT 주 언어 코드")
     args = parser.parse_args()
 
     if args.device is not None:

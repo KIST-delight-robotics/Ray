@@ -231,3 +231,14 @@ class TestEnsureGreetingAudio:
         assert Path(paths.greeting).exists()
         assert paths.greeting != greeting_audio_module._FALLBACK_GREETING_PATH
         assert paths.farewell == greeting_audio_module._FALLBACK_FAREWELL_PATH
+
+
+class TestTextOverride:
+    def test_greeting_text_override_changes_cache_key(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
+        tts = _make_tts_mock()
+        default_paths = ensure_greeting_audio(tts)
+        korean_paths = ensure_greeting_audio(tts, greeting_text="네, 부르셨어요?")
+        assert korean_paths.greeting != default_paths.greeting
+        assert korean_paths.greeting.endswith(f"greeting_{_cache_key(tts, '네, 부르셨어요?')}.wav")
+        assert korean_paths.farewell == default_paths.farewell  # 작별은 기본 문구 그대로

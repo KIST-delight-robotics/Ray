@@ -35,8 +35,10 @@ from voice_pipeline import trace
 from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEventType
 from voice_pipeline.adapters.led import LEDState
 from voice_pipeline.adapters.llm_openai import OpenAILLM
+from voice_pipeline.adapters.tts_openai import OpenAITTS
 from voice_pipeline.adapters.wakeword import WakewordDetector
 from voice_pipeline.greeting_audio import ensure_greeting_audio
+from voice_pipeline.live_session import LIVE_GREETING_TEXT, LIVE_GREETING_TTS_MODEL, LIVE_VOICE
 from voice_pipeline.memory.writer import MemoryWriter
 from voice_pipeline.types import AudioFrame
 from voice_pipeline.wiring import build_components
@@ -59,7 +61,13 @@ _LOG_FORMAT = "%(asctime)s %(name)-40s %(levelname)-7s %(message)s"
 # 콘솔에 INFO를 그대로 내보낼 "대화 서사" 로거 (정확히 일치해야 통과).
 # 모드 전환(voice_pipeline), 대화 흐름(session_loop: ASR/LLM/INTERRUPT 등),
 # SLEEP 중 청취 피드백(wakeword: STT result)만 — 나머지 모듈의 INFO/DEBUG는 파일에만 남는다.
-_CONSOLE_NARRATIVE = {"voice_pipeline", "voice_pipeline.session_loop", "voice_pipeline.wakeword"}
+_CONSOLE_NARRATIVE = {
+    "voice_pipeline",
+    "voice_pipeline.session_loop",
+    "voice_pipeline.live_session",
+    "voice_pipeline.gpt_live",
+    "voice_pipeline.wakeword",
+}
 
 _GREETING_TIMEOUT_SEC = 10.0
 _FAREWELL_TIMEOUT_SEC = 10.0
@@ -188,7 +196,7 @@ def main() -> None:
     shutdown_event = components.shutdown_event
 
     # --- Production-only pieces: wakeword, memory writer, greeting audio ---
-    wakeword = WakewordDetector(language_code=components.language_code, vad_model=components.silero_vad_model)
+    wakeword = WakewordDetector(vad_model=components.silero_vad_model)
     write_llm = OpenAILLM(model="gpt-4o-mini", temperature=0.0, reasoning_effort=None, max_tokens=4096, tools=[])
     memory_writer = MemoryWriter(
         components.memory_storage,
@@ -198,7 +206,12 @@ def main() -> None:
         components.token_counter,
     )
     write_executor = ThreadPoolExecutor(max_workers=1)
-    greeting_paths = ensure_greeting_audio(components.tts)
+    if components.engine == "live":
+        # 인사 WAV 를 Live 세션 목소리로 만들어 인사 → 모델 발화 사이 목소리가 바뀌지 않게 한다
+        greeting_tts = OpenAITTS(voice=LIVE_VOICE, model=LIVE_GREETING_TTS_MODEL)
+        greeting_paths = ensure_greeting_audio(greeting_tts, greeting_text=LIVE_GREETING_TEXT)
+    else:
+        greeting_paths = ensure_greeting_audio(components.tts)
 
     # --- Signal handling ---
     def _handle_signal(*_: object) -> None:
@@ -299,12 +312,13 @@ def main() -> None:
 
             # ---- FAREWELL ----
             elif mode == SystemMode.FAREWELL:
-                _flush_bridge_events(bridge)
-
-                try:
-                    bridge.send_play_file(greeting_paths.farewell)
-                except Exception:
-                    logger.warning("Failed to send farewell", exc_info=True)
+                # live 엔진은 모델이 직접 작별 인사를 함 - WAV 재생 불필요
+                if components.engine == "cascade":
+                    _flush_bridge_events(bridge)
+                    try:
+                        bridge.send_play_file(greeting_paths.farewell)
+                    except Exception:
+                        logger.warning("Failed to send farewell", exc_info=True)
 
                 _wait_playback(bridge, shutdown_event, _FAREWELL_TIMEOUT_SEC)
 
@@ -344,10 +358,12 @@ def main() -> None:
         audio_input.stop()
         bridge.disconnect()
         components.stop_threaded()
-        components.vap.stop()
+        if components.vap is not None:  # live 엔진은 VAP/ASR 을 만들지 않는다
+            components.vap.stop()
         write_executor.shutdown(wait=True)
         components.executor.shutdown(wait=True)
-        components.asr.stop()
+        if components.asr is not None:
+            components.asr.stop()
         wakeword.close()
         led.close()
         components.memory_storage.close()
