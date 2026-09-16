@@ -37,6 +37,9 @@
   - 유실은 **무음 구간에 집중**: 유선·전부 무음 세션 97.3%(단일 프레임 누락 약 36회, 도착 간격 200 ms로 드러남), 유선·90% 말소리 세션 99.8%(167초 지점에서 400 ms 한 번, 도착 간격엔 흔적 없음 — 말소리 유실은 클라이언트가 감지·복구할 수 없고 문장 중간이면 들린다).
   - Wi-Fi 세션(9/14~15, 7회)은 96~98.5%. 유선 대비 추가 손실은 정지와 상관.
   - 사이드밴드 WS의 반사 오디오 타임스탬프로 확인하는 방법은 **불가** — 서버 제어 가이드에 사이드밴드는 WebRTC·SIP 세션 전용("If your backend already owns the primary WebSocket connection, it already receives the session's events"), attach 시 404. 같은 가이드에 "Reflected output ranges can have gaps for dropped frames"로 프레임 드롭이 명시돼 있다.
+- **모델은 재촉 없으면 사용자가 말할 때까지 침묵한다** (run1: 180 s 무음, 전사 0). `commentary.append` 재촉 시 0.9 s 만에 인사(run2). 프로덕션 코드에는 재촉이 없어 현재 흐름은 WAV 인사 → 연결 → 사용자 발화 대기. 세션 시작 직후 0.2 s의 미세 잡음(진폭 ≤50)이 있어 말소리 판정은 rms ≥ 30 기준(2026-09-16 수정 전에는 "Model started speaking"이 이 잡음에 찍혔다).
+- 호출어 감지 → 마이크 전송 시작까지 **4.6~6.2 s**였다: 인사 WAV 2.07 s + GPT-Live 연결 2.0~4.1 s가 직렬. → **겹치기 구현(2026-09-16, 실기기 검증 전)**: `__main__`이 WAV 재생을 보낸 뒤 live 엔진은 기다리지 않고 바로 세션을 만들고, `LiveSessionLoop(wait_for_playback_complete=True)`가 연결 즉시 마이크를 보내며 WAV의 `playback_complete`를 받은 뒤 `stream_start`(그 전 출력 조각은 버림, 10 s 폴백). 예상 2.0~4.1 s.
+- **LED 매칭**: 바(IDLE)는 "마이크가 세션으로 흐르는 구간"과 일치시킨다 — 켜기·끄기는 세션 루프 소유. live: 연결 직후 IDLE, 종료 시퀀스(입력 mute) 진입 시 SLEEPING. cascade: `asr.start()` 뒤 IDLE, 세션 루프 종료 시 SLEEPING(작별 WAV는 링 호흡 상태). `__main__`의 GREETING IDLE 점등은 제거(WAV·연결 중 4~6 s 먼저 켜지던 문제).
 - 네트워크 정지(조각 간격 > 250 ms)는 **Wi-Fi에서만** 관측(약 10초에 1회, 300~500 ms 흔함, 1.1 s도). 유선 3세션(각 3분)은 최대 214~363 ms, 정지 뒤 몰림 없음. 정지 뒤 몰려와도 총량은 완전히 회복되지 않는다(정지 창 도착률 90~94%). wlan0 링크는 −61 dBm, 19.5 Mbit/s로 낮은 속도에 머물러 있었다.
 - C++ 재생부는 큐가 비면 `onGetData`가 100 ms 무음을 스스로 낸다(데이터 소비 없이). 모션부(`control_motor`)는 절대 시계라 데이터가 없으면 기다렸다 몰아친다.
 - 위임·종료·전사·주입 동작은 FINDINGS.md 참고. 웨이크워드는 정상(끊김의 원인 아님). GNOME 소리 설정을 열어 두면 PipeWire가 마이크를 점유해 `No input device matching 'respeaker'`가 난다.
@@ -103,6 +106,7 @@ uv run ray
 ## 6. 남은 항목
 
 - [x] §4.4 2차 실기기 검증(S=200, Wi-Fi 368 s) → S=400 채택. 유선 프리셋(100~200) 전환 방법은 미정
+- [ ] 호출어 → 청취 시작 겹치기 + LED 매칭 실기기 검증: 감지 → `LiveSessionLoop started` 2.0~4.1 s, 바 LED 가 연결 시점에 켜지고 종료 시퀀스에서 꺼지는지, WAV 끝 → `stream_start` 전환이 매끄러운지
 - [ ] 지연 없이 여유 늘리기: `onGetData` 선취 80→40 ms + G 450→560 실험 (`[Sound] underrun` 로그로 확인)
 - [ ] 파이썬 채우기 밴드 축소(목표 +0.1, 말 중 문턱 −0.15) — 긴 발화 사용이 있으면
 - [ ] 종료 시 `audio_end`를 "출력 무음 1 s" 판정 직후 보내기(지금은 close 뒤라 C++가 끝에 1.3 s 채움, SLEEP 전환 지연)

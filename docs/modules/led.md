@@ -7,8 +7,8 @@ Visual feedback controller for the voice pipeline. Drives 24 WS2812 LEDs (8 bar 
 | State | Animation | Description |
 |-------|-----------|-------------|
 | `OFF` | All black | Controller closed / inactive |
-| `SLEEPING` | Breathing (ring only) | Sleep mode, bar LEDs off, ring fades in/out |
-| `IDLE` | Static base color | Active session default |
+| `SLEEPING` | Breathing (ring only) | Bar off. Sleep, greeting/farewell WAV playback, live connect wait, live ending sequence (input muted) |
+| `IDLE` | Static base color | Conversation possible — mic is flowing to the session (cascade: after greeting WAV + ASR start; live: from GPT-Live connect). Set by the session loop, not by the mode loop |
 
 Base color: `(233, 233, 50)`.
 

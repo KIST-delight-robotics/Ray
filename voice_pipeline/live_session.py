@@ -139,6 +139,7 @@ class LiveSessionLoop:
     _END_MIN_WAIT_SEC = 2.0  # 종료 결정 후 모델이 작별 인사를 시작할 여유
     _END_SILENCE_SEC = 1.0  # 출력 무음이 이만큼 이어지면 마지막 발화가 끝난 것으로 봄
     _END_MAX_WAIT_SEC = 8.0  # 무음이 안 와도 종료하는 상한
+    _STREAM_START_MAX_WAIT_SEC = 10.0  # 인사 WAV 의 playback_complete 가 안 와도 이 시간 뒤엔 stream_start
     _LEAD_LOG_INTERVAL_SEC = 15.0  # 오디오 전송 상태(추정 밀림, 조각 도착 간격) DEBUG 로그 주기
     _GAP_EVENT_SEC = 0.3  # 조각 도착 간격이 이 이상이면 정지 이벤트로 INFO 로그 (C++ [split] 로그와 대조용)
     # 서버 출력은 실시간보다 1~3% 짧게 온다 — 주로 무음 프레임이 빠지고, 늦게라도 오지 않는다
@@ -172,13 +173,16 @@ class LiveSessionLoop:
         tool_handlers: dict[str, ToolHandler] | None = None,
         input_sample_rate: int = SAMPLE_RATE,
         live_sample_rate: int = BRIDGE_SAMPLE_RATE,
+        wait_for_playback_complete: bool = False,
     ) -> None:
         """
         Args:
             live: 시작 전 상태의 GPT-Live 세션. run() 이 start()/close() 를 부른다.
             cpp_bridge: 연결된 C++ 브리지.
             history: 세션 히스토리. 확정된 전사 세그먼트를 user/assistant 메시지로 넣는다.
-            led: LED 컨트롤러. 세션 시작 시 IDLE.
+            led: LED 컨트롤러. 연결되어 마이크가 흐르기 시작하면 IDLE, 입력을 막는 종료 시퀀스부터 SLEEPING.
+            wait_for_playback_complete: True 면 브리지가 재생 중인 파일(인사 WAV)의 playback_complete 를 받은 뒤
+                stream_start 를 보낸다. 그 전에도 연결·마이크 전송은 하고, 출력 조각은 버린다(모델은 재촉 없으면 침묵).
             audio_queue: AudioInput 이 채우는 마이크 프레임 큐 (input_sample_rate, mono 16-bit).
             memory_storage: 있으면 utterances 를 저장해 MemoryWriter 입력으로 남긴다.
             tool_handlers: 백엔드 함수 툴 이름 → 실행기. ``end_conversation`` 은 내장.
@@ -197,6 +201,10 @@ class LiveSessionLoop:
         self._tool_handlers.setdefault(END_CONVERSATION_TOOL, lambda _args: json.dumps({"status": "ending"}))
         self._in_rate = input_sample_rate
         self._live_rate = live_sample_rate
+        self._wait_for_playback_complete = wait_for_playback_complete
+        self._stream_start_pending = False
+        self._stream_start_deadline = 0.0
+        self._discarded_before_stream_sec = 0.0
 
         self._stop_event = threading.Event()
         self._phase = Phase.ACTIVE
@@ -258,17 +266,30 @@ class LiveSessionLoop:
         remain_min = (started.expires_at - time.time()) / 60.0
         elapsed = time.monotonic() - t0
         logger.info("GPT-Live connected in %.1fs: %s (expires in %.0f min)", elapsed, started.session_id, remain_min)
-
-        # 세션 전체를 스트림 하나로. live 표시: C++ 가 두 덩이를 모은 뒤 시작하고 헤드모션은 대기 모션 유지.
-        self._bridge.send_stream_start(live=True)
-        self._stream_open = True
-        self._led.set_state(LEDState.IDLE)
+        self._led.set_state(LEDState.IDLE)  # 마이크가 세션으로 흐르기 시작 = 대화 가능
 
         now = time.monotonic()
         self._last_frame_time = now
         self._last_transcript_time = now
         self._last_lead_log_time = now
-        logger.info("LiveSessionLoop started (stream_start sent, live)")
+        if self._wait_for_playback_complete:
+            self._stream_start_pending = True
+            self._stream_start_deadline = now + self._STREAM_START_MAX_WAIT_SEC
+            logger.info("LiveSessionLoop started (listening; stream_start after greeting playback)")
+        else:
+            self._open_stream()
+            logger.info("LiveSessionLoop started (stream_start sent)")
+
+    def _open_stream(self) -> None:
+        """C++ 출력 스트림을 연다. 세션 전체가 스트림 하나 — live 표시로 C++ 가 프리버퍼를 모은 뒤 시작한다."""
+        self._bridge.send_stream_start(live=True)
+        self._stream_open = True
+        self._stream_start_pending = False
+        # lead 회계는 스트림에 실제로 보낸 첫 조각부터
+        self._first_audio_time = None
+        self._last_audio_time = None
+        if self._discarded_before_stream_sec > 0:
+            logger.info("stream_start sent — discarded %.1fs of output before it", self._discarded_before_stream_sec)
 
     def _finish(self, *, graceful: bool) -> None:
         if self._phase == Phase.DONE:
@@ -319,15 +340,22 @@ class LiveSessionLoop:
 
         # 3. 브리지 이벤트 — 오류는 예외로 올라와 run() 이 세션을 닫는다
         while (cpp_event := self._bridge.poll_event()) is not None:
-            if cpp_event.event_type == CppEventType.PLAYBACK_COMPLETE:
-                # 우리가 audio_end 를 보내기 전에 왔다 = C++ 가 스트림을 끝냈다(stop 등). 다시 열지 않고 종료.
-                logger.warning("playback_complete before audio_end — bridge stream ended")
-                self._stream_open = False
-                self._exit_reason = self._exit_reason or "bridge_stream_ended"
-                return True
+            if cpp_event.event_type != CppEventType.PLAYBACK_COMPLETE:
+                continue
+            if self._stream_start_pending:
+                self._open_stream()  # 인사 WAV 끝 → 이제 출력 스트림을 연다
+                continue
+            # 우리가 audio_end 를 보내기 전에 왔다 = C++ 가 스트림을 끝냈다(stop 등). 다시 열지 않고 종료.
+            logger.warning("playback_complete before audio_end — bridge stream ended")
+            self._stream_open = False
+            self._exit_reason = self._exit_reason or "bridge_stream_ended"
+            return True
 
         # 4. 타이머
         now = time.monotonic()
+        if self._stream_start_pending and now > self._stream_start_deadline:
+            logger.warning("Greeting playback_complete not received — opening stream anyway")
+            self._open_stream()
         if self._phase == Phase.ACTIVE and now - self._last_transcript_time > self._SESSION_TIMEOUT_SEC:
             self._begin_ending("idle_timeout")
         if self._phase == Phase.ENDING and self._ending_complete(now):
@@ -384,6 +412,10 @@ class LiveSessionLoop:
         return False
 
     def _on_audio(self, pcm: bytes) -> None:
+        if self._stream_start_pending:
+            # 인사 WAV 재생 중: 스트림이 아직 없다
+            self._discarded_before_stream_sec += len(pcm) / (self._live_rate * 2)
+            return
         now = time.monotonic()
         if self._first_audio_time is None:
             self._first_audio_time = now
@@ -399,8 +431,8 @@ class LiveSessionLoop:
 
         chunk_sec = len(pcm) / (self._live_rate * 2)
         silent = not any(pcm)  # 서버는 말하지 않을 때 값이 전부 0인 조각을 보낸다
-        quiet = silent or _rms(pcm) < self._QUIET_RMS  # 어절 사이 쉼 포함
-        if not silent:
+        quiet = silent or _rms(pcm) < self._QUIET_RMS  # 어절 사이 쉼, 세션 시작 직후의 미세 잡음(진폭 <50) 포함
+        if not quiet:
             self._last_voice_time = now
             if not self._first_voice_logged:
                 self._first_voice_logged = True
@@ -478,6 +510,7 @@ class LiveSessionLoop:
         self._exit_reason = reason
         self._end_started_time = time.monotonic()
         logger.info("Ending session (%s) — muting input, waiting for last utterance", reason)
+        self._led.set_state(LEDState.SLEEPING)  # 입력을 막는 순간부터 대화 불가
         try:
             self._live.mute_input()
         except Exception:

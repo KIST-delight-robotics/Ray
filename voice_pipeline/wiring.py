@@ -129,7 +129,7 @@ class ProcessComponents:
             memory_enabled: False면 memory storage/retriever 없이 조립.
             **session_loop_kwargs: 세션 루프 생성자로 그대로 전달되는 선택 인자
                 (cascade: ``on_turn_shift`` 등 콜백, ``disable_exit_keywords``, ``skip_generation``,
-                ``record_path`` 등 / live: ``tool_handlers``).
+                ``record_path`` 등 / live: ``tool_handlers``, ``wait_for_playback_complete``).
 
         Returns:
             세션 루프와 세션 단위 컴포넌트를 담은 :class:`SessionComponents`.

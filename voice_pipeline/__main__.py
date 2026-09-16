@@ -274,21 +274,27 @@ def main() -> None:
                     continue
 
                 _flush_bridge_events(bridge)
-                led.set_state(LEDState.IDLE)
 
                 try:
                     bridge.send_play_file(greeting_paths.greeting)
                 except Exception:
                     logger.warning("Failed to send greeting", exc_info=True)
 
-                _wait_playback(bridge, shutdown_event, _GREETING_TIMEOUT_SEC)
+                # LED 는 세션 루프가 실제로 청취 가능한 시점에 IDLE 로 켠다.
+                # live 는 인사 WAV 재생과 GPT-Live 연결을 겹친다 — 세션 루프가 playback_complete 뒤 stream_start.
+                if components.engine == "cascade":
+                    _wait_playback(bridge, shutdown_event, _GREETING_TIMEOUT_SEC)
                 mode = SystemMode.ACTIVE
 
             # ---- ACTIVE ----
             elif mode == SystemMode.ACTIVE:
-                _drain_audio_queue(audio_queue)
+                if components.engine == "cascade":
+                    _drain_audio_queue(audio_queue)  # live 는 인사 중 마이크도 세션으로 보낸다
                 try:
-                    session = components.create_session()
+                    if components.engine == "live":
+                        session = components.create_session(wait_for_playback_complete=True)
+                    else:
+                        session = components.create_session()
                 except Exception:
                     logger.error("Session factory failed", exc_info=True)
                     wakeword.reset()
@@ -308,6 +314,7 @@ def main() -> None:
                 except Exception:
                     logger.error("SessionLoop run failed", exc_info=True)
 
+                led.set_state(LEDState.SLEEPING)  # 대화 종료 — 작별 WAV 는 링 호흡 상태에서 나온다
                 mode = SystemMode.FAREWELL
 
             # ---- FAREWELL ----
@@ -335,7 +342,6 @@ def main() -> None:
 
                 session_started = False
                 _drain_audio_queue(audio_queue)
-                led.set_state(LEDState.SLEEPING)
                 current_history = None
                 current_session_id = None
                 session_started_at = None

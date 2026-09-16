@@ -37,6 +37,7 @@ def _make_loop(
     end_max_wait: float = 1.0,
     session_timeout: float = 30.0,
     tool_handlers: dict | None = None,
+    wait_for_playback: bool = False,
 ) -> tuple[LiveSessionLoop, dict[str, MagicMock], queue.Queue]:
     """Live 세션·브리지·히스토리를 모킹한 루프. ``live_events`` 는 poll_event 가 순서대로 돌려준다."""
     monkeypatch.setattr(LiveSessionLoop, "_FRAME_TIMEOUT_SEC", 0.005)
@@ -71,6 +72,7 @@ def _make_loop(
         session_id="sess-1",
         token_counter=len,
         tool_handlers=tool_handlers,
+        wait_for_playback_complete=wait_for_playback,
     )
     return loop, {"live": live, "bridge": bridge, "history": history, "led": led, "memory": memory}, audio_queue
 
@@ -324,3 +326,62 @@ class TestSilencePadding:
         loop._on_audio(VOICE_100MS)
         assert [c.args[0] for c in m["bridge"].send_audio.call_args_list] == [VOICE_100MS]
         assert loop._dropped_sec == pytest.approx(0.1)
+
+
+# ---------------------------------------------------------------------------
+# 인사 WAV 와 연결 겹치기 / LED
+# ---------------------------------------------------------------------------
+
+
+class TestGreetingOverlap:
+    def test_stream_start_waits_for_greeting_playback_complete(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 프레임 1: 출력 조각이 오지만 WAV 재생 중 → 버림. 그 프레임의 브리지 이벤트로 playback_complete → stream_start.
+        # 프레임 3: 이후 조각은 스트림으로 전달.
+        loop, m, _ = _make_loop(monkeypatch, wait_for_playback=True)
+        frames = [[LiveAudio(SILENCE_100MS)], [], [LiveAudio(VOICE_100MS), LiveClosed("close_requested")]]
+
+        def poll_live():
+            if not frames:
+                return None
+            if frames[0]:
+                return frames[0].pop(0)
+            frames.pop(0)
+            return None
+
+        m["live"].poll_event.side_effect = poll_live
+        bridge_pending = [CppEvent(CppEventType.PLAYBACK_COMPLETE)]
+        m["bridge"].poll_event.side_effect = lambda: bridge_pending.pop(0) if bridge_pending else None
+
+        loop.run()
+
+        m["bridge"].send_stream_start.assert_called_once_with(live=True)
+        assert [c.args[0] for c in m["bridge"].send_audio.call_args_list] == [VOICE_100MS]
+        assert loop._discarded_before_stream_sec == pytest.approx(0.1)
+        names = [c[0] for c in m["bridge"].mock_calls]
+        assert names.index("send_stream_start") < names.index("send_audio")
+        m["bridge"].send_audio_end.assert_called_once()
+        assert loop.exit_reason == "live_closed:close_requested"
+
+    def test_stream_start_falls_back_after_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(LiveSessionLoop, "_STREAM_START_MAX_WAIT_SEC", 0.0)
+        loop, m, _ = _make_loop(monkeypatch, wait_for_playback=True)
+        frames = [[], [LiveClosed("close_requested")]]
+
+        def poll_live():
+            if not frames:
+                return None
+            if frames[0]:
+                return frames[0].pop(0)
+            frames.pop(0)
+            return None
+
+        m["live"].poll_event.side_effect = poll_live
+        loop.run()
+        m["bridge"].send_stream_start.assert_called_once_with(live=True)
+        m["bridge"].send_audio_end.assert_called_once()
+
+    def test_led_idle_on_connect_and_sleeping_when_ending(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop, m, _ = _make_loop(monkeypatch, live_events=[_seg("user", "그래, 잘 가!", closed=False)])
+        loop.run()
+        states = [c.args[0] for c in m["led"].set_state.call_args_list]
+        assert states == [LEDState.IDLE, LEDState.SLEEPING]
