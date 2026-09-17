@@ -7,7 +7,9 @@
    세션 전체가 ``stream_start`` 하나로 시작하는 스트림이며 무음 조각도 그대로 흘린다(C++ 는
    ``head_motion=False`` 로 대기 모션을 유지하고 입만 움직인다).
 2. 전사 세그먼트를 히스토리와 utterances(장기기억 입력)에 저장한다.
-3. 세션 종료를 판정하고 닫는다 — 종료 키워드, 유휴 타임아웃, 백엔드의 ``end_conversation`` 툴,
+3. 백엔드의 함수 툴 호출을 실행한다(장기기억 검색 ``search_memory``, 종료 ``end_conversation``). 핸들러는
+   executor 에서 돌리고 프레임 루프는 완료를 폴링한다 — 임베딩·DB 조회가 마이크 전송과 출력 중계를 막지 않게.
+4. 세션 종료를 판정하고 닫는다 — 종료 키워드, 유휴 타임아웃, 백엔드의 ``end_conversation`` 툴,
    세션 만료/연결 끊김, 브리지 오류, 오디오 기아, 외부 stop.
 
 종료 시퀀스(실측 근거는 scripts/gpt_live/FINDINGS.md §4~5):
@@ -25,7 +27,8 @@ import queue
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from concurrent.futures import Executor, Future
 from datetime import UTC, datetime
 from typing import Any
 
@@ -44,11 +47,19 @@ from voice_pipeline.adapters.gpt_live import (
 )
 from voice_pipeline.adapters.led import LEDController, LEDState
 from voice_pipeline.history import ConversationHistory
+from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE, SAMPLE_RATE
 from voice_pipeline.types import AudioFrame, TokenCounter
 
 logger = logging.getLogger("voice_pipeline.live_session")
+
+
+def _completed(value: str) -> Future[str]:
+    """이미 끝난 Future (인라인 실행·오류 경로용)."""
+    future: Future[str] = Future()
+    future.set_result(value)
+    return future
 
 
 def _rms(pcm: bytes) -> float:
@@ -76,12 +87,15 @@ Interruption policy: Stop speaking when the user interrupts. Listen to what they
 Delegation policy:
 Backend tools:
 - Web search: current date and time, weather, news, and facts you are not sure about.
+- Past conversations: things the user told you in earlier sessions.
 - End of conversation: closes the session when the user is done talking.
 Delegate to the backend when:
 - The request needs current information or a fact you are not sure about.
+- The user asks about an earlier conversation or something they told you before, \
+and it is not in what you already know about the user.
 - The user says goodbye or wants to end the conversation. Say a short goodbye yourself at the same time.
 Do not delegate to the backend when:
-- You can answer from the conversation or a still-current result.
+- You can answer from the conversation, from what you already know about the user, or a still-current result.
 - The user is chatting, greeting, or thinking aloud.
 Delegate before giving an answer that depends on backend work.
 Do not guess the result while waiting. Do not mention the backend.
@@ -92,6 +106,9 @@ You are the backend for Ray, a Korean-speaking desk robot.
 
 Tools:
 - Use web search for current information.
+- Use search_memory when the user asks about an earlier conversation or something they told Ray before. \
+Write the query in the user's language. Use only the memories that match the current question and ignore the rest. \
+If nothing relevant comes back, say Ray does not remember; do not use web search for it.
 - Call end_conversation when the user says goodbye or wants to stop, then reply with an empty message.
 
 Answer in Korean, in one or two short sentences that sound natural when spoken aloud.
@@ -103,21 +120,89 @@ LIVE_GREETING_TEXT = "네, 부르셨어요?"  # 웨이크워드 뒤 세션 연�
 LIVE_GREETING_TTS_MODEL = "gpt-4o-mini-tts"  # Live 목소리(marin)를 지원하는 OpenAI TTS 모델
 
 END_CONVERSATION_TOOL = "end_conversation"
+SEARCH_MEMORY_TOOL = "search_memory"
 
-DEFAULT_TOOLS: tuple[dict[str, Any], ...] = (
-    {
-        "type": "function",
-        "name": END_CONVERSATION_TOOL,
-        "description": (
-            "End the current conversation session. "
-            "Call this when the user says goodbye or clearly wants to stop talking."
-        ),
-        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-        "strict": True,
+END_CONVERSATION_TOOL_DEF: dict[str, Any] = {
+    "type": "function",
+    "name": END_CONVERSATION_TOOL,
+    "description": (
+        "End the current conversation session. Call this when the user says goodbye or clearly wants to stop talking."
+    ),
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    "strict": True,
+}
+
+SEARCH_MEMORY_TOOL_DEF: dict[str, Any] = {
+    "type": "function",
+    "name": SEARCH_MEMORY_TOOL,
+    "description": (
+        "Search Ray's long-term memory of earlier conversations with the user. "
+        "Returns episodes (third-person notes with dates) that match the query. "
+        "Use it for anything the user told Ray in a past session."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": (
+                    "What to look for, in the user's language. "
+                    "Include names, topics and time hints from the conversation."
+                ),
+            }
+        },
+        "required": ["query"],
+        "additionalProperties": False,
     },
-)
+    "strict": True,
+}
+
+DEFAULT_TOOLS: tuple[dict[str, Any], ...] = (END_CONVERSATION_TOOL_DEF, SEARCH_MEMORY_TOOL_DEF)
 
 ToolHandler = Callable[[str], str]  # arguments(JSON 문자열) → output(JSON 문자열)
+
+
+def build_live_instructions(profile_text: str = "", recent_session_texts: Sequence[str] = ()) -> str:
+    """세션 시작 instructions — 기본 지시문 뒤에 프로필(블록 2)과 최근 세션(블록 3)을 붙인다.
+
+    instructions 는 세션 시작 후 바꿀 수 없으므로 세션 수준 컨텍스트는 여기에 한 번 들어간다.
+    한도 16,384 토큰에 대해 프로필 256 + 최근 세션 512 soft cap 이라 여유가 크다.
+
+    Args:
+        profile_text: :func:`~voice_pipeline.prompt.format_profile_block` 결과. 빈 문자열이면 생략.
+        recent_session_texts: 최근 세션 블록 텍스트, 시간순. 비어 있으면 생략.
+    """
+    parts = [DEFAULT_LIVE_INSTRUCTIONS.rstrip()]
+    if profile_text or recent_session_texts:
+        parts.append("What you already know about the user, from earlier sessions:")
+    if profile_text:
+        parts.append(profile_text.strip())
+    parts.extend(text.strip() for text in recent_session_texts if text.strip())
+    return "\n\n".join(parts) + "\n"
+
+
+def make_memory_search_handler(retriever: MemoryRetriever, exclude_session_ids: set[str]) -> ToolHandler:
+    """``search_memory`` 툴 핸들러. 검색 결과를 ``{"memories": [{"text", "date"}, …]}`` JSON 으로 돌려준다.
+
+    백엔드가 결과를 읽고 현재 질문에 맞는 것만 골라 답을 만들므로 여기서는 선별하지 않는다(상한은
+    retriever 의 것). 인용 갱신은 하지 않는다 — 대화 모델 출력에 인용 태그가 없고, 턴 단위 retained
+    buffer 도 이 엔진에서는 의미가 없다.
+
+    Args:
+        retriever: 세션 단위 retriever. 핸들러는 executor 스레드에서 불리지만 한 번에 하나씩이다.
+        exclude_session_ids: 검색에서 제외할 세션 — 현재 세션과 instructions 의 최근 세션 블록에 포함된 세션.
+    """
+
+    def handler(arguments: str) -> str:
+        args = json.loads(arguments or "{}")
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return json.dumps({"memories": [], "error": "empty query"})
+        result = retriever.retrieve(query, exclude_session_ids)
+        memories = [{"text": ep.text, "date": ep.timestamp[:10]} for ep in result.episodes]
+        return json.dumps({"memories": memories}, ensure_ascii=False)
+
+    return handler
 
 
 class Phase(enum.Enum):
@@ -171,6 +256,7 @@ class LiveSessionLoop:
         token_counter: TokenCounter | None = None,
         shutdown_event: threading.Event | None = None,
         tool_handlers: dict[str, ToolHandler] | None = None,
+        executor: Executor | None = None,
         input_sample_rate: int = SAMPLE_RATE,
         live_sample_rate: int = BRIDGE_SAMPLE_RATE,
         wait_for_playback_complete: bool = False,
@@ -186,6 +272,7 @@ class LiveSessionLoop:
             audio_queue: AudioInput 이 채우는 마이크 프레임 큐 (input_sample_rate, mono 16-bit).
             memory_storage: 있으면 utterances 를 저장해 MemoryWriter 입력으로 남긴다.
             tool_handlers: 백엔드 함수 툴 이름 → 실행기. ``end_conversation`` 은 내장.
+            executor: 툴 핸들러를 돌릴 executor. None 이면 프레임 루프에서 인라인 실행(테스트용).
             input_sample_rate / live_sample_rate: 마이크 레이트와 세션 레이트. 다르면 선형 보간으로 리샘플.
         """
         self._live = live
@@ -199,6 +286,7 @@ class LiveSessionLoop:
         self._shutdown_event = shutdown_event
         self._tool_handlers: dict[str, ToolHandler] = dict(tool_handlers or {})
         self._tool_handlers.setdefault(END_CONVERSATION_TOOL, lambda _args: json.dumps({"status": "ending"}))
+        self._executor = executor
         self._in_rate = input_sample_rate
         self._live_rate = live_sample_rate
         self._wait_for_playback_complete = wait_for_playback_complete
@@ -210,7 +298,8 @@ class LiveSessionLoop:
         self._phase = Phase.ACTIVE
         self._exit_reason = ""
         self._stream_open = False
-        self._pending_calls: list[LiveFunctionCall] = []
+        self._pending_calls: list[LiveFunctionCall] = []  # 응답 완료 전까지 모은 함수 호출
+        self._inflight: list[tuple[LiveFunctionCall, Future[str]]] = []  # 실행 중인 핸들러
         self._last_frame_time = 0.0
         self._last_transcript_time = 0.0
         self._last_voice_time: float | None = None
@@ -295,6 +384,9 @@ class LiveSessionLoop:
         if self._phase == Phase.DONE:
             return
         self._phase = Phase.DONE
+        for _, future in self._inflight:
+            future.cancel()  # 아직 시작 안 한 것만 취소된다. 실행 중인 결과는 버려진다
+        self._inflight.clear()
         try:
             self._live.close(graceful=graceful)
         except Exception:
@@ -337,6 +429,7 @@ class LiveSessionLoop:
                 break
             if self._handle_live_event(event):
                 return True
+        self._poll_tools()
 
         # 3. 브리지 이벤트 — 오류는 예외로 올라와 run() 이 세션을 닫는다
         while (cpp_event := self._bridge.poll_event()) is not None:
@@ -475,22 +568,46 @@ class LiveSessionLoop:
         self._save_utterance(seg.speaker, text)
 
     def _on_response_done(self) -> None:
+        """백엔드 응답이 끝났다 — 모아둔 함수 호출을 실행에 넘긴다. 결과 제출은 :meth:`_poll_tools`."""
         if not self._pending_calls:
             return
         calls, self._pending_calls = self._pending_calls, []
-        ending = False
         for call in calls:
-            handler = self._tool_handlers.get(call.name)
-            if handler is None:
-                output = json.dumps({"error": f"unknown function {call.name}"})
-                logger.warning("Backend requested unknown tool %s", call.name)
-            else:
-                try:
-                    output = handler(call.arguments)
-                except Exception as exc:
-                    output = json.dumps({"error": str(exc)})
-                    logger.warning("Tool %s failed", call.name, exc_info=True)
-            logger.info("Tool %s(%s) -> %s", call.name, call.arguments, output)
+            logger.info("Tool %s(%s) requested", call.name, call.arguments)
+            self._inflight.append((call, self._submit_tool(call)))
+        self._poll_tools()  # 인라인 실행이면 여기서 바로 끝난다. executor 면 프레임 루프가 이어서 폴링
+
+    def _submit_tool(self, call: LiveFunctionCall) -> Future[str]:
+        handler = self._tool_handlers.get(call.name)
+        if handler is None:
+            logger.warning("Backend requested unknown tool %s", call.name)
+            return _completed(json.dumps({"error": f"unknown function {call.name}"}))
+        if self._executor is None:
+            try:
+                return _completed(handler(call.arguments))
+            except Exception as exc:
+                future: Future[str] = Future()
+                future.set_exception(exc)
+                return future
+        return self._executor.submit(handler, call.arguments)
+
+    def _poll_tools(self) -> None:
+        """실행 중인 핸들러가 전부 끝났으면 결과를 제출하고 백엔드 응답을 이어간다(또는 종료 시퀀스)."""
+        if not self._inflight or not all(future.done() for _, future in self._inflight):
+            return
+        calls, self._inflight = self._inflight, []
+        if self._phase != Phase.ACTIVE:
+            # 종료 시퀀스 중 도착한 결과는 버린다 — 이어가면 모델이 새 발화를 시작해 종료가 늦어진다
+            logger.info("Dropping %d tool result(s) — session is %s", len(calls), self._phase.name)
+            return
+        ending = False
+        for call, future in calls:
+            try:
+                output = future.result()
+            except Exception as exc:
+                output = json.dumps({"error": str(exc)})
+                logger.warning("Tool %s failed", call.name, exc_info=True)
+            logger.info("Tool %s -> %s", call.name, output if len(output) <= 200 else output[:200] + "…")
             self._live.submit_function_output(call.call_id, output)
             ending |= call.name == END_CONVERSATION_TOOL
         if ending:

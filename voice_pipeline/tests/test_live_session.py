@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import queue
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,7 +22,16 @@ from voice_pipeline.adapters.gpt_live import (
     LiveTranscript,
 )
 from voice_pipeline.adapters.led import LEDState
-from voice_pipeline.live_session import END_CONVERSATION_TOOL, LiveSessionLoop, Phase
+from voice_pipeline.live_session import (
+    END_CONVERSATION_TOOL,
+    SEARCH_MEMORY_TOOL,
+    LiveSessionLoop,
+    Phase,
+    build_live_instructions,
+    make_memory_search_handler,
+)
+from voice_pipeline.memory.retriever import MemoryRetriever
+from voice_pipeline.memory.types import Episode, MemoryReadResult
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE, SAMPLE_RATE
 
 SILENCE_100MS = bytes(BRIDGE_SAMPLE_RATE * 2 // 10)
@@ -38,6 +49,7 @@ def _make_loop(
     session_timeout: float = 30.0,
     tool_handlers: dict | None = None,
     wait_for_playback: bool = False,
+    executor: ThreadPoolExecutor | None = None,
 ) -> tuple[LiveSessionLoop, dict[str, MagicMock], queue.Queue]:
     """Live 세션·브리지·히스토리를 모킹한 루프. ``live_events`` 는 poll_event 가 순서대로 돌려준다."""
     monkeypatch.setattr(LiveSessionLoop, "_FRAME_TIMEOUT_SEC", 0.005)
@@ -72,6 +84,7 @@ def _make_loop(
         session_id="sess-1",
         token_counter=len,
         tool_handlers=tool_handlers,
+        executor=executor,
         wait_for_playback_complete=wait_for_playback,
     )
     return loop, {"live": live, "bridge": bridge, "history": history, "led": led, "memory": memory}, audio_queue
@@ -385,3 +398,120 @@ class TestGreetingOverlap:
         loop.run()
         states = [c.args[0] for c in m["led"].set_state.call_args_list]
         assert states == [LEDState.IDLE, LEDState.SLEEPING]
+
+
+# ---------------------------------------------------------------------------
+# Tool handlers on an executor
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncTools:
+    def test_handler_runs_on_executor_and_result_is_submitted_later(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        release = threading.Event()
+        loop_thread: list[str] = []
+
+        def slow_handler(_args: str) -> str:
+            loop_thread.append(threading.current_thread().name)
+            release.wait(2.0)
+            return json.dumps({"ok": True})
+
+        events = [
+            LiveFunctionCall(call_id="c1", name="slow", arguments="{}", delegation_id="d1"),
+            LiveResponseDone(delegation_id="d1"),
+        ]
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            loop, m, _ = _make_loop(monkeypatch, live_events=events, tool_handlers={"slow": slow_handler})
+            loop._executor = executor
+            loop._start_session()
+            for _ in range(5):  # 핸들러가 막혀 있는 동안 프레임 루프는 계속 돈다
+                assert loop._run_frame() is False
+            m["live"].submit_function_output.assert_not_called()
+            release.set()
+            deadline = time.monotonic() + 2.0
+            while not m["live"].submit_function_output.called and time.monotonic() < deadline:
+                loop._run_frame()
+            m["live"].submit_function_output.assert_called_once_with("c1", json.dumps({"ok": True}))
+            m["live"].continue_response.assert_called_once()
+            assert loop_thread and loop_thread[0] != threading.current_thread().name
+            loop._finish(graceful=True)
+
+    def test_result_arriving_during_ending_is_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        release = threading.Event()
+        events = [
+            LiveFunctionCall(call_id="c1", name="slow", arguments="{}", delegation_id="d1"),
+            LiveResponseDone(delegation_id="d1"),
+        ]
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            loop, m, _ = _make_loop(monkeypatch, live_events=events, tool_handlers={"slow": lambda _a: _wait(release)})
+            loop._executor = executor
+            loop._start_session()
+            loop._run_frame()
+            loop.request_stop()
+            loop._run_frame()
+            assert loop._phase is Phase.ENDING
+            release.set()
+            deadline = time.monotonic() + 2.0
+            while loop._inflight and time.monotonic() < deadline:
+                loop._run_frame()
+            m["live"].submit_function_output.assert_not_called()
+            m["live"].continue_response.assert_not_called()
+            loop._finish(graceful=True)
+
+
+def _wait(release: threading.Event) -> str:
+    release.wait(2.0)
+    return "{}"
+
+
+# ---------------------------------------------------------------------------
+# Memory: instructions builder + search handler
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryHelpers:
+    def test_build_live_instructions_without_context_is_base_only(self) -> None:
+        text = build_live_instructions()
+        assert text.startswith("You are Ray")
+        assert "already know about the user, from earlier sessions" not in text
+
+    def test_build_live_instructions_appends_profile_and_recent_sessions(self) -> None:
+        text = build_live_instructions(
+            "[User Profile]\ninterest::movie: SF",
+            ["[2026-09-10 10:00 session]\n- User saw Dune 2.", "[2026-09-12 20:00 session]\n- User liked the OST."],
+        )
+        base_end = text.index("Do not mention the backend.")
+        assert text.index("already know about the user, from earlier sessions:") > base_end
+        assert text.index("[User Profile]") < text.index("[2026-09-10 10:00 session]") < text.index("[2026-09-12")
+
+    def test_search_handler_returns_memories_json(self) -> None:
+        retriever = MagicMock(spec=MemoryRetriever)
+        ep = Episode(7, "User cried watching Interstellar.", "2026-03-15 20:00:00", "s-1", 1.0, "2026-03-15 20:00:00")
+        retriever.retrieve.return_value = MemoryReadResult(episodes=[ep], scores=[0.5], index_to_id={1: 7})
+        handler = make_memory_search_handler(retriever, {"cur", "s-recent"})
+
+        out = json.loads(handler(json.dumps({"query": "인터스텔라"})))
+
+        retriever.retrieve.assert_called_once_with("인터스텔라", {"cur", "s-recent"})
+        assert out == {"memories": [{"text": "User cried watching Interstellar.", "date": "2026-03-15"}]}
+
+    def test_search_handler_empty_query_does_not_search(self) -> None:
+        retriever = MagicMock(spec=MemoryRetriever)
+        handler = make_memory_search_handler(retriever, set())
+        out = json.loads(handler(json.dumps({"query": "  "})))
+        assert out["memories"] == [] and "error" in out
+        retriever.retrieve.assert_not_called()
+
+    def test_search_tool_failure_becomes_error_output(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def boom(_a: str) -> str:
+            raise RuntimeError("index down")
+
+        events = [
+            LiveFunctionCall(call_id="c1", name=SEARCH_MEMORY_TOOL, arguments='{"query": "x"}', delegation_id="d1"),
+            LiveResponseDone(delegation_id="d1"),
+            LiveClosed("x"),
+        ]
+        loop, m, _ = _make_loop(monkeypatch, live_events=events, tool_handlers={SEARCH_MEMORY_TOOL: boom})
+        loop.run()
+        output = json.loads(m["live"].submit_function_output.call_args.args[1])
+        assert output == {"error": "index down"}
+        m["live"].continue_response.assert_called_once()

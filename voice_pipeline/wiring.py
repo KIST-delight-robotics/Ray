@@ -39,15 +39,22 @@ from voice_pipeline.generator import SpeechGenerator
 from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.live_session import (
     DEFAULT_BACKEND_INSTRUCTIONS,
-    DEFAULT_LIVE_INSTRUCTIONS,
     DEFAULT_TOOLS,
     LIVE_VOICE,
+    SEARCH_MEMORY_TOOL,
     LiveSessionLoop,
+    build_live_instructions,
+    make_memory_search_handler,
 )
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
-from voice_pipeline.prompt import DEFAULT_SYSTEM_PROMPT, HistorySummarizer
+from voice_pipeline.prompt import (
+    DEFAULT_SYSTEM_PROMPT,
+    HistorySummarizer,
+    format_profile_block,
+    load_session_context,
+)
 from voice_pipeline.session_loop import SessionComponents, SessionLoop
 from voice_pipeline.settings import (
     BRIDGE_SAMPLE_RATE,
@@ -142,12 +149,28 @@ class ProcessComponents:
         memory_storage = self.memory_storage if memory_enabled else None
 
         if self.engine == "live":
+            # 장기기억: 프로필·최근 세션은 시작 instructions 에(세션 중 재조립 불가), 에피소드 검색은
+            # 백엔드 함수 툴로 — 트리거와 쿼리 생성을 백엔드 LLM 이 맡는다.
+            tool_handlers: dict[str, Any] = dict(session_loop_kwargs.pop("tool_handlers", None) or {})
+            tools = DEFAULT_TOOLS
+            if memory_enabled:
+                profiles, recent_texts, included_ids = load_session_context(
+                    self.memory_storage, session_id, self.token_counter
+                )
+                retriever = MemoryRetriever(self.memory_storage, self.vector_index, self.embedder)
+                tool_handlers.setdefault(
+                    SEARCH_MEMORY_TOOL, make_memory_search_handler(retriever, {session_id} | included_ids)
+                )
+                instructions = build_live_instructions(format_profile_block(profiles), recent_texts)
+            else:
+                tools = tuple(t for t in DEFAULT_TOOLS if t["name"] != SEARCH_MEMORY_TOOL)
+                instructions = build_live_instructions()
             live = GPTLiveSession(
                 LiveSessionConfig(
-                    instructions=DEFAULT_LIVE_INSTRUCTIONS,
+                    instructions=instructions,
                     backend_model=_LIVE_BACKEND_MODEL,
                     backend_instructions=DEFAULT_BACKEND_INSTRUCTIONS,
-                    tools=DEFAULT_TOOLS,
+                    tools=tools,
                     voice=LIVE_VOICE,
                     sample_rate=BRIDGE_SAMPLE_RATE,
                 )
@@ -162,6 +185,8 @@ class ProcessComponents:
                 session_id=session_id,
                 token_counter=self.token_counter,
                 shutdown_event=self.shutdown_event,
+                tool_handlers=tool_handlers,
+                executor=self.executor,
                 **session_loop_kwargs,
             )
             return SessionComponents(session_loop=live_loop, history=history, session_id=session_id)

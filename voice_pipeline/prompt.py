@@ -254,6 +254,100 @@ def parse_citation_tag(text: str) -> tuple[str, list[int]]:
 _PER_MESSAGE_OVERHEAD_TOKENS = 3
 
 
+# ---------------------------------------------------------------------------
+# Session-level context: profiles (Block 2) + recent sessions (Block 3)
+# ---------------------------------------------------------------------------
+
+RECENT_SESSIONS_MAX_TOKENS = 512  # 최근 세션 블록 soft cap — 최신 세션 1개는 캡 무관 보장
+SESSION_PAGE_SIZE = 20  # 세션 에피소드 lazy 로딩 배치 크기 — 순수 조회 배치, 동작에 영향 없음
+
+
+def load_session_context(
+    memory_storage: SQLiteMemoryStorage,
+    session_id: str,
+    token_counter: TokenCounter,
+    *,
+    carryover_session_id: str | None = None,
+    max_tokens: int = RECENT_SESSIONS_MAX_TOKENS,
+    page_size: int = SESSION_PAGE_SIZE,
+) -> tuple[list[Profile], list[str], set[str]]:
+    """Load profiles and the recent-sessions block from memory storage.
+
+    Shared by the cascade :class:`ContextBuilder` and the live engine's
+    session-start instructions. Sessions without episodes (extraction
+    pending, failed, or judged meaningless) are skipped — in cascade the
+    carryover covers the only session whose extraction can still be
+    legitimately in flight. The walk continues into older sessions until
+    the soft cap binds or history is exhausted.
+
+    Args:
+        memory_storage: Episode/profile storage.
+        session_id: Current session (always excluded).
+        token_counter: Token counter for the soft cap.
+        carryover_session_id: Session already shown verbatim as carryover
+            (excluded from the block). ``None`` if no carryover.
+        max_tokens: Soft cap for the block.
+        page_size: Episode loading batch size (pure query batching).
+
+    Returns:
+        (profiles, block texts in chronological order,
+        session IDs actually included in the block).
+    """
+    profiles = memory_storage.get_all_profiles()
+    candidates = _iter_session_blocks(memory_storage, session_id, carryover_session_id, page_size)
+    selected = select_recent_blocks(candidates, token_counter, max_tokens=max_tokens)
+    block_texts = [text for _, text in selected]
+    included_ids = {sid for sid, _ in selected if sid is not None}
+    return profiles, block_texts, included_ids
+
+
+def _iter_session_blocks(
+    memory_storage: SQLiteMemoryStorage,
+    session_id: str,
+    carryover_session_id: str | None,
+    page_size: int,
+) -> Iterator[tuple[str, str]]:
+    """Yield (session_id, block_text) newest-first, skipping episode-less sessions.
+
+    Episode loading is paged and lazy — the consumer stops pulling once the
+    soft cap binds, so sessions beyond that point are never fetched.
+    """
+    sessions = memory_storage.get_recent_sessions(exclude_session_id=session_id)
+    for start in range(0, len(sessions), page_size):
+        page = [(sid, ts) for sid, ts in sessions[start : start + page_size] if sid != carryover_session_id]
+        episodes_by_sid = memory_storage.get_episodes_by_session_ids([sid for sid, _ in page])
+        for sid, started_at in page:
+            episodes = episodes_by_sid.get(sid, [])
+            if not episodes:
+                continue
+            yield sid, format_session_summary_block(started_at, episodes)
+
+
+def select_recent_blocks(
+    candidates: Iterable[tuple[str | None, str]],
+    token_counter: TokenCounter,
+    *,
+    max_tokens: int = RECENT_SESSIONS_MAX_TOKENS,
+) -> list[tuple[str | None, str]]:
+    """Fill whole sessions newest-first under the soft cap; return chronological.
+
+    The newest candidate is always included regardless of size (soft cap);
+    older ones are appended while the running total stays within
+    ``max_tokens``, stopping at the first that no longer fits (keeps the
+    block temporally contiguous). Consumes the candidates iterable lazily.
+    """
+    selected: list[tuple[str | None, str]] = []
+    spent = 0
+    for sid, text in candidates:
+        cost = token_counter(text) + _PER_MESSAGE_OVERHEAD_TOKENS
+        if selected and spent + cost > max_tokens:
+            break
+        selected.append((sid, text))
+        spent += cost
+    selected.reverse()
+    return selected
+
+
 @dataclass(frozen=True)
 class _Carryover:
     """Previous session's raw view carried into the current session's context.
@@ -300,8 +394,8 @@ class ContextBuilder:
     _MAX_HISTORY_TOKENS = HISTORY_TOKEN_BUDGET  # 히스토리 뷰 예산 (이월 + 요약 블록 + 라이브 턴)
     _MAX_MEMORY_TOKENS = 512  # retrieved memory 블록 전용 예산 (초과 시 낮은 salience 순 drop)
     _MAX_PROFILE_TOKENS = 256  # profile 블록 전용 예산 (초과 시 블록 skip)
-    _MAX_RECENT_SESSIONS_TOKENS = 512  # 최근 세션 블록 soft cap — 최신 세션 1개는 캡 무관 보장
-    _SESSION_PAGE_SIZE = 20  # 세션 에피소드 lazy 로딩 배치 크기 — 순수 조회 배치, 동작에 영향 없음
+    _MAX_RECENT_SESSIONS_TOKENS = RECENT_SESSIONS_MAX_TOKENS  # 최근 세션 블록 soft cap
+    _SESSION_PAGE_SIZE = SESSION_PAGE_SIZE  # 세션 에피소드 lazy 로딩 배치 크기
     _CARRYOVER_EVICT_RATIO = 0.75  # 히스토리 수요가 예산 대비 이 비율을 넘으면 이월분 퇴거
 
     def __init__(
@@ -352,12 +446,24 @@ class ContextBuilder:
         self._recent_block_texts: list[str] = []
         self.exclude_session_ids: set[str] = set()
         if memory_storage is not None and session_id is not None:
-            profiles, self._recent_block_texts, included_ids = self._load_session_context(memory_storage, session_id)
+            carryover_sid = self._carryover.session_id if self._carryover is not None else None
+            profiles, self._recent_block_texts, included_ids = load_session_context(
+                memory_storage,
+                session_id,
+                token_counter,
+                carryover_session_id=carryover_sid,
+                max_tokens=self._MAX_RECENT_SESSIONS_TOKENS,
+                page_size=self._SESSION_PAGE_SIZE,
+            )
             self.exclude_session_ids = {session_id} | included_ids
             if self._carryover is not None:
                 self.exclude_session_ids.add(self._carryover.session_id)
         elif session_summaries:
-            selected = self._select_recent_blocks([(None, text) for text in reversed(session_summaries)])
+            selected = select_recent_blocks(
+                [(None, text) for text in reversed(session_summaries)],
+                token_counter,
+                max_tokens=self._MAX_RECENT_SESSIONS_TOKENS,
+            )
             self._recent_block_texts = [text for _, text in selected]
 
         # Pre-format and pre-count session-level blocks (immutable)
@@ -575,75 +681,6 @@ class ContextBuilder:
             messages.extend(items)
         messages.append({"role": "developer", "content": carryover.marker_text})
         return messages
-
-    # ------------------------------------------------------------------
-    # Recent sessions block
-    # ------------------------------------------------------------------
-
-    def _load_session_context(
-        self,
-        memory_storage: SQLiteMemoryStorage,
-        session_id: str,
-    ) -> tuple[list[Profile], list[str], set[str]]:
-        """Load profiles and the recent-sessions block from memory storage.
-
-        Sessions without episodes (extraction pending, failed, or judged
-        meaningless) are skipped — the carryover covers the only session
-        whose extraction can still be legitimately in flight. The walk
-        continues into older sessions until the soft cap binds or history
-        is exhausted.
-
-        Returns:
-            (profiles, block texts in chronological order,
-            session IDs actually included in the block).
-        """
-        profiles = memory_storage.get_all_profiles()
-        selected = self._select_recent_blocks(self._iter_session_blocks(memory_storage, session_id))
-        block_texts = [text for _, text in selected]
-        included_ids = {sid for sid, _ in selected if sid is not None}
-        return profiles, block_texts, included_ids
-
-    def _iter_session_blocks(
-        self,
-        memory_storage: SQLiteMemoryStorage,
-        session_id: str,
-    ) -> Iterator[tuple[str, str]]:
-        """Yield (session_id, block_text) newest-first, skipping episode-less sessions.
-
-        Episode loading is paged (``_SESSION_PAGE_SIZE``) and lazy — the
-        consumer stops pulling once the soft cap binds, so sessions beyond
-        that point are never fetched.
-        """
-        carryover_sid = self._carryover.session_id if self._carryover is not None else None
-        sessions = memory_storage.get_recent_sessions(exclude_session_id=session_id)
-        for start in range(0, len(sessions), self._SESSION_PAGE_SIZE):
-            page = [(sid, ts) for sid, ts in sessions[start : start + self._SESSION_PAGE_SIZE] if sid != carryover_sid]
-            episodes_by_sid = memory_storage.get_episodes_by_session_ids([sid for sid, _ in page])
-            for sid, started_at in page:
-                episodes = episodes_by_sid.get(sid, [])
-                if not episodes:
-                    continue
-                yield sid, format_session_summary_block(started_at, episodes)
-
-    def _select_recent_blocks(self, candidates: Iterable[tuple[str | None, str]]) -> list[tuple[str | None, str]]:
-        """Fill whole sessions newest-first under the soft cap; return chronological.
-
-        The newest candidate is always included regardless of size (soft
-        cap); older ones are appended while the running total stays within
-        ``_MAX_RECENT_SESSIONS_TOKENS``, stopping at the first that no
-        longer fits (keeps the block temporally contiguous). Consumes the
-        candidates iterable lazily.
-        """
-        selected: list[tuple[str | None, str]] = []
-        spent = 0
-        for sid, text in candidates:
-            cost = self._token_counter(text) + _PER_MESSAGE_OVERHEAD_TOKENS
-            if selected and spent + cost > self._MAX_RECENT_SESSIONS_TOKENS:
-                break
-            selected.append((sid, text))
-            spent += cost
-        selected.reverse()
-        return selected
 
     # ------------------------------------------------------------------
     # Memory block

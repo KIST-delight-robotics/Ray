@@ -12,6 +12,8 @@ from voice_pipeline.prompt import (
     _PER_MESSAGE_OVERHEAD_TOKENS,
     ContextBuilder,
     HistorySummarySnapshot,
+    format_session_summary_block,
+    load_session_context,
 )
 from voice_pipeline.types import LLMMetrics
 
@@ -710,6 +712,40 @@ class TestCarryoverEviction:
 
         assert not any(c.startswith("[Previous session") for c in contents)
         assert len(summarizer.scheduled) == 1
+
+
+class TestLoadSessionContext:
+    """모듈 함수 — cascade ContextBuilder 와 live 시작 instructions 가 공유하는 로더."""
+
+    def test_returns_profiles_blocks_and_included_ids(self) -> None:
+        recent = [("s3", "2026-03-28 10:00:00"), ("s2", "2026-03-27 10:00:00"), ("prev-1", "2026-03-26 10:00:00")]
+        episodes = {
+            "s3": [_make_episode("Newest session episode text.", sid="s3")],
+            "s2": [_make_episode("Older session episode text.", sid="s2")],
+            "prev-1": [_make_episode("Carried session episode text.", sid="prev-1")],
+        }
+        storage = StubMemoryStorage(recent=recent, episodes=episodes)
+
+        profiles, blocks, included = load_session_context(
+            storage, "cur", _word_counter, carryover_session_id="prev-1", max_tokens=15
+        )
+
+        assert profiles == []
+        assert blocks == [format_session_summary_block("2026-03-28 10:00:00", episodes["s3"])]
+        assert included == {"s3"}  # 캡에서 탈락한 s2, 이월된 prev-1 은 제외 → 검색으로 복귀 가능
+
+    def test_without_carryover_walks_all_sessions_chronologically(self) -> None:
+        recent = [("s3", "2026-03-28 10:00:00"), ("s2", "2026-03-27 10:00:00")]
+        episodes = {
+            "s3": [_make_episode("Newest.", sid="s3")],
+            "s2": [_make_episode("Older.", sid="s2")],
+        }
+        storage = StubMemoryStorage(recent=recent, episodes=episodes)
+
+        _, blocks, included = load_session_context(storage, "cur", _word_counter)
+
+        assert [b.splitlines()[0] for b in blocks] == ["[2026-03-27 10:00 session]", "[2026-03-28 10:00 session]"]
+        assert included == {"s2", "s3"}
 
 
 class TestRecentSessionsFromStorage:

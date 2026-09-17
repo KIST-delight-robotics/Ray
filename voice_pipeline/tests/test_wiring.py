@@ -13,6 +13,8 @@ from unittest.mock import MagicMock
 import pytest
 
 import voice_pipeline.wiring as wiring
+from voice_pipeline.live_session import SEARCH_MEMORY_TOOL
+from voice_pipeline.memory.types import Episode, Profile
 from voice_pipeline.session_loop import SessionComponents
 from voice_pipeline.trace import record_call
 from voice_pipeline.wiring import ProcessComponents
@@ -182,6 +184,13 @@ class TestCreateSessionLiveEngine:
         comps.vap = None
         comps.turngpt = None
         comps.asr = None
+        comps.memory_storage.get_all_profiles.return_value = [
+            Profile(id=1, topic="interest", sub_topic="movie", content="SF", updated_at="2026-09-01 00:00:00")
+        ]
+        comps.memory_storage.get_recent_sessions.return_value = [("s-old", "2026-09-10 10:00:00")]
+        comps.memory_storage.get_episodes_by_session_ids.return_value = {
+            "s-old": [Episode(None, "User saw Dune 2.", "2026-09-10 10:00:00", "s-old", 1.0, "2026-09-10 10:00:00")]
+        }
 
         result = comps.create_session(tool_handlers={"x": lambda a: a})
 
@@ -190,14 +199,19 @@ class TestCreateSessionLiveEngine:
         config = live_cls.call_args.args[0]
         assert config.backend_model == wiring._LIVE_BACKEND_MODEL
         assert config.sample_rate == 24000
-        assert any(t["name"] == "end_conversation" for t in config.tools)
+        assert {t["name"] for t in config.tools} == {"end_conversation", SEARCH_MEMORY_TOOL}
+        # 프로필·최근 세션은 시작 instructions 에 들어간다
+        assert "interest::movie: SF" in config.instructions
+        assert "User saw Dune 2." in config.instructions
         kwargs = loop_cls.call_args.kwargs
         assert kwargs["live"] is live_cls.return_value
         assert kwargs["session_id"] == result.session_id
-        assert kwargs["tool_handlers"] == {"x": kwargs["tool_handlers"]["x"]}
+        assert set(kwargs["tool_handlers"]) == {"x", SEARCH_MEMORY_TOOL}
+        assert kwargs["executor"] is comps.executor
 
-    def test_memory_disabled_passes_none_storage(self, monkeypatch):
-        monkeypatch.setattr(wiring, "GPTLiveSession", MagicMock())
+    def test_memory_disabled_drops_search_tool(self, monkeypatch):
+        live_cls = MagicMock(name="GPTLiveSession")
+        monkeypatch.setattr(wiring, "GPTLiveSession", live_cls)
         loop_cls = MagicMock(name="LiveSessionLoop")
         monkeypatch.setattr(wiring, "LiveSessionLoop", loop_cls)
         monkeypatch.setattr(wiring, "ConversationHistory", MagicMock())
@@ -206,3 +220,8 @@ class TestCreateSessionLiveEngine:
         comps.create_session(memory_enabled=False)
 
         assert loop_cls.call_args.kwargs["memory_storage"] is None
+        assert SEARCH_MEMORY_TOOL not in loop_cls.call_args.kwargs["tool_handlers"]
+        config = live_cls.call_args.args[0]
+        assert [t["name"] for t in config.tools] == ["end_conversation"]
+        assert "[User Profile]" not in config.instructions
+        comps.memory_storage.get_all_profiles.assert_not_called()
