@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from voice_pipeline import trace
+from voice_pipeline.adapters import respeaker
 from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEventType
 from voice_pipeline.adapters.led import LEDState
 from voice_pipeline.adapters.llm_openai import OpenAILLM
@@ -70,6 +71,7 @@ _CONSOLE_NARRATIVE = {
 }
 
 _GREETING_TIMEOUT_SEC = 10.0
+_RESPEAKER_PRESENT_TIMEOUT_SEC = 3.0  # 리셋 후 USB 재열거 대기 상한 (실측 ~1.1 s)
 _FAREWELL_TIMEOUT_SEC = 10.0
 _FRAME_TIMEOUT_SEC = 0.1
 _POLL_INTERVAL_SEC = 0.05
@@ -183,6 +185,10 @@ def main() -> None:
     """Launch the voice pipeline."""
     _setup_logging()
 
+    # ReSpeaker(XVF3800) 리셋 — RST 버튼과 같은 효과. 재열거 ~1 s 는 아래 모델 로딩(~20 s)에
+    # 완전히 가려지므로 대기를 두지 않는다. 실패해도 시작은 막지 않는다(fail-open).
+    respeaker.reset()
+
     # --- Shared component graph (production defaults: data/ray.db, LED via env) ---
     components = build_components()
 
@@ -244,6 +250,8 @@ def main() -> None:
                 raise
             logger.info("C++ 서버 대기 중 (잔여 %.0f초) — 캘리브레이션이 끝나면 열립니다", remain)
             shutdown_event.wait(_STARTUP_CONNECT_RETRY_DELAY_SEC)
+    # 리셋 뒤 재열거가 끝났는지 가드 — 정상 경로에선 즉시 통과. 실패 시 AudioInput 이 자기 오류를 낸다.
+    respeaker.wait_present(timeout_sec=_RESPEAKER_PRESENT_TIMEOUT_SEC)
     audio_input.start()
     _play_ready_chime()
     try:

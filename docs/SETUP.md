@@ -196,7 +196,33 @@ cat /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
 ```
 
 
-## 11. WiFi 절전 모드 해제 (권장)
+## 11. ReSpeaker USB 제어 권한 (udev)
+
+파이프라인은 시작 시 ReSpeaker Flex(XVF3800)에 USB 벤더 명령(REBOOT)을 보내 마이크를 소프트웨어로
+리셋한다(`voice_pipeline/adapters/respeaker.py`). 기본 권한(`root:root 664`)으로는 control transfer
+쓰기가 거부되므로 udev 규칙으로 `plugdev` 그룹에 쓰기 권한을 준다(사용자는 기본으로 `plugdev` 소속).
+
+```bash
+sudo tee /etc/udev/rules.d/99-respeaker.rules << 'EOF'
+SUBSYSTEM=="usb", ATTR{idVendor}=="2886", MODE="0664", GROUP="plugdev"
+EOF
+
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+적용 확인 (그룹이 `plugdev`여야 한다):
+
+```bash
+lsusb -d 2886:                       # Bus 002 Device 004 → /dev/bus/usb/002/004
+ls -l /dev/bus/usb/002/004
+```
+
+규칙이 없으면 파이프라인 로그에 `ReSpeaker reset failed: ... Access denied` 경고가 남고 리셋만
+건너뛴다(시작은 막지 않음).
+
+
+## 12. WiFi 절전 모드 해제 (권장)
 
 RPi 5의 WiFi는 기본적으로 Power Management가 켜져 있어, 유휴 시 속도가 크게 떨어진다.
 
@@ -225,7 +251,7 @@ sudo systemctl restart NetworkManager
 > `iw` 명령이 없으면 `sudo apt install iw`로 설치하거나, 설정 파일 생성 후 NetworkManager 재시작으로 대체 가능.
 
 
-## 12. 기기별 로봇 값 (`cpp/config.toml`의 `[robot.unitN]`)
+## 13. 기기별 로봇 값 (`cpp/config.toml`의 `[robot.unitN]`)
 
 새 기기는 자기 유닛 섹션이 있어야 기동한다 (`RAY_UNIT` 환경변수로 선택, 없으면 즉시 실패):
 
@@ -238,7 +264,7 @@ sudo systemctl restart NetworkManager
   캘리브레이션 후에도 한쪽으로 일정하게 기울면 이 값이 원인이다.
 
 
-## 13. 다음 단계 — 부팅 자동실행·LED
+## 14. 다음 단계 — 부팅 자동실행·LED
 
 여기까지가 기본 환경이다. 부팅 시퀀스 일체(LED 하드웨어 PWM, OS_LED 데몬, systemd 자동실행,
 기기별 캘리브레이션 값)는 [boot/README.md](../boot/README.md)의 "새 기기 설치 절차"를 따른다.
