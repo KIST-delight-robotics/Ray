@@ -343,6 +343,7 @@ public:
                 frames.push_back({r, p, y});
             } catch (...) { continue; }
         }
+        smoothLoopSeam();
         std::cout << "Idle motions loaded: " << frames.size() << " frames." << std::endl;
         return !frames.empty();
     }
@@ -370,6 +371,34 @@ public:
     }
 
 private:
+    // 루프 이음새(마지막 프레임 → 첫 프레임) 보정.
+    // CSV는 (0,0,0)에서 시작하지만 끝은 임의의 포즈라, 순환 시 한 프레임에 큰 점프가 생긴다.
+    // 마지막 kLoopBlendFrames 프레임에 (첫 프레임 - 마지막 프레임) 오프셋을 smoothstep으로
+    // 점증 적용해 마지막 프레임이 첫 프레임과 같아지도록 수렴시킨다. 로드 시 한 번만 수행하므로
+    // getNextPose / getNextSegment 재생 경로는 그대로 두면 된다.
+    static constexpr size_t kLoopBlendFrames = 20;
+
+    void smoothLoopSeam() {
+        if (frames.size() < kLoopBlendFrames + 1) return;
+
+        const Pose& first = frames.front();
+        const Pose& last = frames.back();
+        const double dr = first.r - last.r;
+        const double dp = first.p - last.p;
+        const double dy = first.y - last.y;
+
+        const size_t begin = frames.size() - kLoopBlendFrames;
+        for (size_t i = 0; i < kLoopBlendFrames; ++i) {
+            // t: 0.0 → 1.0 (마지막 프레임에서 1.0 도달)
+            const double t = static_cast<double>(i + 1) / kLoopBlendFrames;
+            const double alpha = t * t * (3.0 - 2.0 * t);  // smoothstep
+            Pose& f = frames[begin + i];
+            f.r += dr * alpha;
+            f.p += dp * alpha;
+            f.y += dy * alpha;
+        }
+    }
+
     std::vector<Pose> frames;
     std::atomic<size_t> currentIndex{0}; // 쓰레드 간 공유되는 인덱스
 
