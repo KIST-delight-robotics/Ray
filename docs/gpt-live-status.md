@@ -17,9 +17,9 @@
 | 파일 | 내용 |
 |---|---|
 | `voice_pipeline/adapters/gpt_live.py` | SDK `client.live.connect()` 래퍼. 수신 스레드 → 프로젝트 이벤트(`LiveAudio`, `LiveTranscript`, `LiveFunctionCall`, …) 큐. 전사는 SDK `TranscriptGrouper`로 화자별 세그먼트로 묶어 전달. |
-| `voice_pipeline/live_session.py` | `LiveSessionLoop`. 마이크 16k→24k 리샘플 → 세션, 출력 오디오 → 브리지(세션 = 스트림 하나, `live=True`), 전사 → 히스토리·utterances, 종료(키워드·유휴 60 s·`end_conversation` 툴·closed·브리지 오류·기아·stop), 종료 시퀀스(mute → 출력 무음 1 s → close → `audio_end`). **파이썬 무음 채우기/버리기**(§4.2). 대화 모델·백엔드 지시문, `LIVE_VOICE="marin"`, 인사 문구. |
+| `voice_pipeline/live_session.py` | `LiveSessionLoop`. 마이크 16k→24k 리샘플 → 세션, 출력 오디오 → 브리지(세션 = 스트림 하나, `live=True`), 전사 → 히스토리·utterances, 종료(키워드·유휴 60 s·`end_conversation` 툴·closed·브리지 오류·기아·stop), 종료 시퀀스(mute → 출력 무음 1 s → close → `audio_end`). **파이썬 무음 채우기/버리기**(§4.2). 대화 모델·백엔드 지시문, `LIVE_VOICE="cedar"`, 인사 문구. |
 | `voice_pipeline/wiring.py` | `engine` 분기. live면 ASR·VAP·TurnGPT 미로드. responses 위임 + `end_conversation` 툴. |
-| `voice_pipeline/__main__.py` | live면 작별 WAV 생략, 인사 WAV를 `OpenAITTS(voice=marin, model=gpt-4o-mini-tts)`로 "네, 부르셨어요?" 생성. 콘솔에 live 로거 표시. 종료 시 `vap/asr` None 가드. |
+| `voice_pipeline/__main__.py` | live면 작별 WAV 생략, 인사 WAV를 `OpenAITTS(voice=cedar, model=gpt-4o-mini-tts)`로 "네, 부르셨어요?" 생성. 콘솔에 live 로거 표시. 종료 시 `vap/asr` None 가드. |
 | `voice_pipeline/settings.py` | `ENGINE = "live"`, `BRIDGE_SAMPLE_RATE = 24000`. |
 | `voice_pipeline/adapters/cpp_bridge.py` | `send_stream_start(live=True)` → `{"type":"stream_start","live":true}`. |
 | `voice_pipeline/adapters/wakeword.py` | 주 언어 ko-KR + 대안 en-US, 키워드 `("ray","레이")`, 한글은 부분 문자열 매칭. |
@@ -93,7 +93,7 @@ build/Ray
 # 터미널 2
 uv run ray
 ```
-"레이"/"Ray"로 깨움 → 인사 "네, 부르셨어요?"(marin) → Live 세션. 종료는 작별 인사(`end_conversation` 툴, 모델 재량) 또는 키워드("잘 가", "이제 갈게", "여기까지", "bye", …) 또는 유휴 60 s. GNOME 소리 설정 창은 닫아 둘 것.
+"레이"/"Ray"로 깨움 → 인사 "네, 부르셨어요?"(cedar) → Live 세션. 종료는 작별 인사(`end_conversation` 툴, 모델 재량) 또는 키워드("잘 가", "이제 갈게", "여기까지", "bye", …) 또는 유휴 60 s. GNOME 소리 설정 창은 닫아 둘 것.
 
 로그:
 - `logs/pipeline/<시각>.log`: `GPT-Live connected in …`, `LiveSessionLoop started`, `Model started speaking`, `user:`/`assistant:` 전사, 조각 간격 300 ms 이상이면 `Audio chunk gap …ms (speaking|silent, 단계)`, `Ending session (…)`, 종료 시 `Audio summary: sent, padded, dropped, max chunk gap`. 15 s 주기 `Audio lead …` 줄은 DEBUG(`voice_pipeline.live_session=DEBUG`로 켬).

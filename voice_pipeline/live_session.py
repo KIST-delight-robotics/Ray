@@ -115,9 +115,9 @@ Answer in Korean, in one or two short sentences that sound natural when spoken a
 No lists, no URLs, no markdown.
 """
 
-LIVE_VOICE = "marin"  # 세션 목소리. 인사 WAV 도 같은 목소리로 합성해 이질감을 없앤다
+LIVE_VOICE = "cedar"  # 세션 목소리. 인사 WAV 도 같은 목소리로 합성해 이질감을 없앤다
 LIVE_GREETING_TEXT = "네, 부르셨어요?"  # 웨이크워드 뒤 세션 연결 지연(1.5~3.5초)을 가리는 인사
-LIVE_GREETING_TTS_MODEL = "gpt-4o-mini-tts"  # Live 목소리(marin)를 지원하는 OpenAI TTS 모델
+LIVE_GREETING_TTS_MODEL = "gpt-4o-mini-tts"  # Live 목소리(cedar)를 지원하는 OpenAI TTS 모델
 
 END_CONVERSATION_TOOL = "end_conversation"
 SEARCH_MEMORY_TOOL = "search_memory"
