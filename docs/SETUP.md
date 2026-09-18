@@ -116,28 +116,28 @@ production wiring은 부팅 시 네트워크 의존을 없애기 위해 **로컬
 ```bash
 # 임베딩 모델 (HF 허브 → ~/.cache/huggingface). local_files_only=False로 1회 로드
 uv run python -c "from voice_pipeline.adapters.embedder import create_embedder; create_embedder(expected_dimension=384)"
-# tiktoken 인코딩 사전 (→ $TIKTOKEN_CACHE_DIR). .env 의 경로와 같아야 한다
+# tiktoken 인코딩 사전 (→ $TIKTOKEN_CACHE_DIR). config/ray.env 의 경로와 같아야 한다
 mkdir -p var/cache/tiktoken
 TIKTOKEN_CACHE_DIR=$PWD/var/cache/tiktoken uv run python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
 ```
 
 `HF_HUB_OFFLINE=1`은 쓰지 말 것 — sentence-transformers가 허브 트리 조회를 시도해 예외로 죽는다.
 
-## 8. 기기별 설정 + API 인증 (`.env`)
+## 8. API 인증 (`config/ray.env`)
 
-키와 기기별 값은 **저장소 루트 `.env` 한 곳**에 둔다 — systemd 자동실행(`boot/systemd/*.service`)이
+키와 기기별 경로는 **`config/ray.env` 한 곳**에 둔다 — systemd 자동실행(`boot/systemd/*.service`)이
 `EnvironmentFile`로 이 파일을 읽는다. bashrc에만 넣으면 자동실행이 키를 못 받으므로,
 수동 실행(`uv run ray`)용 셸 환경은 bashrc에서 이 파일을 소싱해 맞춘다. 키 목록과 설명은
-`.env.example` 에 있다.
+`config/ray.env.example` 에 있다.
 
 ```bash
 cd ~/KIST_RAY/Ray
-cp .env.example .env
-$EDITOR .env          # RAY_UNIT, API 키, 절대경로 채우기
-chmod 600 .env
+cp config/ray.env.example config/ray.env
+$EDITOR config/ray.env    # API 키, 절대경로 채우기
+chmod 600 config/ray.env
 
 # 수동 실행(uv run ray)도 같은 값을 쓰도록 셸에 소싱
-echo 'set -a; . ~/KIST_RAY/Ray/.env; set +a' >> ~/.bashrc
+echo 'set -a; . ~/KIST_RAY/Ray/config/ray.env; set +a' >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -247,9 +247,14 @@ sudo systemctl restart NetworkManager
 > `iw` 명령이 없으면 `sudo apt install iw`로 설치하거나, 설정 파일 생성 후 NetworkManager 재시작으로 대체 가능.
 
 
-## 13. 기기별 로봇 값 (`cpp/config.toml`의 `[robot.unitN]`)
+## 13. 기기별 로봇 값 (`config/robot.toml`)
 
-새 기기는 자기 유닛 섹션이 있어야 기동한다 (`RAY_UNIT` 환경변수로 선택, 없으면 즉시 실패):
+공유 파라미터는 `cpp/config.toml`, 이 기기의 값은 `config/robot.toml`(gitignore)에 둔다. 없으면 즉시 실패한다.
+
+```bash
+cp config/robot.toml.example config/robot.toml
+$EDITOR config/robot.toml    # 첫 기동은 대략값으로, 캘리브레이션 콘솔 출력값으로 갱신
+```
 
 - **`default_pitch/roll_r/roll_l/yaw/mouth`** — 모터 홈 참고값. pitch/roll/mouth는 매 부팅
   자이로 캘리브레이션이 재설정하므로 기록용이고, **`default_yaw`는 실제 사용된다**

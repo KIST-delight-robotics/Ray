@@ -62,8 +62,8 @@ roll_r과 roll_l은 좌우로 반대 방향, roll 둘과 pitch는 앞뒤로 반�
 
 ### ① yaw 정렬
 
-yaw는 수평 회전이라 중력 센서로 기준을 잡을 수 없다. config의 `default_yaw`(정면을 보는 틱 값)로
-그냥 이동한다. **기기마다 다른 값이니 `RAY_UNIT`이 맞는지 확인할 것** — 다른 기기 값이 들어가면
+yaw는 수평 회전이라 중력 센서로 기준을 잡을 수 없다. `config/robot.toml`의 `default_yaw`(정면을 보는 틱 값)로
+그냥 이동한다. **기기마다 다른 값이니 이 기기의 `config/robot.toml`인지 확인할 것** — 다른 기기 값이 들어가면
 머리가 크게 돌아간다.
 
 ### ② 이완 — 세 줄을 일단 헐겁게
@@ -136,7 +136,7 @@ pitch에는 빨리 감기가 없다. 목표까지 거리가 0.05밖에 안 돼 �
 
 ## 6. 설정값
 
-`cpp/config.toml`. 공용 `[robot]` 항목과 기기별 `[robot.unitN]` 항목이 있다.
+공용 값은 `cpp/config.toml` `[robot]`, 기기별 값은 `config/robot.toml`(gitignore, `config/robot.toml.example` 참고).
 
 | 항목 | 값 | 뜻 |
 |---|---|---|

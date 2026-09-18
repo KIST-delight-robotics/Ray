@@ -1,0 +1,15 @@
+# 이 기기의 모터 홈 값 + 센서 오프셋. 이 파일을 robot.toml 로 복사해 값을 채운다 (robot.toml 은 gitignore).
+# 공유 파라미터는 cpp/config.toml, 기기별 값은 config/robot.toml — build/Ray 는 둘 다 저장소 루트 기준 상대경로로 읽는다.
+# config/robot.toml 이 없거나 키가 빠지면 잘못된 홈으로 이동할 수 있어 기동을 즉시 중단한다.
+
+# 모터 홈 참고값 (Dynamixel 틱). pitch/roll/mouth 는 매 부팅 자이로 캘리브레이션이 재설정하므로 기록용이고,
+# default_yaw 는 실제 사용된다 (자이로로 못 잡는 축 — 정면을 보는 틱 값). 캘리브레이션이 끝나면 콘솔에
+# 이 형식으로 결과가 찍히니 그대로 붙여 넣으면 된다.
+default_pitch   = 0
+default_roll_r  = 0
+default_roll_l  = 0
+default_yaw     = 0
+default_mouth   = 0
+
+# 육안 수평일 때의 Ax(g) — 센서 장착 기울기 보정 (생략 시 0). 측정법은 docs/SETUP.md §13.
+calib_ax_offset = 0.0

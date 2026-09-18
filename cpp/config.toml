@@ -23,8 +23,8 @@ ff1_gain = [0, 0, 0, 0, 0]
 ff2_gain = [0, 0, 0, 0, 0]
 
 [robot]
-# 모터 초기 위치는 기기별 [robot.unitN] 섹션에서 선택된다 (파일 하단).
-# 실행 전 RAY_UNIT 환경변수 필수 (예: RAY_UNIT=unit1). 미설정/오타 시 기동 실패.
+# 모든 기기가 공유하는 값만. 모터 홈(default_*)과 calib_ax_offset 은 기기별이라 config/robot.toml 에 둔다
+# (config/robot.toml.example 참고). 없으면 기동 실패.
 
 led_pwm_pin       = 13              # LED 밝기 PWM용 BCM GPIO 번호 (GPIO13, 물리 33번). -1 = 비활성
 led_pwm_range     = 100             # softPwm duty 범위 (0..range). 100 → ~100Hz
@@ -63,46 +63,3 @@ calib_tension_g           = 0.05   # 텐션 판정 문턱, roll·pitch 공용 (0
 generate_head_motion = true        # 헤드 모션 온라인 생성 여부. GPT-Live 스트림(stream_start live=true)은 이 값과 무관하게 대기 모션 유지
 wait_mode_rpy_ratio = 3.0           # 대기모드에서 최종 roll, pitch, yaw 값에 곱해지는 비율
 control_motor_rpy_ratio = 3.0       # 온라인 생성 시 최종 roll, pitch, yaw 값에 곱해지는 비율
-
-
-# ---------------------------------------------------------------------------
-# 기기별 모터 초기 위치 — RAY_UNIT 환경변수로 선택
-# ---------------------------------------------------------------------------
-
-[robot.unit1]
-default_pitch   = 3460
-default_roll_r  = 1900
-default_roll_l  = 1350
-default_yaw     = 1000
-default_mouth   = 3040
-
-[robot.unit2]
-default_pitch   = 1100
-default_roll_r  = 2750
-default_roll_l  = 1450
-default_yaw     = 2085
-default_mouth   = 1980
-
-[robot.unit3]
-default_pitch   = 1100
-default_roll_r  = 2750
-default_roll_l  = 1450
-default_yaw     = 3600
-default_mouth   = 1980
-
-[robot.unit4]
-default_pitch   = 4478
-default_roll_r  = 65
-default_roll_l  = 2186
-default_yaw     = 3560
-default_mouth   = 848
-calib_ax_offset = 0.036   # 육안 수평일 때의 Ax(g) — 센서 장착 기울기 보정 (기기별, 생략 시 0).
-                          # 측정법: 토크 온 + Wizard로 수평을 맞춘 후 가속도 20회 평균 (2026-09-01)
-
-[robot.unit5]   # mk3 — 2026-08-31 이전 unit4에 있던 값. unit4는 새 기기가 덮어써 사용 중이라 이 기기는 unit5로 이동 (2026-09-04)
-default_pitch   = 3500
-default_roll_r  = 750
-default_roll_l  = 2700
-default_yaw     = 2560
-default_mouth   = 940
-calib_ax_offset = 0.02

@@ -2644,7 +2644,7 @@ void initialize_robot_posture() {
     g_home.home_yaw    = target_position[3];
     g_home.home_mouth  = target_position[4];
 
-    std::cout << "\n===== 캘리브레이션 결과 — config.toml [robot.unitN]에 기입 =====" << std::endl
+    std::cout << "\n===== 캘리브레이션 결과 — config/robot.toml 에 기입 =====" << std::endl
               << "default_pitch   = " << g_home.home_pitch  << std::endl
               << "default_roll_r  = " << g_home.home_roll_r << std::endl
               << "default_roll_l  = " << g_home.home_roll_l << std::endl
@@ -2898,8 +2898,8 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signal_handler);
     std::thread(shutdown_watcher).detach();  // 시그널 → 정상 컨텍스트 정리·종료
 
-    if (!LoadConfig("cpp/config.toml")) {
-        std::cerr << "config.toml 로드 실패 — 종료합니다. (RAY_UNIT 환경변수 확인)" << std::endl;
+    if (!LoadConfig("cpp/config.toml", "config/robot.toml")) {
+        std::cerr << "설정 로드 실패 — 종료합니다. (cpp/config.toml, config/robot.toml 확인)" << std::endl;
         return -1;
     }
 
@@ -2923,7 +2923,7 @@ int main(int argc, char* argv[]) {
 
     // 시작 시 config 홈으로 이동하지 않는다 — 전원 인가 시점의 실제 자세에서 출발해
     // 아래 initialize_robot_posture()가 매 실행마다 수평/장력 기준으로 홈을 재설정한다.
-    // (config의 [robot.unitN] 값은 참고 기록용. 2026-08-31 운용 방침)
+    // (config/robot.toml 의 default_* 값은 yaw 를 빼면 참고 기록용. 2026-08-31 운용 방침)
     {
         std::vector<MotorState> cal_state;
         if (!dxl_driver->readAllState(cal_state) || cal_state.size() < 5) {

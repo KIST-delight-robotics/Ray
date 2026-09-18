@@ -29,10 +29,9 @@ env/
 .DS_Store
 Thumbs.db
 
-# 기기별 설정 + API 키 (운영자가 손으로 쓰는 파일). 키 이름은 .env.example 에
-.env
-.env.*
-!.env.example
+# config/ — 운영자가 기기마다 손으로 쓰는 파일 (API 키, 모터 홈 값). *.example 만 추적
+config/*
+!config/*.example
 
 # pytest
 .pytest_cache/

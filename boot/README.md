@@ -61,7 +61,7 @@ systemctl --user daemon-reload
 systemctl --user enable ray-cpp.service ray-python.service
 ```
 
-기기별 로봇 값(`[robot.unitN]` 홈·센서 오프셋)은 [docs/SETUP.md](../docs/SETUP.md)의 해당 절을 따른다.
+기기별 로봇 값(`config/robot.toml` 홈·센서 오프셋)은 [docs/SETUP.md](../docs/SETUP.md)의 해당 절을 따른다.
 
 ## 소리 (준비 완료 차임)
 

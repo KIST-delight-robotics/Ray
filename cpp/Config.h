@@ -6,7 +6,6 @@
 #include <vector>
 #include <iostream>
 #include <cstdint>
-#include <cstdlib>
 #include <optional>
 
 struct DynamixelConfig {
@@ -67,13 +66,23 @@ inline DynamixelConfig cfg_dxl;
 inline RobotConfig cfg_robot;
 
 
-inline bool LoadConfig(const std::string& path = "config.toml") {
+// path: 공유 파라미터(cpp/config.toml, 추적). robot_path: 이 기기의 모터 홈·센서 오프셋(config/robot.toml, gitignore).
+// 잘못된 홈 값으로 이동하면 하드웨어가 위험하므로 robot.toml 누락·키 누락은 즉시 실패.
+inline bool LoadConfig(const std::string& path = "config.toml", const std::string& robot_path = "config/robot.toml") {
     toml::table tbl;
-    
+    toml::table unit_tbl;
+
     try {
         tbl = toml::parse_file(path);
     } catch (const toml::parse_error& err) {
         std::cerr << "[Config Error] 파일 파싱 실패: " << err << "\n";
+        return false;
+    }
+    try {
+        unit_tbl = toml::parse_file(robot_path);
+    } catch (const toml::parse_error& err) {
+        std::cerr << "[Config Error] 기기별 설정 " << robot_path << " 파싱 실패 (config/robot.toml.example 을 복사해 채울 것): "
+                  << err << "\n";
         return false;
     }
     
@@ -151,19 +160,9 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
     }
     auto robot_node = tbl["robot"];
 
-    // 기기별 모터 초기 위치: RAY_UNIT 환경변수로 [robot.unitN] 섹션 선택.
-    // 잘못된 초기값으로 홈 이동하면 하드웨어가 위험하므로 미설정/오타는 즉시 실패.
-    const char* unit = std::getenv("RAY_UNIT");
-    if (unit == nullptr || *unit == '\0') {
-        std::cerr << "[Config Error] RAY_UNIT 환경변수가 설정되지 않았습니다 (예: RAY_UNIT=unit1).\n";
-        return false;
-    }
-    if (!robot_node[unit].is_table()) {
-        std::cerr << "[Config Error] [robot." << unit << "] 섹션이 config.toml에 없습니다.\n";
-        return false;
-    }
-    auto unit_node = robot_node[unit];
-    std::cout << "[Config] 기기 설정 선택: [robot." << unit << "]" << std::endl;
+    // 기기별 값은 config/robot.toml (최상위 키)
+    toml::node_view<toml::node> unit_node{unit_tbl};
+    std::cout << "[Config] 기기별 설정: " << robot_path << std::endl;
 
     ok &= REQ(unit_node, "default_pitch",  cfg_robot.default_pitch);
     ok &= REQ(unit_node, "default_roll_r", cfg_robot.default_roll_r);
@@ -189,7 +188,7 @@ inline bool LoadConfig(const std::string& path = "config.toml") {
     // 캘리브레이션 (옵션 — 생략 시 기본값)
     cfg_robot.calib_release_step_tick = robot_node["calib_release_step_tick"].value_or(60);
     cfg_robot.calib_release_noise_g     = robot_node["calib_release_noise_g"].value_or(0.03);
-    cfg_robot.calib_ax_offset           = unit_node["calib_ax_offset"].value_or(0.0);  // 기기별 — [robot.unitN]
+    cfg_robot.calib_ax_offset           = unit_node["calib_ax_offset"].value_or(0.0);  // 기기별 — config/robot.toml
     cfg_robot.calib_tension_g           = robot_node["calib_tension_g"].value_or(0.05);
     cfg_robot.calib_release_mouth_tick  = robot_node["calib_release_mouth_tick"].value_or(250);
     cfg_robot.calib_mouth_backoff_tick  = robot_node["calib_mouth_backoff_tick"].value_or(45);

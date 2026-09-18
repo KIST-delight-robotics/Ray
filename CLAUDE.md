@@ -55,8 +55,9 @@ Top-level only — for module details, inspect the folder directly (every module
 - `var/` — everything the programs write at runtime: `ray.db`, `log/` (`pipeline/` Python;
   `motion/`, `pos4_audio/` C++), `audio/` (TTS-generated greeting cache), `cache/`, `eval/`
   (eval WAVs/results). Gitignored as a whole; nothing here is ever tracked.
-- `.env` — per-device settings + API keys, written by the operator (gitignored). Key list in
-  `.env.example`. Read by `~/.bashrc` and the systemd units.
+- `config/` — files the operator writes per device (gitignored; only `*.example` tracked):
+  `ray.env` (API keys, paths; read by `~/.bashrc` and the systemd units) and `robot.toml`
+  (this device's motor home positions + sensor offset, read by the C++ process).
 - `models/`, `external/`, `third_party/` — model files and external repos
 - `build/` — C++ build output
 
@@ -67,11 +68,10 @@ Audio playback + motor control (`build/Ray`). The Python pipeline connects to it
 WebSocket (port 9200).
 
 - **Build**: `cmake --build build --target Ray`
-- **Run**: `RAY_UNIT` env var is **required** — selects the per-device motor home positions
-  from `[robot.unitN]` in `cpp/config.toml`. Missing/typo → startup fails with a config error.
-  Set it per device (e.g. `export RAY_UNIT=unit1` in `~/.bashrc`).
-- **Config**: `cpp/config.toml` — shared params + per-unit sections. Do not keep per-device
-  local edits; add or update a `[robot.unitN]` section instead.
+- **Config**: `cpp/config.toml` — params shared by every device (tracked). `config/robot.toml` —
+  this device's motor home positions + sensor offset (gitignored, copy from
+  `config/robot.toml.example`). Missing file/key → startup fails with a config error. Never put
+  per-device values in `config.toml`.
 - **Python-side dev without the robot**: run `scripts/mock_cpp_server.py` instead of `build/Ray`.
 
 
