@@ -13,11 +13,13 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 
+from voice_pipeline.settings import VAR_DIR
 from voice_pipeline.types import ITTS
 
 logger = logging.getLogger("voice_pipeline.tts")
 
-_AUDIO_DIR = "assets/audio"  # 생성 오디오 파일 저장 디렉토리 (C++ 작업 경로 기준)
+# TTS 로 생성한 인사·작별 WAV 캐시 (C++ 작업 경로 기준). assets/audio 에는 추적되는 폴백만 둔다.
+_AUDIO_DIR = f"{VAR_DIR}/audio"
 _GREETING_TEXT = "Yes, how can I help you?"  # greeting 합성 텍스트
 _FAREWELL_TEXT = "Talk to you next time!"  # farewell 합성 텍스트
 _FALLBACK_GREETING_PATH = "assets/audio/greeting.wav"  # TTS 실패 시 사용할 greeting 파일

@@ -29,9 +29,10 @@ env/
 .DS_Store
 Thumbs.db
 
-# Environment variables
+# 기기별 설정 + API 키 (운영자가 손으로 쓰는 파일). 키 이름은 .env.example 에
 .env
 .env.*
+!.env.example
 
 # pytest
 .pytest_cache/
@@ -42,22 +43,12 @@ Thumbs.db
 # Models (downloaded via models.zip)
 models/
 
-# TTS-generated greeting/farewell audio cache
-assets/audio/greeting_*.wav
-assets/audio/farewell_*.wav
-
-# Audio/motion assets (music, vocal, motion data)
+# assets/ 는 전부 추적. 예외는 대용량 음원만 (별도 배포)
 assets/audio/music/
 assets/audio/vocal/
-assets/headMotion/
-assets/mouthMotion/
-assets/ledMotion/
 
-# Script output (TTS wav files, etc.)
-output/
-
-# Session logs
-logs/
+# 프로그램이 실행 중에 쓰는 파일 전부 (DB, 로그, 캐시, 생성 오디오, 평가 산출물)
+var/
 
 # External model repositories
 external/
@@ -70,10 +61,6 @@ third_party/
 
 # Temporary: research materials (large, not ready for tracking)
 docs/memory-research/
-
-# SQLite database
-data/
-!data/eval/questions.json
 
 # Large media / runtime logs / vendored libs / received bundles (distributed separately)
 /*.wav

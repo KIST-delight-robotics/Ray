@@ -2,7 +2,7 @@
 스피커 출력(마이크 녹음)과 입 모터 실제 위치(C++ Standard_Log)의 온셋을 대조해 고정 오프셋과 드리프트를 잰다.
 
     uv run python scripts/bench/live_sync_probe.py --duration 180            # 실행 + 분석
-    uv run python scripts/bench/live_sync_probe.py --analyze logs/sync_probe/<ts>   # 분석만
+    uv run python scripts/bench/live_sync_probe.py --analyze var/log/sync_probe/<ts>   # 분석만
 
 전제: build/Ray 가 떠 있어야 한다 (RAY_UNIT 필요). 실제 LiveSessionLoop·CppBridge 를 그대로 쓰고 GPTLiveSession 자리만
 FakeLiveSession 으로 바꾼다 — Python 의 lead 채움·버림과 C++ 프리버퍼·split 채움 경로가 프로덕션과 동일하게 돈다.
@@ -14,7 +14,7 @@ FakeLiveSession 으로 바꾼다 — Python 의 lead 채움·버림과 C++ 프�
 순간의 monotonic 을 기준점으로 삼고, 녹음의 첫 read 시각과 Standard_Log(RESPONSES 행 = audio_sync 행과 같은 틱에 기록) 을
 같은 축으로 옮긴다. 고정 오프셋에는 마이크 입력 지연(USB, 수십 ms)이 포함된다 — 드리프트·계단 판정에는 무관.
 
-출력 (logs/sync_probe/<ts>/): capture_6ch.wav, meta.json, probe.log, offsets.csv, report.txt
+출력 (var/log/sync_probe/<ts>/): capture_6ch.wav, meta.json, probe.log, offsets.csv, report.txt
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ from voice_pipeline.adapters.gpt_live import LiveAudio, LiveStarted  # noqa: E40
 from voice_pipeline.live_session import LiveSessionLoop  # noqa: E402
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE, FRAME_SIZE_SAMPLES, SAMPLE_RATE, SAMPLE_WIDTH  # noqa: E402
 
-LOG_ROOT = Path("logs/sync_probe")
-MOTION_LOG_ROOT = Path("logs/motion")
+LOG_ROOT = Path("var/log/sync_probe")
+MOTION_LOG_ROOT = Path("var/log/motion")
 CHUNK_SEC = 0.1  # GPT-Live 관측 조각 길이
 CAPTURE_CH = 6
 CAPTURE_DEVICE_HINTS = ("respeaker", "respeaker_hw", "default")

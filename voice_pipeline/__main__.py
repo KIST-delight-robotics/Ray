@@ -41,6 +41,7 @@ from voice_pipeline.adapters.wakeword import WakewordDetector
 from voice_pipeline.greeting_audio import ensure_greeting_audio
 from voice_pipeline.live_session import LIVE_GREETING_TEXT, LIVE_GREETING_TTS_MODEL, LIVE_VOICE
 from voice_pipeline.memory.writer import MemoryWriter
+from voice_pipeline.settings import VAR_DIR
 from voice_pipeline.types import AudioFrame
 from voice_pipeline.wiring import build_components
 
@@ -56,8 +57,8 @@ class SystemMode(enum.Enum):
 
 logger = logging.getLogger("voice_pipeline")
 
-# C++ 쪽 런타임 로그(logs/pos4_audio, logs/motion)와 같은 목적별 하위 폴더 관례를 따른다.
-_LOG_DIR = Path("logs/pipeline")
+# C++ 쪽 런타임 로그(var/log/pos4_audio, var/log/motion)와 같은 목적별 하위 폴더 관례를 따른다.
+_LOG_DIR = Path(VAR_DIR) / "log" / "pipeline"
 _LOG_FORMAT = "%(asctime)s %(name)-40s %(levelname)-7s %(message)s"
 # 콘솔에 INFO를 그대로 내보낼 "대화 서사" 로거 (정확히 일치해야 통과).
 # 모드 전환(voice_pipeline), 대화 흐름(session_loop: ASR/LLM/INTERRUPT 등),
@@ -189,7 +190,7 @@ def main() -> None:
     # 완전히 가려지므로 대기를 두지 않는다. 실패해도 시작은 막지 않는다(fail-open).
     respeaker.reset()
 
-    # --- Shared component graph (production defaults: data/ray.db, LED via env) ---
+    # --- Shared component graph (production defaults: var/ray.db, LED via env) ---
     components = build_components()
 
     if _asound is not None:

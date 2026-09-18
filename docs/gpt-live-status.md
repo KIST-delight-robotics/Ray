@@ -74,7 +74,7 @@ C++는 첫 360 ms가 차면 시계를 시작하고 매 사이클 "그 시각의 
    - 오프셋 = 360·P + S 가 live의 정상 상태 지연이다(시작 오프셋이 세션 내내 유지). 720 중 360은 채워지는 중인 덩이(불가피), ~240은 재생기 선취(OpenAL 3버퍼×80 ms, 줄이면 G 상한 480→600으로 올라가 지연 없이 여유 +110~150), 90은 G가 사용. 선취 축소는 미착수. `kSplitTrimFloorMs`(200) — 채운 누계가 남아 있고 원시 버퍼가 200 ms보다 많이 남았으면 앞쪽 0 샘플을 "남은 양 − 200"과 채운 누계 중 작은 만큼만 버려 응답 지연을 원위치. 실제 남은 양만 버리니 진동 없음, 말소리 샘플 무영향, 파이썬 회계도 무영향(채움·되돌림 상쇄). 로그 `[split] cycle N: trimmed X ms`. 부작용: 문장 사이 자연 쉼이 채운 만큼(수백 ms) 짧아질 수 있음.
    - 기각한 대안: 파이썬 타이머 채우기(C++가 흡수할 수 있는 정지에도 구멍을 냄 — 채우기는 기한을 아는 C++가 마지막 순간에), C++→파이썬 `padded` 보고(회계를 한곳에 모으려는 시도였지만 C++ 안에서 상쇄되므로 불필요).
 3. 파이썬 무음 채우기 유지(서버 생략분은 파이썬이 조용한 자리에, 정지는 C++가 최후 방어).
-검증(Wi-Fi 3분 세션, 콘솔은 `build/Ray 2>&1 | tee logs/ray_console.log`): `[Sound] underrun` 0회, `[split] padded`는 정지(≈300 ms 이상) 시점에만, 그 뒤 무음에서 `trimmed`로 원위치, `audio_sync_RESPONSES.csv`의 lag 0 근처, motion 로그 40 ms 간격 유지.
+검증(Wi-Fi 3분 세션, 콘솔은 `build/Ray 2>&1 | tee var/log/ray_console.log`): `[Sound] underrun` 0회, `[split] padded`는 정지(≈300 ms 이상) 시점에만, 그 뒤 무음에서 `trimmed`로 원위치, `audio_sync_RESPONSES.csv`의 lag 0 근처, motion 로그 40 ms 간격 유지.
 
 ### 4.4a 유선 전환 뒤 판단 (2026-09-16)
 - 4.2 무음 채우기는 유선에서도 필요 — 무음 유실 1~3%면 720 ms 여유가 27~72초에 소진된다. 유실이 무음에 몰리므로 "무음 조각 뒤에서만 채운다"가 맞는 자리. 유선에서는 100 ms 단위의 작고 잦은 보정, Wi-Fi에서는 정지 뒤 몰아 채우기 + 버리기가 번갈아 동작(17:56 세션 3분에 5초).
@@ -88,7 +88,7 @@ C++는 첫 360 ms가 차면 시계를 시작하고 매 사이클 "그 시각의 
 ## 5. 실행·확인 방법
 
 ```
-# 터미널 1 (모터·재생). RAY_UNIT 은 ~/.config/ray/ray.env / ~/.bashrc 에 설정됨
+# 터미널 1 (모터·재생). RAY_UNIT 은 저장소 루트 .env 에 설정됨 (~/.bashrc 가 소싱)
 build/Ray
 # 터미널 2
 uv run ray
@@ -96,10 +96,10 @@ uv run ray
 "레이"/"Ray"로 깨움 → 인사 "네, 부르셨어요?"(cedar) → Live 세션. 종료는 작별 인사(`end_conversation` 툴, 모델 재량) 또는 키워드("잘 가", "이제 갈게", "여기까지", "bye", …) 또는 유휴 60 s. GNOME 소리 설정 창은 닫아 둘 것.
 
 로그:
-- `logs/pipeline/<시각>.log`: `GPT-Live connected in …`, `LiveSessionLoop started`, `Model started speaking`, `user:`/`assistant:` 전사, 조각 간격 300 ms 이상이면 `Audio chunk gap …ms (speaking|silent, 단계)`, `Ending session (…)`, 종료 시 `Audio summary: sent, padded, dropped, max chunk gap`. 15 s 주기 `Audio lead …` 줄은 DEBUG(`voice_pipeline.live_session=DEBUG`로 켬).
-- `logs/motion/<시각>/console.log`: C++ 콘솔(cout/cerr) 복제. `[split] padded/trimmed`(시각·버퍼 잔량 포함), `[Sound] underrun`, `[MainLoop]`, `[CALIB]`.
-- `logs/motion/<시각>/Standard_Log.csv`: 모터 틱(정상 40 ms 간격, 대기 모드는 약 1 Hz로 저속 기록). `audio_sync_RESPONSES.csv`: 싱크 진단(`kEnableAudioSyncLog`).
-- 요약: `uv run python scripts/hardware/audio_sync_report.py logs/motion/<시각>/audio_sync_RESPONSES.csv`
+- `var/log/pipeline/<시각>.log`: `GPT-Live connected in …`, `LiveSessionLoop started`, `Model started speaking`, `user:`/`assistant:` 전사, 조각 간격 300 ms 이상이면 `Audio chunk gap …ms (speaking|silent, 단계)`, `Ending session (…)`, 종료 시 `Audio summary: sent, padded, dropped, max chunk gap`. 15 s 주기 `Audio lead …` 줄은 DEBUG(`voice_pipeline.live_session=DEBUG`로 켬).
+- `var/log/motion/<시각>/console.log`: C++ 콘솔(cout/cerr) 복제. `[split] padded/trimmed`(시각·버퍼 잔량 포함), `[Sound] underrun`, `[MainLoop]`, `[CALIB]`.
+- `var/log/motion/<시각>/Standard_Log.csv`: 모터 틱(정상 40 ms 간격, 대기 모드는 약 1 Hz로 저속 기록). `audio_sync_RESPONSES.csv`: 싱크 진단(`kEnableAudioSyncLog`).
+- 요약: `uv run python scripts/hardware/audio_sync_report.py var/log/motion/<시각>/audio_sync_RESPONSES.csv`
 
 단위 테스트: `uv run --all-groups python -m pytest -q` (`uv run pytest`가 안 되면 `.venv/bin/pytest` 셔뱅이 옛 경로일 수 있음 → `uv sync --all-groups --reinstall-package pytest`).
 

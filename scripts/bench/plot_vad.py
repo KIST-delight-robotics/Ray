@@ -2,7 +2,7 @@
 
 Usage:
     uv run python scripts/bench/plot_vad.py
-    uv run python scripts/bench/plot_vad.py --results-dir data/ava_speech/results
+    uv run python scripts/bench/plot_vad.py --results-dir var/bench/ava_speech/results
 """
 
 from __future__ import annotations
@@ -67,8 +67,8 @@ def load_single(csv_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--results-dir", type=Path, default=Path("data/ava_speech/results"))
-    parser.add_argument("--out", type=Path, default=Path("data/ava_speech/results/vad_comparison.png"))
+    parser.add_argument("--results-dir", type=Path, default=Path("var/bench/ava_speech/results"))
+    parser.add_argument("--out", type=Path, default=Path("var/bench/ava_speech/results/vad_comparison.png"))
     args = parser.parse_args()
 
     gt, vap, silero = load_all(args.results_dir)

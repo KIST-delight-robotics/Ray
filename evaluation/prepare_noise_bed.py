@@ -14,9 +14,9 @@ a single-source-at-a-time track would let momentary quiet/transient windows
 swing the per-session SNR.
 
 Usage:
-    uv run python -m evaluation.prepare_noise_bed --musan-dir data/musan
-    uv run python -m evaluation.prepare_noise_bed --musan-dir data/musan \\
-        --layers 5 --length 60 --out data/eval/noise_bed/bed_master.wav
+    uv run python -m evaluation.prepare_noise_bed --musan-dir var/eval/musan
+    uv run python -m evaluation.prepare_noise_bed --musan-dir var/eval/musan \\
+        --layers 5 --length 60 --out var/eval/noise_bed/bed_master.wav
 """
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ def main() -> None:
     p.add_argument("--rate", type=int, default=16000, help="Output sample rate (MUSAN native = 16k)")
     p.add_argument("--master-rms", type=float, default=_DEFAULT_MASTER_RMS, help="gain-1.0 reference RMS")
     p.add_argument("--seed", default="bed-master", help="Deterministic clip-selection seed")
-    p.add_argument("--out", default="data/eval/noise_bed/bed_master.wav")
+    p.add_argument("--out", default="var/eval/noise_bed/bed_master.wav")
     args = p.parse_args()
 
     noise_files = index_musan_noise(args.musan_dir)

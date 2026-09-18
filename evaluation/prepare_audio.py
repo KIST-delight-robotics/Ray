@@ -11,9 +11,9 @@ neither vendor exposes loudness normalization and voices differ in level
 (elderly/child library voices especially), which skews ASR/VAD results.
 
 Usage:
-    uv run python -m evaluation.prepare_audio data/eval/questions.json
-    uv run python -m evaluation.prepare_audio data/eval/questions.json --output-dir data/eval/wav
-    uv run python -m evaluation.prepare_audio data/eval/questions.json --force
+    uv run python -m evaluation.prepare_audio evaluation/questions.json
+    uv run python -m evaluation.prepare_audio evaluation/questions.json --output-dir var/eval/wav
+    uv run python -m evaluation.prepare_audio evaluation/questions.json --force
 """
 
 from __future__ import annotations
@@ -129,7 +129,7 @@ def normalize_wav(path: Path, target_rms: float) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate eval question WAV files")
     parser.add_argument("questions", help="Path to questions JSON")
-    parser.add_argument("--output-dir", default="data/eval/wav", help="Output directory")
+    parser.add_argument("--output-dir", default="var/eval/wav", help="Output directory")
     parser.add_argument("--force", action="store_true", help="Regenerate existing files")
     parser.add_argument(
         "--target-rms",

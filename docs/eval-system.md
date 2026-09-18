@@ -228,7 +228,7 @@ tt_incomplete는 의도적 미완성 발화임을 judge에게 알려, 자연스�
 평가를 실행하면 타임스탬프별 디렉토리에 다음 파일이 생성된다.
 
 ```
-data/eval/results/<timestamp>/
+var/eval/results/<timestamp>/
 ├── eval.log           # 실행 로그
 ├── eval.db            # 파이프라인 트레이스·대화 이력·메모리 에피소드 (SQLite)
 ├── sessions.json      # 질문별 실행 기록 (ASR 텍스트, 성공 여부, 레이턴시 등)
@@ -255,16 +255,16 @@ data/eval/results/<timestamp>/
 
 ```bash
 # 1. 질문 WAV 파일 생성 (최초 1회, 이후 변경 없으면 skip)
-uv run python -m evaluation.prepare_audio data/eval/questions.json
+uv run python -m evaluation.prepare_audio evaluation/questions.json
 
-# 2. 평가 실행 (결과는 data/eval/results/<timestamp>/ 에 저장)
-uv run python -m evaluation.run --questions data/eval/questions.json
+# 2. 평가 실행 (결과는 var/eval/results/<timestamp>/ 에 저장)
+uv run python -m evaluation.run --questions evaluation/questions.json
 
 # 채점·대시보드는 run.py 종료 시 자동으로 실행된다.
 # 필요하면 개별 실행도 가능:
-uv run python -m evaluation.report data/eval/results/<timestamp>
-uv run python -m evaluation.score data/eval/results/<timestamp>/report.json
-uv run python -m evaluation.dashboard data/eval/results/<timestamp>/scored.json
+uv run python -m evaluation.report var/eval/results/<timestamp>
+uv run python -m evaluation.score var/eval/results/<timestamp>/report.json
+uv run python -m evaluation.dashboard var/eval/results/<timestamp>/scored.json
 ```
 
 ### 실행 옵션
@@ -273,8 +273,8 @@ uv run python -m evaluation.dashboard data/eval/results/<timestamp>/scored.json
 |------|------|
 | `--questions` | 질문 JSON 파일 경로 (필수) |
 | `--device` | 질문 재생용 ALSA 디바이스 (기본: `default`) |
-| `--wav-dir` | WAV 파일 디렉토리 (기본: `data/eval/wav`) |
-| `--output-dir` | 결과 저장 디렉토리 (기본: `data/eval/results`) |
+| `--wav-dir` | WAV 파일 디렉토리 (기본: `var/eval/wav`) |
+| `--output-dir` | 결과 저장 디렉토리 (기본: `var/eval/results`) |
 | `--quick` | 스위트당 1개 질문만 샘플링하여 빠르게 실행 |
 | `--category` | 특정 카테고리만 실행 (예: `--category asr,quality`) |
 | `--text` | 응답 품질·장기기억 스위트를 Text 모드로 실행 (음성·턴테이킹 단계를 건너뛰고 LLM만 테스트) |
@@ -284,7 +284,7 @@ uv run python -m evaluation.dashboard data/eval/results/<timestamp>/scored.json
 
 | 옵션 | 설명 |
 |------|------|
-| `--output-dir` | WAV 출력 디렉토리 (기본: `data/eval/wav`) |
+| `--output-dir` | WAV 출력 디렉토리 (기본: `var/eval/wav`) |
 | `--voice` | TTS 음성 (기본: `ash`) |
 | `--model` | TTS 모델 (기본: `gpt-4o-mini-tts`) |
 | `--speed` | 재생 속도 (기본: `1.0`) |

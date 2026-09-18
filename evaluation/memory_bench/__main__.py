@@ -2,11 +2,11 @@
 
 Usage:
     uv run python -m evaluation.memory_bench ingest --dataset locomo \\
-        --data data/eval/locomo/locomo10.json --run-dir data/eval/locomo/runs/r1 \\
+        --data var/eval/locomo/locomo10.json --run-dir var/eval/locomo/runs/r1 \\
         [--conversations conv-26,conv-30] [--workers 4]
     uv run python -m evaluation.memory_bench ingest --dataset longmemeval \\
-        --data data/eval/longmemeval/longmemeval_oracle.json \\
-        --run-dir data/eval/longmemeval/runs/r1 [--sample-per-type 2]
+        --data var/eval/longmemeval/longmemeval_oracle.json \\
+        --run-dir var/eval/longmemeval/runs/r1 [--sample-per-type 2]
     uv run python -m evaluation.memory_bench answer --run-dir <run-dir> \\
         [--conversations ...] [--workers 8] [--model gpt-4o-mini]
     uv run python -m evaluation.memory_bench score --run-dir <run-dir> \\

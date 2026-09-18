@@ -54,12 +54,14 @@ static constexpr int AUDIO_SAMPLE_RATE = 24000;
 static constexpr int AUDIO_CHANNELS = 1;
 
 // 파일 경로 설정
+// 경로 규칙: assets/ = 저장소와 함께 배포되는 입력(추적), var/ = 프로그램이 실행 중에 쓰는 출력(전체 gitignore)
 const std::string ASSETS_DIR = "assets";
-const std::string DATA_DIR = "data";
+const std::string VAR_DIR = "var";
+const std::string LOG_DIR = VAR_DIR + "/log";
 const std::string MUSIC_DIR = ASSETS_DIR + "/audio/music";
 const std::string VOCAL_DIR = ASSETS_DIR + "/audio/vocal";
-const std::string SEGMENTS_DIR = DATA_DIR + "/segments";
-const std::string IDLE_MOTION_FILE = DATA_DIR + "/empty_10min.csv";
+const std::string SEGMENTS_DIR = ASSETS_DIR + "/segments";
+const std::string IDLE_MOTION_FILE = ASSETS_DIR + "/empty_10min.csv";
 
 // 전역 변수 및 동기화 도구
 std::string vocal_file_path;
@@ -854,7 +856,7 @@ void read_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& 
 
 
 // ============================================================
-// 로그 설정 / 로깅 파일 저장 경로: /home/limdaemin/LIM/Ray/assets/logs/
+// 로그 설정 / 로깅 파일 저장 경로: var/log/pos4_audio/
 // ============================================================
 
 constexpr float RAW_TO_MOTOR_SCALE = 400.0f; //로깅 파일에서 저장되는 음원 RAW 파일을 스케일링 할때 정할 최댓값
@@ -955,7 +957,7 @@ inline std::string make_pos4_audio_log_path(const std::string& mode_label) {
 
     std::string safe_mode = sanitize_filename(mode_label);
 
-    return "logs/pos4_audio/" +
+    return LOG_DIR + "/pos4_audio/" +
            safe_mode + "_pos4_audio_" + std::to_string(now_ms) + ".csv";
 }
 
@@ -1046,7 +1048,7 @@ class Pos4AudioCsvLogger {
         bool started_ = false;
 };
 
-// 입 모터-오디오 동기화 분석 로그 (logs/pos4_audio/). 40ms마다 원본 오디오를
+// 입 모터-오디오 동기화 분석 로그 (var/log/pos4_audio/). 40ms마다 원본 오디오를
 // 통째로 기록해 용량이 매우 커지므로, 입 모션 튜닝 때만 true로 켠다.
 constexpr bool kEnablePos4AudioLog = false;
 
@@ -2068,10 +2070,10 @@ void csv_control_motor(std::string audioName) {
 
     sf::Music music;
 
-    std::string headMotionFilePath = "assets/headMotion/" + audioName + ".csv";
-    std::string mouthMotionFilePath = "assets/mouthMotion/" + audioName + "-delta-big.csv";
-    std::string ledMotionFilePath = "assets/ledMotion/" + audioName + "-led.csv";
-    std::string audioFilePath = "assets/audio/music/" + audioName + ".wav";
+    std::string headMotionFilePath = ASSETS_DIR + "/headMotion/" + audioName + ".csv";
+    std::string mouthMotionFilePath = ASSETS_DIR + "/mouthMotion/" + audioName + "-delta-big.csv";
+    std::string ledMotionFilePath = ASSETS_DIR + "/ledMotion/" + audioName + "-led.csv";
+    std::string audioFilePath = MUSIC_DIR + "/" + audioName + ".wav";
 
     if (!music.openFromFile(audioFilePath)) {
         std::cerr << "Error: Could not load audio file: " << audioFilePath << std::endl;
@@ -2486,10 +2488,10 @@ void initialize_robot_posture() {
 
     std::cout << "Mouth 조정 (delta-current LSB + MAD auto threshold)" << std::endl;
 
-    std::filesystem::create_directories("data");
-    std::ofstream logf("data/log_only_mouth.csv", std::ios::out | std::ios::trunc);
+    std::filesystem::create_directories(LOG_DIR);
+    std::ofstream logf(LOG_DIR + "/log_only_mouth.csv", std::ios::out | std::ios::trunc);
     if (!logf.is_open()) {
-        std::cerr << "CSV 열기 실패: data/log_only_mouth.csv\n";
+        std::cerr << "CSV 열기 실패: " << LOG_DIR << "/log_only_mouth.csv\n";
         return;
     }
     logf.setf(std::ios::unitbuf);

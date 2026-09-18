@@ -46,7 +46,7 @@ on_session_end callback -> write_executor.submit(...)
 
 ## Storage Schema
 
-Database: `data/ray.db` (shared with conversation history, separate connection).
+Database: `var/ray.db` (shared with conversation history, separate connection).
 
 ```
 episodes           -- episodic memories
@@ -177,7 +177,7 @@ All three access `SQLiteMemoryStorage` and `NumpyVectorIndex` concurrently, guar
 | 변수 | 값 | 의미 |
 |---|---|---|
 | `_DEFAULT_DIMENSION` | `384` | 기본 embedding 차원 (all-MiniLM-L6-v2 기준). |
-| `_DEFAULT_DB_PATH` | `"data/ray.db"` | 기본 SQLite 파일 경로 (History/Trace와 공유). |
+| `_DEFAULT_DB_PATH` | `"var/ray.db"` | 기본 SQLite 파일 경로 (History/Trace와 공유). |
 
 ### `memory/prompts.py`
 | 변수 | 값 | 의미 |

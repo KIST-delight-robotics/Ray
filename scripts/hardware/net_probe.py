@@ -2,14 +2,14 @@
 시각과 함께 남기고, 파이프라인 로그의 "Audio chunk gap" 과 대조해 정지가 어느 구간이었는지 가른다.
 
     uv run python scripts/hardware/net_probe.py                       # 기록 시작 (Ctrl+C 로 종료, 요약 출력)
-    uv run python scripts/hardware/net_probe.py --analyze logs/net/<ts> [--pipeline logs/pipeline/<ts>.log]
+    uv run python scripts/hardware/net_probe.py --analyze var/log/net/<ts> [--pipeline var/log/pipeline/<ts>.log]
 
 판별 논리 (조각 정지 시각 ±윈도 안의 ping 상태):
   게이트웨이 튐 (손실 또는 RTT ≥ 문턱)            → Wi-Fi 한 홉 문제
   게이트웨이 정상, 외부만 튐                       → 연구소 망 이상 상위 경로
   둘 다 정상                                       → 서버 쪽 전송 문제 (경로는 살아 있었음)
 
-기록 형식 (logs/net/<ts>/): <label>.csv = epoch,seq,rtt_ms(빈칸=손실). events.txt = 연속 이상 구간 요약.
+기록 형식 (var/log/net/<ts>/): <label>.csv = epoch,seq,rtt_ms(빈칸=손실). events.txt = 연속 이상 구간 요약.
 200 ms 는 일반 권한에서 허용되는 최소 간격이고, 1 초 정지가 5 개 연속 이상으로 찍혀 단발 손실과 갈린다.
 Wi-Fi 정지는 손실보다 "큐에 갇혔다가 늦게 도착" 이 많아 RTT 도 같이 본다.
 """
@@ -26,7 +26,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-LOG_ROOT = Path("logs/net")
+LOG_ROOT = Path("var/log/net")
 INTERVAL_SEC = 0.2
 LATE_RTT_MS = 300.0  # 이 이상이면 "튐" 으로 본다 (정상 게이트웨이 RTT 2~10 ms, 외부 10~40 ms)
 GAP_WINDOW_SEC = 0.5  # 조각 정지 구간 앞뒤로 함께 보는 폭
@@ -222,13 +222,13 @@ def main() -> None:
     p.add_argument("--gateway", default=None, help="게이트웨이 주소 (기본: 기본 경로에서 자동)")
     p.add_argument("--external", default="1.1.1.1", help="외부 호스트")
     p.add_argument("--analyze", type=Path, default=None, help="기록 디렉터리만 분석")
-    p.add_argument("--pipeline", type=Path, default=None, help="대조할 파이프라인 로그 (기본: logs/pipeline 최신)")
+    p.add_argument("--pipeline", type=Path, default=None, help="대조할 파이프라인 로그 (기본: var/log/pipeline 최신)")
     args = p.parse_args()
 
     run_dir = args.analyze or record(args)
     pipeline = args.pipeline
     if pipeline is None:
-        logs = sorted(Path("logs/pipeline").glob("*.log"))
+        logs = sorted(Path("var/log/pipeline").glob("*.log"))
         pipeline = logs[-1] if logs else None
     print()
     print(analyze(run_dir, pipeline))

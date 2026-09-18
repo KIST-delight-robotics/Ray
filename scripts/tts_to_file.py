@@ -81,7 +81,7 @@ def main() -> None:
             ElevenLabsTTS._MODEL = args.model
 
     tts = create_tts(args.vendor)
-    output = Path("output") / f"{args.name}.wav"
+    output = Path("var/output") / f"{args.name}.wav"
 
     print(f"Synthesizing ({tts.voice_id})...")
     print(f'  Text: "{text[:80]}{"..." if len(text) > 80 else ""}"')

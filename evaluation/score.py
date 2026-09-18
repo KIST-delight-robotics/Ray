@@ -5,8 +5,8 @@ Reads the report JSON produced by report.py and computes:
   - Turn-taking: latency statistics (mean, median, p95)
 
 Usage:
-    uv run python -m evaluation.report data/eval/results
-    uv run python -m evaluation.score data/eval/results/report.json
+    uv run python -m evaluation.report var/eval/results
+    uv run python -m evaluation.score var/eval/results/report.json
 """
 
 from __future__ import annotations

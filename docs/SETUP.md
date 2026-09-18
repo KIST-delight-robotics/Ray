@@ -116,32 +116,28 @@ production wiring은 부팅 시 네트워크 의존을 없애기 위해 **로컬
 ```bash
 # 임베딩 모델 (HF 허브 → ~/.cache/huggingface). local_files_only=False로 1회 로드
 uv run python -c "from voice_pipeline.adapters.embedder import create_embedder; create_embedder(expected_dimension=384)"
-# tiktoken 인코딩 사전 (→ $TIKTOKEN_CACHE_DIR). ray.env의 경로와 같아야 한다
-mkdir -p ~/.cache/tiktoken
-TIKTOKEN_CACHE_DIR=~/.cache/tiktoken uv run python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
+# tiktoken 인코딩 사전 (→ $TIKTOKEN_CACHE_DIR). .env 의 경로와 같아야 한다
+mkdir -p var/cache/tiktoken
+TIKTOKEN_CACHE_DIR=$PWD/var/cache/tiktoken uv run python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
 ```
 
 `HF_HUB_OFFLINE=1`은 쓰지 말 것 — sentence-transformers가 허브 트리 조회를 시도해 예외로 죽는다.
 
-## 8. API 인증 설정
+## 8. 기기별 설정 + API 인증 (`.env`)
 
-키는 **`~/.config/ray/ray.env` 한 곳**에 둔다 — systemd 자동실행(`boot/systemd/*.service`)이
+키와 기기별 값은 **저장소 루트 `.env` 한 곳**에 둔다 — systemd 자동실행(`boot/systemd/*.service`)이
 `EnvironmentFile`로 이 파일을 읽는다. bashrc에만 넣으면 자동실행이 키를 못 받으므로,
-수동 실행(`uv run ray`)용 셸 환경은 bashrc에서 이 파일을 소싱해 맞춘다.
+수동 실행(`uv run ray`)용 셸 환경은 bashrc에서 이 파일을 소싱해 맞춘다. 키 목록과 설명은
+`.env.example` 에 있다.
 
 ```bash
-mkdir -p ~/.config/ray
-cat > ~/.config/ray/ray.env <<'EOF'
-RAY_UNIT=unitN                     # cpp/config.toml [robot.unitN] 선택 (필수)
-OPENAI_API_KEY=sk-...
-ELEVENLABS_API_KEY=...
-GOOGLE_APPLICATION_CREDENTIALS=/home/<user>/<service-account>.json   # GCP 콘솔에서 발급
-TIKTOKEN_CACHE_DIR=/home/<user>/.cache/tiktoken
-EOF
-chmod 600 ~/.config/ray/ray.env
+cd ~/KIST_RAY/Ray
+cp .env.example .env
+$EDITOR .env          # RAY_UNIT, API 키, 절대경로 채우기
+chmod 600 .env
 
 # 수동 실행(uv run ray)도 같은 값을 쓰도록 셸에 소싱
-echo 'set -a; . ~/.config/ray/ray.env; set +a' >> ~/.bashrc
+echo 'set -a; . ~/KIST_RAY/Ray/.env; set +a' >> ~/.bashrc
 source ~/.bashrc
 ```
 

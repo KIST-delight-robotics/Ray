@@ -11,12 +11,12 @@ Robot channel is fed silence (matches turn-shift context in production).
 
 Setup:
     1. Download AVA-Speech labels + audio:
-         curl -o data/ava_speech/ava_speech_labels_v1.csv \\
+         curl -o var/bench/ava_speech/ava_speech_labels_v1.csv \\
              https://research.google.com/ava/download/ava_speech_labels_v1.csv
          # Then download WAVs (16kHz mono, 15:00–30:00) via yt-dlp + ffmpeg
 
     2. Run:
-         uv run python scripts/bench/bench_vad.py --data-dir data/ava_speech
+         uv run python scripts/bench/bench_vad.py --data-dir var/bench/ava_speech
 
     3. Optional flags:
          --max-files 3          Process only N files (quick test)
@@ -248,7 +248,7 @@ def main() -> None:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=Path("data/ava_speech"),
+        default=Path("var/bench/ava_speech"),
     )
     parser.add_argument("--max-files", type=int, default=None)
     parser.add_argument("--frame-dur-ms", type=int, default=30)

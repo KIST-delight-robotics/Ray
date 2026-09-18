@@ -148,7 +148,7 @@ ElevenLabs는 character alignment를 공백 기준 word로 집계해 제공. tim
 
 | 상수 | 값 | 의미 |
 |------|------|------|
-| `_AUDIO_DIR` | `"assets/audio"` | 생성 오디오 파일 저장 디렉토리 (C++ 작업 경로 기준) |
+| `_AUDIO_DIR` | `"var/audio"` | TTS 로 생성한 인사·작별 WAV 캐시 (C++ 작업 경로 기준) |
 | `_GREETING_TEXT` | `"Yes, how can I help you?"` | greeting 합성 텍스트 |
 | `_FAREWELL_TEXT` | `"Talk to you next time!"` | farewell 합성 텍스트 |
 | `_FALLBACK_GREETING_PATH` | `"assets/audio/greeting.wav"` | TTS 실패 시 greeting fallback 파일 |

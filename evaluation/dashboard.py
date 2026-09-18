@@ -1,7 +1,7 @@
 """Generate an HTML dashboard from scored eval results.
 
 Usage:
-    uv run python -m evaluation.dashboard data/eval/results/scored.json
+    uv run python -m evaluation.dashboard var/eval/results/scored.json
 """
 
 from __future__ import annotations

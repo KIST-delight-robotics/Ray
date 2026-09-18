@@ -1,6 +1,6 @@
 """C++ audio_sync 로그로 소리-모션 어긋남을 요약한다.
 
-    uv run python scripts/hardware/audio_sync_report.py [logs/motion/<dir>/audio_sync_RESPONSES.csv]
+    uv run python scripts/hardware/audio_sync_report.py [var/log/motion/<dir>/audio_sync_RESPONSES.csv]
 
 인자가 없으면 가장 최근 motion 로그 디렉터리의 audio_sync_*.csv 를 쓴다.
 lag_ms = expected_ms − (playing_ms − silence_ms): 양수면 소리가 입보다 늦다.
@@ -17,7 +17,7 @@ def main() -> None:
     if len(sys.argv) > 1:
         path = Path(sys.argv[1])
     else:
-        dirs = sorted(Path("logs/motion").iterdir(), key=lambda p: p.name, reverse=True)
+        dirs = sorted(Path("var/log/motion").iterdir(), key=lambda p: p.name, reverse=True)
         files = [f for d in dirs for f in sorted(d.glob("audio_sync_*.csv"))]
         if not files:
             raise SystemExit("audio_sync_*.csv 가 없습니다 (C++ 가 MOTOR_ENABLED 로 빌드되어야 기록)")

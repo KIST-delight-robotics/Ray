@@ -162,10 +162,10 @@ def main() -> None:
         default=None,
         help="Clean question WAV for the speech-level probe (default: first ASR WAV in --manifest)",
     )
-    p.add_argument("--manifest", default="data/eval/wav/manifest.json", help="Used to auto-pick --reference")
-    p.add_argument("--bed-master", default="data/eval/noise_bed/bed_master.wav")
+    p.add_argument("--manifest", default="var/eval/wav/manifest.json", help="Used to auto-pick --reference")
+    p.add_argument("--bed-master", default="var/eval/noise_bed/bed_master.wav")
     p.add_argument("--targets", default="medium=15,loud=7", help="cond=snr_db,cond=snr_db")
-    p.add_argument("--out-dir", default="data/eval/noise_bed")
+    p.add_argument("--out-dir", default="var/eval/noise_bed")
     args = p.parse_args()
 
     if args.reference is None:

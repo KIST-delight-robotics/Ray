@@ -16,7 +16,7 @@ and prints a summary quantifying the two suspected lateness causes:
 
 Usage:
     uv run python scripts/vad_trace.py
-    uv run python scripts/vad_trace.py --seconds 30 --out data/vad/run1
+    uv run python scripts/vad_trace.py --seconds 30 --out var/vad/run1
 """
 
 from __future__ import annotations
@@ -252,10 +252,10 @@ def _save(rows: list[dict], out: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seconds", type=float, default=None, help="capture duration (default: until Ctrl-C)")
-    parser.add_argument("--out", type=str, default=None, help="output path prefix (default: data/vad/trace_<ts>)")
+    parser.add_argument("--out", type=str, default=None, help="output path prefix (default: var/vad/trace_<ts>)")
     args = parser.parse_args()
 
-    out = Path(args.out) if args.out else Path("data/vad") / f"trace_{datetime.now():%Y%m%d_%H%M%S}"
+    out = Path(args.out) if args.out else Path("var/vad") / f"trace_{datetime.now():%Y%m%d_%H%M%S}"
 
     rows = _capture(args.seconds)
     if not rows:

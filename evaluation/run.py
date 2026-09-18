@@ -7,9 +7,9 @@ existing storage systems (trace_store, history, memory_storage).
 
 Usage:
     uv run python -m evaluation.run \\
-        --questions data/eval/questions.json \\
+        --questions evaluation/questions.json \\
         --device plughw:1,0 \\
-        --output-dir data/eval/results
+        --output-dir var/eval/results
 """
 
 from __future__ import annotations
@@ -1253,8 +1253,8 @@ def main() -> None:
         help=f"ALSA device for question playback (default: {_DEFAULT_PLAYBACK_DEVICE}; "
         "noise-bed mode prefers the calibrated device)",
     )
-    parser.add_argument("--output-dir", default="data/eval/results", help="Output directory")
-    parser.add_argument("--wav-dir", default="data/eval/wav", help="Directory with question WAVs")
+    parser.add_argument("--output-dir", default="var/eval/results", help="Output directory")
+    parser.add_argument("--wav-dir", default="var/eval/wav", help="Directory with question WAVs")
     parser.add_argument("--quick", action="store_true", help="Quick mode: 1 question per suite")
     parser.add_argument("--category", default=None, help="Only run suites of these categories (comma-separated)")
     parser.add_argument(
@@ -1269,7 +1269,7 @@ def main() -> None:
         help="E2E acoustic-bed mode: play a continuous noise bed and distribute SNR conditions "
         "across one run (requires prepare_noise_bed.py + calibrate_noise.py output)",
     )
-    parser.add_argument("--bed-dir", default="data/eval/noise_bed", help="Noise-bed dir (calibration.json + bed_*.wav)")
+    parser.add_argument("--bed-dir", default="var/eval/noise_bed", help="Noise-bed dir (calibration.json + bed_*.wav)")
     args = parser.parse_args()
 
     run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
