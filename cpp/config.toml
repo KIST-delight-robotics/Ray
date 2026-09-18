@@ -40,7 +40,7 @@ mouth_back_compensation = 0.75    # 입 움직임에 대한 뒷쪽 보상 (값�
 mouth_pitch_compensation = 0.58   # pitch에 따른 입 움직임 보상 (값↑=보상↑). 예전 분모 1.7과 동일 거동(=1/1.7)
 
 max_mouth = 0
-min_mouth = 300                    # 최대 mouth movement size in DXL dimension
+min_mouth = 400                    # 최대 mouth movement size in DXL dimension
 
 # ===== 캘리브레이션 이완 단계 =====
 # 시작 시 roll/pitch 와이어를 자이로 변화가 멎을 때까지 풀고, mouth는 고정량만 푼 뒤 조정 시작
