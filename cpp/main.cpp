@@ -2249,19 +2249,18 @@ void csv_control_motor(std::string audioName) {
 
 
 #ifdef MOTOR_ENABLED
-static constexpr int MPU6050_ADDR = 0x68;
+static constexpr int LSM6DS_ADDR = 0x6A;   // LSM6DS3TR-C (WHO_AM_I 0x6A). 이전 MPU6050(0x68)과 축·부호 동일 (2026-09-18 실측)
 
-// MPU6050 초기화
-void mpu6050_init(int fd) {
-    wiringPiI2CWriteReg8(fd, 0x6B, 0);      // PWR_MGMT_1: 슬립 해제
-    // DLPF 21 Hz (CONFIG=4): 노이즈 1/3. 전원 유지 중 남는 레지스터라 매 기동 명시. 근거: docs/decisions-wip.md
-    wiringPiI2CWriteReg8(fd, 0x1A, 4);
+// LSM6DS 초기화 — 기본이 power-down이라 ODR을 켜야 출력이 나온다
+void lsm6ds_init(int fd) {
+    // CTRL1_XL: 가속도 104 Hz, ±2 g. 필터 없이도 σ 0.6 mg — MPU6050 DLPF 21 Hz(σ 6 mg)보다 낮아 LPF2 생략
+    wiringPiI2CWriteReg8(fd, 0x10, 0x40);
 }
 
-// 16비트 데이터 읽기
+// 16비트 데이터 읽기 (LSM6DS는 리틀엔디언: low, high 순)
 int read_raw_data(int fd, int addr) {
-    int high = wiringPiI2CReadReg8(fd, addr);
-    int low = wiringPiI2CReadReg8(fd, addr + 1);
+    int low = wiringPiI2CReadReg8(fd, addr);
+    int high = wiringPiI2CReadReg8(fd, addr + 1);
     int value = (high << 8) | low;
 
     if (value > 32768)
@@ -2274,14 +2273,14 @@ int read_raw_data(int fd, int addr) {
 
 
 void initialize_robot_posture() {
-    // MPU6050 초기화 — I2C만 사용하므로 wiringPiSetup()(GPIO 매핑, /dev/gpiomem 권한 필요)은 호출하지 않는다
-    int fd = wiringPiI2CSetup(MPU6050_ADDR);
+    // LSM6DS 초기화 — I2C만 사용하므로 wiringPiSetup()(GPIO 매핑, /dev/gpiomem 권한 필요)은 호출하지 않는다
+    int fd = wiringPiI2CSetup(LSM6DS_ADDR);
     if (fd == -1) {
-        std::cerr << "MPU6050 I2C 연결 실패!" << std::endl;
+        std::cerr << "LSM6DS I2C 연결 실패!" << std::endl;
         return;
     }
-    mpu6050_init(fd);
-    std::cout << "MPU6050 데이터 수집 시작..." << std::endl;
+    lsm6ds_init(fd);
+    std::cout << "LSM6DS 데이터 수집 시작..." << std::endl;
 
     std::vector<int32_t> target_position = {g_home.home_pitch, g_home.home_roll_r, g_home.home_roll_l, g_home.home_yaw, g_home.home_mouth};
 
@@ -2297,14 +2296,14 @@ void initialize_robot_posture() {
     auto read_accel_avg = [&](float& ax, float& ay, float& az) {
         long sx = 0, sy = 0, sz = 0;
         for (int i = 0; i < AVG_SAMPLES; i++) {
-            sx += read_raw_data(fd, 0x3B);
-            sy += read_raw_data(fd, 0x3D);
-            sz += read_raw_data(fd, 0x3F);
+            sx += read_raw_data(fd, 0x28);
+            sy += read_raw_data(fd, 0x2A);
+            sz += read_raw_data(fd, 0x2C);
             delay(10);
         }
-        ax = (sx / AVG_SAMPLES) / 16384.0f;
-        ay = (sy / AVG_SAMPLES) / 16384.0f;
-        az = (sz / AVG_SAMPLES) / 16384.0f;
+        ax = (sx / AVG_SAMPLES) / 16393.0f;
+        ay = (sy / AVG_SAMPLES) / 16393.0f;
+        az = (sz / AVG_SAMPLES) / 16393.0f;
     };
 
     // ---- 이완: 세 와이어를 헐겁게 풀고 시작 ----
@@ -2378,14 +2377,14 @@ void initialize_robot_posture() {
     auto read_accel_quick = [&](float& ax, float& ay, float& az) {
         long sx = 0, sy = 0, sz = 0;
         for (int i = 0; i < sample_count; i++) {
-            sx += read_raw_data(fd, 0x3B);
-            sy += read_raw_data(fd, 0x3D);
-            sz += read_raw_data(fd, 0x3F);
+            sx += read_raw_data(fd, 0x28);
+            sy += read_raw_data(fd, 0x2A);
+            sz += read_raw_data(fd, 0x2C);
             delay(10);
         }
-        ax = (sx / sample_count) / 16384.0f - AX_OFFSET;
-        ay = (sy / sample_count) / 16384.0f;
-        az = (sz / sample_count) / 16384.0f;
+        ax = (sx / sample_count) / 16393.0f - AX_OFFSET;
+        ay = (sy / sample_count) / 16393.0f;
+        az = (sz / sample_count) / 16393.0f;
     };
     // 연속 이동: 프로파일 시간마다 다음 goal → 모터가 멈추지 않고, 읽기 지연은 1스텝 미만
     const int STEP_PERIOD_MS   = (int)cfg_dxl.profile_velocity_calib;

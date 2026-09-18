@@ -259,7 +259,7 @@ sudo systemctl restart NetworkManager
   자이로 캘리브레이션이 재설정하므로 기록용이고, **`default_yaw`는 실제 사용된다**
   (자이로로 못 잡는 축이라 캘리브레이션이 이 값으로 정렬). 정면을 보는 틱 값을 넣을 것.
 - **`calib_ax_offset`** — 센서 장착 기울기 보정 (생략 시 0). 측정법: 토크 온 상태에서
-  Dynamixel Wizard로 roll goal을 조정해 육안 수평을 만든 뒤, MPU6050 가속도 Ax를
+  Dynamixel Wizard로 roll goal을 조정해 육안 수평을 만든 뒤, 가속도 센서 Ax를
   20회 평균한 값 (cpp `gyro_test()`를 임시 활성화하거나 간단한 I2C 리더 사용).
   캘리브레이션 후에도 한쪽으로 일정하게 기울면 이 값이 원인이다.
 
