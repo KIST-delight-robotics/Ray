@@ -2,6 +2,7 @@
 
 공식 예제 audio_transcript.py에서 WAV 입력을 마이크 스트리밍으로 바꾼 것.
     uv run python scripts/gpt_live/mic_live.py [--seconds 60] [--no-play]
+    uv run python scripts/gpt_live/mic_live.py --mic pipewire --mic-channels 1  # PipeWire 기본 소스(다른 USB 마이크). ALSA default 는 reSpeaker hw 직결
 
 - 세션 오디오 포맷은 16 kHz(reSpeaker 캡처 레이트와 동일 → 리샘플 없음). 입·출력 공유 포맷.
 - 스피커 소리가 마이크로 되돌아가면(에코 캔슬 없음) 모델이 자기 말을 듣게 되니 볼륨을 낮추거나 --no-play로 시작.
@@ -31,25 +32,27 @@ import pyaudio
 from openai import AsyncOpenAI
 
 RATE = 16000  # 세션 오디오 포맷. reSpeaker 캡처 레이트와 같게
-CAPTURE_CH = 6  # reSpeaker XVF3800 은 6ch 로 열어야 함. ch0 = 처리된 mono
+CAPTURE_CH = 6  # 기본(reSpeaker XVF3800)은 6ch 로 열어야 함. ch0 = 처리된 mono. --mic-channels 로 바꿀 수 있음
 CHUNK = RATE * 20 // 1000  # 20 ms = 320 샘플
 
 
-def find_input_device(pa: pyaudio.PyAudio, name: str) -> int:
+def find_input_device(pa: pyaudio.PyAudio, name: str, channels: int) -> int:
+    """이름(부분 일치, 대소문자 무시)이 맞고 입력 채널이 channels 이상인 첫 장치. 'default' 는 PipeWire 기본 소스."""
     for i in range(pa.get_device_count()):
         info = pa.get_device_info_by_index(i)
-        if name in info["name"].lower() and info["maxInputChannels"] >= CAPTURE_CH:
+        if name.lower() in info["name"].lower() and info["maxInputChannels"] >= channels:
             return i
-    raise SystemExit(f"입력 장치를 찾지 못함: {name}")
+    raise SystemExit(f"입력 장치를 찾지 못함: {name} ({channels}ch 이상)")
 
 
-def mic_thread(pa: pyaudio.PyAudio, dev: int, loop: asyncio.AbstractEventLoop, out: asyncio.Queue[bytes], stop: threading.Event) -> None:
-    stream = pa.open(format=pyaudio.paInt16, channels=CAPTURE_CH, rate=RATE, input=True,
+def mic_thread(pa: pyaudio.PyAudio, dev: int, channels: int, loop: asyncio.AbstractEventLoop, out: asyncio.Queue[bytes],
+               stop: threading.Event) -> None:
+    stream = pa.open(format=pyaudio.paInt16, channels=channels, rate=RATE, input=True,
                      input_device_index=dev, frames_per_buffer=CHUNK)
     try:
         while not stop.is_set():
             raw = stream.read(CHUNK, exception_on_overflow=False)
-            mono = array.array("h", raw)[0::CAPTURE_CH].tobytes()
+            mono = array.array("h", raw)[0::channels].tobytes() if channels > 1 else raw  # 다채널이면 ch0 만
             loop.call_soon_threadsafe(out.put_nowait, mono)
     finally:
         stream.stop_stream()
@@ -230,7 +233,7 @@ def rms(pcm: bytes) -> int:
 
 async def run(*, model: str, instructions: str, seconds: float, play: bool, save: str | None, prebuffer_ms: int,
               delegation: str, backend_model: str, probe_backend_input: bool, seeds: list[str],
-              script: str | None) -> None:
+              script: str | None, mic: str = "respeaker", mic_channels: int = CAPTURE_CH) -> None:
     loop = asyncio.get_running_loop()
     pa = pyaudio.PyAudio()
     mic_q: asyncio.Queue[bytes] = asyncio.Queue()
@@ -280,7 +283,9 @@ async def run(*, model: str, instructions: str, seconds: float, play: bool, save
                 break
 
         if script is None:
-            threading.Thread(target=mic_thread, args=(pa, find_input_device(pa, "respeaker"), loop, mic_q, stop_mic), daemon=True).start()
+            dev = find_input_device(pa, mic, mic_channels)
+            print(f"{ts()} 마이크: [{dev}] {pa.get_device_info_by_index(dev)['name']} {mic_channels}ch @ {RATE}Hz")
+            threading.Thread(target=mic_thread, args=(pa, dev, mic_channels, loop, mic_q, stop_mic), daemon=True).start()
         else:
             steps = load_script(script)
             # 합성은 미리 전부 해두고(네트워크 지연이 타임라인에 섞이지 않게), 피더는 20 ms 간격으로 큐에 넣는다
@@ -550,6 +555,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", default="gpt-live-1")
     parser.add_argument("--instructions", default="Respond briefly and naturally to the user.")
     parser.add_argument("--seconds", type=float, default=60.0)
+    parser.add_argument("--mic", default="respeaker", help="입력 장치 이름 부분 일치. PipeWire 기본 소스는 pipewire")
+    parser.add_argument("--mic-channels", type=int, default=CAPTURE_CH, help="캡처 채널 수. 다채널이면 ch0 만 사용")
     parser.add_argument("--no-play", action="store_true", help="모델 오디오를 스피커로 재생하지 않음")
     parser.add_argument("--save", metavar="WAV", help="서버에서 받은 오디오를 그대로 WAV로 저장")
     parser.add_argument("--prebuffer-ms", type=int, default=0, help="재생 시작 전 미리 쌓을 오디오 양(ms). 0이면 오는 즉시 재생")
@@ -575,6 +582,7 @@ if __name__ == "__main__":
         asyncio.run(run(model=args.model, instructions=args.instructions, seconds=args.seconds,
                         play=not args.no_play, save=args.save, prebuffer_ms=args.prebuffer_ms,
                         delegation=args.delegation, backend_model=args.backend_model,
-                        probe_backend_input=args.probe_backend_input, seeds=args.seed, script=args.script))
+                        probe_backend_input=args.probe_backend_input, seeds=args.seed, script=args.script,
+                        mic=args.mic, mic_channels=args.mic_channels))
     except KeyboardInterrupt:
         pass
