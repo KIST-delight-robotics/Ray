@@ -18,7 +18,8 @@
 |---|---|
 | `voice_pipeline/adapters/gpt_live.py` | SDK `client.live.connect()` 래퍼. 수신 스레드 → 프로젝트 이벤트(`LiveAudio`, `LiveTranscript`, `LiveFunctionCall`, …) 큐. 전사는 SDK `TranscriptGrouper`로 화자별 세그먼트로 묶어 전달. |
 | `voice_pipeline/live_session.py` | `LiveSessionLoop`. 마이크 16k→24k 리샘플 → 세션, 출력 오디오 → 브리지(세션 = 스트림 하나, `live=True`), 전사 → 히스토리·utterances, 종료(키워드·유휴 60 s·`end_conversation` 툴·closed·브리지 오류·기아·stop), 종료 시퀀스(mute → 출력 무음 1 s → close → `audio_end`). **파이썬 무음 채우기/버리기**(§4.2). 대화 모델·백엔드 지시문, `LIVE_VOICE="cedar"`, 인사 문구. |
-| `voice_pipeline/wiring.py` | `engine` 분기. live면 ASR·VAP·TurnGPT 미로드. responses 위임 + `end_conversation` 툴. |
+| `voice_pipeline/wiring.py` | `engine` 분기. live면 ASR·VAP·TurnGPT 미로드. responses 위임 + 함수 툴(`end_conversation`, `search_memory`, `adjust_volume`, `set_brightness`, `get_device_settings`). |
+| `voice_pipeline/device_settings.py` | 볼륨(10단계, wpctl)·LED 밝기(off/low/medium/high) 툴 정의·핸들러 + 현재 상태 조회. `var/device_settings.json` 에 저장, 시작 시 재적용. |
 | `voice_pipeline/__main__.py` | live면 작별 WAV 생략, 인사 WAV를 `OpenAITTS(voice=cedar, model=gpt-4o-mini-tts)`로 "네, 부르셨어요?" 생성. 콘솔에 live 로거 표시. 종료 시 `vap/asr` None 가드. |
 | `voice_pipeline/settings.py` | `ENGINE = "live"`, `BRIDGE_SAMPLE_RATE = 24000`. |
 | `voice_pipeline/adapters/cpp_bridge.py` | `send_stream_start(live=True)` → `{"type":"stream_start","live":true}`. |

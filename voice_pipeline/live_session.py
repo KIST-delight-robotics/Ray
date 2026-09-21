@@ -7,8 +7,9 @@
    세션 전체가 ``stream_start`` 하나로 시작하는 스트림이며 무음 조각도 그대로 흘린다(C++ 는
    ``head_motion=False`` 로 대기 모션을 유지하고 입만 움직인다).
 2. 전사 세그먼트를 히스토리와 utterances(장기기억 입력)에 저장한다.
-3. 백엔드의 함수 툴 호출을 실행한다(장기기억 검색 ``search_memory``, 종료 ``end_conversation``). 핸들러는
-   executor 에서 돌리고 프레임 루프는 완료를 폴링한다 — 임베딩·DB 조회가 마이크 전송과 출력 중계를 막지 않게.
+3. 백엔드의 함수 툴 호출을 실행한다 — 장기기억 검색 ``search_memory``, 볼륨·밝기 ``adjust_volume`` /
+   ``set_brightness`` / ``get_device_settings``, 종료 ``end_conversation``. 핸들러는 executor 에서 돌리고
+   프레임 루프는 완료를 폴링한다 — 임베딩·DB 조회가 마이크 전송과 출력 중계를 막지 않게.
 4. 세션 종료를 판정하고 닫는다 — 종료 키워드, 유휴 타임아웃, 백엔드의 ``end_conversation`` 툴,
    세션 만료/연결 끊김, 브리지 오류, 오디오 기아, 외부 stop.
 
@@ -46,6 +47,7 @@ from voice_pipeline.adapters.gpt_live import (
     LiveUsage,
 )
 from voice_pipeline.adapters.led import LEDController, LEDState
+from voice_pipeline.device_settings import DEVICE_TOOLS
 from voice_pipeline.history import ConversationHistory
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
@@ -88,11 +90,13 @@ Delegation policy:
 Backend tools:
 - Web search: current date and time, weather, news, and facts you are not sure about.
 - Past conversations: things the user told you in earlier sessions.
+- Device settings: your speaker volume (up or down) and your LED light brightness (off, low, medium, high).
 - End of conversation: closes the session when the user is done talking.
 Delegate to the backend when:
 - The request needs current information or a fact you are not sure about.
 - The user asks about an earlier conversation or something they told you before, \
 and it is not in what you already know about the user.
+- The user asks you to change the volume or the lights, or asks how loud or bright they are.
 - The user says goodbye or wants to end the conversation. Say a short goodbye yourself at the same time.
 Do not delegate to the backend when:
 - You can answer from the conversation, from what you already know about the user, or a still-current result.
@@ -109,6 +113,12 @@ Tools:
 - Use search_memory when the user asks about an earlier conversation or something they told Ray before. \
 Write the query in the user's language. Use only the memories that match the current question and ignore the rest. \
 If nothing relevant comes back, say Ray does not remember; do not use web search for it.
+- Call adjust_volume when the user wants the sound louder or quieter: steps=1 normally, steps=2 for "a lot". \
+Call set_brightness for the LED lights; for "brighter"/"dimmer" pick the level next to the current one, \
+calling get_device_settings first only if the current level is not already known from the conversation. \
+Call get_device_settings alone when the user asks how loud or bright Ray is. \
+Confirm the result in a few words. If the result has at_limit or moved is 0, say it is already at the \
+maximum or minimum instead of claiming a change.
 - Call end_conversation when the user says goodbye or wants to stop, then reply with an empty message.
 
 Answer in Korean, in one or two short sentences that sound natural when spoken aloud.
@@ -157,7 +167,7 @@ SEARCH_MEMORY_TOOL_DEF: dict[str, Any] = {
     "strict": True,
 }
 
-DEFAULT_TOOLS: tuple[dict[str, Any], ...] = (END_CONVERSATION_TOOL_DEF, SEARCH_MEMORY_TOOL_DEF)
+DEFAULT_TOOLS: tuple[dict[str, Any], ...] = (END_CONVERSATION_TOOL_DEF, SEARCH_MEMORY_TOOL_DEF, *DEVICE_TOOLS)
 
 ToolHandler = Callable[[str], str]  # arguments(JSON 문자열) → output(JSON 문자열)
 

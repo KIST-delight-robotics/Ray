@@ -35,11 +35,13 @@ from voice_pipeline.adapters.tts_elevenlabs import ElevenLabsTTS
 from voice_pipeline.adapters.tts_openai import OpenAITTS
 from voice_pipeline.adapters.turngpt import ThreadedTurnGPT, TurnGPTWrapper
 from voice_pipeline.adapters.vap import MaAIVAPModel, ThreadedVAP
+from voice_pipeline.device_settings import DeviceSettings
 from voice_pipeline.generator import SpeechGenerator
 from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.live_session import (
     DEFAULT_BACKEND_INSTRUCTIONS,
     DEFAULT_TOOLS,
+    END_CONVERSATION_TOOL,
     LIVE_VOICE,
     SEARCH_MEMORY_TOOL,
     LiveSessionLoop,
@@ -59,6 +61,7 @@ from voice_pipeline.session_loop import SessionComponents, SessionLoop
 from voice_pipeline.settings import (
     BRIDGE_SAMPLE_RATE,
     DEFAULT_DB_PATH,
+    DEVICE_SETTINGS_PATH,
     ENGINE,
     HISTORY_TOKEN_BUDGET,
     SAMPLE_RATE,
@@ -111,6 +114,7 @@ class ProcessComponents:
     audio_queue: queue.Queue[AudioFrame]
     audio_input: AudioInput
     shutdown_event: threading.Event
+    device_settings: DeviceSettings | None = None  # 볼륨·밝기 (live 툴). None 이면 툴 미노출
     _prev_threaded: list[ThreadedTurnGPT] = field(default_factory=list)
     _prev_summarizers: list[HistorySummarizer] = field(default_factory=list)
 
@@ -152,7 +156,9 @@ class ProcessComponents:
             # 장기기억: 프로필·최근 세션은 시작 instructions 에(세션 중 재조립 불가), 에피소드 검색은
             # 백엔드 함수 툴로 — 트리거와 쿼리 생성을 백엔드 LLM 이 맡는다.
             tool_handlers: dict[str, Any] = dict(session_loop_kwargs.pop("tool_handlers", None) or {})
-            tools = DEFAULT_TOOLS
+            if self.device_settings is not None:
+                for name, handler in self.device_settings.tool_handlers().items():
+                    tool_handlers.setdefault(name, handler)
             if memory_enabled:
                 profiles, recent_texts, included_ids = load_session_context(
                     self.memory_storage, session_id, self.token_counter
@@ -163,8 +169,9 @@ class ProcessComponents:
                 )
                 instructions = build_live_instructions(format_profile_block(profiles), recent_texts)
             else:
-                tools = tuple(t for t in DEFAULT_TOOLS if t["name"] != SEARCH_MEMORY_TOOL)
                 instructions = build_live_instructions()
+            # 핸들러가 있는 툴만 백엔드에 노출한다 (end_conversation 은 루프 내장)
+            tools = tuple(t for t in DEFAULT_TOOLS if t["name"] == END_CONVERSATION_TOOL or t["name"] in tool_handlers)
             live = GPTLiveSession(
                 LiveSessionConfig(
                     instructions=instructions,
@@ -278,6 +285,7 @@ class ProcessComponents:
 def build_components(
     *,
     db_path: str = DEFAULT_DB_PATH,
+    device_settings_path: str = DEVICE_SETTINGS_PATH,
     led_enabled: bool | None = None,
     language_code: str = "en-US",
     engine: Engine = ENGINE,
@@ -287,6 +295,7 @@ def build_components(
     Args:
         db_path: history/memory/trace/call 스토어가 공유하는 SQLite 경로.
             eval은 런별 격리 DB 경로를 전달한다.
+        device_settings_path: 볼륨·밝기 단계를 저장하는 JSON 경로. 시작 시 읽어 하드웨어에 적용한다.
         led_enabled: LED 하드웨어 구동 여부. ``None``이면 ``LED_ENABLED`` env로
             결정 (프로덕션 기본). eval은 ``False``를 전달한다.
         language_code: ASR 언어 코드 (cascade 엔진과 웨이크워드).
@@ -341,6 +350,8 @@ def build_components(
         # cpp/config.toml is C++-only, so the Python side reads LED_ENABLED directly.
         led_enabled = os.environ.get("LED_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
     led = LEDController(enabled=led_enabled)
+    device_settings = DeviceSettings(device_settings_path, led=led)
+    device_settings.apply()  # 저장된 볼륨·밝기 복원. 볼륨 실패(PipeWire 미기동 등)는 경고만
 
     storage = SQLiteStorageBackend(db_path)
     executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
@@ -391,6 +402,7 @@ def build_components(
         audio_queue=audio_queue,
         audio_input=audio_input,
         shutdown_event=threading.Event(),
+        device_settings=device_settings,
     )
 
 

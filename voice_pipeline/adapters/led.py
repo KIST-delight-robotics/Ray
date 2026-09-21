@@ -430,6 +430,20 @@ class LEDController:
         self._state_changed.set()
         logger.debug("LED state → %s", state.value)
 
+    def set_brightness(self, brightness: float) -> None:
+        """LED 전체 밝기(0.0=꺼짐 ~ 1.0=최대)를 바꾼다. 다음 프레임부터 반영되고 하부 LED 미러도 같이 어두워진다.
+
+        스트립 인수 전에 불려도 값은 보관되어 인수 시 적용된다. 상태(애니메이션)는 건드리지 않는다 —
+        ``off`` 상태와 밝기 0 은 다르며, 밝기를 다시 올리면 진행 중이던 애니메이션이 그대로 보인다. 스레드 안전.
+        """
+        brightness = max(0.0, min(1.0, float(brightness)))
+        self._brightness = brightness
+        strip = self._strip
+        if strip is not None:
+            strip.set_brightness(brightness)  # 드라이버가 show() 때마다 곱하므로 별도 재그리기 불필요
+        self._state_changed.set()  # 애니메이션 스레드를 깨워 바로 다음 프레임을 그리게 한다
+        logger.info("LED brightness → %.2f", brightness)
+
     def close(self) -> None:
         """Stop the animation thread and turn off LEDs."""
         self._stop_event.set()
@@ -556,7 +570,7 @@ class LEDController:
         if self._lower_led_period is None:
             return
         ring = frame[self._BAR_COUNT :]
-        level = max((max(px) for px in ring), default=0) / 255
+        level = max((max(px) for px in ring), default=0) / 255 * self._brightness  # 프레임은 밝기 적용 전 값
         duty = int(self._lower_led_period * self._LOWER_LED_MAX_PCT * level) // 100
         if duty == self._lower_led_duty:
             return

@@ -24,6 +24,10 @@ controller.set_state(LEDState.SLEEPING)
 controller.set_state(LEDState.IDLE)
 controller.set_state(LEDState.OFF)
 
+# 전체 밝기 (0.0=꺼짐 ~ 1.0). 상태·애니메이션은 유지되고 다음 프레임부터 반영. 하부 LED 미러도 같은 비율.
+# 사용자가 말로 바꾸는 단계(off/low/medium/high)는 voice_pipeline/device_settings.py 가 이 값으로 변환한다.
+controller.set_brightness(0.3)
+
 controller.close()
 ```
 
@@ -36,7 +40,7 @@ controller.close()
 | `_BAR_COUNT` | `8` | 바 세그먼트 LED 개수 |
 | `_RING_COUNT` | `16` | 링 세그먼트 LED 개수 |
 | `_LED_COUNT` | `24` | 전체 LED 개수 |
-| `_BRIGHTNESS` | `1.0` | LED 전체 밝기 (0.0=꺼짐, 1.0=최대) |
+| `_BRIGHTNESS` | `1.0` | LED 전체 밝기 초기값 (0.0=꺼짐, 1.0=최대). 실행 중 `set_brightness()` 로 변경 |
 | `_NOOP_SLEEP_SEC` | `0.1` | 애니메이션 없을 때 스레드 폴링 간격 (초) |
 | `_CLOSE_JOIN_TIMEOUT_SEC` | `2.0` | close 시 애니메이션 스레드 종료 대기 (초) |
 | `_ANIMATIONS` | dict | 상태별 애니메이션 맵 |

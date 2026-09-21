@@ -225,3 +225,25 @@ class TestCreateSessionLiveEngine:
         assert [t["name"] for t in config.tools] == ["end_conversation"]
         assert "[User Profile]" not in config.instructions
         comps.memory_storage.get_all_profiles.assert_not_called()
+
+    def test_device_settings_handlers_and_tools_are_wired(self, monkeypatch):
+        live_cls = MagicMock(name="GPTLiveSession")
+        monkeypatch.setattr(wiring, "GPTLiveSession", live_cls)
+        loop_cls = MagicMock(name="LiveSessionLoop")
+        monkeypatch.setattr(wiring, "LiveSessionLoop", loop_cls)
+        monkeypatch.setattr(wiring, "ConversationHistory", MagicMock())
+        comps = _make_components(engine="live")
+        comps.device_settings = MagicMock()
+        comps.device_settings.tool_handlers.return_value = {
+            "adjust_volume": lambda a: a,
+            "set_brightness": lambda a: a,
+            "get_device_settings": lambda a: a,
+        }
+
+        comps.create_session(memory_enabled=False)
+
+        # 핸들러가 등록된 툴만 백엔드에 노출된다 (end_conversation 은 루프 내장)
+        config = live_cls.call_args.args[0]
+        device_tools = {"adjust_volume", "set_brightness", "get_device_settings"}
+        assert {t["name"] for t in config.tools} == {"end_conversation", *device_tools}
+        assert set(loop_cls.call_args.kwargs["tool_handlers"]) == device_tools

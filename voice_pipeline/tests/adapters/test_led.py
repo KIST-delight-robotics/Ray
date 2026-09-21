@@ -185,6 +185,35 @@ class TestControllerNoop:
         finally:
             ctrl.close()
 
+    def test_set_brightness_clamps_and_stores(self) -> None:
+        ctrl = _make_controller()
+        try:
+            ctrl.set_brightness(0.3)
+            assert ctrl._brightness == 0.3
+            ctrl.set_brightness(7.0)
+            assert ctrl._brightness == 1.0
+            ctrl.set_brightness(-1.0)
+            assert ctrl._brightness == 0.0
+        finally:
+            ctrl.close()
+
+    def test_set_brightness_forwards_to_strip_and_scales_mirror(self) -> None:
+        ctrl = _make_controller()
+        try:
+            ctrl._strip = MagicMock()
+            ctrl.set_brightness(0.5)
+            ctrl._strip.set_brightness.assert_called_once_with(0.5)
+            # 하부 LED 미러는 프레임 색(밝기 적용 전)에 밝기를 곱해 duty 를 낸다
+            ctrl._lower_led_period = 1_000_000
+            written: list[str] = []
+            with patch("voice_pipeline.adapters.led.Path.write_text", lambda self, text: written.append(text)):
+                ctrl._lower_led_duty = 0  # 첫 점등 램프 경로를 피한다
+                ctrl._mirror_lower_led([(0, 0, 0)] * ctrl._BAR_COUNT + [(255, 255, 255)] * ctrl._RING_COUNT)
+            assert written == ["500000"]
+        finally:
+            ctrl._strip = None
+            ctrl.close()
+
     def test_close_stops_thread(self) -> None:
         ctrl = _make_controller()
         ctrl.close()

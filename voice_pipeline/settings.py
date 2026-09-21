@@ -33,6 +33,7 @@ FRAME_SIZE_BYTES = FRAME_SIZE_SAMPLES * SAMPLE_WIDTH * CHANNELS  # 960
 
 VAR_DIR = "var"  # 프로그램이 실행 중에 쓰는 파일의 루트 (DB, 로그, 캐시, 생성 오디오). 폴더 전체 gitignore
 DEFAULT_DB_PATH = f"{VAR_DIR}/ray.db"  # history / memory / trace / call 스토어가 공유하는 SQLite 파일
+DEVICE_SETTINGS_PATH = f"{VAR_DIR}/device_settings.json"  # 사용자가 말로 바꾼 볼륨·밝기 단계 (device_settings.py)
 
 # 프롬프트 토큰 예산 — prompt.py(ContextBuilder, HistorySummarizer)와 wiring.py(요약 LLM max_tokens)가 함께 사용
 HISTORY_TOKEN_BUDGET = 8192  # 히스토리 뷰 예산 (이월 + 요약 블록 + 라이브 턴)

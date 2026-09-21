@@ -7,6 +7,7 @@
   live_session.py   ACTIVE 세션의 프레임 루프 — GPT-Live 하나로 듣기·말하기·위임 (live 엔진, settings.ENGINE)
   generator.py      응답 생성 (ContextBuilder → LLM → TTS, 백그라운드)
   prompt.py         LLM 입력 조립 + 롤링 요약
+  device_settings.py 볼륨·밝기 단계 — live 백엔드 툴 정의·핸들러·영속화
 
 필요할 때 읽는 것:
   turn_detector.py  VAP + TurnGPT + VAD 결합 → turn_shift / prepare / cancel / interrupt 판정
