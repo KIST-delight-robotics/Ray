@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from voice_pipeline.engines.cascade.text_session import TextSession
 from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
-from voice_pipeline.text_session import TextSession
 from voice_pipeline.types import LLMMetrics, LLMResult, Usage
 
 

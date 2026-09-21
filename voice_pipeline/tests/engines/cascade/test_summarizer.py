@@ -1,4 +1,4 @@
-"""Tests for voice_pipeline.prompt."""
+"""Tests for voice_pipeline.engines.cascade.summarizer."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import Any
 
 import pytest
 
+from voice_pipeline.engines.cascade.summarizer import HistorySummarizer
 from voice_pipeline.history import HistoryTurn
-from voice_pipeline.prompt import HistorySummarizer
 from voice_pipeline.tests.fakes import RecordingCallStore
 from voice_pipeline.trace import install, set_session
 from voice_pipeline.types import LLMMetrics, LLMResult, LLMStream, Usage

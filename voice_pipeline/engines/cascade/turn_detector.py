@@ -53,7 +53,7 @@ class TurnDecision:
         return cls()
 
 
-logger = logging.getLogger("voice_pipeline.turn_detector")
+logger = logging.getLogger("voice_pipeline.engines.cascade.turn_detector")
 
 
 class _TurnState(enum.Enum):

@@ -42,9 +42,10 @@ Top-level only — for module details, inspect the folder directly (every module
 
 - `voice_pipeline/` — Python conversation pipeline. **Start with the `voice_pipeline/__init__.py`
   docstring** — it lists the files in reading order. Layout rule: external wrappers (vendors,
-  hardware, external models) live in `adapters/` one file each; internal logic is top-level
-  files (`session_loop.py`, `generator.py`, `prompt.py`, …); `memory/` is the only subpackage
-  (an optional subsystem).
+  hardware, external models) live in `adapters/` one file each; the two conversation engines live
+  in `engines/gpt_live/` and `engines/cascade/` (only one runs, chosen by `settings.ENGINE`);
+  what both engines share is a top-level file (`history.py`, `session_context.py`,
+  `device_settings.py`, …); `memory/` is the optional long-term-memory subsystem.
 - `cpp/` — C++ audio playback + motor control process (see **C++ Process** below)
 - `evaluation/` — E2E evaluation pipeline (audio prep, run, report, score, dashboard) + `questions.json`
 - `scripts/` — dev utilities, benchmarks (`bench/`), hardware checks (`hardware/`)
@@ -112,13 +113,16 @@ Some modules (VAP, TurnGPT, Wakeword etc.) wrap externally cloned model reposito
   `types.py`). Everything else is injected as its concrete class — do not add an ABC for a
   component with one implementation. Tests mock concrete classes with `Mock(spec=Class)`.
 - **Where new code goes**: wrapping something external (vendor API, hardware, external model) →
-  one file in `adapters/`. Internal logic → extend an existing top-level file, or add one new
-  file. A new subpackage only for an optional subsystem like `memory/`. No per-module
+  one file in `adapters/`. Logic that belongs to one engine → that engine's folder under
+  `engines/` (gpt_live tools go in `engines/gpt_live/tools.py`). Logic both engines use → a
+  top-level file. A new subpackage only for an optional subsystem like `memory/`. No per-module
   `exceptions.py` / `__init__.py` re-exports / README.
 - **Dependency direction**: `adapters/` imports only `types`, `settings`, and `trace` (the
-  recording API — used like `logging`, never injected). Top-level modules may import each other one-way (`session_loop → generator →
-  prompt → history`); never the reverse, and never `adapters → top-level logic`. `wiring.py`
-  is the only place that knows every component. `evaluation → voice_pipeline`, never the reverse.
+  recording API — used like `logging`, never injected). Engines import shared top-level modules
+  (`engines/* → session_context → memory`, `engines/* → history`), never the reverse, and the two
+  engines never import each other. Inside an engine, one-way (`loop → generator →
+  context_builder → summarizer`). Never `adapters → logic`. `wiring.py` is the only place that
+  knows every component. `evaluation → voice_pipeline`, never the reverse.
 - **Entry-point wiring**: production (`__main__.py`) and eval (`evaluation/run.py`) share the component graph via `voice_pipeline/wiring.py` (`build_components()` + `ProcessComponents.create_session()`). Production code exposes only neutral injection points (paths, toggles, callbacks) — never eval-specific behavior or branches. Dependency direction: `evaluation → voice_pipeline`, never the reverse.
 - **Type hints** required. **Docstrings** required on interface methods.
 - **Configuration**: vendor/module-specific knobs are class variables and constructor parameters.
@@ -165,7 +169,8 @@ threading + `queue.Queue` based.
 | Cross-module | `tests/integration/test_*.py` | varies | varies | End-to-end flows spanning modules |
 
 Tests mirror the source layout: `tests/adapters/` for adapters (shared fixtures in
-`tests/adapters/conftest.py`), `tests/memory/`, and top-level `tests/test_<file>.py` for the rest.
+`tests/adapters/conftest.py`), `tests/engines/gpt_live/` and `tests/engines/cascade/` for the
+engines, `tests/memory/`, and top-level `tests/test_<file>.py` for the rest.
 Test doubles that tests need to inspect (e.g. recording call/trace stores) live in `tests/fakes.py`;
 SQLite-backed stores use the `":memory:"` path in tests.
 

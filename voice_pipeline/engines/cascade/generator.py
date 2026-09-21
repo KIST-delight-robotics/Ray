@@ -25,17 +25,18 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
+from voice_pipeline.engines.cascade.context_builder import ContextBuilder, parse_citation_tag, strip_urls
+from voice_pipeline.engines.cascade.summarizer import HistorySummarizer
 from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
-from voice_pipeline.prompt import ContextBuilder, HistorySummarizer, parse_citation_tag, strip_urls
 from voice_pipeline.trace import PipelineTrace
 from voice_pipeline.types import ILLM, ITTS, LLMMetrics, LLMStream, TokenCounter, TTSStream, WordTimestamp
 
 if TYPE_CHECKING:
     from voice_pipeline.memory.types import MemoryReadResult
 
-logger = logging.getLogger("voice_pipeline.generator")
+logger = logging.getLogger("voice_pipeline.engines.cascade.generator")
 
 
 class GeneratorState(enum.Enum):

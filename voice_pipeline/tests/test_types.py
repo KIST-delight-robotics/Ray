@@ -2,9 +2,9 @@
 
 import pytest
 
-from voice_pipeline.generator import ResponseData
+from voice_pipeline.engines.cascade.generator import ResponseData
+from voice_pipeline.engines.cascade.turn_detector import TurnDecision
 from voice_pipeline.trace import PipelineTrace
-from voice_pipeline.turn_detector import TurnDecision
 from voice_pipeline.types import TTSResult, TTSStream, WordTimestamp
 
 

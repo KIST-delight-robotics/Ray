@@ -1,4 +1,4 @@
-"""DeviceSettings 단위 테스트 — 단계 이동·경계·영속화·툴 핸들러 JSON 계약."""
+"""DeviceSettings 단위 테스트 — 단계 이동·경계·영속화. 툴 핸들러는 tests/engines/gpt_live/test_tools.py."""
 
 from __future__ import annotations
 
@@ -10,12 +10,8 @@ import pytest
 
 from voice_pipeline.adapters.led import LEDController
 from voice_pipeline.device_settings import (
-    ADJUST_VOLUME_TOOL,
     BRIGHTNESS_DEFAULT,
     BRIGHTNESS_LEVELS,
-    DEVICE_TOOLS,
-    GET_DEVICE_SETTINGS_TOOL,
-    SET_BRIGHTNESS_TOOL,
     VOLUME_DEFAULT_STEP,
     VOLUME_PERCENT_PER_STEP,
     VOLUME_STEPS,
@@ -157,52 +153,3 @@ class TestBrightness:
         with pytest.raises(ValueError):
             ds.set_brightness("blinding")
         led.set_brightness.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# Tool handlers — JSON in / JSON out, 스키마와 이름이 맞는지
-# ---------------------------------------------------------------------------
-
-
-class TestToolHandlers:
-    def test_handler_names_match_tool_defs(self, tmp_path: Path, led: Mock, volume_calls: list[int]) -> None:
-        ds = _make(tmp_path, led, volume_calls)
-        expected = {ADJUST_VOLUME_TOOL, SET_BRIGHTNESS_TOOL, GET_DEVICE_SETTINGS_TOOL}
-        assert set(ds.tool_handlers()) == {t["name"] for t in DEVICE_TOOLS} == expected
-
-    def test_schema_params_match_handler_args(self) -> None:
-        by_name = {t["name"]: t for t in DEVICE_TOOLS}
-        assert set(by_name[ADJUST_VOLUME_TOOL]["parameters"]["properties"]) == {"direction", "steps"}
-        assert by_name[SET_BRIGHTNESS_TOOL]["parameters"]["properties"]["level"]["enum"] == list(BRIGHTNESS_LEVELS)
-        for t in DEVICE_TOOLS:  # strict 모드: 모든 속성이 required 여야 한다
-            assert set(t["parameters"].get("required", [])) == set(t["parameters"]["properties"])
-
-    def test_volume_handler_round_trip(self, tmp_path: Path, led: Mock, volume_calls: list[int]) -> None:
-        ds = _make(tmp_path, led, volume_calls)
-        out = json.loads(ds.tool_handlers()[ADJUST_VOLUME_TOOL](json.dumps({"direction": "down", "steps": 1})))
-        assert out["level"] == VOLUME_STEPS - 1
-        assert out["moved"] == 1
-
-    def test_brightness_handler_round_trip(self, tmp_path: Path, led: Mock, volume_calls: list[int]) -> None:
-        ds = _make(tmp_path, led, volume_calls)
-        out = json.loads(ds.tool_handlers()[SET_BRIGHTNESS_TOOL](json.dumps({"level": "medium"})))
-        assert out == {"level": "medium", "previous": BRIGHTNESS_DEFAULT, "levels": list(BRIGHTNESS_LEVELS)}
-
-    def test_status_handler_reports_both_without_changing(
-        self, tmp_path: Path, led: Mock, volume_calls: list[int]
-    ) -> None:
-        (tmp_path / "device_settings.json").write_text(json.dumps({"volume_step": 3, "brightness": "medium"}))
-        ds = _make(tmp_path, led, volume_calls)
-        out = json.loads(ds.tool_handlers()[GET_DEVICE_SETTINGS_TOOL]("{}"))
-        assert out == {
-            "volume": {"level": 3, "max": VOLUME_STEPS},
-            "brightness": {"level": "medium", "levels": list(BRIGHTNESS_LEVELS)},
-        }
-        assert volume_calls == []
-        led.set_brightness.assert_not_called()
-
-    def test_handler_propagates_bad_args_as_exception(self, tmp_path: Path, led: Mock, volume_calls: list[int]) -> None:
-        # LiveSessionLoop 가 예외를 {"error": ...} 출력으로 바꾼다
-        ds = _make(tmp_path, led, volume_calls)
-        with pytest.raises(ValueError):
-            ds.tool_handlers()[ADJUST_VOLUME_TOOL]("{}")

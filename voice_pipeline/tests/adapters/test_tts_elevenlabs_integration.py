@@ -10,8 +10,8 @@ import wave
 import pytest
 
 from voice_pipeline.adapters.tts_elevenlabs import ElevenLabsTTS
+from voice_pipeline.engines.cascade.loop import truncate_by_timestamps
 from voice_pipeline.greeting_audio import synthesize_to_wav
-from voice_pipeline.session_loop import truncate_by_timestamps
 
 pytestmark = pytest.mark.requires_api
 

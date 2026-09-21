@@ -31,16 +31,16 @@ from voice_pipeline.adapters.led import LEDState
 from voice_pipeline.adapters.tts_openai import OpenAITTS
 from voice_pipeline.adapters.turngpt import SyncTurnGPTAdapter, TurnGPTWrapper
 from voice_pipeline.adapters.vap import ThreadedVAP, VAPResult
-from voice_pipeline.generator import SpeechGenerator
+from voice_pipeline.engines.cascade.context_builder import DEFAULT_SYSTEM_PROMPT
+from voice_pipeline.engines.cascade.generator import SpeechGenerator
+from voice_pipeline.engines.cascade.loop import SessionLoop
+from voice_pipeline.engines.cascade.turn_detector import TurnDetector
 from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Episode
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
-from voice_pipeline.prompt import DEFAULT_SYSTEM_PROMPT
-from voice_pipeline.session_loop import SessionLoop
 from voice_pipeline.settings import FRAME_SIZE_BYTES
-from voice_pipeline.turn_detector import TurnDetector
 from voice_pipeline.types import IASR, ILLM, ITTS, AudioFrame, IEmbedder, LLMResult, LLMStream, TTSStream, WordTimestamp
 
 # ---------------------------------------------------------------------------

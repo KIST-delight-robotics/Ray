@@ -1,6 +1,6 @@
 """Tests for voice_pipeline.types."""
 
-from voice_pipeline.session_loop import truncate_by_ratio, truncate_by_timestamps
+from voice_pipeline.engines.cascade.loop import truncate_by_ratio, truncate_by_timestamps
 from voice_pipeline.types import WordTimestamp
 
 

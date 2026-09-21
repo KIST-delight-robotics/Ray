@@ -1,16 +1,15 @@
-"""Tests for voice_pipeline.prompt."""
+"""Tests for the cascade block formatters (context_builder + session_context)."""
 
 from __future__ import annotations
 
-from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
-from voice_pipeline.prompt import (
+from voice_pipeline.engines.cascade.context_builder import (
     format_carryover_block,
     format_memory_block,
-    format_profile_block,
     format_session_boundary,
-    format_session_summary_block,
     parse_citation_tag,
 )
+from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
+from voice_pipeline.session_context import format_profile_block, format_session_summary_block
 
 
 def _ep(

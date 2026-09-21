@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from voice_pipeline.generator import GeneratorState, ResponseData, SpeechGenerator
+from voice_pipeline.engines.cascade.generator import GeneratorState, ResponseData, SpeechGenerator
 from voice_pipeline.history import ConversationHistory, HistoryTurn
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.types import Episode, MemoryReadResult

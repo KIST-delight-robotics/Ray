@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from voice_pipeline.generator import SentenceDetector
+from voice_pipeline.engines.cascade.generator import SentenceDetector
 
 # ---------------------------------------------------------------------------
 # Basic sentence detection

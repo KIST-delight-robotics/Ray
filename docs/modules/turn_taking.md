@@ -158,7 +158,7 @@ RTF: 4.16x (100ms budget). Budget exceeded: 0%.
 voice_pipeline/
 ├── adapters/vap.py      # MaAIVAPModel (동기 ONNX 추론) + ThreadedVAP (bg 스레드 런타임, 10Hz)
 ├── adapters/turngpt.py  # TurnGPTWrapper + ThreadedTurnGPT / SyncTurnGPTAdapter
-└── turn_detector.py     # TurnDetector — VAP·TurnGPT·VAD 결합 판정
+└── engines/cascade/turn_detector.py  # TurnDetector — VAP·TurnGPT·VAD 결합 판정
 
 scripts/
 ├── export_maai_onnx.py     # MaAI ONNX export (wrappers + CLI)

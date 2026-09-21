@@ -128,7 +128,7 @@ SLEEP ──(wakeword)──▶ GREETING ──(playback done)──▶ ACTIVE �
 | Strategies | `truncate_by_timestamps`: word-level timestamps로 정확히 절단 |
 |            | `truncate_by_ratio`: 재생 시간 비율로 추정 |
 | Strategy selection | SessionLoop이 `ResponseData`에 timestamps가 있는지로 선택 (section 2.16) |
-| Note | `session_loop.py`의 순수 함수. TTS 구현과 독립. |
+| Note | `engines/cascade/loop.py`의 순수 함수. TTS 구현과 독립. |
 
 
 ### 2.10 ContextBuilder
@@ -356,19 +356,28 @@ Future extension:
 
 ## 5. Directory Structure
 
-기준: **밖의 것을 감싸면 `adapters/`에 파일 하나, 안의 로직은 top-level 파일**. 패키지는 선택 가능한
-서브시스템(`memory/`)만. 읽는 순서는 `voice_pipeline/__init__.py` docstring 참조.
+기준: **밖의 것을 감싸면 `adapters/`에 파일 하나, 한 엔진의 로직은 `engines/<엔진>/`, 두 엔진이 같이 쓰는
+로직은 top-level 파일**. 읽는 순서는 `voice_pipeline/__init__.py` docstring 참조.
 
 ```
 voice_pipeline/
 ├── __main__.py        # 모드 루프 (SLEEP → GREETING → ACTIVE → FAREWELL)
-├── wiring.py          # 컴포넌트 조립 (프로세스/세션 수준), TTS 벤더 선택
-├── session_loop.py    # ACTIVE 프레임 루프 — ASR, 턴 감지, 재생, barge-in
-├── generator.py       # SpeechGenerator (ContextBuilder → LLM → TTS) + SentenceDetector
-├── prompt.py          # DEFAULT_SYSTEM_PROMPT, 블록 포매터, ContextBuilder, HistorySummarizer
-├── turn_detector.py   # VAP + TurnGPT + VAD 결합 판정
+├── wiring.py          # 컴포넌트 조립 (프로세스/세션 수준), 엔진 선택(settings.ENGINE), TTS 벤더 선택
+├── engines/
+│   ├── gpt_live/      # OpenAI GPT-Live 한 모델 (현재 기본)
+│   │   ├── loop.py          # LiveSessionLoop — 마이크→세션, 출력→C++, 전사 저장, 툴 실행, 종료 시퀀스
+│   │   ├── instructions.py  # 대화 모델·백엔드 지시문 + 시작 컨텍스트 붙이기
+│   │   └── tools.py         # 백엔드 함수 툴 정의·핸들러 (search_memory, 볼륨·밝기, end_conversation)
+│   └── cascade/       # ASR → 턴 감지 → LLM → TTS
+│       ├── loop.py            # SessionLoop — ACTIVE 프레임 루프, ASR, 턴 감지, 재생, barge-in
+│       ├── generator.py       # SpeechGenerator (ContextBuilder → LLM → TTS) + SentenceDetector
+│       ├── context_builder.py # DEFAULT_SYSTEM_PROMPT, 턴 단위 블록 포매터, ContextBuilder
+│       ├── summarizer.py      # HistorySummarizer — 히스토리 롤링 요약
+│       ├── turn_detector.py   # VAP + TurnGPT + VAD 결합 판정
+│       └── text_session.py    # 텍스트 전용 세션 (eval --text)
+├── session_context.py # 프로필 블록 + 최근 세션 블록 — 두 엔진이 시작 컨텍스트로 씀
 ├── history.py         # ConversationHistory + SQLiteStorageBackend
-├── text_session.py    # 텍스트 전용 세션 (eval --text)
+├── device_settings.py # 볼륨·밝기 단계 — 상태·저장·시작 시 재적용
 ├── greeting_audio.py  # 인사/작별 오디오 사전 생성
 ├── trace.py           # 기록 API(record_call/save_turn, logging식) + PipelineTrace/CallRecord + SQLite 스토어
 ├── types.py           # IASR/ILLM/ITTS/IEmbedder + 계약 타입(스트림·결과), AudioFrame/TokenCounter
@@ -379,7 +388,7 @@ voice_pipeline/
 │   ├── vap.py           turngpt.py      embedder.py
 │   └── cpp_bridge.py    led.py
 ├── memory/            # 장기 기억 서브시스템 (storage, retriever, writer, vector_index)
-└── tests/             # adapters/ · memory/ · integration/ + top-level test_<file>.py
+└── tests/             # adapters/ · engines/{gpt_live,cascade}/ · memory/ · integration/ + top-level test_<file>.py
 ```
 
 Test structure and development conventions are documented in CLAUDE.md.
@@ -401,11 +410,11 @@ Test structure and development conventions are documented in CLAUDE.md.
 
 ```
 voice_pipeline                  # 모드 전환 (__main__)
-voice_pipeline.session_loop     # 프레임 루프, 턴 처리, barge-in
+voice_pipeline.session_loop     # cascade 프레임 루프 (engines/cascade/loop.py), 턴 처리, barge-in
 voice_pipeline.generator        # SpeechGenerator
 voice_pipeline.prompt           # ContextBuilder, HistorySummarizer
 voice_pipeline.turn_detector    # TurnDetector
-voice_pipeline.history / .memory / .trace / .wiring / .text_session / .types
+voice_pipeline.history / .memory / .trace / .wiring / .types
 voice_pipeline.audio / .wakeword / .asr / .llm / .tts / .bridge / .led / .embedding
 voice_pipeline.adapters.vap / .adapters.turngpt
 ```

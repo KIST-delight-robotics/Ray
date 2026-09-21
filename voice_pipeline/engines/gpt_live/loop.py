@@ -1,6 +1,6 @@
 """GPT-Live 엔진의 ACTIVE 세션 루프.
 
-:class:`~voice_pipeline.session_loop.SessionLoop` 의 자리를 대신한다 — ASR·턴 감지·LLM·TTS 체인이
+:class:`~voice_pipeline.engines.cascade.loop.SessionLoop` 의 자리를 대신한다 — ASR·턴 감지·LLM·TTS 체인이
 모델 하나(gpt-live-1)로 대체되므로, 이 루프가 하는 일은 셋이다.
 
 1. 마이크 프레임을 브리지 레이트로 리샘플해 세션으로 보내고, 모델 출력 오디오를 C++로 그대로 보낸다.
@@ -28,7 +28,6 @@ import queue
 import re
 import threading
 import time
-from collections.abc import Callable, Sequence
 from concurrent.futures import Executor, Future
 from datetime import UTC, datetime
 from typing import Any
@@ -47,9 +46,8 @@ from voice_pipeline.adapters.gpt_live import (
     LiveUsage,
 )
 from voice_pipeline.adapters.led import LEDController, LEDState
-from voice_pipeline.device_settings import DEVICE_TOOLS
+from voice_pipeline.engines.gpt_live.tools import END_CONVERSATION_TOOL, ToolHandler
 from voice_pipeline.history import ConversationHistory
-from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE, SAMPLE_RATE
 from voice_pipeline.types import AudioFrame, TokenCounter
@@ -70,149 +68,6 @@ def _rms(pcm: bytes) -> float:
         return 0.0
     samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
     return float(np.sqrt(np.mean(samples * samples)))
-
-
-# ---------------------------------------------------------------------------
-# Prompts — 공식 프롬프팅 가이드 템플릿 구조(역할 / 백채널 / 인터럽트 / 위임 정책 3라벨).
-# 규칙을 덧붙이는 식으로 쓰면 위임 판단이 흔들린다(FINDINGS §4: 템플릿 6/6 vs 덧붙임 3/5).
-# ---------------------------------------------------------------------------
-
-DEFAULT_LIVE_INSTRUCTIONS = """\
-You are Ray, a small, friendly desk robot.
-Speak Korean unless the user asks to switch. Keep a casual, warm tone and short answers.
-If the user is frustrated, acknowledge it briefly and focus on the next helpful step.
-
-Backchannel policy: Use moderate backchannels. Acknowledge naturally without competing with the main response.
-
-Interruption policy: Stop speaking when the user interrupts. Listen to what they say.
-
-Delegation policy:
-Backend tools:
-- Web search: current date and time, weather, news, and facts you are not sure about.
-- Past conversations: things the user told you in earlier sessions.
-- Device settings: your speaker volume (up or down) and your LED light brightness (off, low, medium, high).
-- End of conversation: closes the session when the user is done talking.
-Delegate to the backend when:
-- The request needs current information or a fact you are not sure about.
-- The user asks about an earlier conversation or something they told you before, \
-and it is not in what you already know about the user.
-- The user asks you to change the volume or the lights, or asks how loud or bright they are.
-- The user says goodbye or wants to end the conversation. Say a short goodbye yourself at the same time.
-Do not delegate to the backend when:
-- You can answer from the conversation, from what you already know about the user, or a still-current result.
-- The user is chatting, greeting, or thinking aloud.
-Delegate before giving an answer that depends on backend work.
-Do not guess the result while waiting. Do not mention the backend.
-"""
-
-DEFAULT_BACKEND_INSTRUCTIONS = """\
-You are the backend for Ray, a Korean-speaking desk robot.
-
-Tools:
-- Use web search for current information.
-- Use search_memory when the user asks about an earlier conversation or something they told Ray before. \
-Write the query in the user's language. Use only the memories that match the current question and ignore the rest. \
-If nothing relevant comes back, say Ray does not remember; do not use web search for it.
-- Call adjust_volume when the user wants the sound louder or quieter: steps=1 normally, steps=2 for "a lot". \
-Call set_brightness for the LED lights; for "brighter"/"dimmer" pick the level next to the current one, \
-calling get_device_settings first only if the current level is not already known from the conversation. \
-Call get_device_settings alone when the user asks how loud or bright Ray is. \
-Confirm the result in a few words. If the result has at_limit or moved is 0, say it is already at the \
-maximum or minimum instead of claiming a change.
-- Call end_conversation when the user says goodbye or wants to stop, then reply with an empty message.
-
-Answer in Korean, in one or two short sentences that sound natural when spoken aloud.
-No lists, no URLs, no markdown.
-"""
-
-LIVE_VOICE = "cedar"  # 세션 목소리. 인사 WAV 도 같은 목소리로 합성해 이질감을 없앤다
-LIVE_GREETING_TEXT = "네, 부르셨어요?"  # 웨이크워드 뒤 세션 연결 지연(1.5~3.5초)을 가리는 인사
-LIVE_GREETING_TTS_MODEL = "gpt-4o-mini-tts"  # Live 목소리(cedar)를 지원하는 OpenAI TTS 모델
-
-END_CONVERSATION_TOOL = "end_conversation"
-SEARCH_MEMORY_TOOL = "search_memory"
-
-END_CONVERSATION_TOOL_DEF: dict[str, Any] = {
-    "type": "function",
-    "name": END_CONVERSATION_TOOL,
-    "description": (
-        "End the current conversation session. Call this when the user says goodbye or clearly wants to stop talking."
-    ),
-    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-    "strict": True,
-}
-
-SEARCH_MEMORY_TOOL_DEF: dict[str, Any] = {
-    "type": "function",
-    "name": SEARCH_MEMORY_TOOL,
-    "description": (
-        "Search Ray's long-term memory of earlier conversations with the user. "
-        "Returns episodes (third-person notes with dates) that match the query. "
-        "Use it for anything the user told Ray in a past session."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": (
-                    "What to look for, in the user's language. "
-                    "Include names, topics and time hints from the conversation."
-                ),
-            }
-        },
-        "required": ["query"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-DEFAULT_TOOLS: tuple[dict[str, Any], ...] = (END_CONVERSATION_TOOL_DEF, SEARCH_MEMORY_TOOL_DEF, *DEVICE_TOOLS)
-
-ToolHandler = Callable[[str], str]  # arguments(JSON 문자열) → output(JSON 문자열)
-
-
-def build_live_instructions(profile_text: str = "", recent_session_texts: Sequence[str] = ()) -> str:
-    """세션 시작 instructions — 기본 지시문 뒤에 프로필(블록 2)과 최근 세션(블록 3)을 붙인다.
-
-    instructions 는 세션 시작 후 바꿀 수 없으므로 세션 수준 컨텍스트는 여기에 한 번 들어간다.
-    한도 16,384 토큰에 대해 프로필 256 + 최근 세션 512 soft cap 이라 여유가 크다.
-
-    Args:
-        profile_text: :func:`~voice_pipeline.prompt.format_profile_block` 결과. 빈 문자열이면 생략.
-        recent_session_texts: 최근 세션 블록 텍스트, 시간순. 비어 있으면 생략.
-    """
-    parts = [DEFAULT_LIVE_INSTRUCTIONS.rstrip()]
-    if profile_text or recent_session_texts:
-        parts.append("What you already know about the user, from earlier sessions:")
-    if profile_text:
-        parts.append(profile_text.strip())
-    parts.extend(text.strip() for text in recent_session_texts if text.strip())
-    return "\n\n".join(parts) + "\n"
-
-
-def make_memory_search_handler(retriever: MemoryRetriever, exclude_session_ids: set[str]) -> ToolHandler:
-    """``search_memory`` 툴 핸들러. 검색 결과를 ``{"memories": [{"text", "date"}, …]}`` JSON 으로 돌려준다.
-
-    백엔드가 결과를 읽고 현재 질문에 맞는 것만 골라 답을 만들므로 여기서는 선별하지 않는다(상한은
-    retriever 의 것). 인용 갱신은 하지 않는다 — 대화 모델 출력에 인용 태그가 없고, 턴 단위 retained
-    buffer 도 이 엔진에서는 의미가 없다.
-
-    Args:
-        retriever: 세션 단위 retriever. 핸들러는 executor 스레드에서 불리지만 한 번에 하나씩이다.
-        exclude_session_ids: 검색에서 제외할 세션 — 현재 세션과 instructions 의 최근 세션 블록에 포함된 세션.
-    """
-
-    def handler(arguments: str) -> str:
-        args = json.loads(arguments or "{}")
-        query = str(args.get("query", "")).strip()
-        if not query:
-            return json.dumps({"memories": [], "error": "empty query"})
-        result = retriever.retrieve(query, exclude_session_ids)
-        memories = [{"text": ep.text, "date": ep.timestamp[:10]} for ep in result.episodes]
-        return json.dumps({"memories": memories}, ensure_ascii=False)
-
-    return handler
 
 
 class Phase(enum.Enum):

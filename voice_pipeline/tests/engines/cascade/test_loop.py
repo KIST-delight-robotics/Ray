@@ -1,4 +1,4 @@
-"""Tests for voice_pipeline.session_loop."""
+"""Tests for voice_pipeline.engines.cascade.loop."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ import pytest
 from voice_pipeline.adapters.cpp_bridge import CppEvent, CppEventType
 from voice_pipeline.adapters.led import LEDState
 from voice_pipeline.adapters.tts_openai import OpenAITTS
-from voice_pipeline.generator import GeneratorState, ResponseData
-from voice_pipeline.session_loop import Phase, SessionLoop, _PendingTruncation
+from voice_pipeline.engines.cascade.generator import GeneratorState, ResponseData
+from voice_pipeline.engines.cascade.loop import Phase, SessionLoop, _PendingTruncation
+from voice_pipeline.engines.cascade.turn_detector import TurnDecision
 from voice_pipeline.tests.fakes import RecordingTraceStore
 from voice_pipeline.trace import PipelineTrace, install, set_session
-from voice_pipeline.turn_detector import TurnDecision
 from voice_pipeline.types import AudioFrame, WordTimestamp
 
 # ---------------------------------------------------------------------------
@@ -340,7 +340,7 @@ class TestBargeIn:
         ]
         orch._current_response = ResponseData(text="hello world", audio=b"\x00" * 100, timestamps=timestamps)
 
-        with patch("voice_pipeline.session_loop.truncate_by_timestamps", return_value="hello") as mock_trunc:
+        with patch("voice_pipeline.engines.cascade.loop.truncate_by_timestamps", return_value="hello") as mock_trunc:
             orch._on_playback_interrupted()
 
             mock_trunc.assert_called_once()
@@ -362,7 +362,7 @@ class TestBargeIn:
         audio = b"\x00" * 48000
         orch._current_response = ResponseData(text="hello world foo bar", audio=audio, timestamps=[])
 
-        with patch("voice_pipeline.session_loop.truncate_by_ratio", return_value="hello") as mock_trunc:
+        with patch("voice_pipeline.engines.cascade.loop.truncate_by_ratio", return_value="hello") as mock_trunc:
             orch._on_playback_interrupted()
             mock_trunc.assert_called_once()
 
@@ -383,7 +383,7 @@ class TestBargeIn:
         mocks["generator"].stream_done = False
         mocks["history"].add_assistant_message.return_value = 42
 
-        with patch("voice_pipeline.session_loop.truncate_by_ratio", return_value="hello"):
+        with patch("voice_pipeline.engines.cascade.loop.truncate_by_ratio", return_value="hello"):
             orch._on_playback_interrupted()
 
         assert orch._pending_truncation is not None
@@ -399,7 +399,7 @@ class TestBargeIn:
         timestamps = [WordTimestamp("a", 0.0, 0.5)]
         orch._current_response = ResponseData(text="a", audio=b"\x00", timestamps=timestamps)
 
-        with patch("voice_pipeline.session_loop.truncate_by_timestamps", return_value="a") as mock_trunc:
+        with patch("voice_pipeline.engines.cascade.loop.truncate_by_timestamps", return_value="a") as mock_trunc:
             orch._on_playback_interrupted()
             mock_trunc.assert_called_once_with("a", 0.0, timestamps)
 
@@ -424,7 +424,7 @@ class TestDeferredTruncation:
         mocks["generator"].get_response_data.return_value = response_data
         orch._pending_truncation = _PendingTruncation(msg_id=5, stop_position_sec=0.35)
 
-        with patch("voice_pipeline.session_loop.truncate_by_timestamps", return_value="hi") as mock_trunc:
+        with patch("voice_pipeline.engines.cascade.loop.truncate_by_timestamps", return_value="hi") as mock_trunc:
             orch._check_deferred_truncation()
             mock_trunc.assert_called_once_with("hi there", 0.35, timestamps)
 
@@ -443,7 +443,7 @@ class TestDeferredTruncation:
 
         orch._pending_truncation = _PendingTruncation(msg_id=5, stop_position_sec=0.5)
 
-        with patch("voice_pipeline.session_loop.truncate_by_ratio", return_value="hello"):
+        with patch("voice_pipeline.engines.cascade.loop.truncate_by_ratio", return_value="hello"):
             orch._check_deferred_truncation()
 
         mocks["history"].update_message.assert_called_once_with(5, "hello")
@@ -833,7 +833,7 @@ class TestCppEvents:
         event = CppEvent(CppEventType.PLAYBACK_COMPLETE)
         mocks["bridge"].poll_event.side_effect = [event, None]
 
-        with patch("voice_pipeline.session_loop.truncate_by_ratio", return_value="hello"):
+        with patch("voice_pipeline.engines.cascade.loop.truncate_by_ratio", return_value="hello"):
             q = _audio_queue_with()
             orch._audio_queue = q
             orch._run_frame()
@@ -1091,7 +1091,7 @@ class TestUtteranceStorage:
             text="I am doing well today",
             audio=b"\x00" * 48000,  # 1 second at 24kHz 16-bit
         )
-        with patch("voice_pipeline.session_loop.truncate_by_timestamps", return_value="I am doing"):
+        with patch("voice_pipeline.engines.cascade.loop.truncate_by_timestamps", return_value="I am doing"):
             orch._on_playback_interrupted()
 
         calls = mocks["memory_storage"].add_utterance.call_args_list
@@ -1176,7 +1176,7 @@ class TestPipelineTraceTruncated:
         orch._stop_pending_time = time.monotonic() - 0.5
         orch._current_response = ResponseData(text="hello world", audio=b"\x00" * 4800)
 
-        with patch("voice_pipeline.session_loop.truncate_by_ratio", return_value="hello"):
+        with patch("voice_pipeline.engines.cascade.loop.truncate_by_ratio", return_value="hello"):
             orch._on_playback_interrupted()
 
         assert len(store.traces) == 1
@@ -1195,7 +1195,7 @@ class TestPipelineTraceTruncated:
         trace = mocks["generator"].trace
         assert trace.interrupt_ts > 0
 
-        with patch("voice_pipeline.session_loop.truncate_by_ratio", return_value="hello"):
+        with patch("voice_pipeline.engines.cascade.loop.truncate_by_ratio", return_value="hello"):
             orch._on_playback_interrupted()
 
         assert trace.interrupt_ack_ts >= trace.interrupt_ts

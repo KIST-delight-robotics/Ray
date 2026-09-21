@@ -17,9 +17,9 @@
 | 파일 | 내용 |
 |---|---|
 | `voice_pipeline/adapters/gpt_live.py` | SDK `client.live.connect()` 래퍼. 수신 스레드 → 프로젝트 이벤트(`LiveAudio`, `LiveTranscript`, `LiveFunctionCall`, …) 큐. 전사는 SDK `TranscriptGrouper`로 화자별 세그먼트로 묶어 전달. |
-| `voice_pipeline/live_session.py` | `LiveSessionLoop`. 마이크 16k→24k 리샘플 → 세션, 출력 오디오 → 브리지(세션 = 스트림 하나, `live=True`), 전사 → 히스토리·utterances, 종료(키워드·유휴 60 s·`end_conversation` 툴·closed·브리지 오류·기아·stop), 종료 시퀀스(mute → 출력 무음 1 s → close → `audio_end`). **파이썬 무음 채우기/버리기**(§4.2). 대화 모델·백엔드 지시문, `LIVE_VOICE="cedar"`, 인사 문구. |
+| `voice_pipeline/engines/gpt_live/loop.py` (+ `instructions.py`, `tools.py`) | `LiveSessionLoop`. 마이크 16k→24k 리샘플 → 세션, 출력 오디오 → 브리지(세션 = 스트림 하나, `live=True`), 전사 → 히스토리·utterances, 종료(키워드·유휴 60 s·`end_conversation` 툴·closed·브리지 오류·기아·stop), 종료 시퀀스(mute → 출력 무음 1 s → close → `audio_end`). **파이썬 무음 채우기/버리기**(§4.2). 대화 모델·백엔드 지시문, `LIVE_VOICE="cedar"`, 인사 문구. |
 | `voice_pipeline/wiring.py` | `engine` 분기. live면 ASR·VAP·TurnGPT 미로드. responses 위임 + 함수 툴(`end_conversation`, `search_memory`, `adjust_volume`, `set_brightness`, `get_device_settings`). |
-| `voice_pipeline/device_settings.py` | 볼륨(10단계, wpctl)·LED 밝기(off/low/medium/high) 툴 정의·핸들러 + 현재 상태 조회. `var/device_settings.json` 에 저장, 시작 시 재적용. |
+| `voice_pipeline/device_settings.py` | 볼륨(10단계, wpctl)·LED 밝기(off/low/medium/high) 상태·저장·재적용. 툴 정의·핸들러는 `engines/gpt_live/tools.py`. `var/device_settings.json` 에 저장, 시작 시 재적용. |
 | `voice_pipeline/__main__.py` | live면 작별 WAV 생략, 인사 WAV를 `OpenAITTS(voice=cedar, model=gpt-4o-mini-tts)`로 "네, 부르셨어요?" 생성. 콘솔에 live 로거 표시. 종료 시 `vap/asr` None 가드. |
 | `voice_pipeline/settings.py` | `ENGINE = "live"`, `BRIDGE_SAMPLE_RATE = 24000`. |
 | `voice_pipeline/adapters/cpp_bridge.py` | `send_stream_start(live=True)` → `{"type":"stream_start","live":true}`. |
@@ -27,7 +27,7 @@
 | `voice_pipeline/adapters/tts_openai.py` | `voice`, `model` 생성자 인자. |
 | `voice_pipeline/greeting_audio.py` | `greeting_text/farewell_text` 인자. |
 | `cpp/main.cpp` | `stream_live` 플래그: live면 헤드모션 온라인 생성 대신 대기 모션, 시작 전 `kLivePrebufferCycles=2`(720 ms) 모음. **싱크 진단 로그** `audio_sync_<mode>.csv`(모터 틱마다 모션이 가정하는 오디오 위치·실제 재생 위치·재생기가 끼운 무음 누적). 빌드 통과. |
-| 테스트 | `tests/test_live_session.py`, `tests/adapters/test_gpt_live.py` 등 추가. 전체 996 통과. |
+| 테스트 | `tests/engines/gpt_live/test_loop.py`, `tests/adapters/test_gpt_live.py` 등 추가. 전체 996 통과. |
 | 진단 도구 | `scripts/hardware/wakeword_diag.py`(마이크 레벨·VAD·STT 결과), `scripts/hardware/audio_sync_report.py`(싱크 로그 요약), `scripts/gpt_live/mic_live.py`(GPT-Live 단독 실험, TTS 스크립트 입력 가능). |
 | 문서 | `docs/decisions-wip.md`(설계 판단), `docs/modules/bridge.md`(live 필드), `docs/modules/wakeword.md`. |
 

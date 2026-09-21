@@ -1,16 +1,16 @@
 """사용자가 말로 바꾸는 기기 설정 — 스피커 볼륨(단계), LED 밝기(단계).
 
-GPT-Live 백엔드 함수 툴 ``adjust_volume`` / ``set_brightness`` / ``get_device_settings`` 의 정의와 핸들러, 값의 영속화
-(``var/device_settings.json``), 프로세스 시작 시 재적용을 한곳에 둔다. 툴 스키마와 그것을 읽는 핸들러가
-같은 파일에 있어 인자 이름이 어긋나지 않는다.
+단계 이동·경계 처리, 값의 영속화(``var/device_settings.json``), 프로세스 시작 시 재적용을 맡는다.
+사용자가 말로 바꾸는 입구는 gpt_live 백엔드 함수 툴(:mod:`voice_pipeline.engines.gpt_live.tools`)이고,
+이 모듈은 툴을 모른다 — 다른 입구(버튼, 앱)가 생겨도 같은 메서드를 부른다.
 
 스마트 스피커처럼 단순하게 간다. 볼륨은 올리기/내리기만 있고 끄기는 없다(최소 단계가 곧 가장 작은 소리).
 밝기는 단계 이름 하나로 정한다(끄기 포함). 끝에 닿으면 실패가 아니라 가능한 만큼만 움직이고 결과에
 ``at_limit`` 을 표시해, 백엔드가 "최대예요/최소예요" 라고 안내하게 한다.
 
 적용 경로: 볼륨은 PipeWire 기본 싱크(:mod:`~voice_pipeline.adapters.system_volume`), 밝기는
-:meth:`~voice_pipeline.adapters.led.LEDController.set_brightness`. 핸들러는 세션 루프의 executor 스레드에서
-한 번에 하나씩 불리고, :meth:`DeviceSettings.apply` 는 시작 시 메인 스레드에서 부르므로 락으로 직렬화한다.
+:meth:`~voice_pipeline.adapters.led.LEDController.set_brightness`. 툴 핸들러는 세션 루프의 executor 스레드에서
+한 번에 하나씩 부르고, :meth:`DeviceSettings.apply` 는 시작 시 메인 스레드에서 부르므로 락으로 직렬화한다.
 """
 
 from __future__ import annotations
@@ -35,76 +35,6 @@ VOLUME_DEFAULT_STEP = 10  # 설정 파일이 없을 때. 도입 전 동작(싱�
 # 밝기: 단계 이름 → LED 전체 밝기 (0.0~1.0). 값은 기기에서 보고 조정할 것.
 BRIGHTNESS_LEVELS: dict[str, float] = {"off": 0.0, "low": 0.3, "medium": 0.65, "high": 1.0}
 BRIGHTNESS_DEFAULT = "high"  # 설정 파일이 없을 때. 도입 전 동작(LEDController._BRIGHTNESS = 1.0)과 같게 둔다
-
-ADJUST_VOLUME_TOOL = "adjust_volume"
-SET_BRIGHTNESS_TOOL = "set_brightness"
-GET_DEVICE_SETTINGS_TOOL = "get_device_settings"
-
-ADJUST_VOLUME_TOOL_DEF: dict[str, Any] = {
-    "type": "function",
-    "name": ADJUST_VOLUME_TOOL,
-    "description": (
-        f"Turn Ray's speaker volume up or down by a number of steps ({VOLUME_STEPS} steps total, no mute). "
-        "Use steps=1 for an ordinary request and steps=2 when the user asks for a big change. "
-        "If the volume is already at the limit, the result says so instead of failing."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "direction": {"type": "string", "enum": ["up", "down"], "description": "Louder or quieter."},
-            "steps": {
-                "type": "integer",
-                "description": "How many steps to move. 1 for a normal request, 2 for 'a lot'.",
-            },
-        },
-        "required": ["direction", "steps"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-SET_BRIGHTNESS_TOOL_DEF: dict[str, Any] = {
-    "type": "function",
-    "name": SET_BRIGHTNESS_TOOL,
-    "description": (
-        "Set the brightness of Ray's LED lights to one of the fixed levels. 'off' turns the lights off. "
-        "For 'brighter' or 'dimmer' pick the level next to the current one; if the current level is not known "
-        "from the conversation, call get_device_settings first."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "level": {
-                "type": "string",
-                "enum": list(BRIGHTNESS_LEVELS),
-                "description": "Target brightness level.",
-            }
-        },
-        "required": ["level"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-GET_DEVICE_SETTINGS_TOOL_DEF: dict[str, Any] = {
-    "type": "function",
-    "name": GET_DEVICE_SETTINGS_TOOL,
-    "description": (
-        "Read Ray's current speaker volume step and LED brightness level without changing them. "
-        "Use it when the user asks how loud or how bright Ray is, or when a relative change needs the current "
-        "level and it is not already known from the conversation."
-    ),
-    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-    "strict": True,
-}
-
-DEVICE_TOOLS: tuple[dict[str, Any], ...] = (
-    ADJUST_VOLUME_TOOL_DEF,
-    SET_BRIGHTNESS_TOOL_DEF,
-    GET_DEVICE_SETTINGS_TOOL_DEF,
-)
-
-ToolHandler = Callable[[str], str]  # arguments(JSON 문자열) → output(JSON 문자열). live_session 의 것과 같은 모양
 
 
 class DeviceSettings:
@@ -208,26 +138,6 @@ class DeviceSettings:
                 "volume": {"level": self.volume_step, "max": VOLUME_STEPS},
                 "brightness": {"level": self.brightness, "levels": list(BRIGHTNESS_LEVELS)},
             }
-
-    def tool_handlers(self) -> dict[str, ToolHandler]:
-        """백엔드 함수 툴 이름 → 핸들러. 세션 루프의 ``tool_handlers`` 에 그대로 넣는다."""
-
-        def adjust_volume(arguments: str) -> str:
-            args = json.loads(arguments or "{}")
-            return json.dumps(self.adjust_volume(str(args.get("direction", "")), int(args.get("steps", 1))))
-
-        def set_brightness(arguments: str) -> str:
-            args = json.loads(arguments or "{}")
-            return json.dumps(self.set_brightness(str(args.get("level", ""))))
-
-        def get_device_settings(_arguments: str) -> str:
-            return json.dumps(self.status())
-
-        return {
-            ADJUST_VOLUME_TOOL: adjust_volume,
-            SET_BRIGHTNESS_TOOL: set_brightness,
-            GET_DEVICE_SETTINGS_TOOL: get_device_settings,
-        }
 
     # ------------------------------------------------------------------
     # Persistence

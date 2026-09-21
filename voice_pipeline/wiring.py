@@ -36,28 +36,30 @@ from voice_pipeline.adapters.tts_openai import OpenAITTS
 from voice_pipeline.adapters.turngpt import ThreadedTurnGPT, TurnGPTWrapper
 from voice_pipeline.adapters.vap import MaAIVAPModel, ThreadedVAP
 from voice_pipeline.device_settings import DeviceSettings
-from voice_pipeline.generator import SpeechGenerator
-from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
-from voice_pipeline.live_session import (
+from voice_pipeline.engines.cascade.context_builder import DEFAULT_SYSTEM_PROMPT
+from voice_pipeline.engines.cascade.generator import SpeechGenerator
+from voice_pipeline.engines.cascade.loop import SessionLoop
+from voice_pipeline.engines.cascade.summarizer import HistorySummarizer
+from voice_pipeline.engines.cascade.text_session import TextSession
+from voice_pipeline.engines.cascade.turn_detector import TurnDetector
+from voice_pipeline.engines.gpt_live.instructions import (
     DEFAULT_BACKEND_INSTRUCTIONS,
+    LIVE_VOICE,
+    build_live_instructions,
+)
+from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop
+from voice_pipeline.engines.gpt_live.tools import (
     DEFAULT_TOOLS,
     END_CONVERSATION_TOOL,
-    LIVE_VOICE,
     SEARCH_MEMORY_TOOL,
-    LiveSessionLoop,
-    build_live_instructions,
+    make_device_settings_handlers,
     make_memory_search_handler,
 )
+from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
-from voice_pipeline.prompt import (
-    DEFAULT_SYSTEM_PROMPT,
-    HistorySummarizer,
-    format_profile_block,
-    load_session_context,
-)
-from voice_pipeline.session_loop import SessionComponents, SessionLoop
+from voice_pipeline.session_context import format_profile_block, load_session_context
 from voice_pipeline.settings import (
     BRIDGE_SAMPLE_RATE,
     DEFAULT_DB_PATH,
@@ -67,9 +69,7 @@ from voice_pipeline.settings import (
     SAMPLE_RATE,
     SUMMARY_MAX_TOKENS,
 )
-from voice_pipeline.text_session import TextSession
 from voice_pipeline.trace import OpenAIRetryHandler, SQLiteCallStore, SQLiteTraceStore, TrackedEmbedder, TrackedTTS
-from voice_pipeline.turn_detector import TurnDetector
 from voice_pipeline.types import ITTS, AudioFrame
 
 logger = logging.getLogger("voice_pipeline.wiring")
@@ -80,6 +80,19 @@ _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
 _LIVE_BACKEND_MODEL = "gpt-5.4-mini"  # GPT-Live responses 위임 백엔드 (검색·함수 툴 실행 주체)
 
 Engine = Literal["cascade", "live"]
+
+
+@dataclass
+class SessionComponents:
+    """Per-session objects created by :meth:`ProcessComponents.create_session`.
+
+    ``session_loop`` 은 엔진에 따라 :class:`~voice_pipeline.engines.cascade.loop.SessionLoop` 또는
+    :class:`~voice_pipeline.engines.gpt_live.loop.LiveSessionLoop`. 둘 다 ``run()``/``request_stop()`` 을 가진다.
+    """
+
+    session_loop: SessionLoop | LiveSessionLoop
+    history: ConversationHistory
+    session_id: str
 
 
 @dataclass
@@ -157,7 +170,7 @@ class ProcessComponents:
             # 백엔드 함수 툴로 — 트리거와 쿼리 생성을 백엔드 LLM 이 맡는다.
             tool_handlers: dict[str, Any] = dict(session_loop_kwargs.pop("tool_handlers", None) or {})
             if self.device_settings is not None:
-                for name, handler in self.device_settings.tool_handlers().items():
+                for name, handler in make_device_settings_handlers(self.device_settings).items():
                     tool_handlers.setdefault(name, handler)
             if memory_enabled:
                 profiles, recent_texts, included_ids = load_session_context(

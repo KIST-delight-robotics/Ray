@@ -273,6 +273,28 @@ XVF3800 은 RST 버튼과 같은 효과를 USB 벤더 명령(REBOOT, resid 48 / 
   제외" 분기도 이 규칙 하나로 흡수됐다.
 - **미검증**: 실기에서 백엔드가 "많이" 를 steps=2 로 옮기는 비율, 밝기 단계 값(0.3/0.65)의 체감, 위임 누락률.
 
+## 대화 엔진을 `engines/gpt_live/`·`engines/cascade/` 로 분리 — 트리에서 "어느 엔진 것인지" 보이게
+
+- **문제**: `voice_pipeline/` 상위에 cascade 전용(session_loop·generator·prompt·turn_detector·text_session),
+  live 전용(live_session), 공통(history·trace…)이 나란히 있어 파일 이름만으로는 무엇이 실행되고 무엇이 놀고
+  있는지 안 보였다. `__init__.py` 의 읽는 순서 독스트링이 그 부재를 메우고 있었다. `live_session.py` 는 루프·
+  지시문·툴 정의·기억 핸들러 700줄이 한 파일이라 툴을 하나 더 넣을 때 "어디 넣나" 가 고민이 됐다.
+- **기준**: `engines/` 아래 두 폴더 = 같은 자리의 두 구현. 한 엔진만 쓰는 건 그 폴더, 둘이 같이 쓰는 건
+  상위. 폴더 이름은 cascade(업계 용어 유지)와 gpt_live(제품명 그대로, 어댑터·문서와 대조 쉬움). 두 루프
+  파일은 같은 역할이라 같은 이름 `loop.py` — 클래스 이름(`SessionLoop`/`LiveSessionLoop`)이 이미 다르다.
+- **`prompt.py` 는 셋으로**: 양 엔진이 실제로 공유하는 건 프로필 블록과 최근 세션 블록을 만드는 120줄뿐이라
+  `session_context.py`(상위)로. `memory/` 에 두지 않은 이유는 그쪽은 저장·검색이고 이건 LLM 에 보여 줄 문장
+  만들기라서. 턴마다 예산 안에 쌓는 `ContextBuilder` 는 cascade 만의 일이라 `context_builder.py`(클래스 이름
+  그대로), 롤링 요약은 `summarizer.py`. `format_history_summary_block` 은 요약기 쪽으로 옮겨 순환 import 를 피했다.
+- **`live_session.py` 는 셋으로**: `loop.py`(500줄, 잘 안 바뀜) / `instructions.py`(지시문 텍스트 50줄 — 위임률이
+  문구 형식에 좌우돼 가장 자주 만지는 부분, GPT-Live API 필드명 그대로) / `tools.py`(정의+핸들러, 앞으로 늘어남).
+  볼륨·밝기 툴 정의·핸들러 팩토리도 `tools.py` 로 합류시켜 `device_settings.py` 는 상태·저장만 남았다 —
+  `search_memory` 와 `MemoryRetriever` 의 관계와 같아졌고, 다른 입구(버튼·앱)가 생겨도 상태 모듈은 그대로다.
+- **로거 이름은 유지**: `voice_pipeline.session_loop`·`voice_pipeline.live_session`·`voice_pipeline.prompt` 는
+  파일명이 아니라 역할 이름으로 보고 그대로 둔다(`voice_pipeline.bridge`, `.tts` 처럼). 콘솔 서사 필터와
+  로그 분석 스크립트가 이 이름을 본다.
+- **하지 않은 것**: 로직·함수 이름 변경 없음, cascade 삭제 없음. 순수 이동과 파일 쪼개기.
+
 ## 차후 고려
 
 - **live 재생 드리프트 보정**: DAC 클럭 54.5 ppm 편차로 1시간에 약 200 ms 소리가 입보다 뒤처진다(위 싱크 실측). 무음 조각에서 재생기 쪽만 그만큼 샘플을 건너뛰는 식의 보정 검토 — 두 스트림에 같이 넣으면 안 되는 유일한 처리.

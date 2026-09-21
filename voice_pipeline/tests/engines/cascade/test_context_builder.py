@@ -1,4 +1,4 @@
-"""Tests for voice_pipeline.prompt."""
+"""Tests for voice_pipeline.engines.cascade.context_builder."""
 
 from __future__ import annotations
 
@@ -6,19 +6,19 @@ from typing import Any
 
 import pytest
 
+from voice_pipeline.engines.cascade.context_builder import ContextBuilder
+from voice_pipeline.engines.cascade.summarizer import HistorySummarySnapshot
 from voice_pipeline.history import HistoryTurn
 from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
-from voice_pipeline.prompt import (
-    _PER_MESSAGE_OVERHEAD_TOKENS,
-    ContextBuilder,
-    HistorySummarySnapshot,
+from voice_pipeline.session_context import (
+    PER_MESSAGE_OVERHEAD_TOKENS,
     format_session_summary_block,
     load_session_context,
 )
 from voice_pipeline.types import LLMMetrics
 
 # Per-message overhead shorthand
-_MO = _PER_MESSAGE_OVERHEAD_TOKENS
+_MO = PER_MESSAGE_OVERHEAD_TOKENS
 
 
 class StubHistory:

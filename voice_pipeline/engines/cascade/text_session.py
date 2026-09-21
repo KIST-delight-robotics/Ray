@@ -38,16 +38,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from voice_pipeline.engines.cascade.context_builder import ContextBuilder, parse_citation_tag, strip_urls
 from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
-from voice_pipeline.prompt import ContextBuilder, parse_citation_tag, strip_urls
 from voice_pipeline.types import ILLM, LLMMetrics, TokenCounter
 
 if TYPE_CHECKING:
     from voice_pipeline.memory.types import MemoryReadResult
 
-logger = logging.getLogger("voice_pipeline.text_session")
+logger = logging.getLogger("voice_pipeline.engines.cascade.text_session")
 
 
 @dataclass

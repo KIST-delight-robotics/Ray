@@ -12,16 +12,15 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
 
 from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEventType
 from voice_pipeline.adapters.led import LEDController, LEDState
-from voice_pipeline.generator import GeneratorState, ResponseData, SpeechGenerator
+from voice_pipeline.engines.cascade.generator import GeneratorState, ResponseData, SpeechGenerator
+from voice_pipeline.engines.cascade.turn_detector import TurnDecision, TurnDetector
 from voice_pipeline.history import ConversationHistory
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.settings import FRAME_DURATION_MS
 from voice_pipeline.trace import save_turn
-from voice_pipeline.turn_detector import TurnDecision, TurnDetector
 from voice_pipeline.types import IASR, AudioFrame, TokenCounter, WordTimestamp
 
 
@@ -78,23 +77,7 @@ def truncate_by_ratio(
     return " ".join(words[:count])
 
 
-if TYPE_CHECKING:
-    from voice_pipeline.live_session import LiveSessionLoop
-
-logger = logging.getLogger("voice_pipeline.session_loop")
-
-
-@dataclass
-class SessionComponents:
-    """Per-session objects created by the session factory.
-
-    ``session_loop`` 은 엔진에 따라 :class:`SessionLoop`(cascade) 또는
-    :class:`~voice_pipeline.live_session.LiveSessionLoop`(live). 둘 다 ``run()``/``request_stop()`` 을 가진다.
-    """
-
-    session_loop: SessionLoop | LiveSessionLoop
-    history: ConversationHistory
-    session_id: str
+logger = logging.getLogger("voice_pipeline.engines.cascade.loop")
 
 
 @dataclass

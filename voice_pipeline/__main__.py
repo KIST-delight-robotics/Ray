@@ -38,8 +38,8 @@ from voice_pipeline.adapters.led import LEDState
 from voice_pipeline.adapters.llm_openai import OpenAILLM
 from voice_pipeline.adapters.tts_openai import OpenAITTS
 from voice_pipeline.adapters.wakeword import WakewordDetector
+from voice_pipeline.engines.gpt_live.instructions import LIVE_GREETING_TEXT, LIVE_GREETING_TTS_MODEL, LIVE_VOICE
 from voice_pipeline.greeting_audio import ensure_greeting_audio
-from voice_pipeline.live_session import LIVE_GREETING_TEXT, LIVE_GREETING_TTS_MODEL, LIVE_VOICE
 from voice_pipeline.memory.writer import MemoryWriter
 from voice_pipeline.settings import VAR_DIR
 from voice_pipeline.types import AudioFrame

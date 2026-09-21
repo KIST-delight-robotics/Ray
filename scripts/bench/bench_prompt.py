@@ -26,9 +26,9 @@ from typing import Any
 from voice_pipeline.adapters.llm_openai import OpenAILLM
 from voice_pipeline.adapters.token_counter import create_token_counter
 from voice_pipeline.adapters.tts_openai import OpenAITTS
-from voice_pipeline.generator import GeneratorState, SpeechGenerator
+from voice_pipeline.engines.cascade.context_builder import DEFAULT_SYSTEM_PROMPT
+from voice_pipeline.engines.cascade.generator import GeneratorState, SpeechGenerator
 from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
-from voice_pipeline.prompt import DEFAULT_SYSTEM_PROMPT
 from voice_pipeline.types import ILLM, ITTS, LLMResult, LLMStream, TTSStream, WordTimestamp
 
 # ---------------------------------------------------------------------------
@@ -476,7 +476,7 @@ def main() -> None:
     if prompt_text:
         print(f"\n[Custom prompt]\n{prompt_text}\n")
     else:
-        from voice_pipeline.prompt import DEFAULT_SYSTEM_PROMPT
+        from voice_pipeline.engines.cascade.context_builder import DEFAULT_SYSTEM_PROMPT
 
         print(f"\n[Default prompt]\n{DEFAULT_SYSTEM_PROMPT}\n")
         prompt_text = None  # use default

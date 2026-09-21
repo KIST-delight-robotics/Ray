@@ -25,7 +25,7 @@ controller.set_state(LEDState.IDLE)
 controller.set_state(LEDState.OFF)
 
 # 전체 밝기 (0.0=꺼짐 ~ 1.0). 상태·애니메이션은 유지되고 다음 프레임부터 반영. 하부 LED 미러도 같은 비율.
-# 사용자가 말로 바꾸는 단계(off/low/medium/high)는 voice_pipeline/device_settings.py 가 이 값으로 변환한다.
+# 사용자가 말로 바꾸는 단계(off/low/medium/high)는 voice_pipeline/device_settings.py 가 이 값으로 변환한다 (툴 입구는 engines/gpt_live/tools.py).
 controller.set_brightness(0.3)
 
 controller.close()

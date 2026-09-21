@@ -13,11 +13,10 @@ from unittest.mock import MagicMock
 import pytest
 
 import voice_pipeline.wiring as wiring
-from voice_pipeline.live_session import SEARCH_MEMORY_TOOL
+from voice_pipeline.engines.gpt_live.tools import SEARCH_MEMORY_TOOL
 from voice_pipeline.memory.types import Episode, Profile
-from voice_pipeline.session_loop import SessionComponents
 from voice_pipeline.trace import record_call
-from voice_pipeline.wiring import ProcessComponents
+from voice_pipeline.wiring import ProcessComponents, SessionComponents
 
 _SESSION_CLASSES = [
     "ThreadedTurnGPT",

@@ -12,9 +12,9 @@ import numpy as np
 
 from voice_pipeline.adapters.turngpt import SyncTurnGPTAdapter, TurnGPTWrapper
 from voice_pipeline.adapters.vap import ThreadedVAP, VAPResult
+from voice_pipeline.engines.cascade.turn_detector import TurnDecision, TurnDetector, _TurnState
 from voice_pipeline.tests.fakes import RecordingCallStore
 from voice_pipeline.trace import current_turn, install, set_session
-from voice_pipeline.turn_detector import TurnDecision, TurnDetector, _TurnState
 from voice_pipeline.types import IEmbedder
 
 # ---------------------------------------------------------------------------

@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEventType  # noqa: E402
 from voice_pipeline.adapters.gpt_live import LiveAudio, LiveStarted  # noqa: E402
-from voice_pipeline.live_session import LiveSessionLoop  # noqa: E402
+from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop  # noqa: E402
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE, FRAME_SIZE_SAMPLES, SAMPLE_RATE, SAMPLE_WIDTH  # noqa: E402
 
 LOG_ROOT = Path("var/log/sync_probe")

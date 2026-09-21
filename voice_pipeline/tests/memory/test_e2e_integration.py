@@ -10,11 +10,11 @@ import pytest
 
 from voice_pipeline.adapters.embedder import SentenceTransformerEmbedder
 from voice_pipeline.adapters.llm_openai import OpenAILLM
+from voice_pipeline.engines.cascade.context_builder import format_memory_block, parse_citation_tag
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.writer import MemoryWriter
-from voice_pipeline.prompt import format_memory_block, parse_citation_tag
 from voice_pipeline.tests.memory.conftest import (
     CONVERSATION_COOKING,
     CONVERSATION_MOVIE,

@@ -1,4 +1,4 @@
-"""Tests for voice_pipeline.live_session (GPT-Live 엔진 세션 루프)."""
+"""Tests for voice_pipeline.engines.gpt_live.loop (GPT-Live 엔진 세션 루프)."""
 
 from __future__ import annotations
 
@@ -22,16 +22,8 @@ from voice_pipeline.adapters.gpt_live import (
     LiveTranscript,
 )
 from voice_pipeline.adapters.led import LEDState
-from voice_pipeline.live_session import (
-    END_CONVERSATION_TOOL,
-    SEARCH_MEMORY_TOOL,
-    LiveSessionLoop,
-    Phase,
-    build_live_instructions,
-    make_memory_search_handler,
-)
-from voice_pipeline.memory.retriever import MemoryRetriever
-from voice_pipeline.memory.types import Episode, MemoryReadResult
+from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop, Phase
+from voice_pipeline.engines.gpt_live.tools import END_CONVERSATION_TOOL, SEARCH_MEMORY_TOOL
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE, SAMPLE_RATE
 
 SILENCE_100MS = bytes(BRIDGE_SAMPLE_RATE * 2 // 10)
@@ -468,39 +460,7 @@ def _wait(release: threading.Event) -> str:
 # ---------------------------------------------------------------------------
 
 
-class TestMemoryHelpers:
-    def test_build_live_instructions_without_context_is_base_only(self) -> None:
-        text = build_live_instructions()
-        assert text.startswith("You are Ray")
-        assert "already know about the user, from earlier sessions" not in text
-
-    def test_build_live_instructions_appends_profile_and_recent_sessions(self) -> None:
-        text = build_live_instructions(
-            "[User Profile]\ninterest::movie: SF",
-            ["[2026-09-10 10:00 session]\n- User saw Dune 2.", "[2026-09-12 20:00 session]\n- User liked the OST."],
-        )
-        base_end = text.index("Do not mention the backend.")
-        assert text.index("already know about the user, from earlier sessions:") > base_end
-        assert text.index("[User Profile]") < text.index("[2026-09-10 10:00 session]") < text.index("[2026-09-12")
-
-    def test_search_handler_returns_memories_json(self) -> None:
-        retriever = MagicMock(spec=MemoryRetriever)
-        ep = Episode(7, "User cried watching Interstellar.", "2026-03-15 20:00:00", "s-1", 1.0, "2026-03-15 20:00:00")
-        retriever.retrieve.return_value = MemoryReadResult(episodes=[ep], scores=[0.5], index_to_id={1: 7})
-        handler = make_memory_search_handler(retriever, {"cur", "s-recent"})
-
-        out = json.loads(handler(json.dumps({"query": "인터스텔라"})))
-
-        retriever.retrieve.assert_called_once_with("인터스텔라", {"cur", "s-recent"})
-        assert out == {"memories": [{"text": "User cried watching Interstellar.", "date": "2026-03-15"}]}
-
-    def test_search_handler_empty_query_does_not_search(self) -> None:
-        retriever = MagicMock(spec=MemoryRetriever)
-        handler = make_memory_search_handler(retriever, set())
-        out = json.loads(handler(json.dumps({"query": "  "})))
-        assert out["memories"] == [] and "error" in out
-        retriever.retrieve.assert_not_called()
-
+class TestToolFailure:
     def test_search_tool_failure_becomes_error_output(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def boom(_a: str) -> str:
             raise RuntimeError("index down")

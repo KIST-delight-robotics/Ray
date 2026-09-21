@@ -43,9 +43,9 @@ from dataclasses import dataclass, field
 
 from voice_pipeline.adapters.llm_openai import OpenAILLM
 from voice_pipeline.adapters.token_counter import create_token_counter
+from voice_pipeline.engines.cascade.context_builder import DEFAULT_SYSTEM_PROMPT, ContextBuilder
 from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
-from voice_pipeline.prompt import DEFAULT_SYSTEM_PROMPT, ContextBuilder
 from voice_pipeline.types import LLMMetrics
 
 # ---------------------------------------------------------------------------

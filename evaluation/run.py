@@ -44,9 +44,8 @@ except Exception:
 from evaluation.noise_bed import NoiseBed
 from evaluation.question_player import QuestionPlayer
 from voice_pipeline import trace
-from voice_pipeline.session_loop import SessionComponents
 from voice_pipeline.types import AudioFrame
-from voice_pipeline.wiring import build_components
+from voice_pipeline.wiring import SessionComponents, build_components
 
 logger = logging.getLogger("eval")
 
