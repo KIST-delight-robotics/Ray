@@ -1,0 +1,215 @@
+{
+  "10CM_pet": {
+    "title": "펫",
+    "artist": "10CM",
+    "aliases": [
+      "Pet"
+    ],
+    "artist_aliases": [
+      "십센치"
+    ]
+  },
+  "Alone_coogie": {
+    "title": "Alone",
+    "artist": "Coogie",
+    "aliases": [
+      "얼론"
+    ],
+    "artist_aliases": [
+      "쿠기"
+    ]
+  },
+  "Butter_BTS": {
+    "title": "Butter",
+    "artist": "BTS",
+    "aliases": [
+      "버터"
+    ],
+    "artist_aliases": [
+      "방탄소년단",
+      "방탄"
+    ]
+  },
+  "Drawer_10cm": {
+    "title": "서랍",
+    "artist": "10CM",
+    "aliases": [
+      "Drawer"
+    ],
+    "artist_aliases": [
+      "십센치"
+    ]
+  },
+  "Dynamite_BTS": {
+    "title": "Dynamite",
+    "artist": "BTS",
+    "aliases": [
+      "다이너마이트"
+    ],
+    "artist_aliases": [
+      "방탄소년단",
+      "방탄"
+    ]
+  },
+  "First_Snow": {
+    "title": "첫눈처럼 너에게 가겠다",
+    "artist": "에일리",
+    "aliases": [
+      "첫눈",
+      "First Snow",
+      "I Will Go to You Like the First Snow"
+    ],
+    "artist_aliases": [
+      "Ailee"
+    ],
+    "note": "도깨비 OST"
+  },
+  "GO_Cortis": {
+    "title": "GO!",
+    "artist": "CORTIS",
+    "aliases": [
+      "고"
+    ],
+    "artist_aliases": [
+      "코르티스"
+    ]
+  },
+  "IAM": {
+    "title": "I AM",
+    "artist": "IVE",
+    "aliases": [
+      "아이엠"
+    ],
+    "artist_aliases": [
+      "아이브"
+    ]
+  },
+  "Just_Like_A_Dream": {
+    "title": "꿈처럼",
+    "artist": "벤",
+    "aliases": [
+      "Just Like A Dream",
+      "Like a Dream"
+    ],
+    "artist_aliases": [
+      "Ben"
+    ],
+    "note": "또 오해영 OST"
+  },
+  "Paradise_of_Rumors_AKMU": {
+    "title": "소문의 낙원",
+    "artist": "AKMU",
+    "aliases": [
+      "Paradise of Rumors"
+    ],
+    "artist_aliases": [
+      "악뮤",
+      "악동뮤지션"
+    ]
+  },
+  "Pavarotti": {
+    "title": "Nessun dorma",
+    "artist": "Luciano Pavarotti",
+    "aliases": [
+      "네순 도르마",
+      "공주는 잠 못 이루고",
+      "Turandot"
+    ],
+    "artist_aliases": [
+      "파바로티",
+      "루치아노 파바로티"
+    ],
+    "note": "푸치니 오페라 투란도트 아리아"
+  },
+  "REDRED_Cortis": {
+    "title": "REDRED",
+    "artist": "CORTIS",
+    "aliases": [
+      "레드레드"
+    ],
+    "artist_aliases": [
+      "코르티스"
+    ]
+  },
+  "Shape_of_you_Ed_Sheeran": {
+    "title": "Shape of You",
+    "artist": "Ed Sheeran",
+    "aliases": [
+      "쉐이프 오브 유"
+    ],
+    "artist_aliases": [
+      "에드 시런"
+    ]
+  },
+  "TICK_TOCK": {
+    "title": "TICK TOCK",
+    "artist": "김하온, Nosun, Raf Sandou, Marv, 정준혁",
+    "aliases": [
+      "틱톡",
+      "쇼미더머니 틱톡",
+      "쇼미 단체곡"
+    ],
+    "artist_aliases": [
+      "HAON",
+      "쇼미더머니 12"
+    ],
+    "note": "쇼미더머니 12 Episode 1 단체곡 (Feat. ZICO, Prod. ZICO·Crush)"
+  },
+  "V_ZionT": {
+    "title": "V",
+    "artist": "Zion.T",
+    "aliases": [
+      "브이"
+    ],
+    "artist_aliases": [
+      "자이언티"
+    ]
+  },
+  "You_Are_My_Everything": {
+    "title": "You Are My Everything",
+    "artist": "거미",
+    "aliases": [
+      "유 아 마이 에브리씽"
+    ],
+    "artist_aliases": [
+      "Gummy"
+    ],
+    "note": "태양의 후예 OST"
+  },
+  "Your_Existence_WONSTEIN": {
+    "title": "존재만으로",
+    "artist": "원슈타인",
+    "aliases": [
+      "Your Existence"
+    ],
+    "artist_aliases": [
+      "Wonstein"
+    ]
+  },
+  "snowflower": {
+    "title": "눈의 꽃",
+    "artist": "박효신",
+    "aliases": [
+      "Snow Flower"
+    ],
+    "artist_aliases": []
+  },
+  "snowman": {
+    "title": "눈사람",
+    "artist": "정승환",
+    "aliases": [
+      "Snowman"
+    ],
+    "artist_aliases": [
+      "Jung Seung Hwan"
+    ]
+  },
+  "wildflower": {
+    "title": "야생화",
+    "artist": "박효신",
+    "aliases": [
+      "Wild Flower"
+    ],
+    "artist_aliases": []
+  }
+}
