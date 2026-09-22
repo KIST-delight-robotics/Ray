@@ -2,9 +2,10 @@
 # 공유 파라미터는 cpp/config.toml, 기기별 값은 config/robot.toml — build/Ray 는 둘 다 저장소 루트 기준 상대경로로 읽는다.
 # config/robot.toml 이 없거나 키가 빠지면 잘못된 홈으로 이동할 수 있어 기동을 즉시 중단한다.
 
-# 모터 홈 참고값 (Dynamixel 틱). pitch/roll/mouth 는 매 부팅 자이로 캘리브레이션이 재설정하므로 기록용이고,
-# default_yaw 는 실제 사용된다 (자이로로 못 잡는 축 — 정면을 보는 틱 값). 캘리브레이션이 끝나면 콘솔에
-# 이 형식으로 결과가 찍히니 그대로 붙여 넣으면 된다.
+# 모터 홈 참고값 (Dynamixel 틱). pitch/roll 은 매 부팅 자이로 캘리브레이션이 재설정하므로 기록용이고,
+# default_yaw 는 실제 사용된다 (자이로로 못 잡는 축 — 정면을 보는 틱 값). default_mouth 는 cpp/config.toml 의
+# calib_mouth = false 일 때만 실제 사용되고, true 면 전류 감지 캘리브레이션이 재설정한다.
+# 캘리브레이션이 끝나면 콘솔에 이 형식으로 결과가 찍히니 그대로 붙여 넣으면 된다.
 default_pitch   = 0
 default_roll_r  = 0
 default_roll_l  = 0

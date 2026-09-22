@@ -2362,13 +2362,15 @@ void initialize_robot_posture() {
             if (!any) break;
         }
 
-        // mouth: 턱 움직임은 자이로로 감지 불가 → 고정량 이완
-        dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
-        target_position[4] += cfg_robot.calib_release_mouth_tick;
-        dxl_driver->writeGoalPosition(target_position);
-        delay(HOME_WAIT_MS);
-        std::cout << "[RELEASE] mouth +" << cfg_robot.calib_release_mouth_tick
-                  << "틱 고정 이완 → " << target_position[4] << std::endl;
+        // mouth: 턱 움직임은 자이로로 감지 불가 → 고정량 이완 (calib_mouth=false 면 건너뜀)
+        if (cfg_robot.calib_mouth) {
+            dxl_driver->setProfile(cfg_dxl.profile_velocity_homing, cfg_dxl.profile_acceleration);
+            target_position[4] += cfg_robot.calib_release_mouth_tick;
+            dxl_driver->writeGoalPosition(target_position);
+            delay(HOME_WAIT_MS);
+            std::cout << "[RELEASE] mouth +" << cfg_robot.calib_release_mouth_tick
+                      << "틱 고정 이완 → " << target_position[4] << std::endl;
+        }
     }
 
     // 감기 단계 프로파일 50 ms = 스텝 주기
@@ -2485,6 +2487,10 @@ void initialize_robot_posture() {
     std::cout << "[CALIB] pitch 단계 " << (millis() - t_pitch0) << " ms" << std::endl;
 
     // ---- Mouth: 전류 급변(MAD 자동 임계) 감지 후 backoff. goal 기반 ----
+    // calib_mouth=false 면 전체 건너뜀 — target_position[4] 는 기동 시 넣은 default_mouth 그대로
+    if (!cfg_robot.calib_mouth) {
+        std::cout << "[CALIB] calib_mouth=false → mouth 조정 생략, 설정 홈(" << target_position[4] << ") 사용" << std::endl;
+    } else {
 
     std::cout << "Mouth 조정 (delta-current LSB + MAD auto threshold)" << std::endl;
 
@@ -2637,6 +2643,8 @@ void initialize_robot_posture() {
     logf.flush();
     logf.close();
 
+    } // calib_mouth
+
     // 결과 저장
     g_home.home_pitch  = target_position[0];
     g_home.home_roll_r = target_position[1];
@@ -2649,7 +2657,7 @@ void initialize_robot_posture() {
               << "default_roll_r  = " << g_home.home_roll_r << std::endl
               << "default_roll_l  = " << g_home.home_roll_l << std::endl
               << "default_yaw     = " << g_home.home_yaw    << std::endl
-              << "default_mouth   = " << g_home.home_mouth  << std::endl
+              << "default_mouth   = " << g_home.home_mouth  << (cfg_robot.calib_mouth ? "" : "   # (config, 미조정)") << std::endl
               << "================================================================" << std::endl;
 
     finish_adjust_ready = true;
@@ -2937,13 +2945,14 @@ int main(int argc, char* argv[]) {
         // yaw는 중력(자이로)으로 기준을 잡을 수 없으므로 현재값이 아니라 설정값을 홈으로 쓴다.
         // 전원 인가 시 머리가 돌아가 있어도 항상 config의 정면 기준으로 복귀한다.
         g_home.home_yaw    = cfg_robot.default_yaw;
-        g_home.home_mouth  = cal_state[4].position;
-        std::cout << "[CALIB] 현재 자세를 임시 홈으로 사용 (yaw만 설정값):"
+        // mouth는 calib_mouth=false 면 캘리브레이션을 건너뛰므로 yaw처럼 설정값을 홈으로 쓴다.
+        g_home.home_mouth  = cfg_robot.calib_mouth ? cal_state[4].position : cfg_robot.default_mouth;
+        std::cout << "[CALIB] 현재 자세를 임시 홈으로 사용 (yaw" << (cfg_robot.calib_mouth ? "" : "·mouth") << "는 설정값):"
                   << " pitch="  << g_home.home_pitch
                   << " roll_r=" << g_home.home_roll_r
                   << " roll_l=" << g_home.home_roll_l
                   << " yaw="    << g_home.home_yaw << "(config)"
-                  << " mouth="  << g_home.home_mouth << std::endl;
+                  << " mouth="  << g_home.home_mouth << (cfg_robot.calib_mouth ? "" : "(config)") << std::endl;
     }
     // 원본 (캘리브레이션 후 복원):
     // if (cfg_dxl.operating_mode == 1)

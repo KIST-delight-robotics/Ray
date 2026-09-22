@@ -42,7 +42,11 @@ mouth_pitch_compensation = 0.58   # pitch에 따른 입 움직임 보상 (값↑
 max_mouth = 0
 min_mouth = 400                    # 최대 mouth movement size in DXL dimension
 
-# ===== 캘리브레이션 이완 단계 =====
+# ===== 캘리브레이션 =====
+calib_mouth               = true   # false 면 mouth 캘리브레이션(이완·장력점 탐색)을 건너뛰고
+                                   # config/robot.toml 의 default_mouth 를 그대로 홈으로 사용 (yaw 와 같은 방식)
+
+# ---- 이완 단계 ----
 # 시작 시 roll/pitch 와이어를 자이로 변화가 멎을 때까지 풀고, mouth는 고정량만 푼 뒤 조정 시작
 calib_release_step_tick   = 60     # 이완 1스텝 풀기 양(틱). 한 스텝 = 이만큼 풀고 자이로 판정 1회.
                                    # 팽팽한 줄을 이만큼 풀면 ≈0.035 g 움직여 아래 임계를 넘는다 (0.00057 g/틱 실측).

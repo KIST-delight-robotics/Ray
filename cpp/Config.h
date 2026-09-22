@@ -52,6 +52,7 @@ struct RobotConfig {
     double control_motor_rpy_ratio;
 
     // 캘리브레이션 (옵션 — config에 없으면 기본값)
+    bool   calib_mouth;             // false 면 mouth 캘리브레이션을 건너뛰고 default_mouth 를 홈으로 사용
     int    calib_release_step_tick;
     double calib_release_noise_g;
     double calib_ax_offset;   // 육안 수평일 때의 Ax(g). roll 조정은 (Ax - offset) 기준
@@ -186,6 +187,7 @@ inline bool LoadConfig(const std::string& path = "config.toml", const std::strin
     ok &= REQ(robot_node, "control_motor_rpy_ratio",  cfg_robot.control_motor_rpy_ratio);
 
     // 캘리브레이션 (옵션 — 생략 시 기본값)
+    cfg_robot.calib_mouth               = robot_node["calib_mouth"].value_or(true);
     cfg_robot.calib_release_step_tick = robot_node["calib_release_step_tick"].value_or(60);
     cfg_robot.calib_release_noise_g     = robot_node["calib_release_noise_g"].value_or(0.03);
     cfg_robot.calib_ax_offset           = unit_node["calib_ax_offset"].value_or(0.0);  // 기기별 — config/robot.toml
