@@ -10,8 +10,19 @@
 3. 백엔드의 함수 툴 호출을 실행한다 — 장기기억 검색 ``search_memory``, 볼륨·밝기 ``adjust_volume`` /
    ``set_brightness`` / ``get_device_settings``, 종료 ``end_conversation``. 핸들러는 executor 에서 돌리고
    프레임 루프는 완료를 폴링한다 — 임베딩·DB 조회가 마이크 전송과 출력 중계를 막지 않게.
-4. 세션 종료를 판정하고 닫는다 — 종료 키워드, 유휴 타임아웃, 백엔드의 ``end_conversation`` 툴,
+4. 노래를 재생한다 (``play_song`` / ``stop_song``, 아래 "노래 재생").
+5. 세션 종료를 판정하고 닫는다 — 종료 키워드, 유휴 타임아웃, 백엔드의 ``end_conversation`` 툴,
    세션 만료/연결 끊김, 브리지 오류, 오디오 기아, 외부 stop.
+
+노래 재생 (C++ 는 재생 하나를 끝까지 처리하므로 라이브 스트림과 교대한다):
+    ``play_song`` 호출은 결과를 보류한 채(PENDING) 모델 출력이 무음이 되길 기다림 → ``audio_end`` 뒤
+    ``playback_complete`` 대기(DRAINING) → 마이크 원본 채널 + 재생 지시 append + ``play_audio_csv``(PLAYING) →
+    보류한 툴 결과 제출 → ``playback_complete``(끝) → 마이크·지시 복원, ``stream_start`` 로 재개.
+    ``stop_song`` 도 결과를 보류한다(STOPPING): ``stop`` 은 즉시 보내되, 위임 시 모델의 한마디("끌게")가 스트림이
+    닫힌 채 끝나길 기다린 뒤 스트림을 열고 결과를 제출한다 — 그래야 "끌게" 는 버려지고 결과 뒤의 "껐어" 만 들린다.
+    결과를 노래 시작 뒤에 제출하므로 위임 시 모델의 한마디는 잘리지 않고, 결과 뒤의 말은 스트림이 없어 버려진다.
+    노래 상태 동안 백엔드는 ``stop_song`` 하나만 가진 재생용 설정으로 교체된다(``session.update``, 끝나면 복원).
+    다른 툴 호출은 오류로 답하고 ``end_conversation`` 도 종료로 치지 않는다. 모델 음성은 버리고 전사는 저장하지 않는다.
 
 종료 시퀀스(실측 근거는 scripts/gpt_live/FINDINGS.md §4~5):
     입력 mute → 모델의 마지막 발화가 끝날 때까지(출력이 무음으로 N초) 대기, 상한 있음 →
@@ -28,12 +39,14 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import Executor, Future
 from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
 
+from voice_pipeline.adapters.audio_input import AudioInput
 from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEventType
 from voice_pipeline.adapters.gpt_live import (
     GPTLiveSession,
@@ -46,7 +59,19 @@ from voice_pipeline.adapters.gpt_live import (
     LiveUsage,
 )
 from voice_pipeline.adapters.led import LEDController, LEDState
-from voice_pipeline.engines.gpt_live.tools import END_CONVERSATION_TOOL, ToolHandler
+from voice_pipeline.engines.gpt_live.instructions import (
+    SONG_BACKEND_INSTRUCTIONS,
+    SONG_ENDED_INSTRUCTIONS,
+    SONG_PLAYING_INSTRUCTIONS,
+)
+from voice_pipeline.engines.gpt_live.songs import Song
+from voice_pipeline.engines.gpt_live.tools import (
+    END_CONVERSATION_TOOL,
+    PLAY_SONG_TOOL,
+    STOP_SONG_TOOL,
+    STOP_SONG_TOOL_DEF,
+    ToolHandler,
+)
 from voice_pipeline.history import ConversationHistory
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE, SAMPLE_RATE
@@ -78,6 +103,16 @@ class Phase(enum.Enum):
     DONE = "done"
 
 
+class SongState(enum.Enum):
+    """노래 재생 하위 상태 (Phase.ACTIVE 안에서만 NONE 이 아니다)."""
+
+    NONE = "none"
+    PENDING = "pending"  # play_song 결과 보류 중. 모델 출력이 무음이 되길 기다림
+    DRAINING = "draining"  # audio_end 보냄. 라이브 스트림의 playback_complete 대기
+    PLAYING = "playing"  # play_audio_csv 보냄. 노래 끝의 playback_complete 대기
+    STOPPING = "stopping"  # stop 보냄. playback_complete 와 모델 출력 무음을 기다린 뒤 스트림 재개
+
+
 class LiveSessionLoop:
     """GPT-Live 세션 하나를 프레임 루프로 돈다. ``run()`` 이 반환하면 세션이 끝난 것."""
 
@@ -88,8 +123,10 @@ class LiveSessionLoop:
     _AUDIO_STARVATION_TIMEOUT_SEC = 5.0  # 마이크 프레임 단절 → 종료
     _END_MIN_WAIT_SEC = 2.0  # 종료 결정 후 모델이 작별 인사를 시작할 여유
     _END_SILENCE_SEC = 1.0  # 출력 무음이 이만큼 이어지면 마지막 발화가 끝난 것으로 봄
-    _END_MAX_WAIT_SEC = 8.0  # 무음이 안 와도 종료하는 상한
+    _END_MAX_WAIT_SEC = 30.0  # 무음이 감지되지 않을 때의 안전망. 정상 발화에서는 걸리지 않아야 한다
     _STREAM_START_MAX_WAIT_SEC = 10.0  # 인사 WAV 의 playback_complete 가 안 와도 이 시간 뒤엔 stream_start
+    _SONG_SILENCE_SEC = 1.0  # play_song 뒤 출력 무음이 이만큼 이어지면 스트림을 닫는다
+    _SONG_MAX_WAIT_SEC = 30.0  # 무음이 감지되지 않을 때의 안전망. 정상 발화에서는 걸리지 않아야 한다
     _LEAD_LOG_INTERVAL_SEC = 15.0  # 오디오 전송 상태(추정 밀림, 조각 도착 간격) DEBUG 로그 주기
     _GAP_EVENT_SEC = 0.3  # 조각 도착 간격이 이 이상이면 정지 이벤트로 INFO 로그 (C++ [split] 로그와 대조용)
     # 서버 출력은 실시간보다 1~3% 짧게 온다 — 주로 무음 프레임이 빠지고, 늦게라도 오지 않는다
@@ -125,6 +162,8 @@ class LiveSessionLoop:
         input_sample_rate: int = SAMPLE_RATE,
         live_sample_rate: int = BRIDGE_SAMPLE_RATE,
         wait_for_playback_complete: bool = False,
+        song_catalog: Mapping[str, Song] | None = None,
+        audio_input: AudioInput | None = None,
     ) -> None:
         """
         Args:
@@ -139,6 +178,8 @@ class LiveSessionLoop:
             tool_handlers: 백엔드 함수 툴 이름 → 실행기. ``end_conversation`` 은 내장.
             executor: 툴 핸들러를 돌릴 executor. None 이면 프레임 루프에서 인라인 실행(테스트용).
             input_sample_rate / live_sample_rate: 마이크 레이트와 세션 레이트. 다르면 선형 보간으로 리샘플.
+            song_catalog: 재생 가능한 노래 (키 → Song). None/빈 dict 면 play_song 은 unknown 으로 답한다.
+            audio_input: 있으면 노래 재생 중 원본 마이크 채널로 바꾼다 (:meth:`AudioInput.set_raw_capture`).
         """
         self._live = live
         self._bridge = cpp_bridge
@@ -155,6 +196,16 @@ class LiveSessionLoop:
         self._in_rate = input_sample_rate
         self._live_rate = live_sample_rate
         self._wait_for_playback_complete = wait_for_playback_complete
+        self._song_catalog: Mapping[str, Song] = dict(song_catalog or {})
+        self._audio_input = audio_input
+        self._song_state = SongState.NONE
+        self._song: Song | None = None
+        self._song_future: Future[str] | None = None  # 보류 중인 play_song 결과. 노래 시작(또는 취소) 시 완료
+        self._stop_future: Future[str] | None = None  # 보류 중인 stop_song 결과. 스트림 재개 시 완료
+        self._song_requested_time = 0.0
+        self._stop_requested_time = 0.0
+        self._song_playback_done = False  # STOPPING 중 playback_complete 를 받았는가
+        self._song_cancelled = False  # DRAINING 중 stop 이 오면 재생 대신 스트림만 다시 연다
         self._stream_start_pending = False
         self._stream_start_deadline = 0.0
         self._discarded_before_stream_sec = 0.0
@@ -243,7 +294,7 @@ class LiveSessionLoop:
         self._first_audio_time = None
         self._last_audio_time = None
         if self._discarded_before_stream_sec > 0:
-            logger.info("stream_start sent — discarded %.1fs of output before it", self._discarded_before_stream_sec)
+            logger.info("stream_start sent — discarded %.1fs of output while closed", self._discarded_before_stream_sec)
 
     def _finish(self, *, graceful: bool) -> None:
         if self._phase == Phase.DONE:
@@ -252,6 +303,13 @@ class LiveSessionLoop:
         for _, future in self._inflight:
             future.cancel()  # 아직 시작 안 한 것만 취소된다. 실행 중인 결과는 버려진다
         self._inflight.clear()
+        if self._song_state is SongState.PLAYING:
+            try:
+                self._bridge.send_stop()
+            except Exception:
+                logger.warning("stop for playing song failed", exc_info=True)
+        self._set_raw_capture(False)
+        self._clear_song("cancelled")
         try:
             self._live.close(graceful=graceful)
         except Exception:
@@ -303,6 +361,15 @@ class LiveSessionLoop:
             if self._stream_start_pending:
                 self._open_stream()  # 인사 WAV 끝 → 이제 출력 스트림을 연다
                 continue
+            if self._song_state is SongState.DRAINING:
+                self._start_song()  # 라이브 스트림이 다 나갔다 → 노래 시작
+                continue
+            if self._song_state is SongState.PLAYING:
+                self._end_song()  # 노래 끝 → 대화 재개
+                continue
+            if self._song_state is SongState.STOPPING:
+                self._song_playback_done = True  # 모델의 한마디가 끝나면 타이머가 _end_song
+                continue
             # 우리가 audio_end 를 보내기 전에 왔다 = C++ 가 스트림을 끝냈다(stop 등). 다시 열지 않고 종료.
             logger.warning("playback_complete before audio_end — bridge stream ended")
             self._stream_open = False
@@ -314,7 +381,30 @@ class LiveSessionLoop:
         if self._stream_start_pending and now > self._stream_start_deadline:
             logger.warning("Greeting playback_complete not received — opening stream anyway")
             self._open_stream()
-        if self._phase == Phase.ACTIVE and now - self._last_transcript_time > self._SESSION_TIMEOUT_SEC:
+        if self._song_state is SongState.PENDING and self._utterance_finished(
+            self._song_requested_time,
+            now,
+            min_wait=0.0,
+            silence=self._SONG_SILENCE_SEC,
+            max_wait=self._SONG_MAX_WAIT_SEC,
+            label="Song",
+        ):
+            self._drain_for_song()
+        if (
+            self._song_state is SongState.STOPPING
+            and self._song_playback_done
+            and self._utterance_finished(
+                self._stop_requested_time,
+                now,
+                min_wait=0.0,
+                silence=self._SONG_SILENCE_SEC,
+                max_wait=self._SONG_MAX_WAIT_SEC,
+                label="Song stop",
+            )
+        ):
+            self._end_song()
+        idle = now - self._last_transcript_time > self._SESSION_TIMEOUT_SEC
+        if self._phase == Phase.ACTIVE and self._song_state is SongState.NONE and idle:
             self._begin_ending("idle_timeout")
         if self._phase == Phase.ENDING and self._ending_complete(now):
             return True
@@ -370,11 +460,13 @@ class LiveSessionLoop:
         return False
 
     def _on_audio(self, pcm: bytes) -> None:
-        if self._stream_start_pending:
-            # 인사 WAV 재생 중: 스트림이 아직 없다
-            self._discarded_before_stream_sec += len(pcm) / (self._live_rate * 2)
-            return
         now = time.monotonic()
+        if not self._stream_open:
+            # 인사 WAV 재생 중이거나 노래 중: 출력이 갈 스트림이 없다. 음성 유무만 추적한다(무음 대기용)
+            self._discarded_before_stream_sec += len(pcm) / (self._live_rate * 2)
+            if any(pcm) and _rms(pcm) >= self._QUIET_RMS:
+                self._last_voice_time = now
+            return
         if self._first_audio_time is None:
             self._first_audio_time = now
         if self._last_audio_time is not None:
@@ -419,12 +511,16 @@ class LiveSessionLoop:
 
     def _on_transcript(self, seg: LiveTranscript) -> None:
         self._last_transcript_time = time.monotonic()
-        if seg.speaker == "user" and self._phase == Phase.ACTIVE and self._matches_exit_keyword(seg.text):
+        can_exit = self._phase == Phase.ACTIVE and self._song_state is SongState.NONE  # 노래 중엔 정지만 받는다
+        if seg.speaker == "user" and can_exit and self._matches_exit_keyword(seg.text):
             logger.info("Exit keyword in user speech: %r", seg.text)
             self._begin_ending("exit_keyword")
         if not seg.closed or not seg.text.strip():
             return
         text = seg.text.strip()
+        if self._song_state in (SongState.PLAYING, SongState.STOPPING):
+            logger.info("%s (during song, not stored): %s", seg.speaker, text)
+            return
         logger.info("%s: %s", seg.speaker, text)
         if seg.speaker == "user":
             self._history.add_user_message(text)
@@ -443,6 +539,12 @@ class LiveSessionLoop:
         self._poll_tools()  # 인라인 실행이면 여기서 바로 끝난다. executor 면 프레임 루프가 이어서 폴링
 
     def _submit_tool(self, call: LiveFunctionCall) -> Future[str]:
+        if call.name == STOP_SONG_TOOL:
+            return self._request_stop()  # 루프 내장. 스트림이 다시 열린 뒤 완료되는 Future
+        if self._song_state is not SongState.NONE:
+            return _completed(json.dumps({"error": "a song is playing; only stop_song is available"}))
+        if call.name == PLAY_SONG_TOOL:
+            return self._request_song(call)  # 루프 내장. 노래가 시작된 뒤 완료되는 Future
         handler = self._tool_handlers.get(call.name)
         if handler is None:
             logger.warning("Backend requested unknown tool %s", call.name)
@@ -466,6 +568,7 @@ class LiveSessionLoop:
             logger.info("Dropping %d tool result(s) — session is %s", len(calls), self._phase.name)
             return
         ending = False
+        stopped = False
         for call, future in calls:
             try:
                 output = future.result()
@@ -474,12 +577,15 @@ class LiveSessionLoop:
                 logger.warning("Tool %s failed", call.name, exc_info=True)
             logger.info("Tool %s -> %s", call.name, output if len(output) <= 200 else output[:200] + "…")
             self._live.submit_function_output(call.call_id, output)
-            ending |= call.name == END_CONVERSATION_TOOL
+            ending |= call.name == END_CONVERSATION_TOOL and self._song_state is SongState.NONE
+            stopped |= call.name == STOP_SONG_TOOL and '"stopped"' in output
         if ending:
             # 이어가면 백엔드가 작별 인사를 또 만들고 모델이 두 번 말할 수 있다(FINDINGS §4). 위임은 미완으로 둔다.
             self._begin_ending("end_conversation_tool")
         else:
             self._live.continue_response()
+            if stopped:
+                self._restore_backend()  # 정지 결과의 후속 응답은 재생용 백엔드로 만들어진 뒤에 복원
 
     # ------------------------------------------------------------------
     # Ending
@@ -493,23 +599,167 @@ class LiveSessionLoop:
         self._end_started_time = time.monotonic()
         logger.info("Ending session (%s) — muting input, waiting for last utterance", reason)
         self._led.set_state(LEDState.SLEEPING)  # 입력을 막는 순간부터 대화 불가
+        if self._song_state in (SongState.PLAYING, SongState.DRAINING, SongState.PENDING):
+            logger.info("Song %s cancelled by ending", self._song_state.value)
+            self._stop_song()  # 끊긴 노래의 playback_complete 뒤 _end_song 이 스트림을 다시 연다
         try:
             self._live.mute_input()
         except Exception:
             logger.warning("mute_input failed", exc_info=True)
 
     def _ending_complete(self, now: float) -> bool:
-        since_start = now - self._end_started_time
-        if since_start >= self._END_MAX_WAIT_SEC:
-            logger.info("Ending: max wait reached")
+        return self._utterance_finished(
+            self._end_started_time,
+            now,
+            min_wait=self._END_MIN_WAIT_SEC,
+            silence=self._END_SILENCE_SEC,
+            max_wait=self._END_MAX_WAIT_SEC,
+            label="Ending",
+        )
+
+    def _utterance_finished(
+        self, started: float, now: float, *, min_wait: float, silence: float, max_wait: float, label: str
+    ) -> bool:
+        """``started`` 이후 모델 발화가 끝났는가.
+
+        최소 대기(``min_wait``) 뒤 출력 무음이 ``silence`` 만큼 이어지면 끝으로 보고, ``max_wait`` 가 상한.
+        """
+        since_start = now - started
+        if since_start >= max_wait:
+            logger.warning("%s: no output silence for %.0fs — forcing on; check silence detection", label, max_wait)
             return True
-        if since_start < self._END_MIN_WAIT_SEC:
+        if since_start < min_wait:
             return False
-        quiet_since = max(self._last_voice_time or 0.0, self._end_started_time)
-        if now - quiet_since >= self._END_SILENCE_SEC:
-            logger.info("Ending: output silent for %.1fs", now - quiet_since)
+        quiet_since = max(self._last_voice_time or 0.0, started)
+        if now - quiet_since >= silence:
+            logger.info("%s: output silent for %.1fs", label, now - quiet_since)
             return True
         return False
+
+    # ------------------------------------------------------------------
+    # Song playback
+    # ------------------------------------------------------------------
+
+    def _request_song(self, call: LiveFunctionCall) -> Future[str]:
+        """play_song 요청. 곡이 유효하면 결과를 보류하고 PENDING 으로 들어간다."""
+        try:
+            key = str(json.loads(call.arguments or "{}").get("song", ""))
+        except json.JSONDecodeError:
+            key = ""
+        song = self._song_catalog.get(key)
+        if song is None:
+            return _completed(json.dumps({"error": f"unknown song {key!r}"}))
+        if self._song_state is not SongState.NONE:
+            return _completed(json.dumps({"error": "a song is already playing"}))
+        self._song = song
+        self._song_future = Future()
+        self._song_state = SongState.PENDING
+        self._song_requested_time = time.monotonic()
+        try:
+            self._live.update_backend(SONG_BACKEND_INSTRUCTIONS, (STOP_SONG_TOOL_DEF,))
+        except Exception:
+            logger.warning("backend update for song failed", exc_info=True)
+        logger.info("Song requested: %s — waiting for output silence", song.key)
+        return self._song_future
+
+    def _request_stop(self) -> Future[str]:
+        """stop_song 요청. 노래 상태면 결과를 보류하고 정지 절차를 시작한다."""
+        if self._song_state is SongState.NONE:
+            return _completed(json.dumps({"status": "not_playing"}))
+        if self._stop_future is not None:
+            return _completed(json.dumps({"status": "stopping"}))
+        self._stop_future = Future()
+        self._stop_song()
+        return self._stop_future
+
+    def _resolve_song_future(self, status: str) -> None:
+        if self._song_future is None or self._song_future.done():
+            return
+        song = self._song
+        payload = {"status": status}
+        if song is not None:
+            payload.update(song=song.key, title=song.title, artist=song.artist)
+        self._song_future.set_result(json.dumps(payload))
+
+    def _clear_song(self, status: str) -> None:
+        """노래 상태를 지우고 보류한 결과를 완료한다. 정지 툴이 없었으면 백엔드도 여기서 복원한다."""
+        had_song = self._song_state is not SongState.NONE
+        self._resolve_song_future(status)
+        if self._stop_future is not None and not self._stop_future.done():
+            self._stop_future.set_result(json.dumps({"status": "stopped"}))
+        stop_pending_submit = self._stop_future is not None and self._phase is Phase.ACTIVE
+        self._song_future = None
+        self._stop_future = None
+        self._song_state = SongState.NONE
+        self._song = None
+        self._song_playback_done = False
+        if had_song and not stop_pending_submit and self._phase is not Phase.DONE:
+            self._restore_backend()  # 정지 결과가 제출될 예정이면 _poll_tools 가 그 뒤에 복원한다
+
+    def _restore_backend(self) -> None:
+        try:
+            self._live.restore_backend()
+        except Exception:
+            logger.warning("backend restore after song failed", exc_info=True)
+
+    def _drain_for_song(self) -> None:
+        """라이브 스트림을 닫고 playback_complete 를 기다린다."""
+        if self._stream_open:
+            self._stream_open = False
+            self._bridge.send_audio_end()
+        self._stream_start_pending = False  # 인사 중이면 인사의 playback_complete 가 DRAINING 을 끝낸다
+        self._song_state = SongState.DRAINING
+        logger.info("Song: live stream closed, waiting for drain")
+
+    def _start_song(self) -> None:
+        assert self._song is not None
+        if self._song_cancelled:
+            self._song_cancelled = False
+            logger.info("Song %s cancelled before start — reopening stream", self._song.key)
+            self._end_song()
+            return
+        self._set_raw_capture(True)
+        try:
+            self._live.append_instructions(SONG_PLAYING_INSTRUCTIONS)
+        except Exception:
+            logger.warning("append for song failed", exc_info=True)
+        self._bridge.send_play_audio_csv(self._song.key)
+        self._song_state = SongState.PLAYING
+        self._resolve_song_future("playing")  # 이제 결과를 제출한다 — 백엔드 완료 뒤 모델 말은 스트림이 없어 버려진다
+        logger.info("Song playing: %s", self._song.key)
+
+    def _stop_song(self) -> None:
+        if self._song_state is SongState.PLAYING:
+            logger.info("Song stop requested")
+            self._bridge.send_stop()
+            self._song_state = SongState.STOPPING
+            self._stop_requested_time = time.monotonic()
+            self._song_playback_done = False
+        elif self._song_state is SongState.DRAINING:
+            self._song_cancelled = True
+        elif self._song_state is SongState.PENDING:
+            logger.info("Song cancelled before start")
+            self._clear_song("cancelled")
+
+    def _end_song(self) -> None:
+        key = self._song.key if self._song else "?"
+        self._clear_song("cancelled")  # 정상 시작된 노래면 play 결과는 이미 완료돼 있어 무시된다
+        self._set_raw_capture(False)
+        try:
+            self._live.append_instructions(SONG_ENDED_INSTRUCTIONS)
+        except Exception:
+            logger.warning("append after song failed", exc_info=True)
+        self._last_transcript_time = time.monotonic()  # 유휴 타임아웃 재시작
+        self._open_stream()
+        logger.info("Song ended: %s — stream reopened", key)
+
+    def _set_raw_capture(self, enabled: bool) -> None:
+        if self._audio_input is None:
+            return
+        try:
+            self._audio_input.set_raw_capture(enabled)
+        except Exception:
+            logger.warning("set_raw_capture(%s) failed", enabled, exc_info=True)
 
     # ------------------------------------------------------------------
     # Helpers

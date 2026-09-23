@@ -9,12 +9,14 @@
 - ``search_memory``: 장기기억 에피소드 검색 → :func:`make_memory_search_handler`.
 - ``adjust_volume`` / ``set_brightness`` / ``get_device_settings``: 볼륨·밝기
   → :func:`make_device_settings_handlers` (상태·저장은 :mod:`voice_pipeline.device_settings`).
+- ``play_song``: 노래 재생 → :func:`make_play_song_tool_def`. ``stop_song`` 은 재생 중에만 백엔드에 주어지는 툴
+  (:data:`STOP_SONG_TOOL_DEF`, 루프가 백엔드를 교체할 때 사용). 둘 다 핸들러는 루프 내장.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from voice_pipeline.device_settings import (
@@ -22,6 +24,7 @@ from voice_pipeline.device_settings import (
     VOLUME_STEPS,
     DeviceSettings,
 )
+from voice_pipeline.engines.gpt_live.songs import Song, format_song_list
 from voice_pipeline.memory.retriever import MemoryRetriever
 
 ToolHandler = Callable[[str], str]  # arguments(JSON 문자열) → output(JSON 문자열)
@@ -135,6 +138,39 @@ DEVICE_TOOLS: tuple[dict[str, Any], ...] = (
 ToolHandler = Callable[[str], str]  # arguments(JSON 문자열) → output(JSON 문자열). live_session 의 것과 같은 모양
 
 DEFAULT_TOOLS: tuple[dict[str, Any], ...] = (END_CONVERSATION_TOOL_DEF, SEARCH_MEMORY_TOOL_DEF, *DEVICE_TOOLS)
+
+PLAY_SONG_TOOL = "play_song"
+STOP_SONG_TOOL = "stop_song"
+# 핸들러 없이 루프가 직접 처리하는 툴 — wiring 은 이 이름들을 핸들러 유무와 무관하게 노출한다
+LOOP_TOOLS: frozenset[str] = frozenset({END_CONVERSATION_TOOL, PLAY_SONG_TOOL, STOP_SONG_TOOL})
+
+STOP_SONG_TOOL_DEF: dict[str, Any] = {
+    "type": "function",
+    "name": STOP_SONG_TOOL,
+    "description": "Stop the song that is playing.",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    "strict": True,
+}
+
+
+def make_play_song_tool_def(catalog: Mapping[str, Song]) -> dict[str, Any] | None:
+    """``play_song`` 정의 (곡 키 enum, 설명에 곡 목록). 카탈로그가 비면 None."""
+    if not catalog:
+        return None
+    return {
+        "type": "function",
+        "name": PLAY_SONG_TOOL,
+        "description": "Play a song stored on Ray. Pass the song id from this list:\n" + format_song_list(catalog),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "song": {"type": "string", "enum": sorted(catalog), "description": "Song id from the list."},
+            },
+            "required": ["song"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
 
 
 def make_memory_search_handler(retriever: MemoryRetriever, exclude_session_ids: set[str]) -> ToolHandler:

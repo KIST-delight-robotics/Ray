@@ -48,12 +48,14 @@ from voice_pipeline.engines.gpt_live.instructions import (
     build_live_instructions,
 )
 from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop
+from voice_pipeline.engines.gpt_live.songs import Song, load_song_catalog
 from voice_pipeline.engines.gpt_live.tools import (
     DEFAULT_TOOLS,
-    END_CONVERSATION_TOOL,
+    LOOP_TOOLS,
     SEARCH_MEMORY_TOOL,
     make_device_settings_handlers,
     make_memory_search_handler,
+    make_play_song_tool_def,
 )
 from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.memory.retriever import MemoryRetriever
@@ -67,6 +69,7 @@ from voice_pipeline.settings import (
     ENGINE,
     HISTORY_TOKEN_BUDGET,
     SAMPLE_RATE,
+    SONG_CATALOG_PATH,
     SUMMARY_MAX_TOKENS,
 )
 from voice_pipeline.trace import OpenAIRetryHandler, SQLiteCallStore, SQLiteTraceStore, TrackedEmbedder, TrackedTTS
@@ -128,6 +131,7 @@ class ProcessComponents:
     audio_input: AudioInput
     shutdown_event: threading.Event
     device_settings: DeviceSettings | None = None  # 볼륨·밝기 (live 툴). None 이면 툴 미노출
+    song_catalog: dict[str, Song] = field(default_factory=dict)  # 재생 가능한 노래 (live 툴). 비면 툴 미노출
     _prev_threaded: list[ThreadedTurnGPT] = field(default_factory=list)
     _prev_summarizers: list[HistorySummarizer] = field(default_factory=list)
 
@@ -183,8 +187,10 @@ class ProcessComponents:
                 instructions = build_live_instructions(format_profile_block(profiles), recent_texts)
             else:
                 instructions = build_live_instructions()
-            # 핸들러가 있는 툴만 백엔드에 노출한다 (end_conversation 은 루프 내장)
-            tools = tuple(t for t in DEFAULT_TOOLS if t["name"] == END_CONVERSATION_TOOL or t["name"] in tool_handlers)
+            # 핸들러가 있는 툴만 백엔드에 노출한다 (end_conversation·노래 툴은 루프 내장)
+            tools = tuple(t for t in DEFAULT_TOOLS if t["name"] in LOOP_TOOLS or t["name"] in tool_handlers)
+            if (play_song := make_play_song_tool_def(self.song_catalog)) is not None:
+                tools += (play_song,)
             live = GPTLiveSession(
                 LiveSessionConfig(
                     instructions=instructions,
@@ -207,6 +213,8 @@ class ProcessComponents:
                 shutdown_event=self.shutdown_event,
                 tool_handlers=tool_handlers,
                 executor=self.executor,
+                song_catalog=self.song_catalog,
+                audio_input=self.audio_input,
                 **session_loop_kwargs,
             )
             return SessionComponents(session_loop=live_loop, history=history, session_id=session_id)
@@ -302,6 +310,7 @@ def build_components(
     led_enabled: bool | None = None,
     language_code: str = "en-US",
     engine: Engine = ENGINE,
+    song_catalog_path: str = SONG_CATALOG_PATH,
 ) -> ProcessComponents:
     """Build the process-level component graph shared by all sessions.
 
@@ -313,6 +322,7 @@ def build_components(
             결정 (프로덕션 기본). eval은 ``False``를 전달한다.
         language_code: ASR 언어 코드 (cascade 엔진과 웨이크워드).
         engine: 대화 엔진. ``live`` 면 ASR·VAP·TurnGPT 를 만들지 않는다 (settings.ENGINE 기본).
+        song_catalog_path: 노래 카탈로그(``songs.json``) 경로. 없거나 비면 노래 툴을 노출하지 않는다.
 
     Returns:
         조립된 :class:`ProcessComponents`. ``audio_input.start()``/``bridge.connect()``
@@ -389,6 +399,7 @@ def build_components(
 
     audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=_AUDIO_QUEUE_SIZE)
     audio_input = AudioInput(audio_queue)
+    song_catalog = load_song_catalog(song_catalog_path) if engine == "live" else {}
 
     return ProcessComponents(
         engine=engine,
@@ -416,6 +427,7 @@ def build_components(
         audio_input=audio_input,
         shutdown_event=threading.Event(),
         device_settings=device_settings,
+        song_catalog=song_catalog,
     )
 
 

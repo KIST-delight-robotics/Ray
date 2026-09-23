@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from voice_pipeline.adapters.audio_input import AudioInput
 from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEvent, CppEventType
 from voice_pipeline.adapters.gpt_live import (
     GPTLiveSession,
@@ -22,8 +23,19 @@ from voice_pipeline.adapters.gpt_live import (
     LiveTranscript,
 )
 from voice_pipeline.adapters.led import LEDState
-from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop, Phase
-from voice_pipeline.engines.gpt_live.tools import END_CONVERSATION_TOOL, SEARCH_MEMORY_TOOL
+from voice_pipeline.engines.gpt_live.instructions import (
+    SONG_BACKEND_INSTRUCTIONS,
+    SONG_ENDED_INSTRUCTIONS,
+    SONG_PLAYING_INSTRUCTIONS,
+)
+from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop, Phase, SongState
+from voice_pipeline.engines.gpt_live.songs import Song
+from voice_pipeline.engines.gpt_live.tools import (
+    END_CONVERSATION_TOOL,
+    PLAY_SONG_TOOL,
+    SEARCH_MEMORY_TOOL,
+    STOP_SONG_TOOL,
+)
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE, SAMPLE_RATE
 
 SILENCE_100MS = bytes(BRIDGE_SAMPLE_RATE * 2 // 10)
@@ -42,9 +54,12 @@ def _make_loop(
     tool_handlers: dict | None = None,
     wait_for_playback: bool = False,
     executor: ThreadPoolExecutor | None = None,
+    song_catalog: dict[str, Song] | None = None,
 ) -> tuple[LiveSessionLoop, dict[str, MagicMock], queue.Queue]:
     """Live 세션·브리지·히스토리를 모킹한 루프. ``live_events`` 는 poll_event 가 순서대로 돌려준다."""
     monkeypatch.setattr(LiveSessionLoop, "_FRAME_TIMEOUT_SEC", 0.005)
+    monkeypatch.setattr(LiveSessionLoop, "_SONG_SILENCE_SEC", 0.03)
+    monkeypatch.setattr(LiveSessionLoop, "_SONG_MAX_WAIT_SEC", 1.0)
     monkeypatch.setattr(LiveSessionLoop, "_END_MIN_WAIT_SEC", end_min_wait)
     monkeypatch.setattr(LiveSessionLoop, "_END_SILENCE_SEC", end_silence)
     monkeypatch.setattr(LiveSessionLoop, "_END_MAX_WAIT_SEC", end_max_wait)
@@ -61,6 +76,7 @@ def _make_loop(
     history = MagicMock()
     led = MagicMock()
     memory = MagicMock()
+    audio_input = MagicMock(spec=AudioInput)
 
     audio_queue: queue.Queue = queue.Queue()
     for _ in range(frames):
@@ -78,8 +94,12 @@ def _make_loop(
         tool_handlers=tool_handlers,
         executor=executor,
         wait_for_playback_complete=wait_for_playback,
+        song_catalog=song_catalog,
+        audio_input=audio_input,
     )
-    return loop, {"live": live, "bridge": bridge, "history": history, "led": led, "memory": memory}, audio_queue
+    mocks = {"live": live, "bridge": bridge, "history": history, "led": led, "memory": memory}
+    mocks["audio_input"] = audio_input
+    return loop, mocks, audio_queue
 
 
 def _seg(speaker: str, text: str, *, closed: bool, start_ms: int = 0, end_ms: int = 1000) -> LiveTranscript:
@@ -272,6 +292,7 @@ class TestSilencePadding:
 
     def _prime(self, loop: LiveSessionLoop, *, behind_sec: float) -> None:
         # 첫 조각이 behind_sec 전에 왔고 그동안 보낸 오디오는 0 → lead = -behind_sec
+        loop._stream_open = True  # run() 없이 부르므로 스트림이 열린 상태를 명시 (닫혀 있으면 조각을 버린다)
         loop._first_audio_time = time.monotonic() - behind_sec
         loop._audio_sent_sec = 0.0
 
@@ -318,6 +339,7 @@ class TestSilencePadding:
     def test_quiet_gap_never_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         quiet = b"\x02\x00" * (BRIDGE_SAMPLE_RATE // 10)
         loop, m, _ = _make_loop(monkeypatch)
+        loop._stream_open = True
         loop._first_audio_time = time.monotonic()
         loop._audio_sent_sec = 1.0
         loop._on_audio(quiet)
@@ -325,6 +347,7 @@ class TestSilencePadding:
 
     def test_drops_silent_chunk_when_ahead_but_keeps_voice(self, monkeypatch: pytest.MonkeyPatch) -> None:
         loop, m, _ = _make_loop(monkeypatch)
+        loop._stream_open = True
         loop._first_audio_time = time.monotonic()
         loop._audio_sent_sec = 1.0  # 1 s 앞서 있음
         loop._on_audio(SILENCE_100MS)
@@ -475,3 +498,290 @@ class TestToolFailure:
         output = json.loads(m["live"].submit_function_output.call_args.args[1])
         assert output == {"error": "index down"}
         m["live"].continue_response.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 노래 재생 (play_song / stop_song)
+# ---------------------------------------------------------------------------
+
+SONGS = {"IAM": Song(key="IAM", title="I AM", artist="IVE", aliases=("아이엠",))}
+PLAYBACK_COMPLETE = CppEvent(event_type=CppEventType.PLAYBACK_COMPLETE)
+
+
+def _call(name: str, args: dict | None = None, call_id: str = "c1") -> LiveFunctionCall:
+    return LiveFunctionCall(call_id, name, json.dumps(args or {}), None)
+
+
+def _wire_bridge_completion(bridge: MagicMock) -> None:
+    """C++ 흉내: audio_end 로 스트림이 닫히거나 stop 으로 노래가 끊기면 playback_complete 를 돌려준다."""
+    events: queue.Queue = queue.Queue()
+    bridge.poll_event.side_effect = lambda: events.get_nowait() if not events.empty() else None
+    bridge.send_audio_end.side_effect = lambda: events.put(PLAYBACK_COMPLETE)
+    bridge.send_stop.side_effect = lambda: events.put(PLAYBACK_COMPLETE)
+
+
+def _staged_live_events(loop: LiveSessionLoop, m: dict[str, MagicMock], stages: list) -> None:
+    """``stages`` = [(조건 함수 | None, 이벤트)] — 조건이 참일 때 순서대로 하나씩 내보낸다."""
+    pending = list(stages)
+
+    def poll():
+        if not pending:
+            return None
+        cond, event = pending[0]
+        if cond is None or cond():
+            pending.pop(0)
+            return event
+        return None
+
+    m["live"].poll_event.side_effect = poll
+
+
+class TestSongPlayback:
+    def test_full_sequence_play_then_stop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS)
+        _wire_bridge_completion(m["bridge"])
+        playing = lambda: loop._song_state is SongState.PLAYING  # noqa: E731
+        # 정지 요청은 play_song 결과가 제출된 뒤(실제로는 노래 도중 수십 초 뒤)에 온다
+        submitted = lambda: playing() and m["live"].submit_function_output.called  # noqa: E731
+        # 정지 결과 제출까지 끝난 뒤에 세션이 닫힌다 (실제로는 한참 뒤)
+        reopened = lambda: loop._song_state is SongState.NONE and m["live"].continue_response.call_count == 2  # noqa: E731
+        _staged_live_events(
+            loop,
+            m,
+            [
+                (None, _call(PLAY_SONG_TOOL, {"song": "IAM"})),
+                (None, LiveResponseDone(None)),
+                (None, LiveAudio(VOICE_100MS)),  # 위임 시 한마디 — 끝나길 기다린 뒤 스트림을 닫는다
+                (playing, LiveAudio(VOICE_100MS)),  # 재생 중 모델 음성 — 나갈 스트림이 없어 버린다
+                (playing, _seg("user", "옆사람 잡담", closed=True, start_ms=5000)),
+                (submitted, _call(STOP_SONG_TOOL, call_id="c2")),
+                (submitted, LiveResponseDone(None)),
+                (reopened, LiveClosed("close_requested")),
+            ],
+        )
+        order = MagicMock()  # 브리지·세션 호출 순서를 한 곳에 기록
+        order.attach_mock(m["bridge"], "bridge")
+        order.attach_mock(m["live"], "live")
+        loop.run()
+
+        live, bridge, ai = m["live"], m["bridge"], m["audio_input"]
+        names = [c[0] for c in order.mock_calls]
+        # 1) 결과는 노래가 시작된 뒤에 제출된다 (play_audio_csv 가 submit 보다 먼저)
+        outputs = {c.args[0]: json.loads(c.args[1]) for c in live.submit_function_output.call_args_list}
+        assert outputs["c1"] == {"status": "playing", "song": "IAM", "title": "I AM", "artist": "IVE"}
+        assert outputs["c2"] == {"status": "stopped"}
+        assert live.continue_response.call_count == 2  # 정지 결과 뒤에도 이어간다 — 백엔드가 "멈췼다" 를 답한다
+        assert names.index("bridge.send_play_audio_csv") < names.index("live.submit_function_output")
+        # 정지도 같다: stop 은 즉시, 결과 제출은 스트림을 다시 연 뒤 (위임 시 "끌게" 는 닫힌 스트림에서 버려진다)
+        submits = [i for i, n in enumerate(names) if n == "live.submit_function_output"]
+        assert names.index("bridge.send_stop") < submits[1]
+        assert names.index("bridge.send_stream_start", names.index("bridge.send_stop")) < submits[1]
+        # 2) 위임 시 한마디는 스트림으로 나갔고, 그 뒤 스트림을 닫았다 (audio_end 는 send_audio 뒤)
+        assert [c.args[0] for c in bridge.send_audio.call_args_list] == [VOICE_100MS]
+        assert names.index("bridge.send_audio") < names.index("bridge.send_audio_end")
+        # 3) 배수 완료 → 원본 채널·재생 지시 → play_audio_csv. 백엔드는 요청 수락 시 교체, 끝나면 복원
+        bridge.send_play_audio_csv.assert_called_once_with("IAM")
+        live.update_backend.assert_called_once()
+        assert live.update_backend.call_args.args[0] == SONG_BACKEND_INSTRUCTIONS
+        assert [t["name"] for t in live.update_backend.call_args.args[1]] == ["stop_song"]
+        live.restore_backend.assert_called_once()
+        assert names.index("live.update_backend") < names.index("bridge.send_audio_end")
+        continues = [i for i, n in enumerate(names) if n == "live.continue_response"]
+        assert continues[1] < names.index("live.restore_backend") < names.index("live.close")  # 정지 후속 응답 뒤 복원
+        assert [c.args[0] for c in ai.set_raw_capture.call_args_list][:2] == [True, False]
+        appended = [c.args[0] for c in live.append_instructions.call_args_list]
+        assert appended == [SONG_PLAYING_INSTRUCTIONS, SONG_ENDED_INSTRUCTIONS]
+        live.append_thinking.assert_not_called()
+        # 4) 재생 중 전사는 기록하지 않는다
+        m["history"].add_user_message.assert_not_called()
+        m["memory"].add_utterance.assert_not_called()
+        # 5) stop → playback_complete → 스트림 재개 (시작 1회 + 재개 1회)
+        bridge.send_stop.assert_called_once()
+        assert bridge.send_stream_start.call_count == 2
+        assert loop.exit_reason == "live_closed:close_requested"
+
+    def test_unknown_song_is_reported_without_side_effects(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        events = [_call(PLAY_SONG_TOOL, {"song": "Nope"}), LiveResponseDone(None), LiveClosed("x")]
+        loop, m, _ = _make_loop(monkeypatch, live_events=events, song_catalog=SONGS)
+        loop.run()
+        out = json.loads(m["live"].submit_function_output.call_args.args[1])
+        assert "unknown song" in out["error"]
+        m["live"].continue_response.assert_called_once()
+        m["bridge"].send_play_audio_csv.assert_not_called()
+        assert m["bridge"].send_audio_end.call_count == 1  # 종료 시 한 번만
+
+    def test_stop_when_nothing_plays_is_a_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        events = [_call(STOP_SONG_TOOL), LiveResponseDone(None), LiveClosed("x")]
+        loop, m, _ = _make_loop(monkeypatch, live_events=events, song_catalog=SONGS)
+        loop.run()
+        assert json.loads(m["live"].submit_function_output.call_args.args[1]) == {"status": "not_playing"}
+        m["bridge"].send_stop.assert_not_called()
+
+    def test_idle_timeout_is_suspended_while_playing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, session_timeout=0.15)
+        _wire_bridge_completion(m["bridge"])
+        started = {"t": 0.0}
+
+        def playing_long_enough() -> bool:
+            if loop._song_state is not SongState.PLAYING:
+                return False
+            started["t"] = started["t"] or time.monotonic()
+            return time.monotonic() - started["t"] > 0.4  # 타임아웃(0.15 s)보다 오래 재생 중
+
+        _staged_live_events(
+            loop,
+            m,
+            [
+                (None, _call(PLAY_SONG_TOOL, {"song": "IAM"})),
+                (None, LiveResponseDone(None)),
+                (playing_long_enough, LiveClosed("close_requested")),
+            ],
+        )
+        loop.run()
+        assert loop.exit_reason == "live_closed:close_requested"  # idle_timeout 이 아니다
+        m["live"].mute_input.assert_not_called()
+
+    def test_exit_keyword_is_ignored_while_playing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS)
+        _wire_bridge_completion(m["bridge"])
+        playing = lambda: loop._song_state is SongState.PLAYING  # noqa: E731
+        _staged_live_events(
+            loop,
+            m,
+            [
+                (None, _call(PLAY_SONG_TOOL, {"song": "IAM"})),
+                (None, LiveResponseDone(None)),
+                (playing, _seg("user", "레이 잘 가", closed=False, start_ms=7000)),
+                (playing, LiveClosed("close_requested")),
+            ],
+        )
+        loop.run()
+        m["live"].mute_input.assert_not_called()  # 종료 시퀀스에 들어가지 않았다
+        assert loop.exit_reason == "live_closed:close_requested"
+
+    def test_stop_waits_for_acknowledgement_to_end_before_reopening(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 정지 위임 시 모델이 "끌게" 를 말한다 — 그 음성은 닫힌 스트림에서 버려지고, 끝난 뒤에야 스트림을 다시 연다
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS)
+        monkeypatch.setattr(LiveSessionLoop, "_SONG_SILENCE_SEC", 0.15)
+        _wire_bridge_completion(m["bridge"])
+        playing = lambda: loop._song_state is SongState.PLAYING  # noqa: E731
+        submitted = lambda: playing() and m["live"].submit_function_output.called  # noqa: E731
+        stopping = lambda: loop._song_state is SongState.STOPPING  # noqa: E731
+        done = lambda: loop._song_state is SongState.NONE and m["live"].continue_response.call_count == 2  # noqa: E731
+        _staged_live_events(
+            loop,
+            m,
+            [
+                (None, _call(PLAY_SONG_TOOL, {"song": "IAM"})),
+                (None, LiveResponseDone(None)),
+                (submitted, _call(STOP_SONG_TOOL, call_id="c2")),
+                (submitted, LiveResponseDone(None)),
+                (stopping, LiveAudio(VOICE_100MS)),  # "응, 끌게" — 스트림 닫힘, 버려져야 한다
+                (stopping, LiveAudio(VOICE_100MS)),
+                (done, LiveClosed("close_requested")),
+            ],
+        )
+        order = MagicMock()
+        order.attach_mock(m["bridge"], "bridge")
+        order.attach_mock(m["live"], "live")
+        t0 = time.monotonic()
+        loop.run()
+        names = [c[0] for c in order.mock_calls]
+        m["bridge"].send_audio.assert_not_called()  # 인사말은 소리로 나가지 않았다
+        stop_i = names.index("bridge.send_stop")
+        reopen_i = names.index("bridge.send_stream_start", stop_i)
+        assert reopen_i > stop_i
+        assert time.monotonic() - t0 >= 0.15  # 무음 판정을 기다렸다
+        assert loop.exit_reason == "live_closed:close_requested"
+
+    def test_end_conversation_while_playing_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS)
+        _wire_bridge_completion(m["bridge"])
+        playing = lambda: loop._song_state is SongState.PLAYING  # noqa: E731
+        _staged_live_events(
+            loop,
+            m,
+            [
+                (None, _call(PLAY_SONG_TOOL, {"song": "IAM"})),
+                (None, LiveResponseDone(None)),
+                (playing, _call(END_CONVERSATION_TOOL, call_id="c2")),
+                (playing, LiveResponseDone(None)),
+                (playing, LiveClosed("close_requested")),
+            ],
+        )
+        loop.run()
+        outputs = {c.args[0]: json.loads(c.args[1]) for c in m["live"].submit_function_output.call_args_list}
+        assert "only stop_song" in outputs["c2"]["error"]
+        m["live"].mute_input.assert_not_called()
+        assert loop.exit_reason == "live_closed:close_requested"
+
+    def test_request_stop_while_playing_reopens_stream_and_ends_normally(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS)
+        _wire_bridge_completion(m["bridge"])
+
+        def stop_when_playing() -> bool:
+            if loop._song_state is SongState.PLAYING:
+                loop.request_stop()
+            return False
+
+        _staged_live_events(
+            loop,
+            m,
+            [
+                (None, _call(PLAY_SONG_TOOL, {"song": "IAM"})),
+                (None, LiveResponseDone(None)),
+                (stop_when_playing, LiveClosed("never")),
+            ],
+        )
+        loop.run()
+        m["bridge"].send_stop.assert_called_once()
+        assert m["bridge"].send_stream_start.call_count == 2  # 끊긴 노래의 playback_complete 로 스트림 재개
+        assert m["bridge"].send_audio_end.call_count == 2  # 노래 전 1회 + 정상 종료 1회 (FAREWELL 이 기다리는 것)
+        assert loop.exit_reason == "stop_requested"
+
+    def test_play_song_while_playing_is_an_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS)
+        _wire_bridge_completion(m["bridge"])
+        playing = lambda: loop._song_state is SongState.PLAYING  # noqa: E731
+        _staged_live_events(
+            loop,
+            m,
+            [
+                (None, _call(PLAY_SONG_TOOL, {"song": "IAM"})),
+                (None, LiveResponseDone(None)),
+                (playing, _call(PLAY_SONG_TOOL, {"song": "IAM"}, call_id="c2")),
+                (playing, LiveResponseDone(None)),
+                (playing, LiveClosed("close_requested")),
+            ],
+        )
+        loop.run()
+        outputs = {c.args[0]: json.loads(c.args[1]) for c in m["live"].submit_function_output.call_args_list}
+        assert "only stop_song" in outputs["c2"]["error"]
+        m["bridge"].send_play_audio_csv.assert_called_once()
+
+    def test_ending_before_song_starts_resolves_the_pending_result(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 결과를 보류한 채 종료가 시작되면 Future 를 끝내 줘야 한다 (제출은 종료 중이라 버려진다)
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS)
+        monkeypatch.setattr(LiveSessionLoop, "_SONG_SILENCE_SEC", 10.0)  # 무음 판정이 안 나게
+        monkeypatch.setattr(LiveSessionLoop, "_SONG_MAX_WAIT_SEC", 10.0)
+        _wire_bridge_completion(m["bridge"])
+
+        def stop_when_pending() -> bool:
+            if loop._song_state is SongState.PENDING:
+                loop.request_stop()
+            return False
+
+        _staged_live_events(
+            loop,
+            m,
+            [
+                (None, _call(PLAY_SONG_TOOL, {"song": "IAM"})),
+                (None, LiveResponseDone(None)),
+                (stop_when_pending, LiveClosed("never")),
+            ],
+        )
+        loop.run()
+        assert loop.exit_reason == "stop_requested"
+        assert not loop._inflight
+        m["bridge"].send_play_audio_csv.assert_not_called()
+        m["live"].submit_function_output.assert_not_called()

@@ -20,6 +20,10 @@ bridge.send_audio_end()
 # File playback (greeting/farewell)
 bridge.send_play_file("assets/audio/awake.wav")
 
+# Stored song with motion CSVs (assets/audio/music/<name>.wav + assets/{head,mouth,led}Motion/)
+# 열려 있는 스트림은 send_audio_end() 로 먼저 닫아야 한다 — C++ 는 재생 하나를 끝까지 처리한다
+bridge.send_play_audio_csv("IAM")
+
 # Interrupt playback (barge-in)
 bridge.send_stop()
 
@@ -44,6 +48,7 @@ All messages are JSON text frames over WebSocket.
 | Audio end | `{"type": "audio_end"}` |
 | Stop | `{"type": "stop"}` |
 | Play file | `{"type": "play_file", "file_path": "path/to/file.wav"}` |
+| Play song (CSV) | `{"type": "play_audio_csv", "audio_name": "IAM"}` — `assets/audio/music/IAM.wav` 와 `assets/headMotion/IAM.csv`, `assets/mouthMotion/IAM-delta-big.csv`, `assets/ledMotion/IAM-led.csv` 를 묶어 재생 (`cpp/main.cpp` `csv_control_motor`). 끝나거나 `stop` 으로 끊기면 `playback_complete`. |
 
 ### C++ → Python
 
@@ -54,6 +59,10 @@ All messages are JSON text frames over WebSocket.
 
 `playback_complete` is sent for both normal completion and after a `stop` interrupt.
 Python distinguishes the two by tracking whether it sent `stop` (STOP_PENDING state).
+
+C++ 메인 루프는 메시지 하나(스트림·파일·노래)를 끝까지 재생한 뒤 다음 메시지를 읽는다. 그래서 GPT-Live
+세션(스트림 하나로 시작)이 노래를 틀 때는 `audio_end` → `playback_complete` → `play_audio_csv` →
+`playback_complete` → `stream_start` 순으로 교대한다 (`engines/gpt_live/loop.py` "노래 재생").
 
 ## 클래스 변수
 

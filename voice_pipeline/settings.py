@@ -35,6 +35,9 @@ VAR_DIR = "var"  # 프로그램이 실행 중에 쓰는 파일의 루트 (DB, �
 DEFAULT_DB_PATH = f"{VAR_DIR}/ray.db"  # history / memory / trace / call 스토어가 공유하는 SQLite 파일
 DEVICE_SETTINGS_PATH = f"{VAR_DIR}/device_settings.json"  # 사용자가 말로 바꾼 볼륨·밝기 단계 (device_settings.py)
 
+ASSETS_DIR = "assets"  # 저장소에 실려 프로그램이 읽는 파일 (오디오, 모션 CSV). 추적 대상
+SONG_CATALOG_PATH = f"{ASSETS_DIR}/songs.json"  # 노래 카탈로그. 키 = 음원·모션 CSV 파일 stem (gpt_live/songs.py)
+
 # 프롬프트 토큰 예산 — prompt.py(ContextBuilder, HistorySummarizer)와 wiring.py(요약 LLM max_tokens)가 함께 사용
 HISTORY_TOKEN_BUDGET = 8192  # 히스토리 뷰 예산 (이월 + 요약 블록 + 라이브 턴)
 SUMMARY_MAX_TOKENS = 512  # 롤링 요약 LLM의 max_output_tokens

@@ -106,6 +106,11 @@ class TestIdleState:
         with pytest.raises(RuntimeError, match="Not connected"):
             bridge.send_play_file("test.wav")
 
+    def test_send_play_audio_csv_before_connect(self, make_bridge) -> None:
+        bridge = make_bridge()
+        with pytest.raises(RuntimeError, match="Not connected"):
+            bridge.send_play_audio_csv("IAM")
+
     def test_poll_event_before_connect(self, make_bridge) -> None:
         bridge = make_bridge()
         assert bridge.poll_event() is None
@@ -236,6 +241,13 @@ class TestSendMethods:
         bridge.send_stream_start(live=True)
         sent = json.loads(mock_conn.send.call_args[0][0])
         assert sent == {"type": "stream_start", "live": True}
+        bridge.disconnect()
+
+    def test_send_play_audio_csv(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
+        bridge.send_play_audio_csv("IAM")
+        sent = json.loads(mock_conn.send.call_args[0][0])
+        assert sent == {"type": "play_audio_csv", "audio_name": "IAM"}
         bridge.disconnect()
 
     def test_send_audio_end(self, make_bridge, mock_conn: MagicMock) -> None:

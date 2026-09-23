@@ -312,6 +312,17 @@ class GPTLiveSession:
         self._guard()
         self._send(lambda c: c.session.commentary.append(content=content, delegation_id=None))
 
+    def update_backend(self, instructions: str, tools: tuple[dict[str, Any], ...]) -> None:
+        """responses 백엔드의 지시문·툴을 바꾼다 (이후 위임부터 적용). 세션 중 바꿀 수 있는 유일한 설정."""
+        self._guard()
+        delegation = {"type": "responses", "responses": {"instructions": instructions, "tools": list(tools)}}
+        self._send(lambda c: c.session.update(session={"delegation": delegation}, event_id="ray_backend_update"))
+
+    def restore_backend(self) -> None:
+        """백엔드 지시문·툴을 세션 시작 설정으로 되돌린다."""
+        cfg = self._config
+        self.update_backend(cfg.backend_instructions, ({"type": "web_search"}, *cfg.tools))
+
     def submit_function_output(self, call_id: str, output: str) -> None:
         """백엔드가 요청한 함수의 결과를 넣는다. 모든 결과를 넣은 뒤 :meth:`continue_response`."""
         self._guard()
@@ -418,7 +429,10 @@ class GPTLiveSession:
         elif t == "error":
             err = getattr(event, "error", None)
             self._events.put(LiveError(str(getattr(err, "code", "")), str(getattr(err, "message", err))))
-        # 나머지(appended ack, muted, delegation.created, info …)는 상태 변화 없음 — 로그만
+        elif t == "session.delegation.created":
+            d = getattr(event, "delegation", event)
+            logger.info("Delegation created (id=%s, offset=%sms)", getattr(d, "id", "?"), getattr(d, "offset_ms", "?"))
+        # 나머지(appended ack, muted, info …)는 상태 변화 없음 — 로그만
         else:
             logger.debug("GPT-Live event %s", t)
 
@@ -427,6 +441,10 @@ class GPTLiveSession:
         it = inner.get("type")
         if it == "response.output_item.done":
             item = inner.get("item") or {}
+            if item.get("type") == "message":
+                parts = item.get("content") or []
+                text = "".join(str(p.get("text", "")) for p in parts if isinstance(p, dict)).strip()
+                logger.info("Backend reply: %s", repr(text[:200]) if text else "(empty)")
             if item.get("type") == "function_call":
                 self._events.put(
                     LiveFunctionCall(
@@ -437,6 +455,8 @@ class GPTLiveSession:
                     )
                 )
         elif it in ("response.completed", "response.failed", "response.incomplete"):
+            if it != "response.completed":
+                logger.warning("Backend response %s", it)
             self._events.put(LiveResponseDone(delegation_id=envelope.delegation_id))
 
 

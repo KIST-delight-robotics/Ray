@@ -1,4 +1,8 @@
-"""AudioInput: microphone capture on a daemon thread."""
+"""AudioInput: microphone capture on a daemon thread.
+
+reSpeaker 는 6채널로 열어 한 채널만 mono 로 뽑는다. 기본은 CH0(후처리 출력), 노래 재생 중에는
+:meth:`AudioInput.set_raw_capture` 로 원본 채널(+게인)로 바꾼다.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +11,8 @@ import logging
 import queue
 import threading
 from typing import Any
+
+import numpy as np
 
 from voice_pipeline.settings import (
     CHANNELS,
@@ -30,7 +36,9 @@ class AudioInput:
     _DEVICE_INDEX: int | None = None  # PyAudio 입력 디바이스 인덱스 명시 오버라이드. None이면 _DEVICE_NAME으로 탐색
     _DEVICE_NAME: str | None = "respeaker"  # 장치 이름 부분 문자열 매칭 (대소문자 무시). 인덱스와 달리 재열거에 안정적
     _CAPTURE_CHANNELS: int | None = 6  # 디바이스에서 캡처할 채널 수. None은 mono (ReSpeaker 6ch는 6)
-    _EXTRACT_CHANNEL = 0  # 다중 채널 캡처 시 mono 추출에 사용할 채널 인덱스 (0-based)
+    _EXTRACT_CHANNEL = 0  # 다중 채널 캡처 시 mono 추출에 사용할 채널 인덱스 (0-based). CH0 = 후처리 출력
+    _RAW_CHANNEL = 2  # set_raw_capture 가 쓰는 원본 마이크 채널 (CH2~5 가 원본, CH1 은 에코 통과라 제외)
+    _RAW_GAIN_DB = 15.0  # 원본 채널 소프트웨어 게인 (CH0 와 레벨을 맞추는 값)
 
     def __init__(self, audio_queue: queue.Queue[AudioFrame]) -> None:
         """Initialize capture state and ensure PyAudio is importable.
@@ -39,6 +47,7 @@ class AudioInput:
             audio_queue: 캡처된 오디오 프레임을 push할 공유 큐.
         """
         self._queue = audio_queue
+        self._extract: tuple[int, float] = (self._EXTRACT_CHANNEL, 0.0)  # (채널, 게인 dB). 캡처 스레드가 매 프레임 읽음
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -73,6 +82,20 @@ class AudioInput:
     def error(self) -> Exception | None:
         """Return the captured error if the capture thread has died."""
         return self._error
+
+    def set_raw_capture(self, enabled: bool) -> None:
+        """Switch between the processed channel (default) and the raw microphone channel with gain.
+
+        다음 프레임부터 적용된다. 단일 채널 캡처에서는 무시된다.
+
+        Args:
+            enabled: True 면 ``_RAW_CHANNEL`` 에 ``_RAW_GAIN_DB`` 를 적용해 내보낸다. False 면 기본 채널.
+        """
+        capture_ch = self._CAPTURE_CHANNELS or CHANNELS
+        if capture_ch == CHANNELS:
+            return
+        self._extract = (self._RAW_CHANNEL, self._RAW_GAIN_DB) if enabled else (self._EXTRACT_CHANNEL, 0.0)
+        logger.info("Capture channel → CH%d (gain %+.0f dB)", *self._extract)
 
     def _resolve_device_index(self, pa: Any) -> int | None:
         """입력 장치 인덱스 결정: 명시 인덱스 > 이름 매칭 > 시스템 기본(None).
@@ -128,21 +151,26 @@ class AudioInput:
             )
 
             if need_extract:
-                ch_idx = self._EXTRACT_CHANNEL
-                if ch_idx >= capture_ch:
-                    raise RuntimeError(f"extract_channel ({ch_idx}) >= capture_channels ({capture_ch})")
+                for ch_idx in (self._EXTRACT_CHANNEL, self._RAW_CHANNEL):
+                    if ch_idx >= capture_ch:
+                        raise RuntimeError(f"extract_channel ({ch_idx}) >= capture_channels ({capture_ch})")
                 logger.info(
                     "Capturing %dch, extracting CH%d as mono",
                     capture_ch,
-                    ch_idx,
+                    self._extract[0],
                 )
 
             while not self._stop_event.is_set():
                 data = stream.read(FRAME_SIZE_SAMPLES, exception_on_overflow=False)
                 if need_extract:
+                    ch_idx, gain_db = self._extract
                     samples = array.array("h", data)
                     mono = samples[ch_idx::capture_ch]
-                    data = mono.tobytes()
+                    if gain_db:
+                        scaled = np.frombuffer(mono.tobytes(), dtype=np.int16).astype(np.float32) * 10 ** (gain_db / 20)
+                        data = np.clip(scaled, -32768, 32767).astype(np.int16).tobytes()
+                    else:
+                        data = mono.tobytes()
                 try:
                     self._queue.put_nowait(data)
                 except queue.Full:

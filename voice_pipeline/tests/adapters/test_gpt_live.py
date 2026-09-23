@@ -117,9 +117,9 @@ def _drain(session: GPTLiveSession, *, want: int, timeout: float = 2.0) -> list[
     return out
 
 
-def _session(events: list[Any]) -> tuple[GPTLiveSession, FakeConnection]:
+def _session(events: list[Any], config: LiveSessionConfig | None = None) -> tuple[GPTLiveSession, FakeConnection]:
     conn = FakeConnection([_started(), *events])
-    session = GPTLiveSession(LiveSessionConfig(instructions="hi"), connection_factory=lambda: conn)
+    session = GPTLiveSession(config or LiveSessionConfig(instructions="hi"), connection_factory=lambda: conn)
     return session, conn
 
 
@@ -238,6 +238,27 @@ class TestSend:
         item = conn.response.item.create.call_args.kwargs["item"]
         assert item == {"type": "function_call_output", "call_id": "c1", "output": '{"ok":true}'}
         conn.response.create.assert_called_once()
+        session.close()
+
+    def test_update_and_restore_backend(self) -> None:
+        cfg = LiveSessionConfig(
+            instructions="x",
+            backend_model="gpt-5.4-mini",
+            backend_instructions="default backend",
+            tools=({"type": "function", "name": "play_song"},),
+        )
+        session, conn = _session([], config=cfg)
+        session.start()
+        stop_tool = {"type": "function", "name": "stop_song"}
+        session.update_backend("song backend", (stop_tool,))
+        sent = conn.session.update.call_args.kwargs["session"]
+        assert sent == {
+            "delegation": {"type": "responses", "responses": {"instructions": "song backend", "tools": [stop_tool]}}
+        }
+        session.restore_backend()  # 시작 설정 그대로: web_search + 원래 툴
+        restored = conn.session.update.call_args.kwargs["session"]["delegation"]["responses"]
+        assert restored["instructions"] == "default backend"
+        assert restored["tools"] == [{"type": "web_search"}, {"type": "function", "name": "play_song"}]
         session.close()
 
     def test_send_before_start_raises(self) -> None:

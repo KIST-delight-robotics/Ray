@@ -5,9 +5,10 @@
   wiring.py           컴포넌트 조립 (프로세스 수준 / 세션 수준). settings.ENGINE 으로 엔진을 고른다
   engines/            ACTIVE 세션을 도는 대화 엔진 두 구현 — 하나만 실행된다
     gpt_live/         OpenAI GPT-Live 한 모델로 듣기·말하기 (현재 기본)
-      loop.py           프레임 루프 — 마이크 → 세션, 출력 → C++, 전사 저장, 툴 실행, 종료 시퀀스
-      instructions.py   세션 지시문 텍스트 (대화 모델 · 백엔드) + 시작 컨텍스트 붙이기
-      tools.py          백엔드 함수 툴 정의·핸들러 (기억 검색, 볼륨·밝기, 종료)
+      loop.py           프레임 루프 — 마이크 → 세션, 출력 → C++, 전사 저장, 툴 실행, 노래 재생 교대, 종료 시퀀스
+      instructions.py   세션 지시문 텍스트 (대화 모델 · 백엔드 · 노래 재생 중) + 시작 컨텍스트 붙이기
+      tools.py          백엔드 함수 툴 정의·핸들러 (기억 검색, 볼륨·밝기, 노래 재생·정지, 종료)
+      songs.py          노래 카탈로그 (assets/songs.json) 로드 · 파일 세트 검증 · LLM 용 목록
     cascade/          ASR → 턴 감지 → LLM → TTS 를 이어 붙인 엔진
       loop.py           프레임 루프 — ASR, 턴 감지, 재생, barge-in
       generator.py      응답 생성 (ContextBuilder → LLM → TTS, 백그라운드)

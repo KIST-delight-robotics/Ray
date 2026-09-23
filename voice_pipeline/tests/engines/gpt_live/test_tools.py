@@ -15,16 +15,22 @@ from voice_pipeline.device_settings import (
     VOLUME_STEPS,
     DeviceSettings,
 )
+from voice_pipeline.engines.gpt_live.songs import Song
 from voice_pipeline.engines.gpt_live.tools import (
     ADJUST_VOLUME_TOOL,
     DEFAULT_TOOLS,
     DEVICE_TOOLS,
     END_CONVERSATION_TOOL,
     GET_DEVICE_SETTINGS_TOOL,
+    LOOP_TOOLS,
+    PLAY_SONG_TOOL,
     SEARCH_MEMORY_TOOL,
     SET_BRIGHTNESS_TOOL,
+    STOP_SONG_TOOL,
+    STOP_SONG_TOOL_DEF,
     make_device_settings_handlers,
     make_memory_search_handler,
+    make_play_song_tool_def,
 )
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.types import Episode, MemoryReadResult
@@ -102,3 +108,25 @@ class TestMemorySearchHandler:
         out = json.loads(handler(json.dumps({"query": "  "})))
         assert out["memories"] == [] and "error" in out
         retriever.retrieve.assert_not_called()
+
+
+class TestSongToolDefinitions:
+    _CATALOG = {
+        "IAM": Song("IAM", "I AM", "IVE", ("아이엠",), ("아이브",)),
+        "Butter_BTS": Song("Butter_BTS", "Butter", "BTS"),
+    }
+
+    def test_play_song_enum_is_catalog_keys_and_description_lists_songs(self) -> None:
+        play, stop = make_play_song_tool_def(self._CATALOG), STOP_SONG_TOOL_DEF
+        assert play is not None and play["name"] == PLAY_SONG_TOOL and stop["name"] == STOP_SONG_TOOL
+        assert play["parameters"]["properties"]["song"]["enum"] == ["Butter_BTS", "IAM"]
+        assert play["description"].endswith("IAM: I AM — IVE (아이엠, 아이브)")
+        for t in (play, stop):  # strict 모드 계약은 다른 툴과 같다
+            assert t["strict"] is True
+            assert set(t["parameters"].get("required", [])) == set(t["parameters"]["properties"])
+
+    def test_empty_catalog_yields_no_play_tool(self) -> None:
+        assert make_play_song_tool_def({}) is None
+
+    def test_song_tools_are_loop_builtin(self) -> None:
+        assert {PLAY_SONG_TOOL, STOP_SONG_TOOL, END_CONVERSATION_TOOL} <= LOOP_TOOLS
