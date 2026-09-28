@@ -77,6 +77,7 @@ from voice_pipeline.engines.gpt_live.instructions import (
     SONG_PLAYING_INSTRUCTIONS,
     STORY_ENDED_INSTRUCTIONS,
     STORY_MODE_INSTRUCTIONS,
+    STORY_QUIET_INSTRUCTIONS,
     build_story_backend_instructions,
 )
 from voice_pipeline.engines.gpt_live.songs import Song
@@ -146,7 +147,7 @@ class LiveSessionLoop:
     _FRAME_TIMEOUT_SEC = 0.1  # audio_queue.get 대기
     _MAX_BATCH_FRAMES = 10  # 한 iteration 에 보내는 최대 프레임 수
     _MAX_EVENTS_PER_FRAME = 64  # 한 iteration 에 처리하는 최대 Live 이벤트 수 (오디오 10/s 라 여유 큼)
-    _SESSION_TIMEOUT_SEC = 60.0  # 마지막 전사(사용자·모델) 이후 이 시간 지나면 종료
+    _SESSION_TIMEOUT_SEC = 180.0  # 마지막 전사(사용자·모델) 이후 이 시간 지나면 종료
     _AUDIO_STARVATION_TIMEOUT_SEC = 5.0  # 마이크 프레임 단절 → 종료
     _END_MIN_WAIT_SEC = 2.0  # 종료 결정 후 모델이 작별 인사를 시작할 여유
     _END_SILENCE_SEC = 1.0  # 출력 무음이 이만큼 이어지면 마지막 발화가 끝난 것으로 봄
@@ -156,6 +157,7 @@ class LiveSessionLoop:
     _SONG_MAX_WAIT_SEC = 30.0  # 무음이 감지되지 않을 때의 안전망. 정상 발화에서는 걸리지 않아야 한다
     _STORY_SILENCE_SEC = 0.5  # start_story 뒤 출력 무음이 이만큼 이어지면 이야기 지시 append + 결과 제출
     _STORY_MAX_WAIT_SEC = 30.0
+    _STORY_QUIET_SEC = 15.0  # 이야기 중 모델 출력·전사가 이만큼 없으면 "계속할까요" 를 묻게 한다 (침묵당 한 번)
     _LEAD_LOG_INTERVAL_SEC = 15.0  # 오디오 전송 상태(추정 밀림, 조각 도착 간격) DEBUG 로그 주기
     _GAP_EVENT_SEC = 0.3  # 조각 도착 간격이 이 이상이면 정지 이벤트로 INFO 로그 (C++ [split] 로그와 대조용)
     # 서버 출력은 실시간보다 1~3% 짧게 온다 — 주로 무음 프레임이 빠지고, 늦게라도 오지 않는다
@@ -237,6 +239,7 @@ class LiveSessionLoop:
         self._story_future: Future[str] | None = None  # 보류 중인 start_story 결과. 지시 append 뒤 완료
         self._story_payload = ""
         self._story_started_time = 0.0
+        self._story_quiet_nudged_at = 0.0  # 마지막 침묵 재촉을 보낸 시각의 quiet_since. 같은 침묵엔 다시 안 보낸다
         self._audio_input = audio_input
         self._song_state = SongState.NONE
         self._song: Song | None = None
@@ -440,6 +443,7 @@ class LiveSessionLoop:
             label="Story",
         ):
             self._append_story_instructions()
+        self._maybe_nudge_quiet_story(now)
         if (
             self._song_state is SongState.STOPPING
             and self._song_playback_done
@@ -787,7 +791,8 @@ class LiveSessionLoop:
         self._story_future = Future()
         self._story_started_time = time.monotonic()
         label = f"{song.title} — {song.artist}" if song.artist else song.title
-        tools = tuple(t for t in self._live.tools if t["name"] != START_STORY_TOOL)
+        # 이야기 중엔 검색·시작 툴을 뺀다 — 남겨 두면 "얘기 어디 갔어" 에 백엔드가 검색을 불렀다 (실기 2026-09-28)
+        tools = tuple(t for t in self._live.tools if t["name"] not in (SEARCH_STORIES_TOOL, START_STORY_TOOL))
         try:
             # 다음 위임부터 이야기용 백엔드. 단락 1 은 아래 결과로 줘서 이 위임의 후속 응답이 그대로 말하게 한다
             self._live.update_backend(
@@ -810,6 +815,20 @@ class LiveSessionLoop:
             logger.warning("append for story failed", exc_info=True)
         logger.info("Story instructions appended — releasing start result")
         self._resolve_story_future()
+
+    def _maybe_nudge_quiet_story(self, now: float) -> None:
+        """이야기 중 침묵이 길면 "계속할까요" 를 묻게 한다. 모델은 재촉 없이 스스로 말하지 않는다."""
+        if self._story_state is not StoryState.TELLING or self._story_future is not None or self._inflight:
+            return
+        quiet_since = max(self._last_voice_time or 0.0, self._last_transcript_time, self._story_started_time)
+        if now - quiet_since < self._STORY_QUIET_SEC or quiet_since <= self._story_quiet_nudged_at:
+            return
+        self._story_quiet_nudged_at = quiet_since
+        try:
+            self._live.append_instructions(STORY_QUIET_INSTRUCTIONS)
+        except Exception:
+            logger.warning("quiet nudge failed", exc_info=True)
+        logger.info("Story: quiet for %.0fs — asking whether to continue", now - quiet_since)
 
     def _resolve_story_future(self) -> None:
         if self._story_future is None:

@@ -29,6 +29,7 @@ from voice_pipeline.engines.gpt_live.instructions import (
     SONG_PLAYING_INSTRUCTIONS,
     STORY_ENDED_INSTRUCTIONS,
     STORY_MODE_INSTRUCTIONS,
+    STORY_QUIET_INSTRUCTIONS,
 )
 from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop, Phase, SongState, StoryState
 from voice_pipeline.engines.gpt_live.songs import Song
@@ -62,6 +63,7 @@ def _make_loop(
     song_catalog: dict[str, Song] | None = None,
     story_selector: StorySelector | None = None,
     tone_preference: str = "",
+    story_quiet: float = 30.0,
 ) -> tuple[LiveSessionLoop, dict[str, MagicMock], queue.Queue]:
     """Live 세션·브리지·히스토리를 모킹한 루프. ``live_events`` 는 poll_event 가 순서대로 돌려준다."""
     monkeypatch.setattr(LiveSessionLoop, "_FRAME_TIMEOUT_SEC", 0.005)
@@ -69,6 +71,7 @@ def _make_loop(
     monkeypatch.setattr(LiveSessionLoop, "_SONG_MAX_WAIT_SEC", 1.0)
     monkeypatch.setattr(LiveSessionLoop, "_STORY_SILENCE_SEC", 0.03)
     monkeypatch.setattr(LiveSessionLoop, "_STORY_MAX_WAIT_SEC", 1.0)
+    monkeypatch.setattr(LiveSessionLoop, "_STORY_QUIET_SEC", story_quiet)
     monkeypatch.setattr(LiveSessionLoop, "_END_MIN_WAIT_SEC", end_min_wait)
     monkeypatch.setattr(LiveSessionLoop, "_END_SILENCE_SEC", end_silence)
     monkeypatch.setattr(LiveSessionLoop, "_END_MAX_WAIT_SEC", end_max_wait)
@@ -76,7 +79,11 @@ def _make_loop(
     monkeypatch.setattr(LiveSessionLoop, "_AUDIO_STARVATION_TIMEOUT_SEC", 30.0)
 
     live = MagicMock(spec=GPTLiveSession)
-    live.tools = ({"type": "function", "name": "end_conversation"}, {"type": "function", "name": "start_story"})
+    live.tools = (
+        {"type": "function", "name": "end_conversation"},
+        {"type": "function", "name": "search_stories"},
+        {"type": "function", "name": "start_story"},
+    )
     live.start.return_value = LiveStarted(session_id="live_x", expires_at=time.time() + 7200)
     pending = list(live_events or [])
     live.poll_event.side_effect = lambda: pending.pop(0) if pending else None
@@ -849,7 +856,8 @@ class TestStory:
         assert "## 단락 1 — 훅" in instructions and 'song id "IAM"' in instructions
         assert "overrides the default: formal" in instructions  # 말투 선호가 이야기용 백엔드에도 간다
         names = [t.get("name", t["type"]) for t in tools]
-        assert names == ["web_search", "end_conversation", "finish_story"]  # start_story 는 빠지고 finish 가 붙는다
+        # 검색·시작 툴은 빠지고 finish 가 붙는다
+        assert names == ["web_search", "end_conversation", "finish_story"]
         assert [c.args[0] for c in live.append_instructions.call_args_list] == [STORY_MODE_INSTRUCTIONS]
         seq = [c[0] for c in order.mock_calls]
         # 교체 → (한마디) → 무음 → append → 결과 제출: 단락 1 은 지시가 얹힌 뒤에야 온다
@@ -972,3 +980,35 @@ class TestStory:
         assert appended == [STORY_MODE_INSTRUCTIONS, SONG_PLAYING_INSTRUCTIONS, SONG_ENDED_INSTRUCTIONS]
         assert loop._story_future is None
         m["bridge"].send_play_audio_csv.assert_called_once_with("IAM")
+
+    def test_quiet_during_story_asks_once_whether_to_continue(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, story_selector=_selector(), story_quiet=0.1)
+        live = m["live"]
+        nudged = lambda: STORY_QUIET_INSTRUCTIONS in [c.args[0] for c in live.append_instructions.call_args_list]  # noqa: E731
+        first_nudge = {"t": 0.0}
+
+        def quiet_long_enough() -> bool:
+            if not nudged():
+                return False
+            first_nudge["t"] = first_nudge["t"] or time.monotonic()
+            return time.monotonic() - first_nudge["t"] > 0.3  # 같은 침묵이 이어져도 두 번 보내지 않는지 볼 여유
+
+        _staged_live_events(
+            loop,
+            m,
+            [
+                (None, _call(START_STORY_TOOL, {"story": "IAM"})),
+                (None, LiveResponseDone(None)),
+                (quiet_long_enough, LiveClosed("x")),
+            ],
+        )
+        loop.run()
+        appended = [c.args[0] for c in live.append_instructions.call_args_list]
+        assert appended == [STORY_MODE_INSTRUCTIONS, STORY_QUIET_INSTRUCTIONS]
+
+    def test_no_quiet_nudge_outside_story(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, story_selector=_selector(), story_quiet=0.05)
+        started = time.monotonic()
+        _staged_live_events(loop, m, [(lambda: time.monotonic() - started > 0.3, LiveClosed("x"))])
+        loop.run()
+        m["live"].append_instructions.assert_not_called()

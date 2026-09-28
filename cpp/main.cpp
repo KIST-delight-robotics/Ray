@@ -2871,6 +2871,12 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 current_mode_label = "RESPONSE";
                 sfinfo.channels = AUDIO_CHANNELS;
                 sfinfo.samplerate = AUDIO_SAMPLE_RATE;
+                // 스트림 플래그는 여기서(큐에서 꺼낸 뒤) 확정한다. WebSocket 스레드가 먼저 켠 값은 직전 재생의
+                // 정리 뒤 루프 시작부 초기화(is_responses_streaming = false)에 덮일 수 있다 — 인사 WAV 종료와
+                // stream_start 가 수 ms 안에 겹치면 live 대기가 즉시 풀려 빈 재생으로 playback_complete 를 보냈다
+                // (2026-09-28, 50 세션 중 2회).
+                is_responses_streaming = true;
+                stream_live = response.value("live", false);
             }
             else if (type == "play_audio_csv") {
                 is_csv_based = true;

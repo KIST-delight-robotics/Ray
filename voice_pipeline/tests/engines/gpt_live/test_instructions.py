@@ -74,16 +74,22 @@ class TestStoryInstructions:
 
     def test_story_mode_hands_pacing_and_interruption_to_the_model(self) -> None:
         assert "stop at once" in STORY_MODE_INSTRUCTIONS and "in full" not in STORY_MODE_INSTRUCTIONS
+        # 끊긴 이야기는 위임 없이 모델이 이어 말하고, 질문 지점에서만 멈추며, 답에는 스스로 반응하고 군말 없이 위임
+        assert "continue from where you stopped without delegating" in STORY_MODE_INSTRUCTIONS
+        assert "two points only" in STORY_MODE_INSTRUCTIONS and "잠깐만요" in STORY_MODE_INSTRUCTIONS
 
     def test_story_backend_embeds_script_and_song(self) -> None:
         text = build_story_backend_instructions("## 단락 1 — 훅\n첫 문장.\n", "snowman", "눈사람 — 정승환", "formal")
-        assert text.index("## Script") < text.index("## 단락 1 — 훅") < text.index("## Task instructions")
+        assert text.index("## Script") < text.index("## 단락 1 — 훅") < text.index("## What to hand over")
         assert 'play_song with song id "snowman" (눈사람 — 정승환)' in text
         assert "finish_story" in text
         assert text.index("## Return the result") < text.index("## Ray's voice") and "formal" in text
-        assert "rewritten in Ray's voice" in text
+        assert "Rewrite it in Ray's voice" in text
         assert text.index("## Deciding whether the story goes on") < text.index("## Return the result")
         assert "Call finish_story only when" in text
+        # 다음 질문 지점까지 통째로 넘기고, 사용자에게 답하지 않는다 (반응은 대화 모델 몫)
+        assert "up to and including the next stop" in text and "Never call it before Ray has told the bridge" in text
+        assert "never answer the user yourself" in text
 
     def test_story_mode_append_stays_short(self) -> None:
         assert len(STORY_MODE_INSTRUCTIONS) < 1500  # append 한도 500 토큰 안에 들도록
