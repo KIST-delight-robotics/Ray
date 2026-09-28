@@ -860,8 +860,6 @@ void read_and_split(SNDFILE* sndfile, const SF_INFO& sfinfo, CustomSoundStream& 
 // ============================================================
 
 constexpr float RAW_TO_MOTOR_SCALE = 400.0f; //로깅 파일에서 저장되는 음원 RAW 파일을 스케일링 할때 정할 최댓값
-constexpr float MOUTH_AUDIO_GAIN = 1.0f; // 입 모션에 음원 볼륨이 미치는 영향의 강도 조절용 상수 현재 3인 이유는 vocals.wav 기준 TTS 음원이 약 1/4라서 3정도가 적당하다고 판단했기 때문.
-
 inline void apply_mouth_audio_gain(std::vector<float>& buf, float gain) {
     for (float& v : buf) {
         float x = v * gain;
@@ -870,6 +868,67 @@ inline void apply_mouth_audio_gain(std::vector<float>& buf, float gain) {
         v = x;
     }
 }
+
+// ============================================================
+// 입 모션용 오디오 자동 레벨 정규화 (재생 소리에는 영향 없음)
+// - 소스마다 절대 레벨이 달라(40ms 피크 중앙값: ElevenLabs ≈0.45, GPT-Live ≈0.17) 고정 gain 으로는
+//   벤더·목소리가 바뀔 때마다 입 크기가 틀어진다. 스트림 안에서 "최근 최대 피크"를 추적해 그것이
+//   kTarget 에 오도록 배율 하나를 곱한다 — 배율이 하나라 음절 간 다이나믹은 그대로 남는다.
+// - 추적: 유성 프레임(40ms 피크 ≥ kVoicedPeak)에서만 갱신. attack 즉시, release 는 유성 프레임에서만
+//   진행해 무음 동안은 배율이 유지된다 (Live 세션은 발화 사이 무음이 길다).
+// - 미리 보기(next_peek) 피크는 배율 계산에만 쓰고 저장하지 않는다 — 발화 시작 360ms 전에 배율이 맞고,
+//   같은 프레임이 current 로 올 때 release 가 두 번 걸리지 않는다.
+// - 스트림마다 새로 만든다 (generate_motion 지역 변수).
+// ============================================================
+struct MouthLevelNormalizer {
+    static constexpr float kTarget     = 0.8f;   // 추적 피크를 이 값에 맞춘다 (1.0 아래 여유 → 클리핑 최소화)
+    static constexpr float kGainMin    = 1.0f;   // 이미 큰 소리는 줄이지 않는다
+    static constexpr float kGainMax    = 5.0f;   // 노이즈·숨소리가 부풀지 않게
+    static constexpr float kVoicedPeak = 0.02f;  // 40ms 피크가 이 미만이면 무음 취급 (≈-34 dBFS; 말소리 최약 구간 ≥0.05)
+    static constexpr float kReleaseSec = 4.0f;   // 유성 프레임 기준 추적값이 1/e 로 내려가는 시간
+    static constexpr int   kHopMs      = 40;
+
+    float tracked = 0.0f;  // 0 = 아직 유성 프레임 없음
+
+    static float chunk_max_peak(const std::vector<float>& interleaved, int channels, int samplerate,
+                                std::vector<float>* peaks_out) {
+        const int frames_per_hop = samplerate * kHopMs / 1000;
+        const int total_frames   = channels > 0 ? static_cast<int>(interleaved.size()) / channels : 0;
+        float max_peak = 0.0f;
+        for (int start = 0; start < total_frames; start += frames_per_hop) {
+            const int end = std::min(start + frames_per_hop, total_frames);
+            float pk = 0.0f;
+            for (int f = start; f < end; ++f) {
+                float s = 0.0f;
+                for (int c = 0; c < channels; ++c) s += interleaved[static_cast<size_t>(f * channels + c)];
+                pk = std::max(pk, std::fabs(s / static_cast<float>(channels)));
+            }
+            if (peaks_out) peaks_out->push_back(pk);
+            max_peak = std::max(max_peak, pk);
+        }
+        return max_peak;
+    }
+
+    // 현재 청크로 추적값 갱신
+    void update(const std::vector<float>& curr, int channels, int samplerate) {
+        std::vector<float> peaks;
+        chunk_max_peak(curr, channels, samplerate, &peaks);
+        const float decay = std::exp(-static_cast<float>(kHopMs) / 1000.0f / kReleaseSec);
+        for (float pk : peaks) {
+            if (pk < kVoicedPeak) continue;      // 무음: 갱신도 감쇠도 없음
+            tracked = std::max(tracked * decay, pk);
+        }
+    }
+
+    // 현재 추적값 + 미리 보기 피크로 배율 계산
+    float gain(const std::vector<float>& future, int channels, int samplerate) const {
+        float ref = tracked;
+        const float future_peak = chunk_max_peak(future, channels, samplerate, nullptr);
+        if (future_peak >= kVoicedPeak) ref = std::max(ref, future_peak);
+        if (ref <= 0.0f) return kGainMin;        // 유성 프레임이 아직 없음 → 어차피 무음
+        return std::clamp(kTarget / ref, kGainMin, kGainMax);
+    }
+};
 
 // ============================================================
 // baseline
@@ -1079,6 +1138,9 @@ void generate_motion(int channels, int samplerate) {
 
     init_partb_mouth_state(mouth_state);
 
+    MouthLevelNormalizer mouth_norm;   // 스트림마다 초기화
+    float last_mouth_gain = 0.0f;      // 로그용: 배율이 눈에 띄게 바뀔 때만 출력
+
     int frames_per_update = samplerate * 40 / 1000;
 
     std::vector<double> prevEndOneBefore = {0.0, 0.0, 0.0};
@@ -1155,12 +1217,20 @@ void generate_motion(int channels, int samplerate) {
             }
         }
         // ============================================================
-        // PART B 입력 오디오 gain 적용
+        // PART B 입력 오디오 자동 정규화
         // - playback용 원본은 read_and_split에서 이미 soundStream으로 갔으므로
         //   여기서는 mouth 생성용만 키워도 됨
         // ============================================================
-        apply_mouth_audio_gain(audio_buffer, MOUTH_AUDIO_GAIN);
-        apply_mouth_audio_gain(next_peek,   MOUTH_AUDIO_GAIN);
+        mouth_norm.update(audio_buffer, channels, samplerate);
+        const float mouth_gain = mouth_norm.gain(next_peek, channels, samplerate);
+        if (std::fabs(mouth_gain - last_mouth_gain) > 0.1f) {
+            std::lock_guard<std::mutex> lock(cout_mutex);
+            std::cout << get_time_str() << " [mouth] gain " << std::fixed << std::setprecision(2) << mouth_gain
+                      << " (tracked peak " << mouth_norm.tracked << ")" << std::endl;
+            last_mouth_gain = mouth_gain;
+        }
+        apply_mouth_audio_gain(audio_buffer, mouth_gain);
+        apply_mouth_audio_gain(next_peek,   mouth_gain);
 
         // ============================================================
         // (A) PART B mouth trajectory 생성
