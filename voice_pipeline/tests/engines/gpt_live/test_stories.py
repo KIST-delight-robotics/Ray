@@ -51,6 +51,12 @@ class TestLoadStories:
             "song": "눈사람 — 정승환",
         }
 
+    def test_first_part_is_part_one_text_without_directions(self, tmp_path: Path) -> None:
+        _write(tmp_path, "snowman")
+        story = load_stories(tmp_path, CATALOG)["snowman"]
+        assert story.first_part() == "첫 문장."
+        assert Story("x", "x", "s", (), "본문만").first_part() == ""
+
     def test_story_for_unplayable_song_is_skipped_with_warning(self, tmp_path: Path, caplog) -> None:
         _write(tmp_path, "snowman")
         _write(tmp_path, "ghost", song="NotInCatalog")

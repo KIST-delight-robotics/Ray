@@ -184,7 +184,14 @@ class TestCreateSessionLiveEngine:
         comps.turngpt = None
         comps.asr = None
         comps.memory_storage.get_all_profiles.return_value = [
-            Profile(id=1, topic="interest", sub_topic="movie", content="SF", updated_at="2026-09-01 00:00:00")
+            Profile(id=1, topic="interest", sub_topic="movie", content="SF", updated_at="2026-09-01 00:00:00"),
+            Profile(
+                id=2,
+                topic="interaction_style",
+                sub_topic="tone_preference",
+                content="prefers formal tone",
+                updated_at="2026-09-01 00:00:00",
+            ),
         ]
         comps.memory_storage.get_recent_sessions.return_value = [("s-old", "2026-09-10 10:00:00")]
         comps.memory_storage.get_episodes_by_session_ids.return_value = {
@@ -202,7 +209,10 @@ class TestCreateSessionLiveEngine:
         # 프로필·최근 세션은 시작 instructions 에 들어간다
         assert "interest::movie: SF" in config.instructions
         assert "User saw Dune 2." in config.instructions
+        # 말투 선호는 백엔드 지시문의 말투 절과 루프(이야기용 백엔드)에도 전달된다
+        assert "overrides the default: prefers formal tone" in config.backend_instructions
         kwargs = loop_cls.call_args.kwargs
+        assert kwargs["tone_preference"] == "prefers formal tone"
         assert kwargs["live"] is live_cls.return_value
         assert kwargs["session_id"] == result.session_id
         assert set(kwargs["tool_handlers"]) == {"x", SEARCH_MEMORY_TOOL}

@@ -9,7 +9,7 @@ from voice_pipeline.engines.cascade.context_builder import (
     parse_citation_tag,
 )
 from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
-from voice_pipeline.session_context import format_profile_block, format_session_summary_block
+from voice_pipeline.session_context import format_profile_block, format_session_summary_block, tone_preference
 
 
 def _ep(
@@ -65,6 +65,15 @@ class TestFormatProfileBlock:
 # ---------------------------------------------------------------------------
 # format_session_summary_block
 # ---------------------------------------------------------------------------
+
+
+class TestTonePreference:
+    def test_returns_interaction_style_tone_preference_only(self) -> None:
+        profiles = [_prof("interest", "movie", "SF"), _prof("interaction_style", "tone_preference", " formal ")]
+        assert tone_preference(profiles) == "formal"
+
+    def test_empty_when_absent(self) -> None:
+        assert tone_preference([_prof("interaction_style", "humor_style", "playful")]) == ""
 
 
 class TestFormatSessionSummaryBlock:

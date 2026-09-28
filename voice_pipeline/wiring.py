@@ -43,8 +43,8 @@ from voice_pipeline.engines.cascade.summarizer import HistorySummarizer
 from voice_pipeline.engines.cascade.text_session import TextSession
 from voice_pipeline.engines.cascade.turn_detector import TurnDetector
 from voice_pipeline.engines.gpt_live.instructions import (
-    DEFAULT_BACKEND_INSTRUCTIONS,
     LIVE_VOICE,
+    build_backend_instructions,
     build_live_instructions,
 )
 from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop
@@ -66,7 +66,7 @@ from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
-from voice_pipeline.session_context import format_profile_block, load_session_context
+from voice_pipeline.session_context import format_profile_block, load_session_context, tone_preference
 from voice_pipeline.settings import (
     BRIDGE_SAMPLE_RATE,
     DEFAULT_DB_PATH,
@@ -192,8 +192,10 @@ class ProcessComponents:
                     SEARCH_MEMORY_TOOL, make_memory_search_handler(retriever, {session_id} | included_ids)
                 )
                 instructions = build_live_instructions(format_profile_block(profiles), recent_texts)
+                tone = tone_preference(profiles)
             else:
                 instructions = build_live_instructions()
+                tone = ""
             # 핸들러가 있는 툴만 백엔드에 노출한다 (end_conversation·노래 툴은 루프 내장)
             tools = tuple(t for t in DEFAULT_TOOLS if t["name"] in LOOP_TOOLS or t["name"] in tool_handlers)
             if (play_song := make_play_song_tool_def(self.song_catalog)) is not None:
@@ -205,7 +207,7 @@ class ProcessComponents:
                 LiveSessionConfig(
                     instructions=instructions,
                     backend_model=_LIVE_BACKEND_MODEL,
-                    backend_instructions=DEFAULT_BACKEND_INSTRUCTIONS,
+                    backend_instructions=build_backend_instructions(tone),
                     tools=tools,
                     voice=LIVE_VOICE,
                     sample_rate=BRIDGE_SAMPLE_RATE,
@@ -225,6 +227,7 @@ class ProcessComponents:
                 executor=self.executor,
                 song_catalog=self.song_catalog,
                 story_selector=self.story_selector,
+                tone_preference=tone,
                 audio_input=self.audio_input,
                 **session_loop_kwargs,
             )

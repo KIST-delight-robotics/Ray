@@ -6,8 +6,10 @@ from voice_pipeline.engines.gpt_live.instructions import (
     DEFAULT_BACKEND_INSTRUCTIONS,
     SONG_BACKEND_INSTRUCTIONS,
     STORY_MODE_INSTRUCTIONS,
+    build_backend_instructions,
     build_live_instructions,
     build_story_backend_instructions,
+    build_voice_section,
 )
 
 
@@ -57,11 +59,31 @@ class TestStoryInstructions:
         task = DEFAULT_BACKEND_INSTRUCTIONS[DEFAULT_BACKEND_INSTRUCTIONS.index("## Task instructions") :]
         assert task.index("search_stories") < task.index("start_story")
 
+    def test_default_backend_rewrites_first_part_in_rays_voice(self) -> None:
+        assert "first_part rewritten in Ray's voice" in DEFAULT_BACKEND_INSTRUCTIONS
+
+    def test_voice_section_default_and_profile_override(self) -> None:
+        plain = build_voice_section()
+        assert plain.startswith("## Ray's voice") and "해요체" in plain and "overrides" not in plain
+        with_pref = build_voice_section("prefers formal tone")
+        assert "overrides the default: prefers formal tone" in with_pref
+
+    def test_backend_builder_appends_voice_section(self) -> None:
+        text = build_backend_instructions("formal")
+        assert text.startswith(DEFAULT_BACKEND_INSTRUCTIONS) and text.rstrip().endswith("formal")
+
+    def test_story_mode_hands_pacing_and_interruption_to_the_model(self) -> None:
+        assert "stop at once" in STORY_MODE_INSTRUCTIONS and "in full" not in STORY_MODE_INSTRUCTIONS
+
     def test_story_backend_embeds_script_and_song(self) -> None:
-        text = build_story_backend_instructions("## 단락 1 — 훅\n첫 문장.\n", "snowman", "눈사람 — 정승환")
+        text = build_story_backend_instructions("## 단락 1 — 훅\n첫 문장.\n", "snowman", "눈사람 — 정승환", "formal")
         assert text.index("## Script") < text.index("## 단락 1 — 훅") < text.index("## Task instructions")
         assert 'play_song with song id "snowman" (눈사람 — 정승환)' in text
         assert "finish_story" in text
+        assert text.index("## Return the result") < text.index("## Ray's voice") and "formal" in text
+        assert "rewritten in Ray's voice" in text
+        assert text.index("## Deciding whether the story goes on") < text.index("## Return the result")
+        assert "Call finish_story only when" in text
 
     def test_story_mode_append_stays_short(self) -> None:
         assert len(STORY_MODE_INSTRUCTIONS) < 1500  # append 한도 500 토큰 안에 들도록

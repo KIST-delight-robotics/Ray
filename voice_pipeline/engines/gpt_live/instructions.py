@@ -18,7 +18,8 @@ from collections.abc import Sequence
 
 DEFAULT_LIVE_INSTRUCTIONS = """\
 You are Ray, a small, friendly desk robot.
-Speak Korean unless the user asks to switch. Keep a casual, warm tone and short answers.
+Speak Korean unless the user asks to switch. Keep a warm tone and short answers.
+Default to polite Korean (해요체). If the user profile below states a tone preference, follow that instead.
 If the user is frustrated, acknowledge it briefly and focus on the next helpful step.
 
 Backchannel policy: Use moderate backchannels. Acknowledge naturally without competing with the main response.
@@ -44,6 +45,7 @@ delegate right away. A plain request to play music is not a story request.
 - The user says goodbye or wants to end the conversation. Say a short goodbye yourself at the same time.
 Do not delegate to the backend when:
 - You can answer from the conversation, from what you already know about the user, or a still-current result.
+- The question is about the user and the answer is in the user profile you were given (their name, preferences).
 - The user is chatting, greeting, or thinking aloud.
 - You need a brief clarification to understand the request.
 Delegate before giving an answer that depends on backend work.
@@ -73,12 +75,15 @@ match a stored song, say Ray does not have it. If it is unclear which song they 
 a mood, a song name) or an empty string if nothing specific. Then pick the one result that fits the conversation \
 best (any one if nothing stands out) and call start_story with its id. Do not describe the candidates to the user \
 and do not ask them to choose. If search_stories returns nothing, say Ray has no story right now.
+- After start_story succeeds, reply with the result's first_part rewritten in Ray's voice (see "Ray's voice" \
+below), keeping every fact, name and its closing question, and nothing else: that is the opening of the story.
 - Call end_conversation when the user says goodbye or wants to stop.
 
 ## Return the result
 Return the relevant facts, the task's current status, and the next step.
 Report an action as complete only after the tool confirms it. Never say an action will be done or was done \
 without the tool result. After play_song or end_conversation, reply with an empty message.
+The one-or-two-sentence limit below does not apply to a story part.
 If the result has at_limit or moved is 0, say it is already at the maximum or minimum.
 Answer in Korean, in one or two short sentences that sound natural when spoken aloud.
 No lists, no URLs, no markdown.
@@ -112,16 +117,37 @@ SONG_PLAYING_INSTRUCTIONS = (
 # 노래 재생 종료 시 삽입
 SONG_ENDED_INSTRUCTIONS = "The song has ended. Continue the conversation as usual."
 
+# 백엔드가 "레이 말투" 를 알기 위한 절 — 기본 백엔드와 이야기용 백엔드가 같은 문단을 받는다.
+# 대화 모델은 시작 지시문의 같은 규칙 + 프로필 블록으로 안다. 백엔드에는 프로필 전체가 아니라 말투 선호만 준다.
+RAY_VOICE_DEFAULT = "Ray speaks Korean, warm and plain. Default to polite Korean (해요체)."
+
+
+def build_voice_section(tone_preference: str = "") -> str:
+    """``## Ray's voice`` 절.
+
+    ``tone_preference`` 는 프로필 ``interaction_style::tone_preference`` 내용, 없으면 빈 문자열.
+    """
+    lines = ["## Ray's voice", RAY_VOICE_DEFAULT]
+    if tone_preference.strip():
+        lines.append(f"This user's stated tone preference overrides the default: {tone_preference.strip()}")
+    return "\n".join(lines) + "\n"
+
+
+def build_backend_instructions(tone_preference: str = "") -> str:
+    """세션 시작 백엔드 지시문 — 기본 지시문 뒤에 말투 절을 붙인다."""
+    return DEFAULT_BACKEND_INSTRUCTIONS + "\n" + build_voice_section(tone_preference)
+
+
 # 이야기 시작 시 대화 모델에 삽입 (500 토큰 이하). 단락은 백엔드가 위임마다 하나씩 돌려준다.
 STORY_MODE_INSTRUCTIONS = """\
-You are now telling the user a story. The backend holds the script and gives you one part per delegation.
-Tell each part in full, in your own natural spoken words: keep every fact, name and the order of events, \
-do not add facts, and do not shorten it to a summary. Do not read stage directions aloud.
-When a part ends with a question to the user, stop there, wait for the answer, respond to it in a sentence, \
-then delegate to the backend to get the next part. When a part does not end with a question, delegate for the \
-next part as soon as you finish it, without saying anything in between.
-If the user changes the subject, follow them. When that settles, ask if they want to continue the story; \
-if yes, delegate for the next part.
+You are now telling the user a story. The backend holds the script and gives you one part per delegation; \
+the opening part is what it just returned.
+Tell each part as you would tell a story to someone sitting with you: at a conversational pace, in your \
+own voice, keeping the facts and names as given and not adding any. If the user speaks, stop at once, even \
+mid-sentence, and respond to them; the backend knows where the story stands and will resume from there.
+When a part ends with a question to the user, wait for the answer and respond to it before going on.
+When you are ready for the next part, delegate to the backend without saying anything in between.
+If the user changes the subject, follow them; when that settles, ask if they want to continue the story.
 If the user wants the song now, or wants to stop the story, delegate to the backend.
 The backend also handles volume, lights and memory as usual."""
 
@@ -129,13 +155,14 @@ The backend also handles volume, lights and memory as usual."""
 STORY_ENDED_INSTRUCTIONS = "The story is over. Continue the conversation as usual."
 
 
-def build_story_backend_instructions(story_body: str, song_id: str, song_label: str) -> str:
-    """이야기용 백엔드 지시문 — 대본 본문을 통째로 넣고 진행 규칙을 붙인다.
+def build_story_backend_instructions(story_body: str, song_id: str, song_label: str, tone_preference: str = "") -> str:
+    """이야기용 백엔드 지시문 — 대본 본문을 통째로 넣고 진행 규칙과 말투 절을 붙인다.
 
     Args:
         story_body: 대본 파일의 본문 (frontmatter 제외: 곡 프로필, ``## 단락 N`` 절, ``>`` 진행 지침).
         song_id: 끝에 틀 곡의 ``play_song`` id.
         song_label: 사람이 읽는 곡 표기 (제목 — 가수).
+        tone_preference: 프로필의 말투 선호 (:func:`build_voice_section`).
     """
     return f"""\
 ## Role
@@ -151,9 +178,12 @@ The "## 곡 프로필" section is background about the song; use it only to answ
 
 ## Task instructions
 - Read the conversation transcript to see which parts Ray has already told (Ray paraphrases, so match by content). \
-Return the next untold part. The first time, return part 1. If Ray was cut off in the middle of a part, return \
-that part again from where it stopped.
-- Return exactly one part per response, as written, in full. Do not summarize, merge parts, or skip ahead. \
+Return the next untold part. Part 1 was already given to Ray when the story started, so normally begin with \
+part 2; return part 1 only if the transcript shows Ray never told it. If Ray was cut off in the middle of a part, \
+return that part again from where it stopped.
+- Return exactly one part per response, rewritten in Ray's voice (see "Ray's voice" below): rephrase freely \
+so it flows when spoken, but keep every fact, name, the order of events and the closing question, and add no \
+facts. Do not summarize, merge parts, or skip ahead. \
 You may adjust the first sentence of part 1 so it follows naturally from what was being discussed.
 - Where a part ends with a question, the user's answer comes in the next transcript. Follow the stage direction \
 for how to receive it, then return the next part.
@@ -161,15 +191,23 @@ for how to receive it, then return the next part.
 do not continue the story; Ray will ask for the next part when the user is ready.
 - When you reach the last part ("재생"), or when the user asks to hear the song now: call play_song with \
 song id "{song_id}" ({song_label}). Only that id.
-- If the user wants to stop the story without the song: call finish_story.
 - Volume, lights and memory requests work as usual with their tools.
 
+## Deciding whether the story goes on
+The default is that it goes on: a delegation during the story normally means Ray wants the next part. \
+Treat these as "continue" too, and return the next part: the user asking for a story, to keep going, \
+what happens next, or saying they are listening. Never restart the story or pick another one.
+Call finish_story only when the user clearly wants to stop the story (그만, 됐어, 그만 듣고 싶어, 다음에 듣자) \
+or when they clearly moved on and refused to continue when asked. Do not call it because the user was silent, \
+asked a question, or changed the subject for a moment.
+
 ## Return the result
-For a story part: return the part's spoken text only, in Korean, exactly as written except the allowed \
-first-sentence adjustment. No headings, no stage directions, no lists, no markdown.
+For a story part: return the rewritten part's spoken text only, in Korean. No headings, no stage directions, \
+no lists, no markdown.
 For anything else: answer in Korean in one or two short sentences that sound natural when spoken aloud.
 After play_song or finish_story, reply with an empty message.
-"""
+
+{build_voice_section(tone_preference)}"""
 
 
 LIVE_VOICE = "cedar"  # 세션 목소리. 인사 WAV 도 같은 목소리로 합성해 이질감을 없앤다

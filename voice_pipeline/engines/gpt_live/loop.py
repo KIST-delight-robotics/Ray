@@ -27,8 +27,12 @@
 
 이야기 (대본은 백엔드가 통째로 들고, 대화 모델이 위임할 때마다 다음 단락을 돌려준다):
     기본 백엔드가 ``search_stories`` → ``start_story`` 를 부르면 루프는 백엔드를 이야기용 설정(대본 + 진행 규칙 +
-    ``finish_story`` + 기본 툴)으로 교체하고(``update_backend``), 대화 모델에 이야기 지시를 append 한 뒤 결과를
-    제출한다 — 이어지는 응답(단락 1)부터 이야기용 백엔드가 만든다. 진행 위치는 파이썬이 갖지 않는다.
+    ``finish_story`` + 기본 툴)으로 교체하고(``update_backend``), 결과(단락 1 텍스트 포함)는 보류한다 — 위임 시
+    한마디가 끝나 출력이 무음이 되면 이야기 지시를 append 한 뒤에야 결과를 제출한다. append 는 발화를 끊고(어댑터
+    문서), 결과를 먼저 제출하면 단락 1 이 곧바로 시작돼 append 가 그 중간에 떨어진다(실기 2026-09-28). 노래
+    PENDING 과 같은 보류. 단락 1 은 결과로 주고 기본 백엔드가 답하게 한다 — 같은 위임의 후속 응답에는 교체가
+    반영되지 않았다. 단락 2 부터는 새 위임이라 이야기용 백엔드가 이력에서 위치를 읽어 돌려준다. 진행 위치는 파이썬이
+    갖지 않는다.
     끝: 이야기용 백엔드가 ``play_song`` 을 부르면 노래 흐름이 이어받고(노래 끝의 복원이 이야기도 끝낸다),
     ``finish_story`` 면 즉시 복원한다.
 
@@ -150,6 +154,8 @@ class LiveSessionLoop:
     _STREAM_START_MAX_WAIT_SEC = 10.0  # 인사 WAV 의 playback_complete 가 안 와도 이 시간 뒤엔 stream_start
     _SONG_SILENCE_SEC = 1.0  # play_song 뒤 출력 무음이 이만큼 이어지면 스트림을 닫는다
     _SONG_MAX_WAIT_SEC = 30.0  # 무음이 감지되지 않을 때의 안전망. 정상 발화에서는 걸리지 않아야 한다
+    _STORY_SILENCE_SEC = 0.5  # start_story 뒤 출력 무음이 이만큼 이어지면 이야기 지시 append + 결과 제출
+    _STORY_MAX_WAIT_SEC = 30.0
     _LEAD_LOG_INTERVAL_SEC = 15.0  # 오디오 전송 상태(추정 밀림, 조각 도착 간격) DEBUG 로그 주기
     _GAP_EVENT_SEC = 0.3  # 조각 도착 간격이 이 이상이면 정지 이벤트로 INFO 로그 (C++ [split] 로그와 대조용)
     # 서버 출력은 실시간보다 1~3% 짧게 온다 — 주로 무음 프레임이 빠지고, 늦게라도 오지 않는다
@@ -187,6 +193,7 @@ class LiveSessionLoop:
         wait_for_playback_complete: bool = False,
         song_catalog: Mapping[str, Song] | None = None,
         story_selector: StorySelector | None = None,
+        tone_preference: str = "",
         audio_input: AudioInput | None = None,
     ) -> None:
         """
@@ -204,6 +211,7 @@ class LiveSessionLoop:
             input_sample_rate / live_sample_rate: 마이크 레이트와 세션 레이트. 다르면 선형 보간으로 리샘플.
             song_catalog: 재생 가능한 노래 (키 → Song). None/빈 dict 면 play_song 은 unknown 으로 답한다.
             story_selector: 이야기 검색·시작. None 이면 start_story 는 unavailable 로 답한다.
+            tone_preference: 프로필의 말투 선호. 이야기용 백엔드 지시문의 말투 절에 들어간다.
             audio_input: 있으면 노래 재생 중 원본 마이크 채널로 바꾼다 (:meth:`AudioInput.set_raw_capture`).
         """
         self._live = live
@@ -223,8 +231,12 @@ class LiveSessionLoop:
         self._wait_for_playback_complete = wait_for_playback_complete
         self._song_catalog: Mapping[str, Song] = dict(song_catalog or {})
         self._story_selector = story_selector
+        self._tone_preference = tone_preference
         self._story_state = StoryState.NONE
         self._story: Story | None = None
+        self._story_future: Future[str] | None = None  # 보류 중인 start_story 결과. 지시 append 뒤 완료
+        self._story_payload = ""
+        self._story_started_time = 0.0
         self._audio_input = audio_input
         self._song_state = SongState.NONE
         self._song: Song | None = None
@@ -338,6 +350,7 @@ class LiveSessionLoop:
                 logger.warning("stop for playing song failed", exc_info=True)
         self._set_raw_capture(False)
         self._clear_song("cancelled")
+        self._resolve_story_future()
         try:
             self._live.close(graceful=graceful)
         except Exception:
@@ -418,6 +431,15 @@ class LiveSessionLoop:
             label="Song",
         ):
             self._drain_for_song()
+        if self._story_future is not None and self._utterance_finished(
+            self._story_started_time,
+            now,
+            min_wait=0.0,
+            silence=self._STORY_SILENCE_SEC,
+            max_wait=self._STORY_MAX_WAIT_SEC,
+            label="Story",
+        ):
+            self._append_story_instructions()
         if (
             self._song_state is SongState.STOPPING
             and self._song_playback_done
@@ -692,6 +714,7 @@ class LiveSessionLoop:
             logger.info("Story %s reached its song", self._story.key if self._story else "?")
             self._story_state = StoryState.NONE
             self._story = None
+            self._resolve_story_future()
         try:
             self._live.update_backend(SONG_BACKEND_INSTRUCTIONS, (STOP_SONG_TOOL_DEF,))
         except Exception:
@@ -744,7 +767,7 @@ class LiveSessionLoop:
     # ------------------------------------------------------------------
 
     def _start_story(self, call: LiveFunctionCall) -> Future[str]:
-        """start_story 요청. 직전 검색 결과의 id 면 백엔드를 이야기용으로 교체하고 바로 결과를 돌려준다."""
+        """start_story 요청. 직전 검색 결과의 id 면 백엔드를 이야기용으로 교체하고 결과를 보류한다(무음 뒤 완료)."""
         try:
             key = str(json.loads(call.arguments or "{}").get("story", ""))
         except json.JSONDecodeError:
@@ -761,19 +784,39 @@ class LiveSessionLoop:
             return _completed(json.dumps({"error": f"song {story.song!r} for story {key!r} is not playable"}))
         self._story = story
         self._story_state = StoryState.TELLING
+        self._story_future = Future()
+        self._story_started_time = time.monotonic()
         label = f"{song.title} — {song.artist}" if song.artist else song.title
         tools = tuple(t for t in self._live.tools if t["name"] != START_STORY_TOOL)
         try:
-            # 결과 제출보다 먼저 보내야 이어지는 응답(단락 1)을 이야기용 백엔드가 만든다
+            # 다음 위임부터 이야기용 백엔드. 단락 1 은 아래 결과로 줘서 이 위임의 후속 응답이 그대로 말하게 한다
             self._live.update_backend(
-                build_story_backend_instructions(story.body, song.key, label),
+                build_story_backend_instructions(story.body, song.key, label, self._tone_preference),
                 ({"type": "web_search"}, *tools, FINISH_STORY_TOOL_DEF),
             )
-            self._live.append_instructions(STORY_MODE_INSTRUCTIONS)
         except Exception:
             logger.warning("backend update for story failed", exc_info=True)
-        logger.info("Story started: %s (song %s)", story.key, song.key)
-        return _completed(json.dumps({"status": "started", "story": story.key, "song": song.key, "title": label}))
+        logger.info("Story started: %s (song %s) — waiting for output silence", story.key, song.key)
+        payload = {"status": "started", "story": story.key, "song": song.key, "title": label}
+        payload["first_part"] = story.first_part()
+        self._story_payload = json.dumps(payload, ensure_ascii=False)
+        return self._story_future
+
+    def _append_story_instructions(self) -> None:
+        """출력이 무음이 됐다 — 이야기 지시를 얹고 보류한 start_story 결과를 완료한다 (단락 1 은 그 뒤에 온다)."""
+        try:
+            self._live.append_instructions(STORY_MODE_INSTRUCTIONS)
+        except Exception:
+            logger.warning("append for story failed", exc_info=True)
+        logger.info("Story instructions appended — releasing start result")
+        self._resolve_story_future()
+
+    def _resolve_story_future(self) -> None:
+        if self._story_future is None:
+            return
+        if not self._story_future.done():
+            self._story_future.set_result(self._story_payload)
+        self._story_future = None
 
     def _finish_story(self) -> Future[str]:
         """finish_story 요청. 이야기 중이면 즉시 기본 백엔드로 돌아간다."""
@@ -782,6 +825,7 @@ class LiveSessionLoop:
         key = self._story.key if self._story else "?"
         self._story_state = StoryState.NONE
         self._story = None
+        self._resolve_story_future()
         self._restore_backend()
         try:
             self._live.append_instructions(STORY_ENDED_INSTRUCTIONS)
