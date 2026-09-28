@@ -11,7 +11,8 @@
    ``set_brightness`` / ``get_device_settings``, 종료 ``end_conversation``. 핸들러는 executor 에서 돌리고
    프레임 루프는 완료를 폴링한다 — 임베딩·DB 조회가 마이크 전송과 출력 중계를 막지 않게.
 4. 노래를 재생한다 (``play_song`` / ``stop_song``, 아래 "노래 재생").
-5. 세션 종료를 판정하고 닫는다 — 종료 키워드, 유휴 타임아웃, 백엔드의 ``end_conversation`` 툴,
+5. 이야기를 들려준다 (``start_story`` / ``finish_story``, 아래 "이야기").
+6. 세션 종료를 판정하고 닫는다 — 종료 키워드, 유휴 타임아웃, 백엔드의 ``end_conversation`` 툴,
    세션 만료/연결 끊김, 브리지 오류, 오디오 기아, 외부 stop.
 
 노래 재생 (C++ 는 재생 하나를 끝까지 처리하므로 라이브 스트림과 교대한다):
@@ -23,6 +24,13 @@
     결과를 노래 시작 뒤에 제출하므로 위임 시 모델의 한마디는 잘리지 않고, 결과 뒤의 말은 스트림이 없어 버려진다.
     노래 상태 동안 백엔드는 ``stop_song`` 하나만 가진 재생용 설정으로 교체된다(``session.update``, 끝나면 복원).
     다른 툴 호출은 오류로 답하고 ``end_conversation`` 도 종료로 치지 않는다. 모델 음성은 버리고 전사는 저장하지 않는다.
+
+이야기 (대본은 백엔드가 통째로 들고, 대화 모델이 위임할 때마다 다음 단락을 돌려준다):
+    기본 백엔드가 ``search_stories`` → ``start_story`` 를 부르면 루프는 백엔드를 이야기용 설정(대본 + 진행 규칙 +
+    ``finish_story`` + 기본 툴)으로 교체하고(``update_backend``), 대화 모델에 이야기 지시를 append 한 뒤 결과를
+    제출한다 — 이어지는 응답(단락 1)부터 이야기용 백엔드가 만든다. 진행 위치는 파이썬이 갖지 않는다.
+    끝: 이야기용 백엔드가 ``play_song`` 을 부르면 노래 흐름이 이어받고(노래 끝의 복원이 이야기도 끝낸다),
+    ``finish_story`` 면 즉시 복원한다.
 
 종료 시퀀스(실측 근거는 scripts/gpt_live/FINDINGS.md §4~5):
     입력 mute → 모델의 마지막 발화가 끝날 때까지(출력이 무음으로 N초) 대기, 상한 있음 →
@@ -63,11 +71,19 @@ from voice_pipeline.engines.gpt_live.instructions import (
     SONG_BACKEND_INSTRUCTIONS,
     SONG_ENDED_INSTRUCTIONS,
     SONG_PLAYING_INSTRUCTIONS,
+    STORY_ENDED_INSTRUCTIONS,
+    STORY_MODE_INSTRUCTIONS,
+    build_story_backend_instructions,
 )
 from voice_pipeline.engines.gpt_live.songs import Song
+from voice_pipeline.engines.gpt_live.stories import Story, StorySelector
 from voice_pipeline.engines.gpt_live.tools import (
     END_CONVERSATION_TOOL,
+    FINISH_STORY_TOOL,
+    FINISH_STORY_TOOL_DEF,
     PLAY_SONG_TOOL,
+    SEARCH_STORIES_TOOL,
+    START_STORY_TOOL,
     STOP_SONG_TOOL,
     STOP_SONG_TOOL_DEF,
     ToolHandler,
@@ -111,6 +127,13 @@ class SongState(enum.Enum):
     DRAINING = "draining"  # audio_end 보냄. 라이브 스트림의 playback_complete 대기
     PLAYING = "playing"  # play_audio_csv 보냄. 노래 끝의 playback_complete 대기
     STOPPING = "stopping"  # stop 보냄. playback_complete 와 모델 출력 무음을 기다린 뒤 스트림 재개
+
+
+class StoryState(enum.Enum):
+    """이야기 하위 상태 (Phase.ACTIVE 안에서만 NONE 이 아니다)."""
+
+    NONE = "none"
+    TELLING = "telling"  # 백엔드가 이야기용 설정. 노래가 시작되거나 finish_story 로 끝난다
 
 
 class LiveSessionLoop:
@@ -163,6 +186,7 @@ class LiveSessionLoop:
         live_sample_rate: int = BRIDGE_SAMPLE_RATE,
         wait_for_playback_complete: bool = False,
         song_catalog: Mapping[str, Song] | None = None,
+        story_selector: StorySelector | None = None,
         audio_input: AudioInput | None = None,
     ) -> None:
         """
@@ -179,6 +203,7 @@ class LiveSessionLoop:
             executor: 툴 핸들러를 돌릴 executor. None 이면 프레임 루프에서 인라인 실행(테스트용).
             input_sample_rate / live_sample_rate: 마이크 레이트와 세션 레이트. 다르면 선형 보간으로 리샘플.
             song_catalog: 재생 가능한 노래 (키 → Song). None/빈 dict 면 play_song 은 unknown 으로 답한다.
+            story_selector: 이야기 검색·시작. None 이면 start_story 는 unavailable 로 답한다.
             audio_input: 있으면 노래 재생 중 원본 마이크 채널로 바꾼다 (:meth:`AudioInput.set_raw_capture`).
         """
         self._live = live
@@ -197,6 +222,9 @@ class LiveSessionLoop:
         self._live_rate = live_sample_rate
         self._wait_for_playback_complete = wait_for_playback_complete
         self._song_catalog: Mapping[str, Song] = dict(song_catalog or {})
+        self._story_selector = story_selector
+        self._story_state = StoryState.NONE
+        self._story: Story | None = None
         self._audio_input = audio_input
         self._song_state = SongState.NONE
         self._song: Song | None = None
@@ -545,6 +573,10 @@ class LiveSessionLoop:
             return _completed(json.dumps({"error": "a song is playing; only stop_song is available"}))
         if call.name == PLAY_SONG_TOOL:
             return self._request_song(call)  # 루프 내장. 노래가 시작된 뒤 완료되는 Future
+        if call.name == START_STORY_TOOL:
+            return self._start_story(call)
+        if call.name == FINISH_STORY_TOOL:
+            return self._finish_story()
         handler = self._tool_handlers.get(call.name)
         if handler is None:
             logger.warning("Backend requested unknown tool %s", call.name)
@@ -655,6 +687,11 @@ class LiveSessionLoop:
         self._song_future = Future()
         self._song_state = SongState.PENDING
         self._song_requested_time = time.monotonic()
+        if self._story_state is StoryState.TELLING:
+            # 이야기의 끝. 노래 지시가 이야기 지시를 대신하고, 노래 끝의 복원이 기본 백엔드로 돌린다
+            logger.info("Story %s reached its song", self._story.key if self._story else "?")
+            self._story_state = StoryState.NONE
+            self._story = None
         try:
             self._live.update_backend(SONG_BACKEND_INSTRUCTIONS, (STOP_SONG_TOOL_DEF,))
         except Exception:
@@ -700,7 +737,58 @@ class LiveSessionLoop:
         try:
             self._live.restore_backend()
         except Exception:
-            logger.warning("backend restore after song failed", exc_info=True)
+            logger.warning("backend restore failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Story
+    # ------------------------------------------------------------------
+
+    def _start_story(self, call: LiveFunctionCall) -> Future[str]:
+        """start_story 요청. 직전 검색 결과의 id 면 백엔드를 이야기용으로 교체하고 바로 결과를 돌려준다."""
+        try:
+            key = str(json.loads(call.arguments or "{}").get("story", ""))
+        except json.JSONDecodeError:
+            key = ""
+        if self._story_selector is None:
+            return _completed(json.dumps({"error": "stories are unavailable"}))
+        if self._story_state is StoryState.TELLING:
+            return _completed(json.dumps({"error": "a story is already being told; finish it first"}))
+        story = self._story_selector.begin(key)
+        if story is None:
+            return _completed(json.dumps({"error": f"unknown story {key!r}; call {SEARCH_STORIES_TOOL} first"}))
+        song = self._song_catalog.get(story.song)
+        if song is None:
+            return _completed(json.dumps({"error": f"song {story.song!r} for story {key!r} is not playable"}))
+        self._story = story
+        self._story_state = StoryState.TELLING
+        label = f"{song.title} — {song.artist}" if song.artist else song.title
+        tools = tuple(t for t in self._live.tools if t["name"] != START_STORY_TOOL)
+        try:
+            # 결과 제출보다 먼저 보내야 이어지는 응답(단락 1)을 이야기용 백엔드가 만든다
+            self._live.update_backend(
+                build_story_backend_instructions(story.body, song.key, label),
+                ({"type": "web_search"}, *tools, FINISH_STORY_TOOL_DEF),
+            )
+            self._live.append_instructions(STORY_MODE_INSTRUCTIONS)
+        except Exception:
+            logger.warning("backend update for story failed", exc_info=True)
+        logger.info("Story started: %s (song %s)", story.key, song.key)
+        return _completed(json.dumps({"status": "started", "story": story.key, "song": song.key, "title": label}))
+
+    def _finish_story(self) -> Future[str]:
+        """finish_story 요청. 이야기 중이면 즉시 기본 백엔드로 돌아간다."""
+        if self._story_state is not StoryState.TELLING:
+            return _completed(json.dumps({"status": "not_telling"}))
+        key = self._story.key if self._story else "?"
+        self._story_state = StoryState.NONE
+        self._story = None
+        self._restore_backend()
+        try:
+            self._live.append_instructions(STORY_ENDED_INSTRUCTIONS)
+        except Exception:
+            logger.warning("append after story failed", exc_info=True)
+        logger.info("Story finished early: %s", key)
+        return _completed(json.dumps({"status": "finished", "story": key}))
 
     def _drain_for_song(self) -> None:
         """라이브 스트림을 닫고 playback_complete 를 기다린다."""

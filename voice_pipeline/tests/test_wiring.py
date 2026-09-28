@@ -246,3 +246,33 @@ class TestCreateSessionLiveEngine:
         device_tools = {"adjust_volume", "set_brightness", "get_device_settings"}
         assert {t["name"] for t in config.tools} == {"end_conversation", *device_tools}
         assert set(loop_cls.call_args.kwargs["tool_handlers"]) == device_tools
+
+
+class TestLiveStoryWiring:
+    def test_story_tools_and_handler_are_wired_when_selector_present(self, monkeypatch):
+        live_cls = MagicMock(name="GPTLiveSession")
+        monkeypatch.setattr(wiring, "GPTLiveSession", live_cls)
+        loop_cls = MagicMock(name="LiveSessionLoop")
+        monkeypatch.setattr(wiring, "LiveSessionLoop", loop_cls)
+        monkeypatch.setattr(wiring, "ConversationHistory", MagicMock())
+        comps = _make_components(engine="live")
+        comps.story_selector = MagicMock()
+
+        comps.create_session(memory_enabled=False)
+
+        config = live_cls.call_args.args[0]
+        assert [t["name"] for t in config.tools] == ["end_conversation", "search_stories", "start_story"]
+        kwargs = loop_cls.call_args.kwargs
+        assert set(kwargs["tool_handlers"]) == {"search_stories"}
+        assert kwargs["story_selector"] is comps.story_selector
+
+    def test_no_story_tools_without_selector(self, monkeypatch):
+        live_cls = MagicMock(name="GPTLiveSession")
+        monkeypatch.setattr(wiring, "GPTLiveSession", live_cls)
+        monkeypatch.setattr(wiring, "LiveSessionLoop", MagicMock())
+        monkeypatch.setattr(wiring, "ConversationHistory", MagicMock())
+        comps = _make_components(engine="live")
+
+        comps.create_session(memory_enabled=False)
+
+        assert [t["name"] for t in live_cls.call_args.args[0].tools] == ["end_conversation"]

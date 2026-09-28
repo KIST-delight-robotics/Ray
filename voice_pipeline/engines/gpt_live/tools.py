@@ -11,6 +11,9 @@
   → :func:`make_device_settings_handlers` (상태·저장은 :mod:`voice_pipeline.device_settings`).
 - ``play_song``: 노래 재생 → :func:`make_play_song_tool_def`. ``stop_song`` 은 재생 중에만 백엔드에 주어지는 툴
   (:data:`STOP_SONG_TOOL_DEF`, 루프가 백엔드를 교체할 때 사용). 둘 다 핸들러는 루프 내장.
+- ``search_stories``: 이야기 후보 검색 → :func:`make_story_search_handler`. ``start_story`` 는 루프 내장(백엔드를
+  이야기용으로 교체), ``finish_story`` 는 이야기 중에만 주어지는 루프 내장 툴. 후보·기록은
+  :mod:`voice_pipeline.engines.gpt_live.stories`.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from voice_pipeline.device_settings import (
     DeviceSettings,
 )
 from voice_pipeline.engines.gpt_live.songs import Song, format_song_list
+from voice_pipeline.engines.gpt_live.stories import StorySelector
 from voice_pipeline.memory.retriever import MemoryRetriever
 
 ToolHandler = Callable[[str], str]  # arguments(JSON 문자열) → output(JSON 문자열)
@@ -141,8 +145,13 @@ DEFAULT_TOOLS: tuple[dict[str, Any], ...] = (END_CONVERSATION_TOOL_DEF, SEARCH_M
 
 PLAY_SONG_TOOL = "play_song"
 STOP_SONG_TOOL = "stop_song"
+SEARCH_STORIES_TOOL = "search_stories"
+START_STORY_TOOL = "start_story"
+FINISH_STORY_TOOL = "finish_story"
 # 핸들러 없이 루프가 직접 처리하는 툴 — wiring 은 이 이름들을 핸들러 유무와 무관하게 노출한다
-LOOP_TOOLS: frozenset[str] = frozenset({END_CONVERSATION_TOOL, PLAY_SONG_TOOL, STOP_SONG_TOOL})
+LOOP_TOOLS: frozenset[str] = frozenset(
+    {END_CONVERSATION_TOOL, PLAY_SONG_TOOL, STOP_SONG_TOOL, START_STORY_TOOL, FINISH_STORY_TOOL}
+)
 
 STOP_SONG_TOOL_DEF: dict[str, Any] = {
     "type": "function",
@@ -151,6 +160,63 @@ STOP_SONG_TOOL_DEF: dict[str, Any] = {
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
     "strict": True,
 }
+
+
+SEARCH_STORIES_TOOL_DEF: dict[str, Any] = {
+    "type": "function",
+    "name": SEARCH_STORIES_TOOL,
+    "description": (
+        "Find stories Ray can tell. Each story is a few minutes long and ends with a song. "
+        "Returns up to a few candidates with a summary, tags and the song. Stories told before are left out. "
+        "Pass what the user asked for as the query (a topic, mood, or song name); pass an empty string when "
+        "the user did not ask for anything specific."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "What the user wants, or an empty string."}},
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+START_STORY_TOOL_DEF: dict[str, Any] = {
+    "type": "function",
+    "name": START_STORY_TOOL,
+    "description": (
+        "Start telling a story. Only an id returned by the latest search_stories call is accepted. "
+        "Ray then tells the story part by part and plays its song at the end."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {"story": {"type": "string", "description": "Story id from search_stories."}},
+        "required": ["story"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+FINISH_STORY_TOOL_DEF: dict[str, Any] = {
+    "type": "function",
+    "name": FINISH_STORY_TOOL,
+    "description": "Stop the current story without playing its song, when the user wants to quit it.",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    "strict": True,
+}
+
+
+def make_story_search_handler(selector: StorySelector) -> ToolHandler:
+    """``search_stories`` 툴 핸들러. ``{"stories": [{"id", "summary", "tags", "song"}, …]}`` JSON 을 돌려준다."""
+
+    def handler(arguments: str) -> str:
+        try:
+            query = str(json.loads(arguments or "{}").get("query", ""))
+        except json.JSONDecodeError:
+            query = ""
+        found = selector.search(query)
+        return json.dumps({"stories": [s.describe() for s in found]}, ensure_ascii=False)
+
+    return handler
 
 
 def make_play_song_tool_def(catalog: Mapping[str, Song]) -> dict[str, Any] | None:

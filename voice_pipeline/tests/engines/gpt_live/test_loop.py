@@ -27,13 +27,18 @@ from voice_pipeline.engines.gpt_live.instructions import (
     SONG_BACKEND_INSTRUCTIONS,
     SONG_ENDED_INSTRUCTIONS,
     SONG_PLAYING_INSTRUCTIONS,
+    STORY_ENDED_INSTRUCTIONS,
+    STORY_MODE_INSTRUCTIONS,
 )
-from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop, Phase, SongState
+from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop, Phase, SongState, StoryState
 from voice_pipeline.engines.gpt_live.songs import Song
+from voice_pipeline.engines.gpt_live.stories import Story, StorySelector
 from voice_pipeline.engines.gpt_live.tools import (
     END_CONVERSATION_TOOL,
+    FINISH_STORY_TOOL,
     PLAY_SONG_TOOL,
     SEARCH_MEMORY_TOOL,
+    START_STORY_TOOL,
     STOP_SONG_TOOL,
 )
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE, SAMPLE_RATE
@@ -55,6 +60,7 @@ def _make_loop(
     wait_for_playback: bool = False,
     executor: ThreadPoolExecutor | None = None,
     song_catalog: dict[str, Song] | None = None,
+    story_selector: StorySelector | None = None,
 ) -> tuple[LiveSessionLoop, dict[str, MagicMock], queue.Queue]:
     """Live 세션·브리지·히스토리를 모킹한 루프. ``live_events`` 는 poll_event 가 순서대로 돌려준다."""
     monkeypatch.setattr(LiveSessionLoop, "_FRAME_TIMEOUT_SEC", 0.005)
@@ -67,6 +73,7 @@ def _make_loop(
     monkeypatch.setattr(LiveSessionLoop, "_AUDIO_STARVATION_TIMEOUT_SEC", 30.0)
 
     live = MagicMock(spec=GPTLiveSession)
+    live.tools = ({"type": "function", "name": "end_conversation"}, {"type": "function", "name": "start_story"})
     live.start.return_value = LiveStarted(session_id="live_x", expires_at=time.time() + 7200)
     pending = list(live_events or [])
     live.poll_event.side_effect = lambda: pending.pop(0) if pending else None
@@ -95,6 +102,7 @@ def _make_loop(
         executor=executor,
         wait_for_playback_complete=wait_for_playback,
         song_catalog=song_catalog,
+        story_selector=story_selector,
         audio_input=audio_input,
     )
     mocks = {"live": live, "bridge": bridge, "history": history, "led": led, "memory": memory}
@@ -785,3 +793,139 @@ class TestSongPlayback:
         assert not loop._inflight
         m["bridge"].send_play_audio_csv.assert_not_called()
         m["live"].submit_function_output.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 이야기 (start_story / finish_story)
+# ---------------------------------------------------------------------------
+
+STORY = Story(
+    key="IAM", song="IAM", summary="디오게네스", tags=("철학",), body="## 단락 1 — 훅\n첫 문장.", song_title="I AM"
+)
+
+
+def _selector(story: Story | None = STORY) -> MagicMock:
+    sel = MagicMock(spec=StorySelector)
+    sel.begin.return_value = story
+    return sel
+
+
+class TestStory:
+    def test_start_swaps_backend_appends_mode_and_returns_started(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        events = [_call(START_STORY_TOOL, {"story": "IAM"}), LiveResponseDone(None), LiveClosed("x")]
+        sel = _selector()
+        loop, m, _ = _make_loop(monkeypatch, live_events=events, song_catalog=SONGS, story_selector=sel)
+        order = MagicMock()
+        order.attach_mock(m["live"], "live")
+        loop.run()
+        live = m["live"]
+        sel.begin.assert_called_once_with("IAM")
+        out = json.loads(live.submit_function_output.call_args.args[1])
+        assert out == {"status": "started", "story": "IAM", "song": "IAM", "title": "I AM — IVE"}
+        instructions, tools = live.update_backend.call_args.args
+        assert "## 단락 1 — 훅" in instructions and 'song id "IAM"' in instructions
+        names = [t.get("name", t["type"]) for t in tools]
+        assert names == ["web_search", "end_conversation", "finish_story"]  # start_story 는 빠지고 finish 가 붙는다
+        assert [c.args[0] for c in live.append_instructions.call_args_list] == [STORY_MODE_INSTRUCTIONS]
+        seq = [c[0] for c in order.mock_calls]
+        assert seq.index("live.update_backend") < seq.index("live.submit_function_output")
+        live.continue_response.assert_called_once()
+        live.restore_backend.assert_not_called()  # 세션이 닫힐 때까지 이야기 중
+
+    def test_unknown_story_is_an_error_without_side_effects(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        events = [_call(START_STORY_TOOL, {"story": "Nope"}), LiveResponseDone(None), LiveClosed("x")]
+        loop, m, _ = _make_loop(monkeypatch, live_events=events, song_catalog=SONGS, story_selector=_selector(None))
+        loop.run()
+        out = json.loads(m["live"].submit_function_output.call_args.args[1])
+        assert "unknown story" in out["error"] and "search_stories" in out["error"]
+        m["live"].update_backend.assert_not_called()
+        m["live"].append_instructions.assert_not_called()
+
+    def test_start_without_selector_is_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        events = [_call(START_STORY_TOOL, {"story": "IAM"}), LiveResponseDone(None), LiveClosed("x")]
+        loop, m, _ = _make_loop(monkeypatch, live_events=events, song_catalog=SONGS)
+        loop.run()
+        assert "unavailable" in json.loads(m["live"].submit_function_output.call_args.args[1])["error"]
+
+    def test_story_whose_song_is_unplayable_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        events = [_call(START_STORY_TOOL, {"story": "IAM"}), LiveResponseDone(None), LiveClosed("x")]
+        loop, m, _ = _make_loop(monkeypatch, live_events=events, song_catalog={}, story_selector=_selector())
+        loop.run()
+        assert "not playable" in json.loads(m["live"].submit_function_output.call_args.args[1])["error"]
+        m["live"].update_backend.assert_not_called()
+
+    def test_finish_restores_backend_and_appends_ended(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        events = [
+            _call(START_STORY_TOOL, {"story": "IAM"}),
+            LiveResponseDone(None),
+            _call(FINISH_STORY_TOOL, call_id="c2"),
+            LiveResponseDone(None),
+            LiveClosed("x"),
+        ]
+        loop, m, _ = _make_loop(monkeypatch, live_events=events, song_catalog=SONGS, story_selector=_selector())
+        order = MagicMock()
+        order.attach_mock(m["live"], "live")
+        loop.run()
+        live = m["live"]
+        outputs = {c.args[0]: json.loads(c.args[1]) for c in live.submit_function_output.call_args_list}
+        assert outputs["c2"] == {"status": "finished", "story": "IAM"}
+        live.restore_backend.assert_called_once()
+        seq = [c[0] for c in order.mock_calls]
+        submits = [i for i, n in enumerate(seq) if n == "live.submit_function_output"]
+        assert seq.index("live.restore_backend") < submits[1]  # 복원 뒤에 결과 제출 → 후속 응답은 기본 백엔드
+        appended = [c.args[0] for c in live.append_instructions.call_args_list]
+        assert appended == [STORY_MODE_INSTRUCTIONS, STORY_ENDED_INSTRUCTIONS]
+        assert loop._story_state is StoryState.NONE
+
+    def test_finish_when_not_telling_is_a_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        events = [_call(FINISH_STORY_TOOL), LiveResponseDone(None), LiveClosed("x")]
+        loop, m, _ = _make_loop(monkeypatch, live_events=events, song_catalog=SONGS, story_selector=_selector())
+        loop.run()
+        assert json.loads(m["live"].submit_function_output.call_args.args[1]) == {"status": "not_telling"}
+        m["live"].restore_backend.assert_not_called()
+
+    def test_second_start_while_telling_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        events = [
+            _call(START_STORY_TOOL, {"story": "IAM"}),
+            LiveResponseDone(None),
+            _call(START_STORY_TOOL, {"story": "IAM"}, call_id="c2"),
+            LiveResponseDone(None),
+            LiveClosed("x"),
+        ]
+        sel = _selector()
+        loop, m, _ = _make_loop(monkeypatch, live_events=events, song_catalog=SONGS, story_selector=sel)
+        loop.run()
+        outputs = {c.args[0]: json.loads(c.args[1]) for c in m["live"].submit_function_output.call_args_list}
+        assert "already being told" in outputs["c2"]["error"]
+        sel.begin.assert_called_once()  # 두 번째는 검증 전에 거부 — 기록되지 않는다
+
+    def test_song_at_the_end_takes_over_and_song_end_restores_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, story_selector=_selector())
+        _wire_bridge_completion(m["bridge"])
+        telling = lambda: loop._story_state is StoryState.TELLING  # noqa: E731
+        playing = lambda: loop._song_state is SongState.PLAYING  # noqa: E731
+        # 정지 결과까지 제출된 뒤(이어가기 3회: 시작·재생·정지) 세션을 닫는다
+        reopened = lambda: loop._song_state is SongState.NONE and m["live"].continue_response.call_count == 3  # noqa: E731
+        _staged_live_events(
+            loop,
+            m,
+            [
+                (None, _call(START_STORY_TOOL, {"story": "IAM"})),
+                (None, LiveResponseDone(None)),
+                (telling, _call(PLAY_SONG_TOOL, {"song": "IAM"}, call_id="c2")),
+                (telling, LiveResponseDone(None)),
+                (None, LiveAudio(SILENCE_100MS)),
+                (playing, _call(STOP_SONG_TOOL, call_id="c3")),
+                (playing, LiveResponseDone(None)),
+                (reopened, LiveClosed("x")),
+            ],
+        )
+        loop.run()
+        live = m["live"]
+        assert loop._story_state is StoryState.NONE and loop._story is None
+        # 백엔드 교체 두 번(이야기용 → 노래용), 복원은 노래 끝에 한 번
+        assert [c.args[0][:6] for c in live.update_backend.call_args_list] == ["## Rol", SONG_BACKEND_INSTRUCTIONS[:6]]
+        live.restore_backend.assert_called_once()
+        appended = [c.args[0] for c in live.append_instructions.call_args_list]
+        assert appended == [STORY_MODE_INSTRUCTIONS, SONG_PLAYING_INSTRUCTIONS, SONG_ENDED_INSTRUCTIONS]
+        m["bridge"].send_play_audio_csv.assert_called_once_with("IAM")

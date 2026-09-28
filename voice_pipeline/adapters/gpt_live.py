@@ -312,6 +312,11 @@ class GPTLiveSession:
         self._guard()
         self._send(lambda c: c.session.commentary.append(content=content, delegation_id=None))
 
+    @property
+    def tools(self) -> tuple[dict[str, Any], ...]:
+        """세션 시작 설정의 function 툴 (web_search 제외). 루프가 백엔드를 교체할 때 기본 툴을 이어받는 데 쓴다."""
+        return self._config.tools
+
     def update_backend(self, instructions: str, tools: tuple[dict[str, Any], ...]) -> None:
         """responses 백엔드의 지시문·툴을 바꾼다 (이후 위임부터 적용). 세션 중 바꿀 수 있는 유일한 설정."""
         self._guard()

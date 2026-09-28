@@ -5,7 +5,9 @@ from __future__ import annotations
 from voice_pipeline.engines.gpt_live.instructions import (
     DEFAULT_BACKEND_INSTRUCTIONS,
     SONG_BACKEND_INSTRUCTIONS,
+    STORY_MODE_INSTRUCTIONS,
     build_live_instructions,
+    build_story_backend_instructions,
 )
 
 
@@ -41,3 +43,25 @@ class TestBackendInstructions:
         assert text.index("## Task instructions") < text.index("play_song") < text.index("## Return the result")
         assert "stop_song" not in text  # 정지는 재생 중 교체되는 백엔드(SONG_BACKEND_INSTRUCTIONS)만 안다
         assert "stop_song" in SONG_BACKEND_INSTRUCTIONS
+
+
+class TestStoryInstructions:
+    def test_story_delegation_lines_sit_inside_the_policy_lists(self) -> None:
+        text = build_live_instructions()
+        tools_block = text[text.index("Backend tools:") : text.index("Delegate to the backend when:")]
+        when_block = text[text.index("Delegate to the backend when:") : text.index("Do not delegate")]
+        assert "- Stories:" in tools_block
+        assert "tell a story" in when_block
+
+    def test_default_backend_orders_search_before_start(self) -> None:
+        task = DEFAULT_BACKEND_INSTRUCTIONS[DEFAULT_BACKEND_INSTRUCTIONS.index("## Task instructions") :]
+        assert task.index("search_stories") < task.index("start_story")
+
+    def test_story_backend_embeds_script_and_song(self) -> None:
+        text = build_story_backend_instructions("## 단락 1 — 훅\n첫 문장.\n", "snowman", "눈사람 — 정승환")
+        assert text.index("## Script") < text.index("## 단락 1 — 훅") < text.index("## Task instructions")
+        assert 'play_song with song id "snowman" (눈사람 — 정승환)' in text
+        assert "finish_story" in text
+
+    def test_story_mode_append_stays_short(self) -> None:
+        assert len(STORY_MODE_INSTRUCTIONS) < 1500  # append 한도 500 토큰 안에 들도록
