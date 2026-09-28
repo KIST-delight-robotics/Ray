@@ -99,6 +99,14 @@ def test_gain_respects_peak_ceiling():
     assert float(np.abs(samples * gain).max()) <= PEAK_CEILING + 1e-6
 
 
+def test_explicit_target_overrides_default():
+    """노래는 통계는 말소리와 같고 목표만 다르다 (scripts/normalize_song_audio.py)."""
+    samples = _tone(0.6)
+
+    assert gain_for(samples, SAMPLE_RATE, speech=True, target=0.18) == pytest.approx(0.3, rel=0.05)
+    assert gain_for(samples, SAMPLE_RATE, speech=True) == pytest.approx(SPEECH_TARGET_PEAK / 0.6, rel=0.05)
+
+
 def test_gain_of_silence_is_unity():
     assert gain_for(np.zeros(SAMPLE_RATE, dtype=np.float32), SAMPLE_RATE, speech=True) == 1.0
 

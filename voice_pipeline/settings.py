@@ -40,6 +40,8 @@ DEVICE_SETTINGS_PATH = f"{VAR_DIR}/device_settings.json"  # 사용자가 말로 
 # 와 같은 척도라 [mouth] gain 로그로 실기 검증이 된다. 실측: GPT-Live 중앙값 0.12 / p90 0.27.
 SPEECH_TARGET_PEAK = 0.12  # 말소리 파일(인사·작별)의 목표 중앙값 = GPT-Live 실측값
 CHIME_TARGET_PEAK = 0.15  # 알림음의 목표 p90. 말소리 p90 보다 5 dB 아래 — 알림음은 의미가 없어 같으면 시끄럽다
+MUSIC_TARGET_PEAK = 0.18  # 노래의 목표 중앙값. 말소리보다 3.5 dB 위 — 재생 중엔 노래가 주인공이다.
+# 노래는 런타임이 아니라 scripts/normalize_song_audio.py 가 WAV 자체에 적용한다 (모션 CSV 생성 뒤에).
 
 ASSETS_DIR = "assets"  # 저장소에 실려 프로그램이 읽는 파일 (오디오, 모션 CSV). 추적 대상
 SONG_CATALOG_PATH = f"{ASSETS_DIR}/songs.json"  # 노래 카탈로그. 키 = 음원·모션 CSV 파일 stem (gpt_live/songs.py)

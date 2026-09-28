@@ -76,13 +76,15 @@ def measure(samples: np.ndarray, sample_rate: int, *, speech: bool) -> float:
     return float(np.median(peaks) if speech else np.percentile(peaks, 90))
 
 
-def gain_for(samples: np.ndarray, sample_rate: int, *, speech: bool) -> float:
+def gain_for(samples: np.ndarray, sample_rate: int, *, speech: bool, target: float | None = None) -> float:
     """목표 레벨에 맞추는 배율을 구한다. ``GAIN_MAX`` 와 ``PEAK_CEILING`` 양쪽으로 제한된다.
 
     Args:
         samples: mono float 샘플 (-1.0~1.0).
         sample_rate: 샘플레이트 (Hz).
         speech: 말소리면 True, 알림음·효과음이면 False.
+        target: 목표 레벨. None 이면 ``speech`` 에 맞는 기본값. 노래처럼 통계는 말소리와 같고
+            목표만 다른 경우에 쓴다 (``scripts/normalize_song_audio.py``).
 
     Returns:
         곱할 배율. 측정 불가(무음)면 1.0.
@@ -90,7 +92,8 @@ def gain_for(samples: np.ndarray, sample_rate: int, *, speech: bool) -> float:
     level = measure(samples, sample_rate, speech=speech)
     if level <= 0.0:
         return 1.0
-    target = SPEECH_TARGET_PEAK if speech else CHIME_TARGET_PEAK
+    if target is None:
+        target = SPEECH_TARGET_PEAK if speech else CHIME_TARGET_PEAK
     gain = min(target / level, GAIN_MAX)
     absolute_peak = float(np.abs(samples).max())
     if absolute_peak > 0.0:
