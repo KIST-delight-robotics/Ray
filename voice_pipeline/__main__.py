@@ -38,6 +38,7 @@ from voice_pipeline.adapters.led import LEDState
 from voice_pipeline.adapters.llm_openai import OpenAILLM
 from voice_pipeline.adapters.tts_openai import OpenAITTS
 from voice_pipeline.adapters.wakeword import WakewordDetector
+from voice_pipeline.audio_level import ensure_normalized
 from voice_pipeline.engines.gpt_live.instructions import LIVE_GREETING_TEXT, LIVE_GREETING_TTS_MODEL, LIVE_VOICE
 from voice_pipeline.greeting_audio import ensure_greeting_audio
 from voice_pipeline.memory.writer import MemoryWriter
@@ -166,12 +167,18 @@ def _play_ready_chime() -> None:
 
     부팅 사운드의 의미를 "전원 들어옴"이 아니라 "말 걸어도 됨"으로 통일한다
     (구 boot-chime.service는 PipeWire 기동 직후 울려 캘리브레이션 중 뜬금없었음).
+    크기는 :mod:`~voice_pipeline.audio_level` 이 대화 음성 기준으로 맞춘 사본으로 재생한다 —
+    ``pw-play --volume`` 을 안 쓰는 이유는 인사 WAV(C++ 경로)와 같은 장치를 쓰기 위해서다.
     best-effort: 파일이 없거나 재생 실패해도 파이프라인 기동은 계속한다.
     """
     path = Path(READY_CHIME_PATH)
     if not path.exists():
         logger.warning("Ready chime not found: %s", path)
         return
+    try:
+        path = ensure_normalized(path, speech=False)
+    except Exception:
+        logger.warning("Chime level normalization failed, playing as is", exc_info=True)
     try:
         subprocess.Popen(
             ["pw-play", str(path)],

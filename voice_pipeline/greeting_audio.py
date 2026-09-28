@@ -2,7 +2,9 @@
 
 Ensures that greeting and farewell audio match the configured TTS voice.
 Files are named with a voice_id+text hash to auto-invalidate when any
-voice-affecting setting or text changes.
+voice-affecting setting or text changes. Returned paths are level-normalized
+copies (see :mod:`~voice_pipeline.audio_level`) so that TTS 벤더가 바뀌어도
+재생 크기는 GPT-Live 말소리에 맞는다.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 
+from voice_pipeline.audio_level import ensure_normalized
 from voice_pipeline.settings import VAR_DIR
 from voice_pipeline.types import ITTS
 
@@ -119,4 +122,16 @@ def ensure_greeting_audio(
                 )
                 paths[label] = fallback
 
-    return GreetingAudioPaths(greeting=paths["greeting"], farewell=paths["farewell"])
+    return GreetingAudioPaths(
+        greeting=_leveled(paths["greeting"]),
+        farewell=_leveled(paths["farewell"]),
+    )
+
+
+def _leveled(path: str) -> str:
+    """출력 레벨을 맞춘 사본 경로. 실패하면 원본 그대로 — 소리가 큰 게 안 나오는 것보다 낫다."""
+    try:
+        return str(ensure_normalized(path, speech=True))
+    except Exception:
+        logger.warning("Level normalization failed, playing as is: %s", path, exc_info=True)
+        return path

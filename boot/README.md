@@ -66,6 +66,8 @@ systemctl --user enable ray-cpp.service ray-python.service
 ## 소리 (준비 완료 차임)
 
 - 재생 시점: ray-python이 웨이크워드 대기에 진입하는 순간 1회 (`_play_ready_chime()`).
-- 교체: `boot/sounds/ready.oga`를 바꾸면 됨 (pw-play가 읽을 수 있는 포맷 — wav/ogg/oga 등).
+- 교체: `boot/sounds/ready.oga`를 바꾸면 됨 (libsndfile이 읽는 포맷 — wav/ogg/oga/flac 등).
+- 크기: 파일을 뭘 넣든 `voice_pipeline/audio_level.py`가 대화 음성 기준으로 맞춰 재생한다
+  (`var/audio/normalized/`에 사본 생성, 원본은 그대로). 목표값은 `settings.CHIME_TARGET_PEAK`.
 - 과거의 `boot-chime.service`(PipeWire 기동 직후 재생, 기기 로컬 유닛)는 폐기됨 —
   캘리브레이션 도중에 뜬금없이 울리는 문제로 재생 주체를 파이프라인으로 이동.

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from voice_pipeline import audio_level as audio_level_module
 from voice_pipeline import greeting_audio as greeting_audio_module
 from voice_pipeline.greeting_audio import (
     _cache_key,
@@ -24,6 +25,22 @@ from voice_pipeline.types import TTSStream
 SAMPLE_RATE = 24000
 # 100 samples of silence (16-bit mono)
 PCM_SILENCE = struct.pack(f"<{100}h", *([0] * 100))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_level_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """정규화 사본이 실제 var/ 로 새지 않게 한다 — 반환 경로는 전부 이 폴더 아래다."""
+    monkeypatch.setattr(audio_level_module, "_CACHE_DIR", str(tmp_path / "normalized"))
+
+
+def _write_wav(path: Path) -> str:
+    """폴백 자산 대역 — 정규화가 읽을 수 있는 실제 WAV."""
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(struct.pack(f"<{SAMPLE_RATE}h", *([8000, -8000] * (SAMPLE_RATE // 2))))
+    return str(path)
 
 
 def _make_tts_mock(
@@ -158,10 +175,13 @@ class TestEnsureGreetingAudio:
 
         paths = ensure_greeting_audio(tts)
 
+        # 반환되는 건 레벨을 맞춘 사본이고, 이름에 원본 캐시 키가 남아 출처를 알 수 있다
         g_key = _cache_key(tts, greeting_audio_module._GREETING_TEXT)
         f_key = _cache_key(tts, greeting_audio_module._FAREWELL_TEXT)
-        assert paths.greeting == str(tmp_path / f"greeting_{g_key}.wav")
-        assert paths.farewell == str(tmp_path / f"farewell_{f_key}.wav")
+        assert Path(paths.greeting).parent == tmp_path / "normalized"
+        assert Path(paths.greeting).stem.startswith(f"greeting_{g_key}")
+        assert Path(paths.farewell).stem.startswith(f"farewell_{f_key}")
+        assert (tmp_path / f"greeting_{g_key}.wav").exists()  # 원본도 남는다
 
     def test_voice_change_triggers_regeneration(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
@@ -203,11 +223,18 @@ class TestEnsureGreetingAudio:
         tts.output_sample_rate = SAMPLE_RATE
         tts.synthesize.side_effect = RuntimeError("API down")
         monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            greeting_audio_module, "_FALLBACK_GREETING_PATH", _write_wav(tmp_path / "fallback_greeting.wav")
+        )
+        monkeypatch.setattr(
+            greeting_audio_module, "_FALLBACK_FAREWELL_PATH", _write_wav(tmp_path / "fallback_farewell.wav")
+        )
 
         paths = ensure_greeting_audio(tts)
 
-        assert paths.greeting == greeting_audio_module._FALLBACK_GREETING_PATH
-        assert paths.farewell == greeting_audio_module._FALLBACK_FAREWELL_PATH
+        # 폴백 자산도 레벨을 맞춘 사본으로 나간다 (자산 파일 자체는 그대로)
+        assert Path(paths.greeting).stem.startswith("fallback_greeting")
+        assert Path(paths.farewell).stem.startswith("fallback_farewell")
 
     def test_partial_failure_falls_back_individually(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Greeting succeeds, farewell fails → only farewell uses fallback."""
@@ -225,12 +252,15 @@ class TestEnsureGreetingAudio:
         tts.output_sample_rate = SAMPLE_RATE
         tts.synthesize.side_effect = _fail_on_second
         monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            greeting_audio_module, "_FALLBACK_FAREWELL_PATH", _write_wav(tmp_path / "fallback_farewell.wav")
+        )
 
         paths = ensure_greeting_audio(tts)
 
         assert Path(paths.greeting).exists()
-        assert paths.greeting != greeting_audio_module._FALLBACK_GREETING_PATH
-        assert paths.farewell == greeting_audio_module._FALLBACK_FAREWELL_PATH
+        assert Path(paths.greeting).stem.startswith("greeting_")
+        assert Path(paths.farewell).stem.startswith("fallback_farewell")
 
 
 class TestTextOverride:
@@ -240,5 +270,5 @@ class TestTextOverride:
         default_paths = ensure_greeting_audio(tts)
         korean_paths = ensure_greeting_audio(tts, greeting_text="네, 부르셨어요?")
         assert korean_paths.greeting != default_paths.greeting
-        assert korean_paths.greeting.endswith(f"greeting_{_cache_key(tts, '네, 부르셨어요?')}.wav")
+        assert Path(korean_paths.greeting).stem.startswith(f"greeting_{_cache_key(tts, '네, 부르셨어요?')}")
         assert korean_paths.farewell == default_paths.farewell  # 작별은 기본 문구 그대로

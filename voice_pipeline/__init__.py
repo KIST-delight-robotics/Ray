@@ -23,6 +23,7 @@
   memory/             장기 기억 — 에피소드·프로필 추출/검색. 선택 가능한 서브시스템
   device_settings.py  볼륨·밝기 단계 — 상태·저장·시작 시 재적용 (바꾸는 입구는 gpt_live/tools.py)
   greeting_audio.py   인사/작별 오디오 사전 생성
+  audio_level.py      재생 파일 출력 레벨 정규화 — 차임·인사 WAV 를 GPT-Live 말소리 크기에 맞춘다
   trace.py            실행 기록 (관측용, 동작에 영향 없음)
 
 참조용 — 선형으로 읽지 않음:
