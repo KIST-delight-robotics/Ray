@@ -172,7 +172,10 @@ def _control_server():
             continue
         except OSError:
             break
-        _serve_client(conn)
+        try:
+            _serve_client(conn)
+        except Exception as exc:            # one bad client must never take the accept loop down
+            print(f"arbiter: client error ({exc!r}) — continuing", flush=True)
 
     try:
         srv.close()
@@ -192,6 +195,8 @@ def _serve_client(conn):
                 data = conn.recv(64)
             except socket.timeout:
                 continue
+            except OSError:
+                break                       # reset by peer (RAY closed with our reply unread) — treat as disconnect
             if not data:
                 break                       # socket closed / RAY crashed
             buf += data

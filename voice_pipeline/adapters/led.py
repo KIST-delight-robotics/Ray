@@ -236,6 +236,10 @@ class OSLedArbiterClient:
             return
         with contextlib.suppress(OSError):
             self._conn.sendall(b"RELEASE\n")
+            # 데몬의 OK 를 읽고 나서 닫는다 — 읽지 않은 데이터가 남은 채 close 하면 커널이 FIN 대신 RST 를
+            # 보내 데몬 쪽 recv 가 ConnectionResetError 로 죽는다 (2026-09-23 arbiter 스레드 사망 원인).
+            self._conn.settimeout(_CONNECT_TIMEOUT_S)
+            self._conn.recv(32)
         with contextlib.suppress(OSError):
             self._conn.close()
         self._conn = None
