@@ -137,6 +137,7 @@ class TestConfig:
         cfg = LiveSessionConfig(instructions="x", backend_model="m", tools=(tool,)).to_session_dict()
         tools = cfg["delegation"]["responses"]["tools"]
         assert tools[0] == {"type": "web_search"} and tools[1] == tool
+        assert cfg["delegation"]["responses"]["reasoning"] == {"effort": "none"}  # 위임 지연을 줄이려 추론 최소
 
 
 class TestStart:
@@ -159,13 +160,49 @@ class TestStart:
             session.start()
         assert conn.closed
 
-    def test_connect_failure_raises_runtime_error(self) -> None:
+    def test_connect_failure_raises_runtime_error_after_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(GPTLiveSession, "_START_RETRY_DELAY_SEC", 0.0)
+        calls = {"n": 0}
+
         def boom() -> Any:
+            calls["n"] += 1
             raise OSError("network down")
 
         session = GPTLiveSession(LiveSessionConfig(instructions="x"), connection_factory=boom)
         with pytest.raises(RuntimeError, match="connect failed"):
             session.start()
+        assert calls["n"] == GPTLiveSession._START_ATTEMPTS
+
+    def test_connect_succeeds_on_a_later_attempt(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(GPTLiveSession, "_START_RETRY_DELAY_SEC", 0.0)
+        conn = FakeConnection([_started()])
+        outcomes: list[Any] = [OSError("down"), OSError("down again"), conn]
+
+        def factory() -> Any:
+            item = outcomes.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        session = GPTLiveSession(LiveSessionConfig(instructions="x"), connection_factory=factory)
+        assert session.start().session_id == "live_abc"
+        session.close()
+
+    def test_rejected_config_is_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(GPTLiveSession, "_START_RETRY_DELAY_SEC", 0.0)
+        err = MagicMock()
+        err.type = "error"
+        err.error.message = "bad config"
+        calls = {"n": 0}
+
+        def factory() -> Any:
+            calls["n"] += 1
+            return FakeConnection([err])
+
+        session = GPTLiveSession(LiveSessionConfig(instructions="x"), connection_factory=factory)
+        with pytest.raises(RuntimeError, match="rejected"):
+            session.start()
+        assert calls["n"] == 1
 
 
 class TestEvents:
@@ -253,7 +290,14 @@ class TestSend:
         session.update_backend("song backend", (stop_tool,))
         sent = conn.session.update.call_args.kwargs["session"]
         assert sent == {
-            "delegation": {"type": "responses", "responses": {"instructions": "song backend", "tools": [stop_tool]}}
+            "delegation": {
+                "type": "responses",
+                "responses": {
+                    "instructions": "song backend",
+                    "tools": [stop_tool],
+                    "reasoning": {"effort": "none"},  # 교체 시에도 추론 최소 설정을 유지한다
+                },
+            }
         }
         session.restore_backend()  # 시작 설정 그대로: web_search + 원래 툴
         restored = conn.session.update.call_args.kwargs["session"]["delegation"]["responses"]

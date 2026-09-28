@@ -129,6 +129,7 @@ class LiveSessionConfig:
         backend_model: responses 위임 백엔드 모델. None 이면 client 위임(백엔드 없음).
         backend_instructions: 백엔드 모델 지시문 (툴 사용 규칙, 답 형식).
         tools: 백엔드에 주는 function 툴 정의(Responses API function 형식). web_search 는 항상 포함.
+        backend_reasoning: 백엔드 추론 노력(reasoning.effort). 위임 지연을 줄이려 기본 none.
         voice: 목소리 이름. 기본 marin.
         sample_rate: 입출력 공유 PCM 레이트. 16000 또는 24000.
     """
@@ -137,6 +138,7 @@ class LiveSessionConfig:
     backend_model: str | None = None
     backend_instructions: str = ""
     tools: tuple[dict[str, Any], ...] = ()
+    backend_reasoning: str = "none"
     voice: str = "marin"
     sample_rate: int = BRIDGE_SAMPLE_RATE
     model: str = "gpt-live-1"
@@ -158,6 +160,7 @@ class LiveSessionConfig:
                     "model": self.backend_model,
                     "instructions": self.backend_instructions,
                     "tools": [{"type": "web_search"}, *self.tools],
+                    "reasoning": {"effort": self.backend_reasoning},
                 },
             }
         return cfg
@@ -180,6 +183,8 @@ class GPTLiveSession:
     """
 
     _START_TIMEOUT_SEC = 15.0  # session.started 대기 상한. 실측 1.5~3.5초
+    _START_ATTEMPTS = 3  # 연결·session.started 실패 시 재시도 횟수
+    _START_RETRY_DELAY_SEC = 1.0
     _RECV_JOIN_TIMEOUT_SEC = 3.0  # close 시 수신 스레드 종료 대기
 
     def __init__(self, config: LiveSessionConfig, *, connection_factory: ConnectionFactory | None = None) -> None:
@@ -206,9 +211,23 @@ class GPTLiveSession:
     def start(self) -> LiveStarted:
         """연결하고 ``session.start`` 를 보낸 뒤 ``session.started`` 까지 기다린다.
 
+        연결·수신 실패와 타임아웃은 ``_START_ATTEMPTS`` 번까지 다시 시도한다(인사 WAV 가 나가는 동안이라
+        사용자는 차이를 못 느낀다). 서버가 설정을 거부한 경우("rejected")는 다시 해도 같으므로 바로 던진다.
+
         Raises:
             RuntimeError: 연결·시작 실패, 서버 오류, 타임아웃.
         """
+        for attempt in range(1, self._START_ATTEMPTS + 1):
+            try:
+                return self._start_once()
+            except RuntimeError as exc:
+                if "rejected" in str(exc) or attempt == self._START_ATTEMPTS:
+                    raise
+                logger.warning("GPT-Live start attempt %d/%d failed: %s", attempt, self._START_ATTEMPTS, exc)
+                time.sleep(self._START_RETRY_DELAY_SEC)
+        raise AssertionError("unreachable")
+
+    def _start_once(self) -> LiveStarted:
         t0 = time.monotonic()
         try:
             self._conn = self._connection_factory()
@@ -320,7 +339,14 @@ class GPTLiveSession:
     def update_backend(self, instructions: str, tools: tuple[dict[str, Any], ...]) -> None:
         """responses 백엔드의 지시문·툴을 바꾼다 (이후 위임부터 적용). 세션 중 바꿀 수 있는 유일한 설정."""
         self._guard()
-        delegation = {"type": "responses", "responses": {"instructions": instructions, "tools": list(tools)}}
+        delegation = {
+            "type": "responses",
+            "responses": {
+                "instructions": instructions,
+                "tools": list(tools),
+                "reasoning": {"effort": self._config.backend_reasoning},
+            },
+        }
         self._send(lambda c: c.session.update(session={"delegation": delegation}, event_id="ray_backend_update"))
 
     def restore_backend(self) -> None:

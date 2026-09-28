@@ -73,10 +73,11 @@ class TestStoryInstructions:
         assert text.startswith(DEFAULT_BACKEND_INSTRUCTIONS) and text.rstrip().endswith("formal")
 
     def test_story_mode_hands_pacing_and_interruption_to_the_model(self) -> None:
-        assert "stop at once" in STORY_MODE_INSTRUCTIONS and "in full" not in STORY_MODE_INSTRUCTIONS
-        # 끊긴 이야기는 위임 없이 모델이 이어 말하고, 질문 지점에서만 멈추며, 답에는 스스로 반응하고 군말 없이 위임
-        assert "continue from where you stopped without delegating" in STORY_MODE_INSTRUCTIONS
-        assert "two points only" in STORY_MODE_INSTRUCTIONS and "잠깐만요" in STORY_MODE_INSTRUCTIONS
+        assert "in full" not in STORY_MODE_INSTRUCTIONS
+        # 끊긴 이야기는 계속할지 물은 뒤 위임 없이 이어 말하고, 답에는 스스로 반응하고 군말 없이 위임
+        assert "ask whether they want you to continue" in STORY_MODE_INSTRUCTIONS
+        assert "stop and talk with them" in STORY_MODE_INSTRUCTIONS and "잠깐만요" in STORY_MODE_INSTRUCTIONS
+        assert "continuously" not in STORY_MODE_INSTRUCTIONS  # 끼어들기를 무시하게 만들었던 표현 (실기 2026-09-28)
 
     def test_story_backend_embeds_script_and_song(self) -> None:
         text = build_story_backend_instructions("## 단락 1 — 훅\n첫 문장.\n", "snowman", "눈사람 — 정승환", "formal")
@@ -91,5 +92,8 @@ class TestStoryInstructions:
         assert "up to and including the next stop" in text and "Never call it before Ray has told the bridge" in text
         assert "never answer the user yourself" in text
 
-    def test_story_mode_append_stays_short(self) -> None:
-        assert len(STORY_MODE_INSTRUCTIONS) < 1500  # append 한도 500 토큰 안에 들도록
+    def test_story_mode_append_stays_within_append_limit(self) -> None:
+        import tiktoken
+
+        tokens = len(tiktoken.get_encoding("o200k_base").encode(STORY_MODE_INSTRUCTIONS))
+        assert tokens <= 450  # instructions.append 한도 500 토큰, 토크나이저 차이를 감안한 여유
