@@ -25,14 +25,15 @@
     노래 상태 동안 백엔드는 ``stop_song`` 하나만 가진 재생용 설정으로 교체된다(``session.update``, 끝나면 복원).
     다른 툴 호출은 오류로 답하고 ``end_conversation`` 도 종료로 치지 않는다. 모델 음성은 버리고 전사는 저장하지 않는다.
 
-이야기 (대본은 백엔드가 통째로 들고, 대화 모델이 위임할 때마다 다음 단락을 돌려준다):
+이야기 (대본은 백엔드가 통째로 들고, 대화 모델이 위임할 때마다 필요한 전달 단위를 돌려준다):
     기본 백엔드가 ``search_stories`` → ``start_story`` 를 부르면 루프는 백엔드를 이야기용 설정(대본 + 진행 규칙 +
-    ``finish_story`` + 기본 툴)으로 교체하고(``update_backend``), 결과(단락 1 텍스트 포함)는 보류한다 — 위임 시
+    검색·``change_story``·``finish_story`` + 기본 툴)으로 교체하고(``update_backend``), 결과(도입부 텍스트 포함)는
+    보류한다 — 위임 시
     한마디가 끝나 출력이 무음이 되면 이야기 지시를 append 한 뒤에야 결과를 제출한다. append 는 발화를 끊고(어댑터
-    문서), 결과를 먼저 제출하면 단락 1 이 곧바로 시작돼 append 가 그 중간에 떨어진다(실기 2026-09-28). 노래
-    PENDING 과 같은 보류. 단락 1 은 결과로 주고 기본 백엔드가 답하게 한다 — 같은 위임의 후속 응답에는 교체가
-    반영되지 않았다. 단락 2 부터는 새 위임이라 이야기용 백엔드가 이력에서 위치를 읽어 돌려준다. 진행 위치는 파이썬이
-    갖지 않는다.
+    문서), 결과를 먼저 제출하면 도입부 이 곧바로 시작돼 append 가 그 중간에 떨어진다(실기 2026-09-28). 노래
+    PENDING 과 같은 보류. 도입부 은 결과로 주고 기본 백엔드가 답하게 한다 — 같은 위임의 후속 응답에는 교체가
+    반영되지 않았다. 본문부터는 새 위임이라 이야기용 백엔드가 이력에서 위치를 읽어 돌려준다. 진행 위치는 파이썬이
+    갖지 않는다. 교체는 검색→선택→``change_story`` 로 처리하며 일반 대화 복원 없이 새 도입부을 같은 방식으로 준다.
     끝: 이야기용 백엔드가 ``play_song`` 을 부르면 노래 흐름이 이어받고(노래 끝의 복원이 이야기도 끝낸다),
     ``finish_story`` 면 즉시 복원한다.
 
@@ -72,17 +73,21 @@ from voice_pipeline.adapters.gpt_live import (
 )
 from voice_pipeline.adapters.led import LEDController, LEDState
 from voice_pipeline.engines.gpt_live.instructions import (
+    FAREWELL_COMMENTARY,
     SONG_BACKEND_INSTRUCTIONS,
     SONG_ENDED_INSTRUCTIONS,
     SONG_PLAYING_INSTRUCTIONS,
     STORY_ENDED_INSTRUCTIONS,
     STORY_MODE_INSTRUCTIONS,
     STORY_QUIET_INSTRUCTIONS,
+    STORY_SONG_ENDED_INSTRUCTIONS,
     build_story_backend_instructions,
 )
 from voice_pipeline.engines.gpt_live.songs import Song
 from voice_pipeline.engines.gpt_live.stories import Story, StorySelector
 from voice_pipeline.engines.gpt_live.tools import (
+    CHANGE_STORY_TOOL,
+    CHANGE_STORY_TOOL_DEF,
     END_CONVERSATION_TOOL,
     FINISH_STORY_TOOL,
     FINISH_STORY_TOOL_DEF,
@@ -92,6 +97,7 @@ from voice_pipeline.engines.gpt_live.tools import (
     STOP_SONG_TOOL,
     STOP_SONG_TOOL_DEF,
     ToolHandler,
+    make_story_search_handler,
 )
 from voice_pipeline.history import ConversationHistory
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
@@ -150,6 +156,7 @@ class LiveSessionLoop:
     _SESSION_TIMEOUT_SEC = 180.0  # 마지막 전사(사용자·모델) 이후 이 시간 지나면 종료
     _AUDIO_STARVATION_TIMEOUT_SEC = 5.0  # 마이크 프레임 단절 → 종료
     _END_MIN_WAIT_SEC = 2.0  # 종료 결정 후 모델이 작별 인사를 시작할 여유
+    _END_NUDGE_AFTER_SEC = 1.5  # 종료 결정 후 이 시간까지 모델 음성이 없으면 작별 인사를 commentary 로 유도한다
     _END_SILENCE_SEC = 1.0  # 출력 무음이 이만큼 이어지면 마지막 발화가 끝난 것으로 봄
     _END_MAX_WAIT_SEC = 30.0  # 무음이 감지되지 않을 때의 안전망. 정상 발화에서는 걸리지 않아야 한다
     _STREAM_START_MAX_WAIT_SEC = 10.0  # 인사 WAV 의 playback_complete 가 안 와도 이 시간 뒤엔 stream_start
@@ -157,7 +164,7 @@ class LiveSessionLoop:
     _SONG_MAX_WAIT_SEC = 30.0  # 무음이 감지되지 않을 때의 안전망. 정상 발화에서는 걸리지 않아야 한다
     _STORY_SILENCE_SEC = 0.5  # start_story 뒤 출력 무음이 이만큼 이어지면 이야기 지시 append + 결과 제출
     _STORY_MAX_WAIT_SEC = 30.0
-    _STORY_QUIET_SEC = 15.0  # 이야기 중 모델 출력·전사가 이만큼 없으면 "계속할까요" 를 묻게 한다 (침묵당 한 번)
+    _STORY_QUIET_SEC = 15.0  # 이야기 중 모델 출력·전사가 이만큼 없으면 대기 종류에 맞게 재촉한다 (침묵당 한 번)
     _LEAD_LOG_INTERVAL_SEC = 15.0  # 오디오 전송 상태(추정 밀림, 조각 도착 간격) DEBUG 로그 주기
     _GAP_EVENT_SEC = 0.3  # 조각 도착 간격이 이 이상이면 정지 이벤트로 INFO 로그 (C++ [split] 로그와 대조용)
     # 서버 출력은 실시간보다 1~3% 짧게 온다 — 주로 무음 프레임이 빠지고, 늦게라도 오지 않는다
@@ -243,6 +250,7 @@ class LiveSessionLoop:
         self._audio_input = audio_input
         self._song_state = SongState.NONE
         self._song: Song | None = None
+        self._song_from_story = False  # 자연 종료 후 감상 질문을 할 대상인지 기억한다
         self._song_future: Future[str] | None = None  # 보류 중인 play_song 결과. 노래 시작(또는 취소) 시 완료
         self._stop_future: Future[str] | None = None  # 보류 중인 stop_song 결과. 스트림 재개 시 완료
         self._song_requested_time = 0.0
@@ -263,7 +271,9 @@ class LiveSessionLoop:
         self._last_transcript_time = 0.0
         self._last_voice_time: float | None = None
         self._end_started_time = 0.0
-        self._audio_sent_sec = 0.0
+        self._end_nudged = False  # 종료 시퀀스에서 작별 인사 유도를 보냈는가 (한 번만)
+        self._audio_sent_sec = 0.0  # 현재 스트림에 보낸 출력 누적 (lead 회계용. 스트림을 다시 열면 0 부터)
+        self._audio_sent_total_sec = 0.0  # 세션 전체 (종료 요약용)
         self._first_audio_time: float | None = None
         self._first_voice_logged = False
         self._last_audio_time: float | None = None
@@ -333,9 +343,11 @@ class LiveSessionLoop:
         self._bridge.send_stream_start(live=True)
         self._stream_open = True
         self._stream_start_pending = False
-        # lead 회계는 스트림에 실제로 보낸 첫 조각부터
+        # lead 회계는 스트림에 실제로 보낸 첫 조각부터 — 보낸 양도 함께 0 으로. 노래 뒤 재개 때 이전 누적이 남아
+        # lead 가 수 분으로 계산돼 무음 조각을 전부 버리고 C++ 가 그만큼 무음을 채우던 문제 (2026-09-28 실기)
         self._first_audio_time = None
         self._last_audio_time = None
+        self._audio_sent_sec = 0.0
         if self._discarded_before_stream_sec > 0:
             logger.info("stream_start sent — discarded %.1fs of output while closed", self._discarded_before_stream_sec)
 
@@ -366,7 +378,7 @@ class LiveSessionLoop:
                 logger.warning("audio_end send failed", exc_info=True)
         logger.info(
             "Audio summary: sent %.0fs, padded %.1fs, dropped %.1fs, max chunk gap %.0fms",
-            self._audio_sent_sec,
+            self._audio_sent_total_sec,
             self._padded_sec,
             self._dropped_sec,
             self._max_audio_gap_total_sec * 1000,
@@ -409,7 +421,7 @@ class LiveSessionLoop:
                 self._start_song()  # 라이브 스트림이 다 나갔다 → 노래 시작
                 continue
             if self._song_state is SongState.PLAYING:
-                self._end_song()  # 노래 끝 → 대화 재개
+                self._end_song(completed=True)  # 자연 종료 → 일반 대화와 필요한 감상 질문
                 continue
             if self._song_state is SongState.STOPPING:
                 self._song_playback_done = True  # 모델의 한마디가 끝나면 타이머가 _end_song
@@ -460,6 +472,8 @@ class LiveSessionLoop:
         idle = now - self._last_transcript_time > self._SESSION_TIMEOUT_SEC
         if self._phase == Phase.ACTIVE and self._song_state is SongState.NONE and idle:
             self._begin_ending("idle_timeout")
+        if self._phase == Phase.ENDING:
+            self._maybe_nudge_farewell(now)
         if self._phase == Phase.ENDING and self._ending_complete(now):
             return True
         self._maybe_log_lead(now)
@@ -548,6 +562,7 @@ class LiveSessionLoop:
             return
         self._bridge.send_audio(pcm)
         self._audio_sent_sec += chunk_sec
+        self._audio_sent_total_sec += chunk_sec
         lead += chunk_sec
         if silent and lead < self._LEAD_PAD_BELOW_SEC:
             self._pad_silence(len(pcm), count=int((self._LEAD_PAD_TARGET_SEC - lead) / chunk_sec + 0.999))
@@ -561,6 +576,7 @@ class LiveSessionLoop:
         for _ in range(max(count, 0)):
             self._bridge.send_audio(zeros)
             self._audio_sent_sec += chunk_sec
+            self._audio_sent_total_sec += chunk_sec
             self._padded_sec += chunk_sec
 
     def _on_transcript(self, seg: LiveTranscript) -> None:
@@ -601,9 +617,14 @@ class LiveSessionLoop:
             return self._request_song(call)  # 루프 내장. 노래가 시작된 뒤 완료되는 Future
         if call.name == START_STORY_TOOL:
             return self._start_story(call)
+        if call.name == CHANGE_STORY_TOOL:
+            return self._start_story(call, replace=True)
         if call.name == FINISH_STORY_TOOL:
             return self._finish_story()
         handler = self._tool_handlers.get(call.name)
+        if call.name == SEARCH_STORIES_TOOL and self._story is not None and self._story_selector is not None:
+            # 현재 대본은 전부 들은 이야기로 재순환할 때도 검색 후보에 넣지 않는다.
+            handler = make_story_search_handler(self._story_selector, exclude=(self._story.key,))
         if handler is None:
             logger.warning("Backend requested unknown tool %s", call.name)
             return _completed(json.dumps({"error": f"unknown function {call.name}"}))
@@ -655,6 +676,7 @@ class LiveSessionLoop:
         self._phase = Phase.ENDING
         self._exit_reason = reason
         self._end_started_time = time.monotonic()
+        self._end_nudged = False
         logger.info("Ending session (%s) — muting input, waiting for last utterance", reason)
         self._led.set_state(LEDState.SLEEPING)  # 입력을 막는 순간부터 대화 불가
         if self._song_state in (SongState.PLAYING, SongState.DRAINING, SongState.PENDING):
@@ -664,6 +686,23 @@ class LiveSessionLoop:
             self._live.mute_input()
         except Exception:
             logger.warning("mute_input failed", exc_info=True)
+
+    def _maybe_nudge_farewell(self, now: float) -> None:
+        """종료가 결정됐는데 모델이 작별 인사 없이 조용하면 한 번 유도한다.
+
+        설계는 "위임과 동시에 인사" 지만(FINDINGS §4) 실기에서 인사 없이 위임만 하는 경우가 있었다 (2026-09-28).
+        입력은 이미 mute 라 사용자 말과 겹치지 않고, 인사 중이면(음성 있음) 보내지 않아 두 번 인사하지 않는다.
+        """
+        if self._end_nudged or now - self._end_started_time < self._END_NUDGE_AFTER_SEC:
+            return
+        self._end_nudged = True
+        if self._last_voice_time is not None and self._last_voice_time >= self._end_started_time:
+            return  # 이미 인사를 시작했다
+        try:
+            self._live.append_commentary(FAREWELL_COMMENTARY)
+        except Exception:
+            logger.warning("farewell nudge failed", exc_info=True)
+        logger.info("Ending: no goodbye yet — nudging the model to say one")
 
     def _ending_complete(self, now: float) -> bool:
         return self._utterance_finished(
@@ -710,12 +749,13 @@ class LiveSessionLoop:
         if self._song_state is not SongState.NONE:
             return _completed(json.dumps({"error": "a song is already playing"}))
         self._song = song
+        self._song_from_story = self._story_state is StoryState.TELLING
         self._song_future = Future()
         self._song_state = SongState.PENDING
         self._song_requested_time = time.monotonic()
         if self._story_state is StoryState.TELLING:
             # 이야기의 끝. 노래 지시가 이야기 지시를 대신하고, 노래 끝의 복원이 기본 백엔드로 돌린다
-            logger.info("Story %s reached its song", self._story.key if self._story else "?")
+            logger.info("Story %s handed off to music", self._story.key if self._story else "?")
             self._story_state = StoryState.NONE
             self._story = None
             self._resolve_story_future()
@@ -756,6 +796,7 @@ class LiveSessionLoop:
         self._stop_future = None
         self._song_state = SongState.NONE
         self._song = None
+        self._song_from_story = False
         self._song_playback_done = False
         if had_song and not stop_pending_submit and self._phase is not Phase.DONE:
             self._restore_backend()  # 정지 결과가 제출될 예정이면 _poll_tools 가 그 뒤에 복원한다
@@ -770,45 +811,59 @@ class LiveSessionLoop:
     # Story
     # ------------------------------------------------------------------
 
-    def _start_story(self, call: LiveFunctionCall) -> Future[str]:
-        """start_story 요청. 직전 검색 결과의 id 면 백엔드를 이야기용으로 교체하고 결과를 보류한다(무음 뒤 완료)."""
+    def _start_story(self, call: LiveFunctionCall, *, replace: bool = False) -> Future[str]:
+        """검색 결과로 시작·교체한다. 새 도입부은 지시 append 뒤 현재 위임의 툴 결과로 전달한다."""
         try:
             key = str(json.loads(call.arguments or "{}").get("story", ""))
         except json.JSONDecodeError:
             key = ""
         if self._story_selector is None:
             return _completed(json.dumps({"error": "stories are unavailable"}))
-        if self._story_state is StoryState.TELLING:
-            return _completed(json.dumps({"error": "a story is already being told; finish it first"}))
+        if self._story_future is not None:
+            return _completed(json.dumps({"error": "a story transition is already pending"}))
+        if replace:
+            if self._story_state is not StoryState.TELLING or self._story is None:
+                return _completed(json.dumps({"error": "no current story to change; use start_story"}))
+            if key == self._story.key:
+                return _completed(json.dumps({"error": "choose a different story from search_stories"}))
+        elif self._story_state is StoryState.TELLING:
+            return _completed(json.dumps({"error": "a story is already being told; use change_story to replace it"}))
         story = self._story_selector.begin(key)
         if story is None:
             return _completed(json.dumps({"error": f"unknown story {key!r}; call {SEARCH_STORIES_TOOL} first"}))
         song = self._song_catalog.get(story.song)
         if song is None:
             return _completed(json.dumps({"error": f"song {story.song!r} for story {key!r} is not playable"}))
+        label = f"{song.title} — {song.artist}" if song.artist else song.title
+        # 검색·선택은 백엔드가, 교체는 전용 툴이 맡는다. 이야기 중에는 start_story 를 노출하지 않는다.
+        tools = tuple(t for t in self._live.tools if t["name"] != START_STORY_TOOL)
+        try:
+            # 다음 위임부터 새 대본을 쓴다. 현재 위임에는 first_part 를 직접 돌려준다.
+            self._live.update_backend(
+                build_story_backend_instructions(story.body, song.key, label, self._tone_preference),
+                ({"type": "web_search"}, *tools, CHANGE_STORY_TOOL_DEF, FINISH_STORY_TOOL_DEF),
+            )
+        except Exception:
+            logger.warning("backend update for story failed", exc_info=True)
+            return _completed(json.dumps({"error": "could not configure the new story; current story unchanged"}))
+        previous = self._story.key if replace and self._story else None
         self._story = story
         self._story_state = StoryState.TELLING
         self._story_future = Future()
         self._story_started_time = time.monotonic()
-        label = f"{song.title} — {song.artist}" if song.artist else song.title
-        # 이야기 중엔 검색·시작 툴을 뺀다 — 남겨 두면 "얘기 어디 갔어" 에 백엔드가 검색을 불렀다 (실기 2026-09-28)
-        tools = tuple(t for t in self._live.tools if t["name"] not in (SEARCH_STORIES_TOOL, START_STORY_TOOL))
-        try:
-            # 다음 위임부터 이야기용 백엔드. 단락 1 은 아래 결과로 줘서 이 위임의 후속 응답이 그대로 말하게 한다
-            self._live.update_backend(
-                build_story_backend_instructions(story.body, song.key, label, self._tone_preference),
-                ({"type": "web_search"}, *tools, FINISH_STORY_TOOL_DEF),
-            )
-        except Exception:
-            logger.warning("backend update for story failed", exc_info=True)
-        logger.info("Story started: %s (song %s) — waiting for output silence", story.key, song.key)
-        payload = {"status": "started", "story": story.key, "song": song.key, "title": label}
+        self._story_quiet_nudged_at = 0.0
+        logger.info(
+            "Story %s: %s (song %s) — waiting for output silence", "changed" if replace else "started", key, song.key
+        )
+        payload = {"status": "changed" if replace else "started", "story": story.key, "song": song.key, "title": label}
+        if previous is not None:
+            payload["previous_story"] = previous
         payload["first_part"] = story.first_part()
         self._story_payload = json.dumps(payload, ensure_ascii=False)
         return self._story_future
 
     def _append_story_instructions(self) -> None:
-        """출력이 무음이 됐다 — 이야기 지시를 얹고 보류한 start_story 결과를 완료한다 (단락 1 은 그 뒤에 온다)."""
+        """출력이 무음이 됐다 — 이야기 지시를 얹고 보류한 start_story 결과를 완료한다 (도입부 은 그 뒤에 온다)."""
         try:
             self._live.append_instructions(STORY_MODE_INSTRUCTIONS)
         except Exception:
@@ -817,7 +872,7 @@ class LiveSessionLoop:
         self._resolve_story_future()
 
     def _maybe_nudge_quiet_story(self, now: float) -> None:
-        """이야기 중 침묵이 길면 "계속할까요" 를 묻게 한다. 모델은 재촉 없이 스스로 말하지 않는다."""
+        """침묵 시 첫 질문·곁 대화·동의 대기를 구분하도록 한 번 재촉한다."""
         if self._story_state is not StoryState.TELLING or self._story_future is not None or self._inflight:
             return
         quiet_since = max(self._last_voice_time or 0.0, self._last_transcript_time, self._story_started_time)
@@ -828,7 +883,7 @@ class LiveSessionLoop:
             self._live.append_instructions(STORY_QUIET_INSTRUCTIONS)
         except Exception:
             logger.warning("quiet nudge failed", exc_info=True)
-        logger.info("Story: quiet for %.0fs — asking whether to continue", now - quiet_since)
+        logger.info("Story: quiet for %.0fs — applying quiet-story policy", now - quiet_since)
 
     def _resolve_story_future(self) -> None:
         if self._story_future is None:
@@ -892,16 +947,24 @@ class LiveSessionLoop:
             logger.info("Song cancelled before start")
             self._clear_song("cancelled")
 
-    def _end_song(self) -> None:
+    def _end_song(self, *, completed: bool = False) -> None:
         key = self._song.key if self._song else "?"
+        invite_reflection = (
+            completed
+            and self._song_state is SongState.PLAYING
+            and self._song_from_story
+            and self._phase is Phase.ACTIVE
+        )
         self._clear_song("cancelled")  # 정상 시작된 노래면 play 결과는 이미 완료돼 있어 무시된다
         self._set_raw_capture(False)
+        self._open_stream()  # 질문 지시 전에 출력 경로를 열어 첫 음성이 버려지지 않게 한다
         try:
-            self._live.append_instructions(SONG_ENDED_INSTRUCTIONS)
+            self._live.append_instructions(
+                STORY_SONG_ENDED_INSTRUCTIONS if invite_reflection else SONG_ENDED_INSTRUCTIONS
+            )
         except Exception:
             logger.warning("append after song failed", exc_info=True)
         self._last_transcript_time = time.monotonic()  # 유휴 타임아웃 재시작
-        self._open_stream()
         logger.info("Song ended: %s — stream reopened", key)
 
     def _set_raw_capture(self, enabled: bool) -> None:

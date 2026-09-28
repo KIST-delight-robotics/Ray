@@ -29,7 +29,7 @@ logger = logging.getLogger("voice_pipeline.stories")
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]+")
-_PART_HEADING_RE = re.compile(r"^## 단락 1\b.*$", re.MULTILINE)
+_OPENING_HEADING_RE = re.compile(r"^## 도입부[^\S\n]*$", re.MULTILINE)
 # 요청문에 늘 붙지만 이야기를 가려내지 못하는 말 — 점수에서 뺀다
 _STOP_WORDS = frozenset(
     {"이야기", "얘기", "스토리", "노래", "곡", "해줘", "해", "줘", "들려줘", "하나", "좀", "그냥", "아무거나"}
@@ -44,7 +44,7 @@ class Story:
     song: str
     summary: str
     tags: tuple[str, ...]
-    body: str  # frontmatter 를 뺀 본문 전체 (곡 프로필 + 단락 + 진행 지침)
+    body: str  # frontmatter 를 뺀 본문 전체 (곡 프로필 + 도입부·본문 + 진행 지침)
     song_title: str = ""
     song_artist: str = ""
 
@@ -54,12 +54,12 @@ class Story:
         return {"id": self.key, "summary": self.summary, "tags": list(self.tags), "song": song}
 
     def first_part(self) -> str:
-        """단락 1 의 말할 텍스트 (``>`` 진행 지침 제외). ``start_story`` 결과에 실어 기본 백엔드가 그대로 답하게 한다.
+        """도입부의 말할 텍스트 (``>`` 진행 지침 제외). ``start_story`` 결과에 실어 기본 백엔드가 그대로 답하게 한다.
 
-        본문 구조를 아는 유일한 곳 — 첫 단락은 백엔드 교체가 반영되기 전의 같은 위임에서 나와야 하므로
-        기본 백엔드에 텍스트를 직접 준다. 단락 헤딩이 없으면 빈 문자열.
+        본문 구조를 아는 유일한 곳 — 도입부는 백엔드 교체가 반영되기 전의 같은 위임에서 나와야 하므로
+        기본 백엔드에 텍스트를 직접 준다. 도입부 헤딩이 없으면 빈 문자열.
         """
-        m = _PART_HEADING_RE.search(self.body)
+        m = _OPENING_HEADING_RE.search(self.body)
         if m is None:
             return ""
         rest = self.body[m.end() :]
@@ -227,9 +227,10 @@ class StorySelector:
     def stories(self) -> Mapping[str, Story]:
         return self._stories
 
-    def search(self, query: str) -> list[Story]:
-        """후보를 돌려주고 그 id 들을 다음 ``begin`` 의 허용 집합으로 기억한다."""
-        found = search_stories(self._stories, query, played=self._log.played_keys(), limit=self._limit, rng=self._rng)
+    def search(self, query: str, *, exclude: Sequence[str] = ()) -> list[Story]:
+        """후보를 기억한다. 교체 시 현재 이야기는 재청취 후보에서도 제외한다."""
+        candidates = {key: story for key, story in self._stories.items() if key not in exclude}
+        found = search_stories(candidates, query, played=self._log.played_keys(), limit=self._limit, rng=self._rng)
         with self._lock:
             self._offered = frozenset(s.key for s in found)
         return found

@@ -6,6 +6,8 @@ from voice_pipeline.engines.gpt_live.instructions import (
     DEFAULT_BACKEND_INSTRUCTIONS,
     SONG_BACKEND_INSTRUCTIONS,
     STORY_MODE_INSTRUCTIONS,
+    STORY_QUIET_INSTRUCTIONS,
+    STORY_SONG_ENDED_INSTRUCTIONS,
     build_backend_instructions,
     build_live_instructions,
     build_story_backend_instructions,
@@ -75,25 +77,29 @@ class TestStoryInstructions:
     def test_story_mode_hands_pacing_and_interruption_to_the_model(self) -> None:
         assert "in full" not in STORY_MODE_INSTRUCTIONS
         # 끊긴 이야기는 계속할지 물은 뒤 위임 없이 이어 말하고, 답에는 스스로 반응하고 군말 없이 위임
-        assert "ask whether they want you to continue" in STORY_MODE_INSTRUCTIONS
-        assert "stop and talk with them" in STORY_MODE_INSTRUCTIONS and "잠깐만요" in STORY_MODE_INSTRUCTIONS
+        assert "ask whether they want you to continue" in " ".join(STORY_MODE_INSTRUCTIONS.split())
+        assert "stop and talk with them" in STORY_MODE_INSTRUCTIONS and "say nothing first" in STORY_MODE_INSTRUCTIONS
         assert "continuously" not in STORY_MODE_INSTRUCTIONS  # 끼어들기를 무시하게 만들었던 표현 (실기 2026-09-28)
 
     def test_story_backend_embeds_script_and_song(self) -> None:
-        text = build_story_backend_instructions("## 단락 1 — 훅\n첫 문장.\n", "snowman", "눈사람 — 정승환", "formal")
-        assert text.index("## Script") < text.index("## 단락 1 — 훅") < text.index("## What to hand over")
-        assert 'play_song with song id "snowman" (눈사람 — 정승환)' in text
+        text = build_story_backend_instructions("## 도입부\n첫 문장.\n", "snowman", "눈사람 — 정승환", "formal")
+        assert (
+            text.index("## Narration: exact output span")
+            < text.index("## Script\n")
+            < text.index("## 도입부\n첫 문장.")
+        )
+        assert 'song id "snowman" (눈사람 — 정승환)' in text
         assert "finish_story" in text
-        assert text.index("## Return the result") < text.index("## Ray's voice") and "formal" in text
-        assert "Rewrite it in Ray's voice" in text
-        assert text.index("## Deciding whether the story goes on") < text.index("## Return the result")
+        assert text.index("## Return the result") < text.index("## Ray's voice") < text.index("## Script\n")
+        assert "formal" in text and "Rewrite it in Ray's voice" in text
         assert "Call finish_story only when" in text
-        # 다음 질문 지점까지 통째로 넘기고, 사용자에게 답하지 않는다 (반응은 대화 모델 몫)
-        assert "up to and including the next stop" in text and "Never call it before Ray has told the bridge" in text
-        assert "never answer the user yourself" in text
+        assert "ENTIRE main story" in text and "even mid-story" in text
 
     def test_story_mode_append_stays_within_append_limit(self) -> None:
         import tiktoken
 
-        tokens = len(tiktoken.get_encoding("o200k_base").encode(STORY_MODE_INSTRUCTIONS))
+        tokens = max(
+            len(tiktoken.get_encoding("o200k_base").encode(text))
+            for text in (STORY_MODE_INSTRUCTIONS, STORY_QUIET_INSTRUCTIONS, STORY_SONG_ENDED_INSTRUCTIONS)
+        )
         assert tokens <= 450  # instructions.append 한도 500 토큰, 토크나이저 차이를 감안한 여유

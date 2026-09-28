@@ -86,7 +86,7 @@ logger = logging.getLogger("voice_pipeline.wiring")
 _AUDIO_QUEUE_SIZE = 300
 _VAD_INFER_INTERVAL = 3  # 3프레임(90ms)마다 추론, 사이는 캐시 반환
 _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
-_LIVE_BACKEND_MODEL = "gpt-6-sol"  # GPT-Live responses 위임 백엔드. gpt-5.4-mini 에서 교체 시험 (2026-09-28)
+_LIVE_BACKEND_MODEL = "gpt-5.4-mini"  # GPT-Live responses 위임 백엔드
 
 Engine = Literal["cascade", "live"]
 

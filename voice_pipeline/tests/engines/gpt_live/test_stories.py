@@ -26,7 +26,10 @@ CATALOG = {
 def _write(root: Path, key: str, *, song: str | None = None, summary: str = "요약", tags: str = "[겨울, 이별]") -> Path:
     root.mkdir(parents=True, exist_ok=True)
     front = [f"song: {song or key}", "status: draft", f"summary: {summary}", f"tags: {tags}", "link_type: 정서"]
-    body = "## 곡 프로필\n- 핵심 정서: x\n\n## 단락 1 — 훅\n첫 문장.\n\n> (지침)\n\n## 단락 6 — 재생\n> (play_song.)\n"
+    body = (
+        "## 곡 프로필\n- 핵심 정서: x\n\n## 도입부\n첫 문장.\n\n> (지침)\n\n"
+        "## 본문\n이어지는 이야기.\n\n마지막 이야기와 노래 제안.\n> (play_song.)\n"
+    )
     path = root / f"{key}.md"
     path.write_text("---\n" + "\n".join(front) + "\n---\n\n" + body, encoding="utf-8")
     return path
@@ -43,7 +46,7 @@ class TestLoadStories:
         s = stories["snowman"]
         assert (s.song, s.summary, s.tags) == ("snowman", "보내주는 사람", ("영화", "이별", "겨울"))
         assert s.song_title == "눈사람" and s.song_artist == "정승환"
-        assert s.body.startswith("## 곡 프로필") and "## 단락 6" in s.body and "---" not in s.body
+        assert s.body.startswith("## 곡 프로필") and "## 본문" in s.body and "---" not in s.body
         assert s.describe() == {
             "id": "snowman",
             "summary": "보내주는 사람",
@@ -51,7 +54,7 @@ class TestLoadStories:
             "song": "눈사람 — 정승환",
         }
 
-    def test_first_part_is_part_one_text_without_directions(self, tmp_path: Path) -> None:
+    def test_first_part_is_opening_text_without_directions(self, tmp_path: Path) -> None:
         _write(tmp_path, "snowman")
         story = load_stories(tmp_path, CATALOG)["snowman"]
         assert story.first_part() == "첫 문장."
@@ -147,3 +150,23 @@ class TestStorySelector:
         sel.begin(sel.search("")[0].key)
         told = log.played_keys()[0]
         assert told not in {s.key for s in sel.search("")}
+
+    def test_replacement_excludes_current_even_when_all_stories_were_told(self) -> None:
+        log = StoryLog(":memory:")
+        stories = TestSearchStories.STORIES
+        for key in stories:
+            log.record(key)
+        sel = StorySelector(stories, log, limit=4)
+        found = sel.search("겨울", exclude=("a",))
+        assert {s.key for s in found} == {"b", "c", "d"}
+        assert sel.begin("a") is None
+        assert sel.begin(found[0].key) is not None
+        log.close()
+
+    def test_only_current_story_leaves_no_replacement_or_stale_selection(self) -> None:
+        log = StoryLog(":memory:")
+        sel = StorySelector({"a": _story("a")}, log)
+        sel.search("")
+        assert sel.search("", exclude=("a",)) == []
+        assert sel.begin("a") is None
+        log.close()
