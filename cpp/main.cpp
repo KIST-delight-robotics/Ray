@@ -210,7 +210,9 @@ std::vector<std::string> csv_read_row(std::istream& in, char delimiter) {
     std::vector<std::string> row;
     while (in.good())
     {
-        char c = in.get();
+        int ch = in.get();
+        if (ch == EOF) break;  // EOF(-1)를 char로 넣으면 0xFF 문자가 필드에 들어가 stof가 던진다
+        char c = static_cast<char>(ch);
         if (!inquotes && c == '"') {
             inquotes = true;
         }
@@ -238,6 +240,29 @@ std::vector<std::string> csv_read_row(std::istream& in, char delimiter) {
     if (!ss.str().empty())
         row.push_back(ss.str());
     return row;
+}
+
+// 헤드/입 CSV 한 프레임을 숫자로 변환. 파일 끝(빈 행)이나 잘못된 값이면 false — 호출부는 재생을 정상 종료한다.
+bool parse_motion_frame(const std::vector<std::string>& headRow, const std::vector<std::string>& mouthRow,
+                        int step, float& roll_s, float& pitch_s, float& yaw_s, float& mouth_s, float& ratio) {
+    if (headRow.size() < 3 || mouthRow.size() < 2) {
+        if (!headRow.empty() || !mouthRow.empty()) {
+            std::cerr << "[csv_control_motor] 열 부족 (step " << step << "): head=" << headRow.size()
+                      << " mouth=" << mouthRow.size() << " — 재생 종료" << std::endl;
+        }
+        return false;
+    }
+    try {
+        roll_s = std::stof(headRow[0]);
+        pitch_s = std::stof(headRow[1]);
+        yaw_s = std::stof(headRow[2]);
+        mouth_s = std::stof(mouthRow[0]);
+        ratio = std::stof(mouthRow[1]) * 1.4f;
+    } catch (const std::exception& e) {
+        std::cerr << "[csv_control_motor] 숫자 변환 실패 (step " << step << "): " << e.what() << " — 재생 종료" << std::endl;
+        return false;
+    }
+    return true;
 }
 
 // CustomSoundStream 클래스 정의
@@ -2178,7 +2203,8 @@ void csv_control_motor(std::string audioName) {
             brightness = 0.f;  // 없으면 소등
             if (!led_enabled || !ledGesture.good()) return;
             auto ledRow = csv_read_row(ledGesture, ',');
-            if (!ledRow.empty() && !ledRow[0].empty()) brightness = std::stof(ledRow[0]);
+            if (ledRow.empty() || ledRow[0].empty()) return;
+            try { brightness = std::stof(ledRow[0]); } catch (const std::exception&) { brightness = 0.f; }
         };
 
         // 초기 프레임 궤적 보간
@@ -2190,12 +2216,8 @@ void csv_control_motor(std::string audioName) {
             if (!headGesture.good() || !MouthGesture.good()) break;
             auto headRow = csv_read_row(headGesture, ',');
             auto mouthRow = csv_read_row(MouthGesture, ',');
-            float roll_s = std::stof(headRow[0]);
-            float pitch_s = std::stof(headRow[1]);
-            float yaw_s = std::stof(headRow[2]);
-            float mouth_s = std::stof(mouthRow[0]);
-
-            float ratiooo = std::stof(mouthRow[1]) * 1.4;
+            float roll_s, pitch_s, yaw_s, mouth_s, ratiooo;
+            if (!parse_motion_frame(headRow, mouthRow, i, roll_s, pitch_s, yaw_s, mouth_s, ratiooo)) break;
 
             targetTraj.push_back({roll_s * ratiooo, pitch_s * ratiooo, yaw_s * ratiooo, mouth_s});
 
@@ -2254,12 +2276,8 @@ void csv_control_motor(std::string audioName) {
                 auto headRow = csv_read_row(headGesture, ',');
                 auto mouthRow = csv_read_row(MouthGesture, ',');
 
-                float roll_s = std::stof(headRow[0]);
-                float pitch_s = std::stof(headRow[1]);
-                float yaw_s = std::stof(headRow[2]);
-                float mouth_s = std::stof(mouthRow[0]);
-
-                float ratiooo = std::stof(mouthRow[1]) * 1.4;
+                float roll_s, pitch_s, yaw_s, mouth_s, ratiooo;
+                if (!parse_motion_frame(headRow, mouthRow, step, roll_s, pitch_s, yaw_s, mouth_s, ratiooo)) break;  // 파일 끝 → 정상 종료
 
                 roll_final = roll_s * ratiooo;
                 pitch_final = pitch_s * ratiooo;
