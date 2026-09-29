@@ -26,6 +26,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
+from uuid import uuid4
 
 from voice_pipeline import trace
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE
@@ -78,6 +79,17 @@ class LiveFunctionCall:
     name: str
     arguments: str
     delegation_id: str | None
+    response_id: str | None = None
+
+
+@dataclass(frozen=True)
+class LiveAppended:
+    """주입 수락. 발화 완료가 아니다. 송신 event_id와 client_event_id로 연결한다."""
+
+    kind: str
+    client_event_id: str | None
+    start_ms: int
+    end_ms: int
 
 
 @dataclass(frozen=True)
@@ -85,6 +97,15 @@ class LiveResponseDone:
     """백엔드 응답 하나가 끝났다. 모아둔 함수 호출 결과를 제출하고 이어갈 시점."""
 
     delegation_id: str | None
+    response_id: str | None = None
+    status: str = "unknown"
+    function_call_ids: tuple[str, ...] = ()
+    tracked: bool = False
+
+    @property
+    def is_final(self) -> bool:
+        """created부터 추적한 성공 응답이며 제출할 함수 결과가 남아 있지 않다."""
+        return self.tracked and self.status == "completed" and not self.function_call_ids
 
 
 @dataclass(frozen=True)
@@ -108,10 +129,19 @@ class LiveError:
 
     code: str
     message: str
+    client_event_id: str | None = None
 
 
 LiveEvent = (
-    LiveStarted | LiveAudio | LiveTranscript | LiveFunctionCall | LiveResponseDone | LiveUsage | LiveClosed | LiveError
+    LiveStarted
+    | LiveAudio
+    | LiveTranscript
+    | LiveFunctionCall
+    | LiveResponseDone
+    | LiveUsage
+    | LiveClosed
+    | LiveError
+    | LiveAppended
 )
 
 
@@ -199,6 +229,8 @@ class GPTLiveSession:
         self._error: RuntimeError | None = None
         self._grouper: Any = None
         self._session_id: str | None = None
+        self._active_responses: dict[str | None, str] = {}
+        self._response_calls: dict[tuple[str | None, str], list[str]] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -316,20 +348,29 @@ class GPTLiveSession:
         self._guard()
         self._send(lambda c: c.session.input_audio.mute(event_id="ray_mute"))
 
-    def append_thinking(self, content: str) -> None:
+    def append_thinking(self, content: str, *, event_id: str | None = None) -> str:
         """조용한 사실 컨텍스트. 발화 중에도 끊지 않고 반영된다. 500 토큰 이하."""
-        self._guard()
-        self._send(lambda c: c.session.thinking.append(content=content, delegation_id=None))
+        return self._append("thinking", content, event_id)
 
-    def append_instructions(self, content: str) -> None:
+    def append_instructions(self, content: str, *, event_id: str | None = None) -> str:
         """지시 추가. 모델이 말하는 중이면 발화가 끊기므로 조용할 때 부를 것. 500 토큰 이하."""
-        self._guard()
-        self._send(lambda c: c.session.instructions.append(content=content, delegation_id=None))
+        return self._append("instructions", content, event_id)
 
-    def append_commentary(self, content: str) -> None:
+    def append_commentary(self, content: str, *, event_id: str | None = None) -> str:
         """모델이 말로 옮길 정보. 패러프레이즈된다. 500 토큰 이하."""
+        return self._append("commentary", content, event_id)
+
+    def _append(self, kind: str, content: str, event_id: str | None) -> str:
         self._guard()
-        self._send(lambda c: c.session.commentary.append(content=content, delegation_id=None))
+        event_id = event_id or f"ray_{kind}_{uuid4().hex}"
+        self._send(
+            lambda c: getattr(c.session, kind).append(
+                content=content,
+                delegation_id=None,
+                event_id=event_id,
+            )
+        )
+        return event_id
 
     @property
     def tools(self) -> tuple[dict[str, Any], ...]:
@@ -459,36 +500,74 @@ class GPTLiveSession:
             self._events.put(LiveClosed(reason=event.reason))
         elif t == "error":
             err = getattr(event, "error", None)
-            self._events.put(LiveError(str(getattr(err, "code", "")), str(getattr(err, "message", err))))
+            self._events.put(
+                LiveError(
+                    str(getattr(err, "code", "")),
+                    str(getattr(err, "message", err)),
+                    getattr(err, "client_event_id", None),
+                )
+            )
+        elif t in ("session.thinking.appended", "session.instructions.appended", "session.commentary.appended"):
+            self._events.put(
+                LiveAppended(
+                    t.split(".")[1],
+                    getattr(event, "client_event_id", None),
+                    event.start_ms,
+                    event.end_ms,
+                )
+            )
         elif t == "session.delegation.created":
             d = getattr(event, "delegation", event)
             logger.info("Delegation created (id=%s, offset=%sms)", getattr(d, "id", "?"), getattr(d, "offset_ms", "?"))
-        # 나머지(appended ack, muted, info …)는 상태 변화 없음 — 로그만
+        # 나머지(muted, info …)는 상태 변화 없음 — 로그만
         else:
             logger.debug("GPT-Live event %s", t)
 
     def _dispatch_backend(self, envelope: Any) -> None:
         inner: dict[str, Any] = envelope.event
         it = inner.get("type")
-        if it == "response.output_item.done":
+        delegation_id = envelope.delegation_id
+        response = inner.get("response") or {}
+        response_id = inner.get("response_id") or response.get("id") or self._active_responses.get(delegation_id)
+        key = (delegation_id, response_id)
+        if it == "response.created" and response_id:
+            self._active_responses[delegation_id] = response_id
+            self._response_calls[key] = []
+        elif it == "response.output_item.done":
             item = inner.get("item") or {}
             if item.get("type") == "message":
                 parts = item.get("content") or []
                 text = "".join(str(p.get("text", "")) for p in parts if isinstance(p, dict)).strip()
                 logger.info("Backend reply: %s", repr(text[:200]) if text else "(empty)")
             if item.get("type") == "function_call":
+                call_id = str(item.get("call_id", ""))
+                if key in self._response_calls:
+                    self._response_calls[key].append(call_id)
                 self._events.put(
                     LiveFunctionCall(
                         call_id=str(item.get("call_id", "")),
                         name=str(item.get("name", "")),
                         arguments=str(item.get("arguments") or "{}"),
                         delegation_id=envelope.delegation_id,
+                        response_id=response_id,
                     )
                 )
         elif it in ("response.completed", "response.failed", "response.incomplete"):
             if it != "response.completed":
                 logger.warning("Backend response %s", it)
-            self._events.put(LiveResponseDone(delegation_id=envelope.delegation_id))
+            tracked = key in self._response_calls
+            calls = tuple(self._response_calls.pop(key, ()))
+            if self._active_responses.get(delegation_id) == response_id:
+                self._active_responses.pop(delegation_id, None)
+            self._events.put(
+                LiveResponseDone(
+                    delegation_id,
+                    response_id,
+                    it.removeprefix("response."),
+                    calls,
+                    tracked,
+                )
+            )
 
 
 def _ms(t0: float) -> float:

@@ -271,7 +271,12 @@ class TestLiveStoryWiring:
         comps.create_session(memory_enabled=False)
 
         config = live_cls.call_args.args[0]
-        assert [t["name"] for t in config.tools] == ["end_conversation", "search_stories", "start_story"]
+        assert [t["name"] for t in config.tools] == [
+            "end_conversation",
+            "search_stories",
+            "start_story",
+            "finish_story",
+        ]
         kwargs = loop_cls.call_args.kwargs
         assert set(kwargs["tool_handlers"]) == {"search_stories"}
         assert kwargs["story_selector"] is comps.story_selector

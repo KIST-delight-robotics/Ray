@@ -9,9 +9,9 @@ from voice_pipeline.engines.gpt_live.instructions import (
     STORY_QUIET_INSTRUCTIONS,
     STORY_SONG_ENDED_INSTRUCTIONS,
     build_backend_instructions,
+    build_current_story_section,
     build_live_instructions,
     build_songs_section,
-    build_story_backend_instructions,
     build_voice_section,
 )
 from voice_pipeline.engines.gpt_live.songs import Song
@@ -68,8 +68,16 @@ class TestStoryInstructions:
         task = DEFAULT_BACKEND_INSTRUCTIONS[DEFAULT_BACKEND_INSTRUCTIONS.index("## Task instructions") :]
         assert task.index("search_stories") < task.index("start_story")
 
-    def test_default_backend_rewrites_first_part_in_rays_voice(self) -> None:
-        assert "first_part rewritten in Ray's voice" in DEFAULT_BACKEND_INSTRUCTIONS
+    def test_default_backend_leaves_narration_to_application(self) -> None:
+        assert "finish_story or end_conversation, return an empty message" in DEFAULT_BACKEND_INSTRUCTIONS
+        assert "Ray already has the whole script" in DEFAULT_BACKEND_INSTRUCTIONS
+        assert "first_part" not in DEFAULT_BACKEND_INSTRUCTIONS
+
+    def test_default_backend_judges_story_end_from_transcript(self) -> None:
+        task = DEFAULT_BACKEND_INSTRUCTIONS[DEFAULT_BACKEND_INSTRUCTIONS.index("## Task instructions") :]
+        assert "the user has moved on without agreeing" in task
+        assert "Call it before handling anything else in that turn" in task
+        assert "Silence and side conversation alone do not end the story" in task
 
     def test_voice_section_default_and_profile_override(self) -> None:
         plain = build_voice_section()
@@ -90,30 +98,22 @@ class TestStoryInstructions:
 
     def test_default_backend_lists_songs_instead_of_playing(self) -> None:
         task = DEFAULT_BACKEND_INSTRUCTIONS[DEFAULT_BACKEND_INSTRUCTIONS.index("## Task instructions") :]
-        assert "asks which songs Ray has" in task and "do not call play_song" in task
-        assert "never pick a song for them" in task
+        assert "asks which songs Ray has" in task and "do not play" in task
+        assert "Never choose for them unless asked" in task
 
     def test_story_mode_hands_pacing_and_interruption_to_the_model(self) -> None:
-        assert "in full" not in STORY_MODE_INSTRUCTIONS
-        # 끊긴 이야기는 계속할지 물은 뒤 위임 없이 이어 말하고, 답에는 스스로 반응하고 군말 없이 위임
-        assert "ask whether they want you to continue" in " ".join(STORY_MODE_INSTRUCTIONS.split())
-        assert "stop and talk with them" in STORY_MODE_INSTRUCTIONS and "say nothing first" in STORY_MODE_INSTRUCTIONS
-        assert "continuously" not in STORY_MODE_INSTRUCTIONS  # 끼어들기를 무시하게 만들었던 표현 (실기 2026-09-28)
+        assert "ask whether to resume and wait" in STORY_MODE_INSTRUCTIONS
+        assert "Questions or side conversation: stop and answer" in STORY_MODE_INSTRUCTIONS
+        assert "Do not delegate for narration, continuation, replay" in STORY_MODE_INSTRUCTIONS
 
-    def test_story_backend_embeds_script_and_song(self) -> None:
-        text = build_story_backend_instructions("## 도입부\n첫 문장.\n", "snowman", "눈사람 — 정승환", "formal", _SONGS)
-        assert (
-            text.index("## Narration: exact output span")
-            < text.index("## Songs on Ray")
-            < text.index("## Script\n")
-            < text.index("## 도입부\n첫 문장.")
-        )
-        assert 'song id "snowman" (눈사람 — 정승환)' in text
-        assert "finish_story" in text
-        assert text.index("## Return the result") < text.index("## Ray's voice") < text.index("## Script\n")
-        assert "formal" in text and "Rewrite it in Ray's voice" in text
-        assert "Call finish_story only when" in text
-        assert "ENTIRE main story" in text and "even mid-story" in text
+    def test_backend_builder_appends_current_story_last(self) -> None:
+        text = build_backend_instructions("formal", _SONGS, ("snowman", "snowman", "눈사람 — 정승환"))
+        assert text.startswith(DEFAULT_BACKEND_INSTRUCTIONS)
+        assert text.index("## Ray's voice") < text.index("## Songs on Ray") < text.index("## Current story")
+        assert "telling story 'snowman'" in text and "song id 'snowman' (눈사람 — 정승환)" in text
+        assert "until you call finish_story or play_song" in text
+        assert "## Current story" not in build_backend_instructions("formal", _SONGS)
+        assert build_current_story_section("a", "b", "c").startswith("## Current story\n")
 
     def test_story_mode_append_stays_within_append_limit(self) -> None:
         import tiktoken

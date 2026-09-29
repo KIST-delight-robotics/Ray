@@ -18,12 +18,11 @@ from voice_pipeline.device_settings import (
 from voice_pipeline.engines.gpt_live.songs import Song
 from voice_pipeline.engines.gpt_live.tools import (
     ADJUST_VOLUME_TOOL,
-    CHANGE_STORY_TOOL,
-    CHANGE_STORY_TOOL_DEF,
     DEFAULT_TOOLS,
     DEVICE_TOOLS,
     END_CONVERSATION_TOOL,
     FINISH_STORY_TOOL,
+    FINISH_STORY_TOOL_DEF,
     GET_DEVICE_SETTINGS_TOOL,
     LOOP_TOOLS,
     PLAY_SONG_TOOL,
@@ -141,8 +140,8 @@ class TestSongToolDefinitions:
 
 class TestStoryTools:
     def test_story_tools_are_loop_builtins_and_strict(self) -> None:
-        assert {START_STORY_TOOL, CHANGE_STORY_TOOL, FINISH_STORY_TOOL} <= LOOP_TOOLS
-        for d in (SEARCH_STORIES_TOOL_DEF, START_STORY_TOOL_DEF, CHANGE_STORY_TOOL_DEF):
+        assert {START_STORY_TOOL, FINISH_STORY_TOOL} <= LOOP_TOOLS
+        for d in (SEARCH_STORIES_TOOL_DEF, START_STORY_TOOL_DEF, FINISH_STORY_TOOL_DEF):
             assert d["strict"] is True and d["parameters"]["additionalProperties"] is False
         assert SEARCH_STORIES_TOOL_DEF["parameters"]["required"] == ["query"]
         assert START_STORY_TOOL_DEF["parameters"]["required"] == ["story"]

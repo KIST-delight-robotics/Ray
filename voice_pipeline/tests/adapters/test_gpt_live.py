@@ -234,7 +234,7 @@ class TestEvents:
         events = _drain(session, want=2)
         session.close()
         assert events[0] == LiveFunctionCall("c1", "end_conversation", "{}", "d1")
-        assert events[1] == LiveResponseDone("d1")
+        assert events[1] == LiveResponseDone("d1", status="completed")
 
     def test_backend_message_items_are_ignored(self) -> None:
         msg = {"type": "response.output_item.done", "item": {"type": "message"}}
@@ -242,7 +242,7 @@ class TestEvents:
         session.start()
         events = _drain(session, want=1)
         session.close()
-        assert events == [LiveResponseDone("d1")]
+        assert events == [LiveResponseDone("d1", status="completed")]
 
     def test_usage_event(self) -> None:
         session, _ = _session([_usage(14.0, 0.0131)])
@@ -316,3 +316,94 @@ class TestSend:
         session.close()
         conn.session.close.assert_called_once()
         assert conn.closed
+
+
+class TestAppendAndResponseTracking:
+    @pytest.mark.parametrize("kind", ["thinking", "instructions", "commentary"])
+    def test_append_ids_and_acceptance(self, kind: str) -> None:
+        from types import SimpleNamespace
+
+        from voice_pipeline.adapters.gpt_live import LiveAppended
+
+        session, conn = _session([])
+        session._conn = conn
+        event_id = getattr(session, f"append_{kind}")("context")
+        other_id = getattr(session, f"append_{kind}")("context")
+        assert event_id != other_id
+        getattr(conn.session, kind).append.assert_any_call(
+            content="context",
+            delegation_id=None,
+            event_id=event_id,
+        )
+        session._dispatch(
+            SimpleNamespace(type=f"session.{kind}.appended", client_event_id=event_id, start_ms=100, end_ms=100)
+        )
+        assert session.poll_event() == LiveAppended(kind, event_id, 100, 100)
+
+    def test_empty_output_snapshot_does_not_hide_function_call(self) -> None:
+        session, _ = _session([])
+        session._dispatch_backend(_backend({"type": "response.created", "response": {"id": "r1"}}))
+        session._dispatch_backend(
+            _backend(
+                {
+                    "type": "response.output_item.done",
+                    "response_id": "r1",
+                    "item": {"type": "function_call", "call_id": "c1", "name": "start_story"},
+                }
+            )
+        )
+        call = session.poll_event()
+        assert call.response_id == "r1"
+        session._dispatch_backend(_backend({"type": "response.completed", "response": {"id": "r1", "output": []}}))
+        done = session.poll_event()
+        assert done.function_call_ids == ("c1",)
+        assert not done.is_final
+        session._dispatch_backend(_backend({"type": "response.created", "response": {"id": "r2"}}))
+        session._dispatch_backend(_backend({"type": "response.completed", "response": {"id": "r2", "output": []}}))
+        done = session.poll_event()
+        assert done.response_id == "r2" and done.is_final
+
+    @pytest.mark.parametrize("status", ["failed", "incomplete"])
+    def test_unsuccessful_response_is_not_final(self, status: str) -> None:
+        session, _ = _session([])
+        session._dispatch_backend(_backend({"type": "response.created", "response": {"id": "r1"}}))
+        session._dispatch_backend(_backend({"type": f"response.{status}", "response": {"id": "r1"}}))
+        done = session.poll_event()
+        assert done.status == status and not done.is_final
+
+    def test_interleaved_delegations_keep_calls_separate(self) -> None:
+        session, _ = _session([])
+        for d, r in (("d1", "r1"), ("d2", "r2")):
+            session._dispatch_backend(_backend({"type": "response.created", "response": {"id": r}}, d))
+        session._dispatch_backend(
+            _backend(
+                {
+                    "type": "response.output_item.done",
+                    "response_id": "r1",
+                    "item": {"type": "function_call", "call_id": "c1"},
+                },
+                "d1",
+            )
+        )
+        session.poll_event()
+        for d, r in (("d2", "r2"), ("d1", "r1")):
+            session._dispatch_backend(_backend({"type": "response.completed", "response": {"id": r}}, d))
+        assert session.poll_event().is_final
+        assert not session.poll_event().is_final
+
+    def test_untracked_or_duplicate_completion_is_not_final(self) -> None:
+        session, _ = _session([])
+        session._dispatch_backend(_backend({"type": "response.completed", "response": {"id": "missing"}}))
+        assert not session.poll_event().is_final
+
+    def test_error_preserves_client_event_id(self) -> None:
+        from types import SimpleNamespace
+
+        session, _ = _session([])
+        session._dispatch(
+            SimpleNamespace(
+                type="error",
+                error=SimpleNamespace(code="invalid_request", message="too long", client_event_id="append1"),
+            )
+        )
+        assert session.poll_event().client_event_id == "append1"

@@ -11,9 +11,12 @@
   → :func:`make_device_settings_handlers` (상태·저장은 :mod:`voice_pipeline.device_settings`).
 - ``play_song``: 노래 재생 → :func:`make_play_song_tool_def`. ``stop_song`` 은 재생 중에만 백엔드에 주어지는 툴
   (:data:`STOP_SONG_TOOL_DEF`, 루프가 백엔드를 교체할 때 사용). 둘 다 핸들러는 루프 내장.
-- ``search_stories``: 이야기 후보 검색 → :func:`make_story_search_handler`. ``start_story`` 는 루프 내장(백엔드를
-  이야기용으로 교체). ``change_story`` 와 ``finish_story`` 는 이야기 중의 교체·종료를 맡는 루프 내장 툴. 후보·기록은
-  :mod:`voice_pipeline.engines.gpt_live.stories`.
+- ``search_stories``: 이야기 후보 검색 → :func:`make_story_search_handler`. ``start_story`` / ``finish_story`` 는
+  루프 내장(상태 검사는 루프가 한다). 교체는 ``finish_story`` → ``search_stories`` → ``start_story`` 로 한다.
+  후보·기록은 :mod:`voice_pipeline.engines.gpt_live.stories`.
+
+설명은 함수가 무엇을 하는지와 인자·결과 형식만 적는다. 언제 부를지·부르지 말지는 백엔드 지시문
+(:data:`~voice_pipeline.engines.gpt_live.instructions.DEFAULT_BACKEND_INSTRUCTIONS`)에만 둔다.
 """
 
 from __future__ import annotations
@@ -101,11 +104,7 @@ ADJUST_VOLUME_TOOL_DEF: dict[str, Any] = {
 SET_BRIGHTNESS_TOOL_DEF: dict[str, Any] = {
     "type": "function",
     "name": SET_BRIGHTNESS_TOOL,
-    "description": (
-        "Set the brightness of Ray's LED lights to one of the fixed levels. 'off' turns the lights off. "
-        "For 'brighter' or 'dimmer' pick the level next to the current one; if the current level is not known "
-        "from the conversation, call get_device_settings first."
-    ),
+    "description": ("Set the brightness of Ray's LED lights to one of the fixed levels. 'off' turns the lights off."),
     "parameters": {
         "type": "object",
         "properties": {
@@ -124,11 +123,7 @@ SET_BRIGHTNESS_TOOL_DEF: dict[str, Any] = {
 GET_DEVICE_SETTINGS_TOOL_DEF: dict[str, Any] = {
     "type": "function",
     "name": GET_DEVICE_SETTINGS_TOOL,
-    "description": (
-        "Read Ray's current speaker volume step and LED brightness level without changing them. "
-        "Use it when the user asks how loud or how bright Ray is, or when a relative change needs the current "
-        "level and it is not already known from the conversation."
-    ),
+    "description": ("Read Ray's current speaker volume step and LED brightness level without changing them."),
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
     "strict": True,
 }
@@ -147,11 +142,10 @@ PLAY_SONG_TOOL = "play_song"
 STOP_SONG_TOOL = "stop_song"
 SEARCH_STORIES_TOOL = "search_stories"
 START_STORY_TOOL = "start_story"
-CHANGE_STORY_TOOL = "change_story"
 FINISH_STORY_TOOL = "finish_story"
 # 핸들러 없이 루프가 직접 처리하는 툴 — wiring 은 이 이름들을 핸들러 유무와 무관하게 노출한다
 LOOP_TOOLS: frozenset[str] = frozenset(
-    {END_CONVERSATION_TOOL, PLAY_SONG_TOOL, STOP_SONG_TOOL, START_STORY_TOOL, CHANGE_STORY_TOOL, FINISH_STORY_TOOL}
+    {END_CONVERSATION_TOOL, PLAY_SONG_TOOL, STOP_SONG_TOOL, START_STORY_TOOL, FINISH_STORY_TOOL}
 )
 
 STOP_SONG_TOOL_DEF: dict[str, Any] = {
@@ -168,15 +162,16 @@ SEARCH_STORIES_TOOL_DEF: dict[str, Any] = {
     "name": SEARCH_STORIES_TOOL,
     "description": (
         "Find stories Ray can tell. Each story is a few minutes long and ends with a song. "
-        "Returns candidates with summary, tags and song; may include unrelated fallback candidates. "
-        "During a story, search only for an explicit request to change stories, never to continue or resume. "
-        "If no candidate fits the requirements, propose an alternative and wait for consent before starting it. "
-        "Pass what the user asked for as the query (a topic, mood, or song name); pass an empty string when "
-        "the user did not ask for anything specific."
+        "Returns candidates with id, summary, tags and song; may include unrelated fallback candidates."
     ),
     "parameters": {
         "type": "object",
-        "properties": {"query": {"type": "string", "description": "What the user wants, or an empty string."}},
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "What the user asked for (a topic, mood or song name), or an empty string.",
+            }
+        },
         "required": ["query"],
         "additionalProperties": False,
     },
@@ -187,8 +182,8 @@ START_STORY_TOOL_DEF: dict[str, Any] = {
     "type": "function",
     "name": START_STORY_TOOL,
     "description": (
-        "Start telling a story. Only an id returned by the latest search_stories call is accepted. "
-        "Ray tells the story and offers its song at the end; playback requires user agreement."
+        "Start the story with this id. Only an id returned by the latest search_stories call is accepted. "
+        "The application delivers the script to Ray; the result is short metadata."
     ),
     "parameters": {
         "type": "object",
@@ -199,33 +194,11 @@ START_STORY_TOOL_DEF: dict[str, Any] = {
     "strict": True,
 }
 
-CHANGE_STORY_TOOL_DEF: dict[str, Any] = {
-    "type": "function",
-    "name": CHANGE_STORY_TOOL,
-    "description": (
-        "Replace the current story only when the user explicitly asks for a different story or agrees to an "
-        "offered replacement. Never use for continuing, resuming, questions, or 'I know this story' alone. "
-        "Search first, choose an id from the latest results that fits the user's requirements. "
-        "If none fits, propose an alternative and wait for agreement. Do not finish the current story first. "
-        "On success, return an empty final response; the application supplies the new script directly."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {"story": {"type": "string", "description": "Replacement id from the latest search_stories."}},
-        "required": ["story"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
 
 FINISH_STORY_TOOL_DEF: dict[str, Any] = {
     "type": "function",
     "name": FINISH_STORY_TOOL,
-    "description": (
-        "End the current story when the user wants to stop, declines to resume, or refuses the final song offer. "
-        "Do not use for replacement, questions or silence."
-    ),
+    "description": ("Mark the current story as over."),
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
     "strict": True,
 }

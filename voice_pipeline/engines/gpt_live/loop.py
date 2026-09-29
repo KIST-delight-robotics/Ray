@@ -25,17 +25,15 @@
     노래 상태 동안 백엔드는 ``stop_song`` 하나만 가진 재생용 설정으로 교체된다(``session.update``, 끝나면 복원).
     다른 툴 호출은 오류로 답하고 ``end_conversation`` 도 종료로 치지 않는다. 모델 음성은 버리고 전사는 저장하지 않는다.
 
-이야기 (대본은 백엔드가 통째로 들고, 대화 모델이 위임할 때마다 필요한 전달 단위를 돌려준다):
-    기본 백엔드가 ``search_stories`` → ``start_story`` 를 부르면 루프는 백엔드를 이야기용 설정(대본 + 진행 규칙 +
-    검색·``change_story``·``finish_story`` + 기본 툴)으로 교체하고(``update_backend``), 결과(도입부 텍스트 포함)는
-    보류한다 — 위임 시
-    한마디가 끝나 출력이 무음이 되면 이야기 지시를 append 한 뒤에야 결과를 제출한다. append 는 발화를 끊고(어댑터
-    문서), 결과를 먼저 제출하면 도입부 이 곧바로 시작돼 append 가 그 중간에 떨어진다(실기 2026-09-28). 노래
-    PENDING 과 같은 보류. 도입부 은 결과로 주고 기본 백엔드가 답하게 한다 — 같은 위임의 후속 응답에는 교체가
-    반영되지 않았다. 본문부터는 새 위임이라 이야기용 백엔드가 이력에서 위치를 읽어 돌려준다. 진행 위치는 파이썬이
-    갖지 않는다. 교체는 검색→선택→``change_story`` 로 처리하며 일반 대화 복원 없이 새 도입부을 같은 방식으로 준다.
-    끝: 이야기용 백엔드가 ``play_song`` 을 부르면 노래 흐름이 이어받고(노래 끝의 복원이 이야기도 끝낸다),
-    ``finish_story`` 면 즉시 복원한다.
+이야기:
+    search_stories → start_story → 무음 대기 → 준비 지시 수락 → 전체 대본 thinking.append 수락.
+    기존 툴 결과 Future에는 prepared 메타데이터만 반환한다. 같은 위임의 최종 성공 응답 후 시작 신호를 보낸다.
+    취소·종료는 전송을 무효화한다. 교체는 finish_story 뒤 새 start_story 다.
+    질문·재개·재청취 위치는 대화 모델이 전달받은 대본으로 처리한다.
+    백엔드 지시문은 하나다 — 시작·교체 때 ``## Current story`` 절만 붙여 ``session.update`` 하고 툴 집합은 그대로.
+    이야기가 끝났는지는 백엔드가 위임 때마다 전사를 보고 판단해 finish_story 로 알린다(자연 종료 뒤 사용자가
+    노래 제안에 답하지 않고 넘어간 경우 포함). play_song은 노래 흐름으로 이어지고, finish_story는 기본 지시문을
+    복원한다.
 
 종료 시퀀스(실측 근거는 scripts/gpt_live/FINDINGS.md §4~5):
     입력 mute → 모델의 마지막 발화가 끝날 때까지(출력이 무음으로 N초) 대기, 상한 있음 →
@@ -78,19 +76,16 @@ from voice_pipeline.engines.gpt_live.instructions import (
     SONG_ENDED_INSTRUCTIONS,
     SONG_PLAYING_INSTRUCTIONS,
     STORY_ENDED_INSTRUCTIONS,
-    STORY_MODE_INSTRUCTIONS,
     STORY_QUIET_INSTRUCTIONS,
     STORY_SONG_ENDED_INSTRUCTIONS,
-    build_story_backend_instructions,
+    build_backend_instructions,
 )
 from voice_pipeline.engines.gpt_live.songs import Song
 from voice_pipeline.engines.gpt_live.stories import Story, StorySelector
+from voice_pipeline.engines.gpt_live.story_append import StoryAppendTransfer, narration_text
 from voice_pipeline.engines.gpt_live.tools import (
-    CHANGE_STORY_TOOL,
-    CHANGE_STORY_TOOL_DEF,
     END_CONVERSATION_TOOL,
     FINISH_STORY_TOOL,
-    FINISH_STORY_TOOL_DEF,
     PLAY_SONG_TOOL,
     SEARCH_STORIES_TOOL,
     START_STORY_TOOL,
@@ -144,7 +139,7 @@ class StoryState(enum.Enum):
     """이야기 하위 상태 (Phase.ACTIVE 안에서만 NONE 이 아니다)."""
 
     NONE = "none"
-    TELLING = "telling"  # 백엔드가 이야기용 설정. 노래가 시작되거나 finish_story 로 끝난다
+    TELLING = "telling"  # 백엔드에 Current story 절이 붙어 있다. 노래가 시작되거나 finish_story 로 끝난다
 
 
 class LiveSessionLoop:
@@ -220,7 +215,7 @@ class LiveSessionLoop:
             input_sample_rate / live_sample_rate: 마이크 레이트와 세션 레이트. 다르면 선형 보간으로 리샘플.
             song_catalog: 재생 가능한 노래 (키 → Song). None/빈 dict 면 play_song 은 unknown 으로 답한다.
             story_selector: 이야기 검색·시작. None 이면 start_story 는 unavailable 로 답한다.
-            tone_preference: 프로필의 말투 선호. 이야기용 백엔드 지시문의 말투 절에 들어간다.
+            tone_preference: 프로필의 말투 선호. 이야기 중 백엔드 지시문을 다시 만들 때 말투 절에 들어간다.
             audio_input: 있으면 노래 재생 중 원본 마이크 채널로 바꾼다 (:meth:`AudioInput.set_raw_capture`).
         """
         self._live = live
@@ -244,7 +239,7 @@ class LiveSessionLoop:
         self._story_state = StoryState.NONE
         self._story: Story | None = None
         self._story_future: Future[str] | None = None  # 보류 중인 start_story 결과. 지시 append 뒤 완료
-        self._story_payload = ""
+        self._story_transfer: StoryAppendTransfer | None = None
         self._story_started_time = 0.0
         self._story_quiet_nudged_at = 0.0  # 마지막 침묵 재촉을 보낸 시각의 quiet_since. 같은 침묵엔 다시 안 보낸다
         self._audio_input = audio_input
@@ -365,7 +360,7 @@ class LiveSessionLoop:
                 logger.warning("stop for playing song failed", exc_info=True)
         self._set_raw_capture(False)
         self._clear_song("cancelled")
-        self._resolve_story_future()
+        self._cancel_story_transfer()
         try:
             self._live.close(graceful=graceful)
         except Exception:
@@ -446,15 +441,20 @@ class LiveSessionLoop:
             label="Song",
         ):
             self._drain_for_song()
-        if self._story_future is not None and self._utterance_finished(
-            self._story_started_time,
-            now,
-            min_wait=0.0,
-            silence=self._STORY_SILENCE_SEC,
-            max_wait=self._STORY_MAX_WAIT_SEC,
-            label="Story",
+        if (
+            self._story_transfer is not None
+            and self._story_transfer.state == "new"
+            and self._utterance_finished(
+                self._story_started_time,
+                now,
+                min_wait=0.0,
+                silence=self._STORY_SILENCE_SEC,
+                max_wait=self._STORY_MAX_WAIT_SEC,
+                label="Story",
+            )
         ):
             self._append_story_instructions()
+        self._advance_story_transfer(now=now)
         self._maybe_nudge_quiet_story(now)
         if (
             self._song_state is SongState.STOPPING
@@ -508,6 +508,7 @@ class LiveSessionLoop:
 
     def _handle_live_event(self, event: Any) -> bool:
         """이벤트 하나를 처리한다. True 면 루프 종료."""
+        self._advance_story_transfer(event, time.monotonic())
         if isinstance(event, LiveAudio):
             self._on_audio(event.pcm)
         elif isinstance(event, LiveTranscript):
@@ -515,7 +516,7 @@ class LiveSessionLoop:
         elif isinstance(event, LiveFunctionCall):
             self._pending_calls.append(event)
         elif isinstance(event, LiveResponseDone):
-            self._on_response_done()
+            self._on_response_done(event)
         elif isinstance(event, LiveUsage):
             self._context_ratio = event.context_ratio
             logger.debug("Live usage %.0fs, context %.1f%%", event.seconds, (event.context_ratio or 0.0) * 100)
@@ -598,11 +599,22 @@ class LiveSessionLoop:
             self._history.add_assistant_message(text)
         self._save_utterance(seg.speaker, text)
 
-    def _on_response_done(self) -> None:
+    def _on_response_done(self, event: LiveResponseDone | None = None) -> None:
         """백엔드 응답이 끝났다 — 모아둔 함수 호출을 실행에 넘긴다. 결과 제출은 :meth:`_poll_tools`."""
         if not self._pending_calls:
             return
-        calls, self._pending_calls = self._pending_calls, []
+        if event is None:
+            calls, self._pending_calls = self._pending_calls, []
+        else:
+            calls = [
+                c
+                for c in self._pending_calls
+                if c.delegation_id == event.delegation_id and c.response_id == event.response_id
+            ]
+            self._pending_calls = [c for c in self._pending_calls if c not in calls]
+            if event.status in ("failed", "incomplete"):
+                logger.warning("Discarding calls from %s backend response", event.status)
+                return
         for call in calls:
             logger.info("Tool %s(%s) requested", call.name, call.arguments)
             self._inflight.append((call, self._submit_tool(call)))
@@ -617,8 +629,6 @@ class LiveSessionLoop:
             return self._request_song(call)  # 루프 내장. 노래가 시작된 뒤 완료되는 Future
         if call.name == START_STORY_TOOL:
             return self._start_story(call)
-        if call.name == CHANGE_STORY_TOOL:
-            return self._start_story(call, replace=True)
         if call.name == FINISH_STORY_TOOL:
             return self._finish_story()
         handler = self._tool_handlers.get(call.name)
@@ -656,6 +666,9 @@ class LiveSessionLoop:
                 logger.warning("Tool %s failed", call.name, exc_info=True)
             logger.info("Tool %s -> %s", call.name, output if len(output) <= 200 else output[:200] + "…")
             self._live.submit_function_output(call.call_id, output)
+            transfer = self._story_transfer
+            if transfer is not None and call.call_id == transfer.call.call_id:
+                transfer.result_submitted = True
             ending |= call.name == END_CONVERSATION_TOOL and self._song_state is SongState.NONE
             stopped |= call.name == STOP_SONG_TOOL and '"stopped"' in output
         if ending:
@@ -673,6 +686,7 @@ class LiveSessionLoop:
     def _begin_ending(self, reason: str) -> None:
         if self._phase != Phase.ACTIVE:
             return
+        self._cancel_story_transfer()
         self._phase = Phase.ENDING
         self._exit_reason = reason
         self._end_started_time = time.monotonic()
@@ -758,7 +772,7 @@ class LiveSessionLoop:
             logger.info("Story %s handed off to music", self._story.key if self._story else "?")
             self._story_state = StoryState.NONE
             self._story = None
-            self._resolve_story_future()
+            self._cancel_story_transfer()
         try:
             self._live.update_backend(SONG_BACKEND_INSTRUCTIONS, (STOP_SONG_TOOL_DEF,))
         except Exception:
@@ -811,23 +825,16 @@ class LiveSessionLoop:
     # Story
     # ------------------------------------------------------------------
 
-    def _start_story(self, call: LiveFunctionCall, *, replace: bool = False) -> Future[str]:
-        """검색 결과로 시작·교체한다. 새 도입부은 지시 append 뒤 현재 위임의 툴 결과로 전달한다."""
+    def _start_story(self, call: LiveFunctionCall) -> Future[str]:
+        """검색 결과로 시작한다. 전체 대본 수락 후 메타데이터만 툴 결과로 반환한다. 이야기 중이면 거절한다."""
         try:
             key = str(json.loads(call.arguments or "{}").get("story", ""))
         except json.JSONDecodeError:
             key = ""
         if self._story_selector is None:
             return _completed(json.dumps({"error": "stories are unavailable"}))
-        if self._story_future is not None:
-            return _completed(json.dumps({"error": "a story transition is already pending"}))
-        if replace:
-            if self._story_state is not StoryState.TELLING or self._story is None:
-                return _completed(json.dumps({"error": "no current story to change; use start_story"}))
-            if key == self._story.key:
-                return _completed(json.dumps({"error": "choose a different story from search_stories"}))
-        elif self._story_state is StoryState.TELLING:
-            return _completed(json.dumps({"error": "a story is already being told; use change_story to replace it"}))
+        if self._story_state is StoryState.TELLING or self._story_transfer is not None:
+            return _completed(json.dumps({"error": "a story is already current; call finish_story first"}))
         story = self._story_selector.begin(key)
         if story is None:
             return _completed(json.dumps({"error": f"unknown story {key!r}; call {SEARCH_STORIES_TOOL} first"}))
@@ -835,47 +842,95 @@ class LiveSessionLoop:
         if song is None:
             return _completed(json.dumps({"error": f"song {story.song!r} for story {key!r} is not playable"}))
         label = f"{song.title} — {song.artist}" if song.artist else song.title
-        # 검색·선택은 백엔드가, 교체는 전용 툴이 맡는다. 이야기 중에는 start_story 를 노출하지 않는다.
-        tools = tuple(t for t in self._live.tools if t["name"] != START_STORY_TOOL)
         try:
-            # 다음 위임부터 새 대본을 쓴다. 현재 위임에는 first_part 를 직접 돌려준다.
+            import tiktoken
+
+            encoding = tiktoken.get_encoding("o200k_base")
+            future: Future[str] = Future()
+            transfer = StoryAppendTransfer(
+                self._live,
+                call,
+                story.key,
+                narration_text(story.body),
+                lambda text: len(encoding.encode(text)),
+                result_callback=lambda result: future.set_result(result) if not future.done() else None,
+            )
+        except Exception:
+            logger.warning("story preparation failed", exc_info=True)
+            return _completed(json.dumps({"error": "could not prepare the story script"}))
+        # 같은 지시문·같은 툴에 Current story 절만 붙인다. 이 위임은 아직 이전 설정으로 돌지만 빈 응답만 내면 된다.
+        try:
             self._live.update_backend(
-                build_story_backend_instructions(
-                    story.body, song.key, label, self._tone_preference, self._song_catalog
-                ),
-                ({"type": "web_search"}, *tools, CHANGE_STORY_TOOL_DEF, FINISH_STORY_TOOL_DEF),
+                build_backend_instructions(self._tone_preference, self._song_catalog, (story.key, song.key, label)),
+                ({"type": "web_search"}, *self._live.tools),
             )
         except Exception:
             logger.warning("backend update for story failed", exc_info=True)
-            return _completed(json.dumps({"error": "could not configure the new story; current story unchanged"}))
-        previous = self._story.key if replace and self._story else None
+            return _completed(json.dumps({"error": "could not configure the story"}))
         self._story = story
         self._story_state = StoryState.TELLING
-        self._story_future = Future()
+        self._story_future = future
+        self._story_transfer = transfer
         self._story_started_time = time.monotonic()
         self._story_quiet_nudged_at = 0.0
-        logger.info(
-            "Story %s: %s (song %s) — waiting for output silence", "changed" if replace else "started", key, song.key
-        )
-        payload = {"status": "changed" if replace else "started", "story": story.key, "song": song.key, "title": label}
-        if previous is not None:
-            payload["previous_story"] = previous
-        payload["first_part"] = story.first_part()
-        self._story_payload = json.dumps(payload, ensure_ascii=False)
-        return self._story_future
+        logger.info("Story preparing: %s (%d parts)", key, len(transfer.parts))
+        return future
 
     def _append_story_instructions(self) -> None:
-        """출력이 무음이 됐다 — 이야기 지시를 얹고 보류한 start_story 결과를 완료한다 (도입부 은 그 뒤에 온다)."""
+        transfer = self._story_transfer
+        if transfer is None or transfer.state != "new":
+            return
         try:
-            self._live.append_instructions(STORY_MODE_INSTRUCTIONS)
+            transfer.begin(time.monotonic())
+        except Exception as exc:
+            self._fail_story_transfer(str(exc))
+
+    def _advance_story_transfer(self, event: object = None, now: float | None = None) -> None:
+        transfer = self._story_transfer
+        if transfer is None:
+            return
+        now = time.monotonic() if now is None else now
+        try:
+            if event is not None:
+                transfer.handle(event, now)
+            transfer.tick(now)
+        except Exception as exc:
+            self._fail_story_transfer(str(exc))
+            return
+        if self._story_future is not None and self._story_future.done():
+            self._story_future = None
+        if transfer.failure:
+            self._fail_story_transfer(transfer.failure)
+
+    def _fail_story_transfer(self, reason: str) -> None:
+        logger.warning("Story transfer failed: %s", reason)
+        self._cancel_story_transfer(reason)
+        self._story = None
+        self._story_state = StoryState.NONE
+        self._restore_backend()
+        try:
+            self._live.append_instructions(STORY_ENDED_INSTRUCTIONS)
         except Exception:
-            logger.warning("append for story failed", exc_info=True)
-        logger.info("Story instructions appended — releasing start result")
-        self._resolve_story_future()
+            logger.warning("could not restore live instructions", exc_info=True)
+
+    def _cancel_story_transfer(self, reason: str = "cancelled") -> None:
+        transfer, self._story_transfer = self._story_transfer, None
+        if transfer is not None:
+            try:
+                transfer.cancel(time.monotonic(), reason, submit_error=self._phase != Phase.DONE)
+            except Exception:
+                logger.warning("story cancellation notification failed", exc_info=True)
+        if self._story_future is not None and not self._story_future.done():
+            self._story_future.set_result(json.dumps({"error": reason}))
+        self._story_future = None
 
     def _maybe_nudge_quiet_story(self, now: float) -> None:
         """침묵 시 첫 질문·곁 대화·동의 대기를 구분하도록 한 번 재촉한다."""
-        if self._story_state is not StoryState.TELLING or self._story_future is not None or self._inflight:
+        if (
+            self._story_state is not StoryState.TELLING
+            or self._inflight
+            or (self._story_transfer is not None and self._story_transfer.state != "started")
+        ):
             return
         quiet_since = max(self._last_voice_time or 0.0, self._last_transcript_time, self._story_started_time)
         if now - quiet_since < self._STORY_QUIET_SEC or quiet_since <= self._story_quiet_nudged_at:
@@ -887,21 +942,14 @@ class LiveSessionLoop:
             logger.warning("quiet nudge failed", exc_info=True)
         logger.info("Story: quiet for %.0fs — applying quiet-story policy", now - quiet_since)
 
-    def _resolve_story_future(self) -> None:
-        if self._story_future is None:
-            return
-        if not self._story_future.done():
-            self._story_future.set_result(self._story_payload)
-        self._story_future = None
-
     def _finish_story(self) -> Future[str]:
-        """finish_story 요청. 이야기 중이면 즉시 기본 백엔드로 돌아간다."""
+        """finish_story 요청. 이야기 중이면 즉시 기본 지시문으로 돌아간다. 아니면 not_telling (헛 호출은 무해)."""
         if self._story_state is not StoryState.TELLING:
             return _completed(json.dumps({"status": "not_telling"}))
         key = self._story.key if self._story else "?"
         self._story_state = StoryState.NONE
         self._story = None
-        self._resolve_story_future()
+        self._cancel_story_transfer()
         self._restore_backend()
         try:
             self._live.append_instructions(STORY_ENDED_INSTRUCTIONS)

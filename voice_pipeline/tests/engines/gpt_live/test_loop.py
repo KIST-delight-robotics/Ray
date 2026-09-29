@@ -15,6 +15,7 @@ from voice_pipeline.adapters.audio_input import AudioInput
 from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEvent, CppEventType
 from voice_pipeline.adapters.gpt_live import (
     GPTLiveSession,
+    LiveAppended,
     LiveAudio,
     LiveClosed,
     LiveFunctionCall,
@@ -24,6 +25,7 @@ from voice_pipeline.adapters.gpt_live import (
 )
 from voice_pipeline.adapters.led import LEDState
 from voice_pipeline.engines.gpt_live.instructions import (
+    DEFAULT_BACKEND_INSTRUCTIONS,
     FAREWELL_COMMENTARY,
     SONG_BACKEND_INSTRUCTIONS,
     SONG_ENDED_INSTRUCTIONS,
@@ -37,7 +39,6 @@ from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop, Phase, SongSta
 from voice_pipeline.engines.gpt_live.songs import Song
 from voice_pipeline.engines.gpt_live.stories import Story, StoryLog, StorySelector
 from voice_pipeline.engines.gpt_live.tools import (
-    CHANGE_STORY_TOOL,
     END_CONVERSATION_TOOL,
     FINISH_STORY_TOOL,
     PLAY_SONG_TOOL,
@@ -45,6 +46,7 @@ from voice_pipeline.engines.gpt_live.tools import (
     SEARCH_STORIES_TOOL,
     START_STORY_TOOL,
     STOP_SONG_TOOL,
+    make_story_search_handler,
 )
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE, SAMPLE_RATE
 
@@ -577,6 +579,14 @@ def _staged_live_events(loop: LiveSessionLoop, m: dict[str, MagicMock], stages: 
     pending = list(stages)
 
     def poll():
+        transfer = loop._story_transfer
+        if transfer is not None:
+            if transfer.pending_id:
+                return LiveAppended(transfer.pending_kind, transfer.pending_id, 0, 0)
+            if transfer.state == "backend" and transfer.result_submitted:
+                return LiveResponseDone(
+                    transfer.call.delegation_id, "final_" + transfer.transfer_id, "completed", (), True
+                )
         if not pending:
             return None
         cond, event = pending[0]
@@ -641,7 +651,11 @@ class TestSongPlayback:
         continues = [i for i, n in enumerate(names) if n == "live.continue_response"]
         assert continues[1] < names.index("live.restore_backend") < names.index("live.close")  # 정지 후속 응답 뒤 복원
         assert [c.args[0] for c in ai.set_raw_capture.call_args_list][:2] == [True, False]
-        appended = [c.args[0] for c in live.append_instructions.call_args_list]
+        appended = [
+            c.args[0].split("\nCurrent transfer:")[0]
+            for c in live.append_instructions.call_args_list
+            if "is cancelled." not in c.args[0]
+        ]
         assert appended == [SONG_PLAYING_INSTRUCTIONS, SONG_ENDED_INSTRUCTIONS]
         live.append_thinking.assert_not_called()
         # 4) 재생 중 전사는 기록하지 않는다
@@ -871,7 +885,12 @@ class TestSongPlayback:
 # ---------------------------------------------------------------------------
 
 STORY = Story(
-    key="IAM", song="IAM", summary="디오게네스", tags=("철학",), body="## 도입부\n첫 문장.", song_title="I AM"
+    key="IAM",
+    song="IAM",
+    summary="디오게네스",
+    tags=("철학",),
+    body="## 도입부\n첫 문장.\n## 본문\n본문이에요. 노래를 들어볼까요?",
+    song_title="I AM",
 )
 
 
@@ -905,20 +924,22 @@ class TestStory:
         live = m["live"]
         sel.begin.assert_called_once_with("IAM")
         out = json.loads(live.submit_function_output.call_args.args[1])
-        assert out == {
-            "status": "started",
-            "story": "IAM",
-            "song": "IAM",
-            "title": "I AM — IVE",
-            "first_part": "첫 문장.",
-        }
+        assert out["status"] == "prepared" and out["story"] == "IAM"
+        assert "first_part" not in out
+        assert live.append_thinking.called
         instructions, tools = live.update_backend.call_args.args
-        assert "## 도입부" in instructions and 'song id "IAM"' in instructions
-        assert "overrides the default: formal" in instructions  # 말투 선호가 이야기용 백엔드에도 간다
+        # 같은 기본 지시문에 Current story 절만 붙고, 툴 집합은 세션 시작 그대로다.
+        assert instructions.startswith(DEFAULT_BACKEND_INSTRUCTIONS)
+        assert "## Current story" in instructions and "song id 'IAM'" in instructions
+        assert "## 도입부" not in instructions  # 대본은 백엔드에 주지 않는다
+        assert "overrides the default: formal" in instructions  # 말투 선호가 유지된다
         names = [t.get("name", t["type"]) for t in tools]
-        # 검색은 유지하고 시작 대신 교체 툴을 노출한다.
-        assert names == ["web_search", "end_conversation", "search_stories", "change_story", "finish_story"]
-        assert [c.args[0] for c in live.append_instructions.call_args_list] == [STORY_MODE_INSTRUCTIONS]
+        assert names == ["web_search", *(t["name"] for t in live.tools)]
+        assert [
+            c.args[0].split("\nCurrent transfer:")[0]
+            for c in live.append_instructions.call_args_list
+            if "is cancelled." not in c.args[0]
+        ] == [STORY_MODE_INSTRUCTIONS]
         seq = [c[0] for c in order.mock_calls]
         # 교체 → (한마디) → 무음 → append → 결과 제출: 단락 1 은 지시가 얹힌 뒤에야 온다
         assert seq.index("live.update_backend") < seq.index("bridge.send_audio")
@@ -977,7 +998,11 @@ class TestStory:
         seq = [c[0] for c in order.mock_calls]
         submits = [i for i, n in enumerate(seq) if n == "live.submit_function_output"]
         assert seq.index("live.restore_backend") < submits[1]  # 복원 뒤에 결과 제출 → 후속 응답은 기본 백엔드
-        appended = [c.args[0] for c in live.append_instructions.call_args_list]
+        appended = [
+            c.args[0].split("\nCurrent transfer:")[0]
+            for c in live.append_instructions.call_args_list
+            if "is cancelled." not in c.args[0]
+        ]
         assert appended == [STORY_MODE_INSTRUCTIONS, STORY_ENDED_INSTRUCTIONS]
         assert loop._story_state is StoryState.NONE and loop._story_future is None
 
@@ -1006,7 +1031,7 @@ class TestStory:
         )
         loop.run()
         outputs = {c.args[0]: json.loads(c.args[1]) for c in m["live"].submit_function_output.call_args_list}
-        assert "already being told" in outputs["c2"]["error"]
+        assert "call finish_story first" in outputs["c2"]["error"]
         sel.begin.assert_called_once()  # 두 번째는 검증 전에 거부 — 기록되지 않는다
 
     def test_song_at_the_end_takes_over_and_song_end_restores_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1033,10 +1058,17 @@ class TestStory:
         loop.run()
         live = m["live"]
         assert loop._story_state is StoryState.NONE and loop._story is None
-        # 백엔드 교체 두 번(이야기용 → 노래용), 복원은 노래 끝에 한 번
-        assert [c.args[0][:6] for c in live.update_backend.call_args_list] == ["## Rol", SONG_BACKEND_INSTRUCTIONS[:6]]
+        # 백엔드 갱신 두 번(Current story 절 → 노래용), 복원은 노래 끝에 한 번
+        assert [c.args[0][:6] for c in live.update_backend.call_args_list] == [
+            DEFAULT_BACKEND_INSTRUCTIONS[:6],
+            SONG_BACKEND_INSTRUCTIONS[:6],
+        ]
         live.restore_backend.assert_called_once()
-        appended = [c.args[0] for c in live.append_instructions.call_args_list]
+        appended = [
+            c.args[0].split("\nCurrent transfer:")[0]
+            for c in live.append_instructions.call_args_list
+            if "is cancelled." not in c.args[0]
+        ]
         assert appended == [STORY_MODE_INSTRUCTIONS, SONG_PLAYING_INSTRUCTIONS, SONG_ENDED_INSTRUCTIONS]
         assert loop._story_future is None
         m["bridge"].send_play_audio_csv.assert_called_once_with("IAM")
@@ -1044,7 +1076,14 @@ class TestStory:
     def test_quiet_during_story_asks_once_whether_to_continue(self, monkeypatch: pytest.MonkeyPatch) -> None:
         loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, story_selector=_selector(), story_quiet=0.1)
         live = m["live"]
-        nudged = lambda: STORY_QUIET_INSTRUCTIONS in [c.args[0] for c in live.append_instructions.call_args_list]  # noqa: E731
+        nudged = lambda: (  # noqa: E731
+            STORY_QUIET_INSTRUCTIONS
+            in [
+                c.args[0].split("\nCurrent transfer:")[0]
+                for c in live.append_instructions.call_args_list
+                if "is cancelled." not in c.args[0]
+            ]
+        )  # noqa: E731
         first_nudge = {"t": 0.0}
 
         def quiet_long_enough() -> bool:
@@ -1063,7 +1102,11 @@ class TestStory:
             ],
         )
         loop.run()
-        appended = [c.args[0] for c in live.append_instructions.call_args_list]
+        appended = [
+            c.args[0].split("\nCurrent transfer:")[0]
+            for c in live.append_instructions.call_args_list
+            if "is cancelled." not in c.args[0]
+        ]
         assert appended == [STORY_MODE_INSTRUCTIONS, STORY_QUIET_INSTRUCTIONS]
 
     def test_no_quiet_nudge_outside_story(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1074,88 +1117,85 @@ class TestStory:
         m["live"].append_instructions.assert_not_called()
 
     @pytest.mark.parametrize("threaded", [False, True])
-    def test_search_then_change_returns_new_opening_without_restoring_default_backend(
+    def test_finish_then_search_then_start_replaces_story(
         self, monkeypatch: pytest.MonkeyPatch, threaded: bool
     ) -> None:
-        replacement = Story("new", "IAM", "우주 이야기", ("우주",), "## 도입부\n새 첫 문장.")
+        replacement = Story("new", "IAM", "우주 이야기", ("우주",), "## 도입부\n새 첫 문장.\n## 본문\n새 본문이에요.")
         log = StoryLog(":memory:")
         sel = StorySelector({STORY.key: STORY, replacement.key: replacement}, log)
         sel.search("")
         with ThreadPoolExecutor(max_workers=1) as executor:
             loop, m, _ = _make_loop(
-                monkeypatch, song_catalog=SONGS, story_selector=sel, executor=executor if threaded else None
+                monkeypatch,
+                song_catalog=SONGS,
+                story_selector=sel,
+                executor=executor if threaded else None,
+                tool_handlers={SEARCH_STORIES_TOOL: make_story_search_handler(sel)},
             )
             live = m["live"]
             started = lambda: live.submit_function_output.call_count >= 1  # noqa: E731
-            searched = lambda: live.submit_function_output.call_count >= 2  # noqa: E731
-            changed = lambda: live.submit_function_output.call_count >= 3  # noqa: E731
+            searched = lambda: live.submit_function_output.call_count >= 3  # noqa: E731
+            restarted = lambda: live.submit_function_output.call_count >= 4  # noqa: E731
             _staged_live_events(
                 loop,
                 m,
                 [
                     (None, _call(START_STORY_TOOL, {"story": "IAM"})),
                     (None, LiveResponseDone(None)),
+                    # 교체 요청: 백엔드가 한 응답에 finish_story 와 search_stories 를 같이 부른다
+                    (started, _call(FINISH_STORY_TOOL, call_id="finish")),
                     (started, _call(SEARCH_STORIES_TOOL, {"query": "우주"}, call_id="search")),
                     (started, LiveResponseDone(None)),
-                    (searched, _call(CHANGE_STORY_TOOL, {"story": "new"}, call_id="change")),
+                    (searched, _call(START_STORY_TOOL, {"story": "new"}, call_id="restart")),
                     (searched, LiveResponseDone(None)),
                     (searched, LiveAudio(VOICE_100MS)),
-                    (changed, LiveClosed("x")),
+                    (restarted, LiveClosed("x")),
                 ],
             )
             loop.run()
         outputs = {c.args[0]: json.loads(c.args[1]) for c in live.submit_function_output.call_args_list}
-        assert [s["id"] for s in outputs["search"]["stories"]] == ["new"]
-        assert outputs["change"]["status"] == "changed"
-        assert outputs["change"]["previous_story"] == "IAM"
-        assert outputs["change"]["first_part"] == "새 첫 문장."
+        assert outputs["finish"] == {"status": "finished", "story": "IAM"}
+        assert [s["id"] for s in outputs["search"]["stories"]] == ["new"]  # 방금 한 이야기는 기록돼 후보에서 빠진다
+        assert outputs["restart"]["status"] == "prepared" and outputs["restart"]["story"] == "new"
         assert loop._story == replacement and loop._story_state is StoryState.TELLING
-        assert live.update_backend.call_count == 2
-        assert "새 첫 문장." in live.update_backend.call_args.args[0]
-        assert [c.args[0] for c in live.append_instructions.call_args_list] == [STORY_MODE_INSTRUCTIONS] * 2
-        live.restore_backend.assert_not_called()
-        seq = [c[0] for c in live.mock_calls]
-        assert seq.index("update_backend") < seq.index("append_instructions") < seq.index("submit_function_output")
-        last_update = max(i for i, name in enumerate(seq) if name == "update_backend")
-        last_append = max(i for i, name in enumerate(seq) if name == "append_instructions")
-        last_submit = max(i for i, name in enumerate(seq) if name == "submit_function_output")
-        assert last_update < last_append < last_submit
+        updates = [c.args[0] for c in live.update_backend.call_args_list]
+        assert all(u.startswith(DEFAULT_BACKEND_INSTRUCTIONS) and "## Current story" in u for u in updates)
+        assert "telling story 'IAM'" in updates[0] and "telling story 'new'" in updates[1]
+        live.restore_backend.assert_called_once()  # finish_story 가 기본 지시문으로 되돌린다
+        assert [
+            c.args[0].split("\nCurrent transfer:")[0]
+            for c in live.append_instructions.call_args_list
+            if "is cancelled." not in c.args[0]
+        ] == [STORY_MODE_INSTRUCTIONS, STORY_ENDED_INSTRUCTIONS, STORY_MODE_INSTRUCTIONS]
         log.close()
 
-    @pytest.mark.parametrize("failure", ["same", "unknown", "unplayable", "backend"])
-    def test_failed_replacement_keeps_current_story(self, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
-        sel = _selector(Story("new", "missing" if failure == "unplayable" else "IAM", "s", (), "new script"))
+    def test_start_story_while_telling_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sel = _selector(Story("new", "IAM", "s", (), "new script"))
         loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, story_selector=sel)
         loop._story = STORY
         loop._story_state = StoryState.TELLING
-        if failure == "unknown":
-            sel.begin.return_value = None
-        if failure == "backend":
-            m["live"].update_backend.side_effect = RuntimeError("disconnected")
-        result = loop._submit_tool(_call(CHANGE_STORY_TOOL, {"story": "IAM" if failure == "same" else "new"}))
-        assert "error" in json.loads(result.result())
+        result = loop._submit_tool(_call(START_STORY_TOOL, {"story": "new"}))
+        assert "finish_story first" in json.loads(result.result())["error"]
         assert loop._story == STORY and loop._story_state is StoryState.TELLING
-        assert loop._story_future is None
+        sel.begin.assert_not_called()
+        m["live"].update_backend.assert_not_called()
         m["live"].restore_backend.assert_not_called()
         m["live"].append_instructions.assert_not_called()
 
-    def test_change_without_current_story_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_start_story_during_pending_transfer_needs_finish_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sel = _selector()
-        loop, m, _ = _make_loop(monkeypatch, story_selector=sel)
-        result = loop._submit_tool(_call(CHANGE_STORY_TOOL, {"story": "new"}))
-        assert "no current story" in json.loads(result.result())["error"]
-        sel.begin.assert_not_called()
-        m["live"].update_backend.assert_not_called()
-
-    def test_pending_opening_cannot_be_overwritten_by_change(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, story_selector=_selector())
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, story_selector=sel)
         original = loop._submit_tool(_call(START_STORY_TOOL, {"story": "IAM"}))
-        refused = loop._submit_tool(_call(CHANGE_STORY_TOOL, {"story": "new"}))
-        assert "pending" in json.loads(refused.result())["error"]
-        assert loop._story_future is original and not original.done()
         loop._append_story_instructions()
-        assert json.loads(original.result())["story"] == "IAM"
-        m["live"].update_backend.assert_called_once()
+        sel.begin.return_value = Story("new", "IAM", "s", (), "## 도입부\n새 도입.\n## 본문\n새 본문.")
+        refused = loop._submit_tool(_call(START_STORY_TOOL, {"story": "new"}, "again"))
+        assert "finish_story first" in json.loads(refused.result(timeout=1))["error"]
+        assert not original.done()
+        loop._finish_story()  # 준비 중인 전송을 취소하고 보류 결과를 오류로 끝낸다
+        assert "error" in json.loads(original.result(timeout=1))
+        restarted = loop._submit_tool(_call(START_STORY_TOOL, {"story": "new"}, "restart"))
+        assert not restarted.done() and loop._story_transfer.state == "new"
+        m["live"].append_commentary.assert_not_called()
 
     @pytest.mark.parametrize(
         "from_story,state,completed,phase,expected",

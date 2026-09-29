@@ -52,6 +52,7 @@ from voice_pipeline.engines.gpt_live.songs import Song, load_song_catalog
 from voice_pipeline.engines.gpt_live.stories import StoryLog, StorySelector, load_stories
 from voice_pipeline.engines.gpt_live.tools import (
     DEFAULT_TOOLS,
+    FINISH_STORY_TOOL_DEF,
     LOOP_TOOLS,
     SEARCH_MEMORY_TOOL,
     SEARCH_STORIES_TOOL,
@@ -202,7 +203,7 @@ class ProcessComponents:
                 tools += (play_song,)
             if self.story_selector is not None:
                 tool_handlers.setdefault(SEARCH_STORIES_TOOL, make_story_search_handler(self.story_selector))
-                tools += (SEARCH_STORIES_TOOL_DEF, START_STORY_TOOL_DEF)
+                tools += (SEARCH_STORIES_TOOL_DEF, START_STORY_TOOL_DEF, FINISH_STORY_TOOL_DEF)
             live = GPTLiveSession(
                 LiveSessionConfig(
                     instructions=instructions,

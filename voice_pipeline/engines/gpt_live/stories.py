@@ -1,8 +1,7 @@
 """이야기 대본 — ``assets/song_stories/*.md`` 를 읽어 "이야기 → 노래" 콘텐츠의 후보·선택·기록을 맡는다.
 
-파일 하나가 이야기 하나. frontmatter(``song``, ``summary``, ``tags``, …) 뒤의 본문은 구조를 해석하지 않고
-통째로 이야기용 백엔드 지시문에 들어간다(:mod:`~voice_pipeline.engines.gpt_live.instructions` 의
-``build_story_backend_instructions``).
+파일 하나가 이야기 하나. frontmatter(``song``, ``summary``, ``tags``, …) 뒤의 본문은 여기서 구조를 해석하지 않고
+:mod:`~voice_pipeline.engines.gpt_live.story_append` 가 도입부·본문만 뽑아 대화 모델에 직접 주입한다.
 고를 때 백엔드가 보는 것은 요약·태그·곡뿐이다.
 
 흐름: 백엔드 ``search_stories(query)`` → :meth:`StorySelector.search` (한 이야기는 제외, 나머지에서 키워드 점수 +
@@ -29,7 +28,6 @@ logger = logging.getLogger("voice_pipeline.stories")
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]+")
-_OPENING_HEADING_RE = re.compile(r"^## 도입부[^\S\n]*$", re.MULTILINE)
 # 요청문에 늘 붙지만 이야기를 가려내지 못하는 말 — 점수에서 뺀다
 _STOP_WORDS = frozenset(
     {"이야기", "얘기", "스토리", "노래", "곡", "해줘", "해", "줘", "들려줘", "하나", "좀", "그냥", "아무거나"}
@@ -52,21 +50,6 @@ class Story:
         """백엔드가 고를 때 보는 항목 — 본문은 넣지 않는다."""
         song = f"{self.song_title} — {self.song_artist}" if self.song_artist else self.song_title
         return {"id": self.key, "summary": self.summary, "tags": list(self.tags), "song": song}
-
-    def first_part(self) -> str:
-        """도입부의 말할 텍스트 (``>`` 진행 지침 제외). ``start_story`` 결과에 실어 기본 백엔드가 그대로 답하게 한다.
-
-        본문 구조를 아는 유일한 곳 — 도입부는 백엔드 교체가 반영되기 전의 같은 위임에서 나와야 하므로
-        기본 백엔드에 텍스트를 직접 준다. 도입부 헤딩이 없으면 빈 문자열.
-        """
-        m = _OPENING_HEADING_RE.search(self.body)
-        if m is None:
-            return ""
-        rest = self.body[m.end() :]
-        end = rest.find("\n## ")
-        section = rest if end < 0 else rest[:end]
-        lines = [ln.strip() for ln in section.splitlines() if ln.strip() and not ln.lstrip().startswith(">")]
-        return "\n".join(lines)
 
     def search_text(self) -> str:
         """검색 매칭 대상 (요약·태그·곡명·가수·키)."""
