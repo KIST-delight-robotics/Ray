@@ -840,7 +840,9 @@ class LiveSessionLoop:
         try:
             # 다음 위임부터 새 대본을 쓴다. 현재 위임에는 first_part 를 직접 돌려준다.
             self._live.update_backend(
-                build_story_backend_instructions(story.body, song.key, label, self._tone_preference),
+                build_story_backend_instructions(
+                    story.body, song.key, label, self._tone_preference, self._song_catalog
+                ),
                 ({"type": "web_search"}, *tools, CHANGE_STORY_TOOL_DEF, FINISH_STORY_TOOL_DEF),
             )
         except Exception:

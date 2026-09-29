@@ -207,7 +207,7 @@ class ProcessComponents:
                 LiveSessionConfig(
                     instructions=instructions,
                     backend_model=_LIVE_BACKEND_MODEL,
-                    backend_instructions=build_backend_instructions(tone),
+                    backend_instructions=build_backend_instructions(tone, self.song_catalog),
                     tools=tools,
                     voice=LIVE_VOICE,
                     sample_rate=BRIDGE_SAMPLE_RATE,

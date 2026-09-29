@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+
+from voice_pipeline.engines.gpt_live.songs import Song, format_song_list
 
 # ---------------------------------------------------------------------------
 # Prompts — 공식 프롬프팅 가이드 템플릿 구조(역할 / 백채널 / 인터럽트 / 위임 정책 3라벨).
@@ -73,8 +75,12 @@ If nothing relevant comes back, say Ray does not remember; do not use web search
 Call set_brightness for the LED lights; for "brighter"/"dimmer" pick the level next to the current one, \
 calling get_device_settings first only if the current level is not already known from the conversation. \
 Call get_device_settings alone when the user asks how loud or bright Ray is.
-- The only way to play a song is calling play_song with a song id from its list. If the user's request does not \
-match a stored song, say Ray does not have it. If it is unclear which song they mean, ask.
+- Songs: the Songs on Ray section lists every song Ray has. When the user asks which songs Ray has, \
+or asks for music without naming a song, do not call play_song: name three or four titles with their artists \
+that fit the conversation, say there are more, and ask which one they want. \
+Call play_song only when the user named a stored song or agreed to one Ray proposed; \
+never pick a song for them unless they ask Ray to choose. If the request matches no stored song, say Ray does not \
+have it. If it is unclear which stored song they mean, ask.
 - When the user asks for a story, or accepts Ray's offer of one (not when they merely sound bored): call \
 search_stories first, with what they asked for as the query (a topic, a mood, a song name) or an empty string \
 if nothing specific. Then pick the one result that fits the conversation \
@@ -93,7 +99,7 @@ without the tool result. After play_song or end_conversation, reply with an empt
 The one-or-two-sentence limit below does not apply to a story part.
 If the result has at_limit or moved is 0, say it is already at the maximum or minimum.
 Answer in Korean, in one or two short sentences that sound natural when spoken aloud.
-No lists, no URLs, no markdown.
+No markdown, bullet lists or URLs; naming a few songs inside a sentence is fine.
 """
 
 # 노래 재생 중 백엔드 프롬프트
@@ -140,9 +146,20 @@ def build_voice_section(tone_preference: str = "") -> str:
     return "\n".join(lines) + "\n"
 
 
-def build_backend_instructions(tone_preference: str = "") -> str:
-    """세션 시작 백엔드 지시문 — 기본 지시문 뒤에 말투 절을 붙인다."""
-    return DEFAULT_BACKEND_INSTRUCTIONS + "\n" + build_voice_section(tone_preference)
+def build_songs_section(catalog: Mapping[str, Song]) -> str:
+    """``## Songs on Ray`` 절 — 백엔드가 목록 질문에 답하고 ``play_song`` id 를 고르는 단일 출처.
+
+    카탈로그가 비면 빈 문자열.
+    """
+    if not catalog:
+        return ""
+    return "## Songs on Ray\nOne per line: song id: title — artist (aliases).\n" + format_song_list(catalog) + "\n"
+
+
+def build_backend_instructions(tone_preference: str = "", catalog: Mapping[str, Song] | None = None) -> str:
+    """세션 시작 백엔드 지시문 — 기본 지시문 뒤에 말투 절과 곡 목록 절을 붙인다."""
+    sections = build_voice_section(tone_preference) + build_songs_section(catalog or {})
+    return DEFAULT_BACKEND_INSTRUCTIONS + "\n" + sections
 
 
 # 이야기 시작·교체 시 삽입 (500 토큰 이하). 백채널은 기본 정책을 유지한다.
@@ -194,7 +211,13 @@ The user has been quiet for a while. Apply only the matching case, without comme
 """
 
 
-def build_story_backend_instructions(story_body: str, song_id: str, song_label: str, tone_preference: str = "") -> str:
+def build_story_backend_instructions(
+    story_body: str,
+    song_id: str,
+    song_label: str,
+    tone_preference: str = "",
+    catalog: Mapping[str, Song] | None = None,
+) -> str:
     """이야기용 백엔드 지시문 — 요청별 반환 범위와 말투를 먼저 정의하고 대본을 마지막에 넣는다.
 
     Args:
@@ -202,6 +225,7 @@ def build_story_backend_instructions(story_body: str, song_id: str, song_label: 
         song_id: 끝에 틀 곡의 ``play_song`` id.
         song_label: 사람이 읽는 곡 표기 (제목 — 가수).
         tone_preference: 프로필의 말투 선호 (:func:`build_voice_section`).
+        catalog: 노래 카탈로그 (:func:`build_songs_section`).
     """
     return f"""\
 ## Role
@@ -251,7 +275,8 @@ brightness level, querying get_device_settings only if needed. Report a confirme
 ## Song playback and ending
 - The story's suggested song is song id "{song_id}" ({song_label}). After the song offer, a clear yes requests
 that song. A clear request to hear it now also permits playback even mid-story; skip the remaining narration.
-- If the user explicitly asks for a different stored song, choose its id from play_song's catalog instead.
+- If the user explicitly asks for a different stored song, choose its id from the Songs on Ray section instead.
+If the user asks which songs Ray has, name a few from that section and ask; do not play one.
 If the song is unavailable, explain; if the intended song is unclear, ask. Keep the story pending in either case.
 - Call play_song directly for the selected song. It ends story mode and starts playback; do not call finish_story
 first. After successful play_song, return an empty message. On failure, report the error without claiming playback.
@@ -285,7 +310,7 @@ question to the listener. Check the opening and remove any request for their ans
 The one-or-two-sentence limit applies ONLY to answers, clarifications, proposals and tool results, not narration.
 Do not add a reaction Ray already spoke. For ordinary continuation, retain the final song-offer question.
 
-{build_voice_section(tone_preference)}
+{build_voice_section(tone_preference)}{build_songs_section(catalog or {})}
 ## Script format
 "## 도입부" ends with the opening question. "## 본문" is one complete delivery unit ending with the song offer.
 "## 곡 프로필" is song background, not narration. Lines starting with ">" are editorial notes, not spoken text.

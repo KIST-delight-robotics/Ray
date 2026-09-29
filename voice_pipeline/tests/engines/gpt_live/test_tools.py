@@ -123,11 +123,11 @@ class TestSongToolDefinitions:
         "Butter_BTS": Song("Butter_BTS", "Butter", "BTS"),
     }
 
-    def test_play_song_enum_is_catalog_keys_and_description_lists_songs(self) -> None:
+    def test_play_song_enum_is_catalog_keys_and_description_points_to_songs_section(self) -> None:
         play, stop = make_play_song_tool_def(self._CATALOG), STOP_SONG_TOOL_DEF
         assert play is not None and play["name"] == PLAY_SONG_TOOL and stop["name"] == STOP_SONG_TOOL
         assert play["parameters"]["properties"]["song"]["enum"] == ["Butter_BTS", "IAM"]
-        assert play["description"].endswith("IAM: I AM — IVE (아이엠, 아이브)")
+        assert "Songs on Ray" in play["description"] and "I AM" not in play["description"]
         for t in (play, stop):  # strict 모드 계약은 다른 툴과 같다
             assert t["strict"] is True
             assert set(t["parameters"].get("required", [])) == set(t["parameters"]["properties"])

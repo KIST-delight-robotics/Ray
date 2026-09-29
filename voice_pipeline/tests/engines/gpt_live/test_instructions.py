@@ -10,9 +10,16 @@ from voice_pipeline.engines.gpt_live.instructions import (
     STORY_SONG_ENDED_INSTRUCTIONS,
     build_backend_instructions,
     build_live_instructions,
+    build_songs_section,
     build_story_backend_instructions,
     build_voice_section,
 )
+from voice_pipeline.engines.gpt_live.songs import Song
+
+_SONGS = {
+    "IAM": Song("IAM", "I AM", "IVE", artist_aliases=("아이브",)),
+    "Butter_BTS": Song("Butter_BTS", "Butter", "BTS"),
+}
 
 
 class TestBuildLiveInstructions:
@@ -73,6 +80,18 @@ class TestStoryInstructions:
     def test_backend_builder_appends_voice_section(self) -> None:
         text = build_backend_instructions("formal")
         assert text.startswith(DEFAULT_BACKEND_INSTRUCTIONS) and text.rstrip().endswith("formal")
+        assert "## Songs on Ray" not in text
+
+    def test_backend_builder_appends_songs_section_after_voice(self) -> None:
+        text = build_backend_instructions("formal", _SONGS)
+        assert text.index("## Ray's voice") < text.index("## Songs on Ray")
+        assert text.rstrip().endswith("IAM: I AM — IVE (아이브)")
+        assert build_songs_section({}) == ""
+
+    def test_default_backend_lists_songs_instead_of_playing(self) -> None:
+        task = DEFAULT_BACKEND_INSTRUCTIONS[DEFAULT_BACKEND_INSTRUCTIONS.index("## Task instructions") :]
+        assert "asks which songs Ray has" in task and "do not call play_song" in task
+        assert "never pick a song for them" in task
 
     def test_story_mode_hands_pacing_and_interruption_to_the_model(self) -> None:
         assert "in full" not in STORY_MODE_INSTRUCTIONS
@@ -82,9 +101,10 @@ class TestStoryInstructions:
         assert "continuously" not in STORY_MODE_INSTRUCTIONS  # 끼어들기를 무시하게 만들었던 표현 (실기 2026-09-28)
 
     def test_story_backend_embeds_script_and_song(self) -> None:
-        text = build_story_backend_instructions("## 도입부\n첫 문장.\n", "snowman", "눈사람 — 정승환", "formal")
+        text = build_story_backend_instructions("## 도입부\n첫 문장.\n", "snowman", "눈사람 — 정승환", "formal", _SONGS)
         assert (
             text.index("## Narration: exact output span")
+            < text.index("## Songs on Ray")
             < text.index("## Script\n")
             < text.index("## 도입부\n첫 문장.")
         )

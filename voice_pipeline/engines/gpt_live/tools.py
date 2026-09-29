@@ -27,7 +27,7 @@ from voice_pipeline.device_settings import (
     VOLUME_STEPS,
     DeviceSettings,
 )
-from voice_pipeline.engines.gpt_live.songs import Song, format_song_list
+from voice_pipeline.engines.gpt_live.songs import Song
 from voice_pipeline.engines.gpt_live.stories import StorySelector
 from voice_pipeline.memory.retriever import MemoryRetriever
 
@@ -207,7 +207,7 @@ CHANGE_STORY_TOOL_DEF: dict[str, Any] = {
         "offered replacement. Never use for continuing, resuming, questions, or 'I know this story' alone. "
         "Search first, choose an id from the latest results that fits the user's requirements. "
         "If none fits, propose an alternative and wait for agreement. Do not finish the current story first. "
-        "On success, narrate only the returned first_part, not the previous script."
+        "On success, return an empty final response; the application supplies the new script directly."
     ),
     "parameters": {
         "type": "object",
@@ -246,13 +246,13 @@ def make_story_search_handler(selector: StorySelector, *, exclude: tuple[str, ..
 
 
 def make_play_song_tool_def(catalog: Mapping[str, Song]) -> dict[str, Any] | None:
-    """``play_song`` 정의 (곡 키 enum, 설명에 곡 목록). 카탈로그가 비면 None."""
+    """``play_song`` 정의 (곡 키 enum). 곡 목록은 백엔드 지시문의 Songs on Ray 절에 있다. 카탈로그가 비면 None."""
     if not catalog:
         return None
     return {
         "type": "function",
         "name": PLAY_SONG_TOOL,
-        "description": "Play a song stored on Ray. Pass the song id from this list:\n" + format_song_list(catalog),
+        "description": "Play a song stored on Ray. Pass a song id from the Songs on Ray section of your instructions.",
         "parameters": {
             "type": "object",
             "properties": {

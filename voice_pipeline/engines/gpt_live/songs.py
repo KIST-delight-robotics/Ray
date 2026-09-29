@@ -93,5 +93,5 @@ def load_song_catalog(
 
 
 def format_song_list(catalog: Mapping[str, Song]) -> str:
-    """백엔드 지시문·툴 설명에 넣는 목록 — 키 순서대로 한 줄씩."""
+    """백엔드 지시문의 Songs on Ray 절에 넣는 목록 — 키 순서대로 한 줄씩."""
     return "\n".join(catalog[k].describe() for k in sorted(catalog))
