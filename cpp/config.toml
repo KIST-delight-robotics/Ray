@@ -40,7 +40,7 @@ mouth_back_compensation = 0.75    # 입 움직임에 대한 뒷쪽 보상 (값�
 mouth_pitch_compensation = 0.58   # pitch에 따른 입 움직임 보상 (값↑=보상↑). 예전 분모 1.7과 동일 거동(=1/1.7)
 
 max_mouth = 0
-min_mouth = 400                    # 최대 mouth movement size in DXL dimension
+min_mouth = 300                    # 최대 mouth movement size in DXL dimension
 
 # ===== 캘리브레이션 =====
 calib_mouth               = true   # false 면 mouth 캘리브레이션(이완·장력점 탐색)을 건너뛰고
@@ -53,7 +53,7 @@ calib_release_step_tick   = 60     # 이완 1스텝 풀기 양(틱). 한 스텝 
 calib_release_noise_g     = 0.03   # 스텝당 3축 가속도 변화합(g) 임계 — 미만이면 이완 완료.
                                    # DLPF 21 Hz + 10샘플의 정지 최대 0.018 (2026-09-07). 이전 0.05/100틱은 DLPF 이전 값.
 calib_release_mouth_tick  = 250    # mouth 고정 이완량(틱) — 턱은 자이로로 감지 불가
-calib_mouth_backoff_tick  = 60     # mouth 장력점 감지 후 되돌리는 양(틱). 입이 과하게 벌어지면 키울 것
+calib_mouth_backoff_tick  = 20      # mouth 장력점 감지 후 되돌리는 양(틱). 입이 과하게 벌어지면 키울 것
 calib_tension_g           = 0.05   # 텐션 판정 문턱, roll·pitch 공용 (0.05 g ≈ 2.9°). 감았을 때 수평 너머로
                                    # 이만큼 움직이면 줄이 팽팽한 것으로 보고 반대쪽으로 되당긴다. 이 각도가 곧
                                    # 줄의 당김량(압축)이라 노이즈 바로 위로: DLPF 21 Hz 기준 이동 중 3샘플 σ≈0.006 → 8σ.
