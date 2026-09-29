@@ -881,7 +881,7 @@ inline void apply_mouth_audio_gain(std::vector<float>& buf, float gain) {
 // - 스트림마다 새로 만든다 (generate_motion 지역 변수).
 // ============================================================
 struct MouthLevelNormalizer {
-    static constexpr float kTarget     = 0.8f;   // 추적 피크를 이 값에 맞춘다 (1.0 아래 여유 → 클리핑 최소화)
+    static constexpr float kTarget     = 0.7f;   // 추적 피크를 이 값에 맞춘다 (1.0 아래 여유 → 클리핑 최소화)
     static constexpr float kGainMin    = 1.0f;   // 이미 큰 소리는 줄이지 않는다
     static constexpr float kGainMax    = 5.0f;   // 노이즈·숨소리가 부풀지 않게
     static constexpr float kVoicedPeak = 0.02f;  // 40ms 피크가 이 미만이면 무음 취급 (≈-34 dBFS; 말소리 최약 구간 ≥0.05)
