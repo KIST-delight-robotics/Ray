@@ -610,11 +610,12 @@ void move_to_initial_position_velctrl() {
     dxl_driver->writeGoalVelocity(goal_velocity);
 }
 
-// === LED (ID6 막대 각도 + GPIO PWM 밝기) ===
+// === 후면 LED (GPIO PWM 밝기, 노래 재생 중에만) ===
 //
-// 무대 조명형 LED 막대: 각도는 ID6 Dynamixel(위치 제어), 밝기는 별도 GPIO 핀의
-// 소프트웨어 PWM(WiringPi softPwm). 오프라인 생성한 <곡>-led.csv를 헤드/입과 같은
-// 40ms 프레임으로 읽어 두 채널을 함께 구동한다.
+// 오프라인 생성한 <곡>-led.csv(1열 = 밝기 0.0~1.0, 헤드/입 CSV와 같은 40ms 프레임)를 읽어
+// 노래 재생(csv_control_motor) 동안만 구동하고 끝나면 소등한다. 하부 LED(PWM0, GPIO12)는
+// 파이썬(voice_pipeline/adapters/led.py)이 상부 링과 동기해 그리므로 여기서 건드리지 않는다.
+// 옛 CSV 는 [ID6 각도, 밝기] 2열이었다 — ID6 모터 제거 후 각도 열도 뺐다 (2026-09-29).
 
 // LED 밝기 = RP1 하드웨어 PWM (sysfs /sys/class/pwm). GPIO13 = PWM1 = pwmchip0 채널1.
 // softPwm(~100Hz, CPU 토글, 플리커)을 대체. 캐리어(예 20kHz)는 부팅 시 systemd 서비스
@@ -2192,7 +2193,7 @@ void csv_control_motor(std::string audioName) {
             return;
         }
 
-        // LED 밝기 궤적: 없으면 밝기 미구동으로 graceful 처리 (ID6 각도 모터는 제거됨)
+        // 후면 LED 밝기 궤적 (1열, 0.0~1.0): 없으면 밝기 미구동으로 graceful 처리
         std::ifstream ledGesture(ledMotionFilePath);
         bool led_enabled = ledGesture.good();
         if (!led_enabled) {

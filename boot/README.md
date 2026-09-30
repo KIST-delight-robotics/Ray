@@ -26,14 +26,17 @@
 **하부 LED** (RP1 하드웨어 PWM 채널0 = GPIO12): RAY가 링을 그리는 동안
 `voice_pipeline/adapters/led.py`가 매 프레임 링 밝기를 duty로 미러한다 — 호흡·대화·페이드가
 전부 하부에도 따라온다. 첫 점등만 0.3 s 램프(인수 페이드 동안은 데몬이 링을 그려 하부가
-꺼져 있으므로). 밝기 상한은 `_LOWER_LED_MAX_PCT`. PWM1(GPIO13)은 예비.
+꺼져 있으므로). 밝기 상한은 `_LOWER_LED_MAX_PCT`.
+
+**후면 LED** (PWM 채널1 = GPIO13): 노래 재생 중에만 C++(`csv_control_motor`)가
+`assets/ledMotion/<곡>-led.csv`(1열 = 밝기 0~1, 40 ms 프레임)로 구동하고 끝나면 소등. 평소엔 꺼져 있다.
 
 ## 구성요소
 
 | 경로 | 역할 | 설치 위치 |
 |---|---|---|
 | `OS_LED/` | 전원/부팅 LED 서브시스템 (ATtiny 펌웨어 지식 + Pi 데몬). 상세: [OS_LED/README.md](OS_LED/README.md) | `sudo bash OS_LED/pi/install.sh` |
-| `led-pwm/` | RP1 하드웨어 PWM 준비 — config.txt 오버레이, gpio 그룹, `led-pwm.service`(부팅 시 채널 0·1 export). PWM0=하부 LED, PWM1=예비 | `sudo bash led-pwm/setup.sh` + **재부팅 1회** |
+| `led-pwm/` | RP1 하드웨어 PWM 준비 — config.txt 오버레이, gpio 그룹, `led-pwm.service`(부팅 시 채널 0·1 export). PWM0=하부 LED(파이썬), PWM1=후면 LED(C++, 노래 중) | `sudo bash led-pwm/setup.sh` + **재부팅 1회** |
 | `systemd/ray-cpp.service` | C++(모터·오디오) 부팅 자동실행. 시작 시 자이로 캘리브레이션 수행 | `~/.config/systemd/user/` (경로 수정 후 복사) |
 | `systemd/ray-python.service` | 파이썬 파이프라인 부팅 자동실행 | `~/.config/systemd/user/` (경로 수정 후 복사) |
 | `sounds/ready.oga` | 준비 완료 차임. `voice_pipeline/__main__.py`의 `READY_CHIME_PATH`가 참조 | 저장소 그대로 사용 (WorkingDirectory 기준 상대경로) |

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # RP1 하드웨어 PWM LED 준비 — 1회 시스템 설정 (20kHz 캐리어, 무플리커).
 #   PWM0 (GPIO12, 물리 32번) = 하부 LED — voice_pipeline/adapters/led.py가 링 밝기를 미러
-#   PWM1 (GPIO13, 물리 33번) = 예비 (구 전방 LED 밝기 — cpp가 duty 사용)
+#   PWM1 (GPIO13, 물리 33번) = 후면 LED — 노래 재생 중에만 cpp(csv_control_motor)가 <곡>-led.csv 밝기로 구동
 #
 # 하는 일:
 #   1) /boot/firmware/config.txt 에 pwm-2chan 오버레이 추가 (GPIO12=PWM0, GPIO13=PWM1)
@@ -46,7 +46,7 @@ usermod -aG gpio "$TARGET_USER"
 echo "[3/4] 부팅 PWM 준비 스크립트 + systemd 서비스 설치 (${PWM_HZ}Hz)"
 cat > /usr/local/bin/led-pwm-setup.sh <<EOF
 #!/bin/sh
-# 부팅 시 pwmchip0 채널0(GPIO12, 하부 LED)·채널1(GPIO13)을 export하고 period/enable/권한 설정.
+# 부팅 시 pwmchip0 채널0(GPIO12, 하부 LED)·채널1(GPIO13, 후면 LED)을 export하고 period/enable/권한 설정.
 CHIP=/sys/class/pwm/pwmchip0
 for CH in 0 1; do
     [ -e "\$CHIP/pwm\$CH" ] || echo \$CH > "\$CHIP/export"
@@ -64,7 +64,7 @@ chmod +x /usr/local/bin/led-pwm-setup.sh
 
 cat > /etc/systemd/system/led-pwm.service <<'EOF'
 [Unit]
-Description=LED hardware PWM (GPIO12/PWM0 하부, GPIO13/PWM1) export+enable
+Description=LED hardware PWM (GPIO12/PWM0 하부, GPIO13/PWM1 후면) export+enable
 After=multi-user.target
 
 [Service]
