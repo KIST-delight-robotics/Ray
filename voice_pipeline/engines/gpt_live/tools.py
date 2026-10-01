@@ -11,6 +11,8 @@
   → :func:`make_device_settings_handlers` (상태·저장은 :mod:`voice_pipeline.device_settings`).
 - ``play_song``: 노래 재생 → :func:`make_play_song_tool_def`. ``stop_song`` 은 재생 중에만 백엔드에 주어지는 툴
   (:data:`STOP_SONG_TOOL_DEF`, 루프가 백엔드를 교체할 때 사용). 둘 다 핸들러는 루프 내장.
+- ``start_dj`` / ``stop_dj`` / ``play_dj_song``: DJ 모드 진입·종료·현재 소재의 곡 재생 (:data:`DJ_TOOLS`). 인자 없음 —
+  소재와 곡은 루프가 안다. 핸들러는 루프 내장. 소재가 없으면 wiring 이 노출하지 않는다.
 
 설명은 함수가 무엇을 하는지와 인자·결과 형식만 적는다. 언제 부를지·부르지 말지는 백엔드 지시문
 (:data:`~voice_pipeline.engines.gpt_live.instructions.DEFAULT_BACKEND_INSTRUCTIONS`)에만 둔다.
@@ -134,8 +136,13 @@ DEFAULT_TOOLS: tuple[dict[str, Any], ...] = (END_CONVERSATION_TOOL_DEF, SEARCH_M
 
 PLAY_SONG_TOOL = "play_song"
 STOP_SONG_TOOL = "stop_song"
+START_DJ_TOOL = "start_dj"
+STOP_DJ_TOOL = "stop_dj"
+PLAY_DJ_SONG_TOOL = "play_dj_song"
 # 핸들러 없이 루프가 직접 처리하는 툴 — wiring 은 이 이름들을 핸들러 유무와 무관하게 노출한다
-LOOP_TOOLS: frozenset[str] = frozenset({END_CONVERSATION_TOOL, PLAY_SONG_TOOL, STOP_SONG_TOOL})
+LOOP_TOOLS: frozenset[str] = frozenset(
+    {END_CONVERSATION_TOOL, PLAY_SONG_TOOL, STOP_SONG_TOOL, START_DJ_TOOL, STOP_DJ_TOOL, PLAY_DJ_SONG_TOOL}
+)
 
 STOP_SONG_TOOL_DEF: dict[str, Any] = {
     "type": "function",
@@ -144,6 +151,26 @@ STOP_SONG_TOOL_DEF: dict[str, Any] = {
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
     "strict": True,
 }
+
+
+def _no_arg_tool(name: str, description: str) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "name": name,
+        "description": description,
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        "strict": True,
+    }
+
+
+DJ_TOOLS: tuple[dict[str, Any], ...] = (
+    _no_arg_tool(START_DJ_TOOL, "Start DJ mode: Ray hosts a calm radio segment and then plays its assigned song."),
+    _no_arg_tool(STOP_DJ_TOOL, "End DJ mode and return to ordinary conversation."),
+    _no_arg_tool(
+        PLAY_DJ_SONG_TOOL,
+        "Play the song assigned to the current DJ segment. Only valid in DJ mode, after Ray has introduced the song.",
+    ),
+)
 
 
 def make_play_song_tool_def(catalog: Mapping[str, Song]) -> dict[str, Any] | None:

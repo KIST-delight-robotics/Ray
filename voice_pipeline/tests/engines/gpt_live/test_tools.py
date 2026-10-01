@@ -20,12 +20,16 @@ from voice_pipeline.engines.gpt_live.tools import (
     ADJUST_VOLUME_TOOL,
     DEFAULT_TOOLS,
     DEVICE_TOOLS,
+    DJ_TOOLS,
     END_CONVERSATION_TOOL,
     GET_DEVICE_SETTINGS_TOOL,
     LOOP_TOOLS,
+    PLAY_DJ_SONG_TOOL,
     PLAY_SONG_TOOL,
     SEARCH_MEMORY_TOOL,
     SET_BRIGHTNESS_TOOL,
+    START_DJ_TOOL,
+    STOP_DJ_TOOL,
     STOP_SONG_TOOL,
     STOP_SONG_TOOL_DEF,
     make_device_settings_handlers,
@@ -130,3 +134,16 @@ class TestSongToolDefinitions:
 
     def test_song_tools_are_loop_builtin(self) -> None:
         assert {PLAY_SONG_TOOL, STOP_SONG_TOOL, END_CONVERSATION_TOOL} <= LOOP_TOOLS
+
+
+class TestDJTools:
+    def test_dj_tools_are_loop_builtins_without_arguments(self) -> None:
+        assert {START_DJ_TOOL, STOP_DJ_TOOL, PLAY_DJ_SONG_TOOL} <= LOOP_TOOLS
+        assert [t["name"] for t in DJ_TOOLS] == [START_DJ_TOOL, STOP_DJ_TOOL, PLAY_DJ_SONG_TOOL]
+        for d in DJ_TOOLS:
+            assert d["strict"] is True and d["parameters"] == {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            }
+        assert all(t["name"] not in {d["name"] for d in DJ_TOOLS} for t in DEFAULT_TOOLS)  # 소재 있을 때만 노출

@@ -1,7 +1,7 @@
 """GPT-Live 엔진의 ACTIVE 세션 루프.
 
 :class:`~voice_pipeline.engines.cascade.loop.SessionLoop` 의 자리를 대신한다 — ASR·턴 감지·LLM·TTS 체인이
-모델 하나(gpt-live-1)로 대체되므로, 이 루프가 하는 일은 다섯이다.
+모델 하나(gpt-live-1)로 대체되므로, 이 루프가 하는 일은 여섯이다.
 
 1. 마이크 프레임을 브리지 레이트로 리샘플해 세션으로 보내고, 모델 출력 오디오를 C++로 그대로 보낸다.
    세션 전체가 ``stream_start`` 하나로 시작하는 스트림이며 무음 조각도 그대로 흘린다(C++ 는
@@ -11,7 +11,8 @@
    ``set_brightness`` / ``get_device_settings``, 종료 ``end_conversation``. 핸들러는 executor 에서 돌리고
    프레임 루프는 완료를 폴링한다 — 임베딩·DB 조회가 마이크 전송과 출력 중계를 막지 않게.
 4. 노래를 재생한다 (``play_song`` / ``stop_song``, 아래 "노래 재생").
-5. 세션 종료를 판정하고 닫는다 — 종료 키워드, 유휴 타임아웃, 백엔드의 ``end_conversation`` 툴,
+5. DJ 모드를 돈다 (``start_dj`` / ``play_dj_song`` / ``stop_dj``, 아래 "DJ 모드").
+6. 세션 종료를 판정하고 닫는다 — 종료 키워드, 유휴 타임아웃, 백엔드의 ``end_conversation`` 툴,
    세션 만료/연결 끊김, 브리지 오류, 오디오 기아, 외부 stop.
 
 노래 재생 (C++ 는 재생 하나를 끝까지 처리하므로 라이브 스트림과 교대한다):
@@ -23,6 +24,15 @@
     결과를 노래 시작 뒤에 제출하므로 위임 시 모델의 한마디는 잘리지 않고, 결과 뒤의 말은 스트림이 없어 버려진다.
     노래 상태 동안 백엔드는 ``stop_song`` 하나만 가진 재생용 설정으로 교체된다(``session.update``, 끝나면 복원).
     다른 툴 호출은 오류로 답하고 ``end_conversation`` 도 종료로 치지 않는다. 모델 음성은 버리고 전사는 저장하지 않는다.
+
+DJ 모드 (설계 배경은 docs/dj-mode-worknote.md):
+    ``start_dj`` 는 결과를 보류하고(위임 시 한마디가 끝나 무음 0.5 s) → 소재 ``thinking.append`` → 시작 신호
+    ``instructions.append`` → 결과 제출 → 이어가기가 오프닝 멘트를 시작시킨다. 백엔드는 ``## Current segment`` 절을
+    붙인 지시문으로 ``session.update``(소재마다 교체, 다음 위임부터 적용). ``play_dj_song`` 은 현재 소재의 곡으로
+    노래 흐름을 탄다. 노래 자연 종료 → 다음 소재 + 신호. 사용자 정지·``stop_dj``·세션 종료 → DJ 해제, 백엔드 복원.
+    복귀 감시: DJ 중 노래·위임 없이 사용자와 모델이 ``_DJ_QUIET_SEC`` 동안 조용하면 복귀 신호를 한 번 보낸다
+    (같은 침묵엔 다시 안 보냄 — 모델이 반응해 말하면 침묵이 새로 시작된다). 모델은 한 덩어리 말하고 멈추므로
+    끝이 없는 자리는 앱이 깨워야 한다.
 
 종료 시퀀스(실측 근거는 scripts/gpt_live/FINDINGS.md §4~5):
     입력 mute → 모델의 마지막 발화가 끝날 때까지(출력이 무음으로 N초) 대기, 상한 있음 →
@@ -59,16 +69,26 @@ from voice_pipeline.adapters.gpt_live import (
     LiveUsage,
 )
 from voice_pipeline.adapters.led import LEDController, LEDState
+from voice_pipeline.engines.gpt_live.dj import Segment, SegmentPicker
 from voice_pipeline.engines.gpt_live.instructions import (
+    DJ_BEGIN_INSTRUCTIONS,
+    DJ_ENDED_INSTRUCTIONS,
+    DJ_RETURN_INSTRUCTIONS,
+    DJ_SONG_ENDED_INSTRUCTIONS,
     FAREWELL_COMMENTARY,
     SONG_BACKEND_INSTRUCTIONS,
     SONG_ENDED_INSTRUCTIONS,
     SONG_PLAYING_INSTRUCTIONS,
+    build_backend_instructions,
+    build_segment_thinking,
 )
 from voice_pipeline.engines.gpt_live.songs import Song
 from voice_pipeline.engines.gpt_live.tools import (
     END_CONVERSATION_TOOL,
+    PLAY_DJ_SONG_TOOL,
     PLAY_SONG_TOOL,
+    START_DJ_TOOL,
+    STOP_DJ_TOOL,
     STOP_SONG_TOOL,
     STOP_SONG_TOOL_DEF,
     ToolHandler,
@@ -129,6 +149,9 @@ class LiveSessionLoop:
     _STREAM_START_MAX_WAIT_SEC = 10.0  # 인사 WAV 의 playback_complete 가 안 와도 이 시간 뒤엔 stream_start
     _SONG_SILENCE_SEC = 1.0  # play_song 뒤 출력 무음이 이만큼 이어지면 스트림을 닫는다
     _SONG_MAX_WAIT_SEC = 30.0  # 무음이 감지되지 않을 때의 안전망. 정상 발화에서는 걸리지 않아야 한다
+    _DJ_SILENCE_SEC = 0.5  # start_dj 뒤 출력 무음이 이만큼 이어지면 소재 주입 + 시작 신호 + 결과 제출
+    _DJ_MAX_WAIT_SEC = 30.0
+    _DJ_QUIET_SEC = 6.0  # DJ 중 사용자·모델 출력이 이만큼 없으면 복귀 신호 (모델의 문장 사이 쉼 1~2 s 보다 넉넉히)
     _LEAD_LOG_INTERVAL_SEC = 15.0  # 오디오 전송 상태(추정 밀림, 조각 도착 간격) DEBUG 로그 주기
     _GAP_EVENT_SEC = 0.3  # 조각 도착 간격이 이 이상이면 정지 이벤트로 INFO 로그 (C++ [split] 로그와 대조용)
     # 서버 출력은 실시간보다 1~3% 짧게 온다 — 주로 무음 프레임이 빠지고, 늦게라도 오지 않는다
@@ -165,6 +188,8 @@ class LiveSessionLoop:
         live_sample_rate: int = BRIDGE_SAMPLE_RATE,
         wait_for_playback_complete: bool = False,
         song_catalog: Mapping[str, Song] | None = None,
+        dj_picker: SegmentPicker | None = None,
+        tone_preference: str = "",
         audio_input: AudioInput | None = None,
     ) -> None:
         """
@@ -181,6 +206,8 @@ class LiveSessionLoop:
             executor: 툴 핸들러를 돌릴 executor. None 이면 프레임 루프에서 인라인 실행(테스트용).
             input_sample_rate / live_sample_rate: 마이크 레이트와 세션 레이트. 다르면 선형 보간으로 리샘플.
             song_catalog: 재생 가능한 노래 (키 → Song). None/빈 dict 면 play_song 은 unknown 으로 답한다.
+            dj_picker: DJ 소재 선택기. None 이면 start_dj 는 unavailable 로 답한다.
+            tone_preference: 프로필의 말투 선호. DJ 중 백엔드 지시문을 다시 만들 때 말투 절에 들어간다.
             audio_input: 있으면 노래 재생 중 원본 마이크 채널로 바꾼다 (:meth:`AudioInput.set_raw_capture`).
         """
         self._live = live
@@ -199,6 +226,14 @@ class LiveSessionLoop:
         self._live_rate = live_sample_rate
         self._wait_for_playback_complete = wait_for_playback_complete
         self._song_catalog: Mapping[str, Song] = dict(song_catalog or {})
+        self._dj_picker = dj_picker
+        self._tone_preference = tone_preference
+        self._dj_active = False
+        self._dj_segment: Segment | None = None
+        self._dj_future: Future[str] | None = None  # 보류 중인 start_dj 결과. 소재 주입 뒤 완료
+        self._dj_requested_time = 0.0
+        self._dj_signal_time = 0.0  # 마지막 시작·노래 끝 신호 시각 — 복귀 감시의 기준점
+        self._dj_nudged_at = 0.0  # 복귀 신호를 보낸 침묵의 시작 시각. 같은 침묵엔 다시 안 보낸다
         self._audio_input = audio_input
         self._song_state = SongState.NONE
         self._song: Song | None = None
@@ -315,6 +350,7 @@ class LiveSessionLoop:
             except Exception:
                 logger.warning("stop for playing song failed", exc_info=True)
         self._set_raw_capture(False)
+        self._dj_reset()
         self._clear_song()
         try:
             self._live.close(graceful=graceful)
@@ -371,7 +407,7 @@ class LiveSessionLoop:
                 self._start_song()  # 라이브 스트림이 다 나갔다 → 노래 시작
                 continue
             if self._song_state is SongState.PLAYING:
-                self._end_song()  # 자연 종료 → 일반 대화로
+                self._end_song(completed=True)  # 자연 종료 → 일반 대화 또는 DJ 다음 소재
                 continue
             if self._song_state is SongState.STOPPING:
                 self._song_playback_done = True  # 모델의 한마디가 끝나면 타이머가 _end_song
@@ -396,6 +432,16 @@ class LiveSessionLoop:
             label="Song",
         ):
             self._drain_for_song()
+        if self._dj_future is not None and self._utterance_finished(
+            self._dj_requested_time,
+            now,
+            min_wait=0.0,
+            silence=self._DJ_SILENCE_SEC,
+            max_wait=self._DJ_MAX_WAIT_SEC,
+            label="DJ start",
+        ):
+            self._dj_begin()
+        self._maybe_nudge_dj(now)
         if (
             self._song_state is SongState.STOPPING
             and self._song_playback_done
@@ -563,6 +609,12 @@ class LiveSessionLoop:
             return _completed(json.dumps({"error": "a song is playing; only stop_song is available"}))
         if call.name == PLAY_SONG_TOOL:
             return self._request_song(call)  # 루프 내장. 노래가 시작된 뒤 완료되는 Future
+        if call.name == START_DJ_TOOL:
+            return self._request_dj_start()  # 루프 내장. 소재 주입 뒤 완료되는 Future
+        if call.name == STOP_DJ_TOOL:
+            return self._request_dj_stop()
+        if call.name == PLAY_DJ_SONG_TOOL:
+            return self._request_dj_song()
         handler = self._tool_handlers.get(call.name)
         if handler is None:
             logger.warning("Backend requested unknown tool %s", call.name)
@@ -603,7 +655,7 @@ class LiveSessionLoop:
         else:
             self._live.continue_response()
             if stopped:
-                self._restore_backend()  # 정지 결과의 후속 응답은 재생용 백엔드로 만들어진 뒤에 복원
+                self._apply_backend()  # 정지 결과의 후속 응답은 재생용 백엔드로 만들어진 뒤에 복원
 
     # ------------------------------------------------------------------
     # Ending
@@ -616,6 +668,7 @@ class LiveSessionLoop:
         self._exit_reason = reason
         self._end_started_time = time.monotonic()
         self._end_nudged = False
+        self._dj_reset()  # 세션이 닫히므로 백엔드 복원·지시는 필요 없다
         logger.info("Ending session (%s) — muting input, waiting for last utterance", reason)
         self._led.set_state(LEDState.SLEEPING)  # 입력을 막는 순간부터 대화 불가
         if self._song_state in (SongState.PLAYING, SongState.DRAINING, SongState.PENDING):
@@ -685,6 +738,9 @@ class LiveSessionLoop:
         song = self._song_catalog.get(key)
         if song is None:
             return _completed(json.dumps({"error": f"unknown song {key!r}"}))
+        return self._begin_song(song)
+
+    def _begin_song(self, song: Song) -> Future[str]:
         if self._song_state is not SongState.NONE:
             return _completed(json.dumps({"error": "a song is already playing"}))
         self._song = song
@@ -733,13 +789,19 @@ class LiveSessionLoop:
         self._song = None
         self._song_playback_done = False
         if had_song and not stop_pending_submit and self._phase is not Phase.DONE:
-            self._restore_backend()  # 정지 결과가 제출될 예정이면 _poll_tools 가 그 뒤에 복원한다
+            self._apply_backend()  # 정지 결과가 제출될 예정이면 _poll_tools 가 그 뒤에 복원한다
 
-    def _restore_backend(self) -> None:
+    def _apply_backend(self) -> None:
+        """노래용 백엔드에서 돌아온다 — DJ 중이면 현재 소재 절을 붙인 지시문으로, 아니면 세션 시작 설정으로."""
         try:
-            self._live.restore_backend()
+            if self._dj_active and self._dj_segment is not None:
+                self._live.update_backend(
+                    build_backend_instructions(self._tone_preference, self._song_catalog, self._dj_segment)
+                )
+            else:
+                self._live.restore_backend()
         except Exception:
-            logger.warning("backend restore failed", exc_info=True)
+            logger.warning("backend update failed", exc_info=True)
 
     def _drain_for_song(self) -> None:
         """라이브 스트림을 닫고 playback_complete 를 기다린다."""
@@ -780,15 +842,32 @@ class LiveSessionLoop:
             logger.info("Song cancelled before start")
             self._clear_song()
 
-    def _end_song(self) -> None:
+    def _end_song(self, *, completed: bool = False) -> None:
+        """노래가 끝났다(``completed`` 면 자연 종료, 아니면 정지·취소). DJ 중이면 자연 종료만 다음 소재로 이어진다."""
         key = self._song.key if self._song else "?"
-        self._clear_song()
+        was_dj = self._dj_active
+        next_segment: Segment | None = None
+        if was_dj and self._phase is Phase.ACTIVE:
+            if completed:
+                next_segment = self._dj_picker.pick() if self._dj_picker is not None else None
+                if next_segment is not None:
+                    self._dj_segment = next_segment
+                else:
+                    logger.warning("DJ: no next segment — leaving DJ mode")
+                    self._dj_reset()
+            else:
+                logger.info("DJ: song stopped by user — leaving DJ mode")
+                self._dj_reset()
+        self._clear_song()  # 백엔드는 여기서 현재 상태(새 소재 또는 기본)로 돌아간다
         self._set_raw_capture(False)
-        self._open_stream()  # 종료 지시 전에 출력 경로를 열어 첫 음성이 버려지지 않게 한다
-        try:
-            self._live.append_instructions(SONG_ENDED_INSTRUCTIONS)
-        except Exception:
-            logger.warning("append after song failed", exc_info=True)
+        self._open_stream()  # 지시 전에 출력 경로를 열어 첫 음성이 버려지지 않게 한다
+        if next_segment is not None:
+            self._dj_push_segment(next_segment, DJ_SONG_ENDED_INSTRUCTIONS)
+        else:
+            try:
+                self._live.append_instructions(DJ_ENDED_INSTRUCTIONS if was_dj else SONG_ENDED_INSTRUCTIONS)
+            except Exception:
+                logger.warning("append after song failed", exc_info=True)
         self._last_transcript_time = time.monotonic()  # 유휴 타임아웃 재시작
         logger.info("Song ended: %s — stream reopened", key)
 
@@ -799,6 +878,100 @@ class LiveSessionLoop:
             self._audio_input.set_raw_capture(enabled)
         except Exception:
             logger.warning("set_raw_capture(%s) failed", enabled, exc_info=True)
+
+    # ------------------------------------------------------------------
+    # DJ mode
+    # ------------------------------------------------------------------
+
+    def _request_dj_start(self) -> Future[str]:
+        """start_dj 요청. 소재를 고르고 결과를 보류한다 — 모델이 조용해지면 :meth:`_dj_begin`."""
+        if self._dj_picker is None:
+            return _completed(json.dumps({"error": "DJ mode is unavailable"}))
+        if self._dj_active or self._dj_future is not None:
+            return _completed(json.dumps({"error": "DJ mode is already active"}))
+        segment = self._dj_picker.pick()
+        if segment is None:
+            return _completed(json.dumps({"error": "no DJ segments available"}))
+        self._dj_active = True
+        self._dj_segment = segment
+        self._dj_future = Future()
+        self._dj_requested_time = time.monotonic()
+        self._dj_nudged_at = 0.0
+        self._apply_backend()  # 소재 절 — 이 위임은 아직 이전 설정으로 돌지만 빈 응답만 내면 된다
+        logger.info("DJ requested: segment %s (song %s) — waiting for output silence", segment.key, segment.song.key)
+        return self._dj_future
+
+    def _dj_begin(self) -> None:
+        """출력 무음 뒤: 소재 주입 → 시작 신호 → 보류한 결과 완료 (제출과 이어가기는 _poll_tools)."""
+        future, self._dj_future = self._dj_future, None
+        segment = self._dj_segment
+        if future is None or segment is None:
+            return
+        self._dj_push_segment(segment, DJ_BEGIN_INSTRUCTIONS)
+        if not future.done():
+            future.set_result(json.dumps({"status": "started", "segment": segment.key, "song": segment.song.key}))
+
+    def _dj_push_segment(self, segment: Segment, signal: str) -> None:
+        """대화 모델에 소재(thinking)와 앱 신호(instructions)를 넣는다. 모델이 조용할 때만 부른다."""
+        try:
+            self._live.append_thinking(build_segment_thinking(segment))
+            self._live.append_instructions(signal)
+        except Exception:
+            logger.warning("DJ segment append failed", exc_info=True)
+        self._dj_signal_time = time.monotonic()
+        self._dj_nudged_at = 0.0
+        logger.info("DJ: segment %s pushed — %s", segment.key, signal)
+
+    def _request_dj_song(self) -> Future[str]:
+        """play_dj_song 요청. DJ 중이면 현재 소재의 곡으로 노래 흐름을 탄다."""
+        if not self._dj_active or self._dj_segment is None:
+            return _completed(json.dumps({"error": "not in DJ mode"}))
+        return self._begin_song(self._dj_segment.song)
+
+    def _request_dj_stop(self) -> Future[str]:
+        """stop_dj 요청. DJ 를 해제하고 백엔드를 복원한다. 노래가 걸려 있으면 함께 멈춘다."""
+        if not self._dj_active:
+            return _completed(json.dumps({"status": "not_active"}))
+        self._dj_reset()
+        if self._song_state is SongState.NONE:
+            self._apply_backend()
+            try:
+                self._live.append_instructions(DJ_ENDED_INSTRUCTIONS)
+            except Exception:
+                logger.warning("append after DJ stop failed", exc_info=True)
+        else:
+            self._stop_song()  # 노래 끝 처리가 백엔드 복원과 종료 지시를 맡는다
+        logger.info("DJ stopped by request")
+        return _completed(json.dumps({"status": "stopped"}))
+
+    def _dj_reset(self) -> None:
+        """DJ 상태를 지운다. 보류 중인 start_dj 결과는 오류로 끝낸다. 백엔드·지시는 건드리지 않는다."""
+        self._dj_active = False
+        self._dj_segment = None
+        future, self._dj_future = self._dj_future, None
+        if future is not None and not future.done():
+            future.set_result(json.dumps({"error": "DJ start cancelled"}))
+
+    def _maybe_nudge_dj(self, now: float) -> None:
+        """DJ 중 사용자와 모델이 함께 조용하면 복귀 신호를 한 번 보낸다 (같은 침묵엔 다시 안 보냄)."""
+        if (
+            not self._dj_active
+            or self._dj_future is not None
+            or self._song_state is not SongState.NONE
+            or self._phase is not Phase.ACTIVE
+            or self._inflight
+            or self._pending_calls
+        ):
+            return
+        quiet_since = max(self._last_voice_time or 0.0, self._last_transcript_time, self._dj_signal_time)
+        if now - quiet_since < self._DJ_QUIET_SEC or quiet_since <= self._dj_nudged_at:
+            return
+        self._dj_nudged_at = quiet_since
+        try:
+            self._live.append_instructions(DJ_RETURN_INSTRUCTIONS)
+        except Exception:
+            logger.warning("DJ return nudge failed", exc_info=True)
+        logger.info("DJ: quiet for %.0fs — return signal sent", now - quiet_since)
 
     # ------------------------------------------------------------------
     # Helpers

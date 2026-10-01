@@ -336,9 +336,16 @@ class GPTLiveSession:
         self._guard()
         self._send(lambda c: getattr(c.session, kind).append(content=content, delegation_id=None))
 
-    def update_backend(self, instructions: str, tools: tuple[dict[str, Any], ...]) -> None:
-        """responses 백엔드의 지시문·툴을 바꾼다 (이후 위임부터 적용). 세션 중 바꿀 수 있는 유일한 설정."""
+    def update_backend(self, instructions: str, tools: tuple[dict[str, Any], ...] | None = None) -> None:
+        """responses 백엔드의 지시문·툴을 바꾼다 (이후 위임부터 적용). 세션 중 바꿀 수 있는 유일한 설정.
+
+        Args:
+            instructions: 새 백엔드 지시문.
+            tools: 새 툴 집합. None 이면 세션 시작 설정의 툴(web_search 포함)을 그대로 쓴다 — 지시문만 바꿀 때.
+        """
         self._guard()
+        if tools is None:
+            tools = ({"type": "web_search"}, *self._config.tools)
         delegation = {
             "type": "responses",
             "responses": {
@@ -351,8 +358,7 @@ class GPTLiveSession:
 
     def restore_backend(self) -> None:
         """백엔드 지시문·툴을 세션 시작 설정으로 되돌린다."""
-        cfg = self._config
-        self.update_backend(cfg.backend_instructions, ({"type": "web_search"}, *cfg.tools))
+        self.update_backend(self._config.backend_instructions)
 
     def submit_function_output(self, call_id: str, output: str) -> None:
         """백엔드가 요청한 함수의 결과를 넣는다. 모든 결과를 넣은 뒤 :meth:`continue_response`."""
