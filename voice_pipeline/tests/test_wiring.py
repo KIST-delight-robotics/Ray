@@ -209,10 +209,9 @@ class TestCreateSessionLiveEngine:
         # 프로필·최근 세션은 시작 instructions 에 들어간다
         assert "interest::movie: SF" in config.instructions
         assert "User saw Dune 2." in config.instructions
-        # 말투 선호는 백엔드 지시문의 말투 절과 루프(이야기용 백엔드)에도 전달된다
+        # 말투 선호는 백엔드 지시문의 말투 절에 들어간다
         assert "overrides the default: prefers formal tone" in config.backend_instructions
         kwargs = loop_cls.call_args.kwargs
-        assert kwargs["tone_preference"] == "prefers formal tone"
         assert kwargs["live"] is live_cls.return_value
         assert kwargs["session_id"] == result.session_id
         assert set(kwargs["tool_handlers"]) == {"x", SEARCH_MEMORY_TOOL}
@@ -257,31 +256,7 @@ class TestCreateSessionLiveEngine:
         assert {t["name"] for t in config.tools} == {"end_conversation", *device_tools}
         assert set(loop_cls.call_args.kwargs["tool_handlers"]) == device_tools
 
-
-class TestLiveStoryWiring:
-    def test_story_tools_and_handler_are_wired_when_selector_present(self, monkeypatch):
-        live_cls = MagicMock(name="GPTLiveSession")
-        monkeypatch.setattr(wiring, "GPTLiveSession", live_cls)
-        loop_cls = MagicMock(name="LiveSessionLoop")
-        monkeypatch.setattr(wiring, "LiveSessionLoop", loop_cls)
-        monkeypatch.setattr(wiring, "ConversationHistory", MagicMock())
-        comps = _make_components(engine="live")
-        comps.story_selector = MagicMock()
-
-        comps.create_session(memory_enabled=False)
-
-        config = live_cls.call_args.args[0]
-        assert [t["name"] for t in config.tools] == [
-            "end_conversation",
-            "search_stories",
-            "start_story",
-            "finish_story",
-        ]
-        kwargs = loop_cls.call_args.kwargs
-        assert set(kwargs["tool_handlers"]) == {"search_stories"}
-        assert kwargs["story_selector"] is comps.story_selector
-
-    def test_no_story_tools_without_selector(self, monkeypatch):
+    def test_only_end_conversation_without_handlers(self, monkeypatch):
         live_cls = MagicMock(name="GPTLiveSession")
         monkeypatch.setattr(wiring, "GPTLiveSession", live_cls)
         monkeypatch.setattr(wiring, "LiveSessionLoop", MagicMock())

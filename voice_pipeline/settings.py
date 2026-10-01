@@ -45,8 +45,6 @@ MUSIC_TARGET_PEAK = 0.18  # 노래의 목표 중앙값. 말소리보다 3.5 dB �
 
 ASSETS_DIR = "assets"  # 저장소에 실려 프로그램이 읽는 파일 (오디오, 모션 CSV). 추적 대상
 SONG_CATALOG_PATH = f"{ASSETS_DIR}/songs.json"  # 노래 카탈로그. 키 = 음원·모션 CSV 파일 stem (gpt_live/songs.py)
-SONG_STORIES_DIR = f"{ASSETS_DIR}/song_stories"  # 이야기 대본 .md — 끝에 노래가 딸린 이야기 (gpt_live/stories.py)
-STORY_SEARCH_LIMIT = 5  # search_stories 가 백엔드에 돌려주는 후보 수
 
 # 프롬프트 토큰 예산 — prompt.py(ContextBuilder, HistorySummarizer)와 wiring.py(요약 LLM max_tokens)가 함께 사용
 HISTORY_TOKEN_BUDGET = 8192  # 히스토리 뷰 예산 (이월 + 요약 블록 + 라이브 턴)

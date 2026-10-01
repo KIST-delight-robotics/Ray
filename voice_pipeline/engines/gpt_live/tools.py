@@ -11,9 +11,6 @@
   → :func:`make_device_settings_handlers` (상태·저장은 :mod:`voice_pipeline.device_settings`).
 - ``play_song``: 노래 재생 → :func:`make_play_song_tool_def`. ``stop_song`` 은 재생 중에만 백엔드에 주어지는 툴
   (:data:`STOP_SONG_TOOL_DEF`, 루프가 백엔드를 교체할 때 사용). 둘 다 핸들러는 루프 내장.
-- ``search_stories``: 이야기 후보 검색 → :func:`make_story_search_handler`. ``start_story`` / ``finish_story`` 는
-  루프 내장(상태 검사는 루프가 한다). 교체는 ``finish_story`` → ``search_stories`` → ``start_story`` 로 한다.
-  후보·기록은 :mod:`voice_pipeline.engines.gpt_live.stories`.
 
 설명은 함수가 무엇을 하는지와 인자·결과 형식만 적는다. 언제 부를지·부르지 말지는 백엔드 지시문
 (:data:`~voice_pipeline.engines.gpt_live.instructions.DEFAULT_BACKEND_INSTRUCTIONS`)에만 둔다.
@@ -31,7 +28,6 @@ from voice_pipeline.device_settings import (
     DeviceSettings,
 )
 from voice_pipeline.engines.gpt_live.songs import Song
-from voice_pipeline.engines.gpt_live.stories import StorySelector
 from voice_pipeline.memory.retriever import MemoryRetriever
 
 ToolHandler = Callable[[str], str]  # arguments(JSON 문자열) → output(JSON 문자열)
@@ -134,19 +130,12 @@ DEVICE_TOOLS: tuple[dict[str, Any], ...] = (
     GET_DEVICE_SETTINGS_TOOL_DEF,
 )
 
-ToolHandler = Callable[[str], str]  # arguments(JSON 문자열) → output(JSON 문자열). live_session 의 것과 같은 모양
-
 DEFAULT_TOOLS: tuple[dict[str, Any], ...] = (END_CONVERSATION_TOOL_DEF, SEARCH_MEMORY_TOOL_DEF, *DEVICE_TOOLS)
 
 PLAY_SONG_TOOL = "play_song"
 STOP_SONG_TOOL = "stop_song"
-SEARCH_STORIES_TOOL = "search_stories"
-START_STORY_TOOL = "start_story"
-FINISH_STORY_TOOL = "finish_story"
 # 핸들러 없이 루프가 직접 처리하는 툴 — wiring 은 이 이름들을 핸들러 유무와 무관하게 노출한다
-LOOP_TOOLS: frozenset[str] = frozenset(
-    {END_CONVERSATION_TOOL, PLAY_SONG_TOOL, STOP_SONG_TOOL, START_STORY_TOOL, FINISH_STORY_TOOL}
-)
+LOOP_TOOLS: frozenset[str] = frozenset({END_CONVERSATION_TOOL, PLAY_SONG_TOOL, STOP_SONG_TOOL})
 
 STOP_SONG_TOOL_DEF: dict[str, Any] = {
     "type": "function",
@@ -155,67 +144,6 @@ STOP_SONG_TOOL_DEF: dict[str, Any] = {
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
     "strict": True,
 }
-
-
-SEARCH_STORIES_TOOL_DEF: dict[str, Any] = {
-    "type": "function",
-    "name": SEARCH_STORIES_TOOL,
-    "description": (
-        "Find stories Ray can tell. Each story is a few minutes long and ends with a song. "
-        "Returns candidates with id, summary, tags and song; may include unrelated fallback candidates."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "What the user asked for (a topic, mood or song name), or an empty string.",
-            }
-        },
-        "required": ["query"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-START_STORY_TOOL_DEF: dict[str, Any] = {
-    "type": "function",
-    "name": START_STORY_TOOL,
-    "description": (
-        "Start the story with this id. Only an id returned by the latest search_stories call is accepted. "
-        "The application delivers the script to Ray; the result is short metadata."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {"story": {"type": "string", "description": "Story id from search_stories."}},
-        "required": ["story"],
-        "additionalProperties": False,
-    },
-    "strict": True,
-}
-
-
-FINISH_STORY_TOOL_DEF: dict[str, Any] = {
-    "type": "function",
-    "name": FINISH_STORY_TOOL,
-    "description": ("Mark the current story as over."),
-    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-    "strict": True,
-}
-
-
-def make_story_search_handler(selector: StorySelector, *, exclude: tuple[str, ...] = ()) -> ToolHandler:
-    """후보 JSON 을 돌려준다. ``exclude`` 는 교체 시 현재 이야기를 제외하는 애플리케이션 인자다."""
-
-    def handler(arguments: str) -> str:
-        try:
-            query = str(json.loads(arguments or "{}").get("query", ""))
-        except json.JSONDecodeError:
-            query = ""
-        found = selector.search(query, exclude=exclude)
-        return json.dumps({"stories": [s.describe() for s in found]}, ensure_ascii=False)
-
-    return handler
 
 
 def make_play_song_tool_def(catalog: Mapping[str, Song]) -> dict[str, Any] | None:

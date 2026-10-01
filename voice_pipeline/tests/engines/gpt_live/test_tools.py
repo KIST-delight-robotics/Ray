@@ -21,22 +21,16 @@ from voice_pipeline.engines.gpt_live.tools import (
     DEFAULT_TOOLS,
     DEVICE_TOOLS,
     END_CONVERSATION_TOOL,
-    FINISH_STORY_TOOL,
-    FINISH_STORY_TOOL_DEF,
     GET_DEVICE_SETTINGS_TOOL,
     LOOP_TOOLS,
     PLAY_SONG_TOOL,
     SEARCH_MEMORY_TOOL,
-    SEARCH_STORIES_TOOL_DEF,
     SET_BRIGHTNESS_TOOL,
-    START_STORY_TOOL,
-    START_STORY_TOOL_DEF,
     STOP_SONG_TOOL,
     STOP_SONG_TOOL_DEF,
     make_device_settings_handlers,
     make_memory_search_handler,
     make_play_song_tool_def,
-    make_story_search_handler,
 )
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.types import Episode, MemoryReadResult
@@ -136,27 +130,3 @@ class TestSongToolDefinitions:
 
     def test_song_tools_are_loop_builtin(self) -> None:
         assert {PLAY_SONG_TOOL, STOP_SONG_TOOL, END_CONVERSATION_TOOL} <= LOOP_TOOLS
-
-
-class TestStoryTools:
-    def test_story_tools_are_loop_builtins_and_strict(self) -> None:
-        assert {START_STORY_TOOL, FINISH_STORY_TOOL} <= LOOP_TOOLS
-        for d in (SEARCH_STORIES_TOOL_DEF, START_STORY_TOOL_DEF, FINISH_STORY_TOOL_DEF):
-            assert d["strict"] is True and d["parameters"]["additionalProperties"] is False
-        assert SEARCH_STORIES_TOOL_DEF["parameters"]["required"] == ["query"]
-        assert START_STORY_TOOL_DEF["parameters"]["required"] == ["story"]
-
-    def test_search_handler_returns_describe_json(self) -> None:
-        selector = MagicMock()
-        story = MagicMock()
-        story.describe.return_value = {"id": "snowman", "summary": "s", "tags": ["겨울"], "song": "눈사람 — 정승환"}
-        selector.search.return_value = [story]
-        out = json.loads(make_story_search_handler(selector)(json.dumps({"query": "겨울"})))
-        selector.search.assert_called_once_with("겨울", exclude=())
-        assert out == {"stories": [{"id": "snowman", "summary": "s", "tags": ["겨울"], "song": "눈사람 — 정승환"}]}
-
-    def test_search_handler_tolerates_bad_arguments(self) -> None:
-        selector = MagicMock()
-        selector.search.return_value = []
-        assert json.loads(make_story_search_handler(selector)("not json")) == {"stories": []}
-        selector.search.assert_called_once_with("", exclude=())
