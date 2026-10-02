@@ -132,7 +132,7 @@ class LiveSessionConfig:
         backend_model: responses 위임 백엔드 모델. None 이면 client 위임(백엔드 없음).
         backend_instructions: 백엔드 모델 지시문 (툴 사용 규칙, 답 형식).
         tools: 백엔드에 주는 function 툴 정의(Responses API function 형식). web_search 는 항상 포함.
-        backend_reasoning: 백엔드 추론 노력(reasoning.effort). 위임 지연을 줄이려 기본 none.
+        backend_reasoning: 백엔드 추론 노력(reasoning.effort). 운영은 wiring 이 low 를 넘긴다 (FINDINGS §4).
         voice: 목소리 이름. 기본 marin.
         sample_rate: 입출력 공유 PCM 레이트. 16000 또는 24000.
     """

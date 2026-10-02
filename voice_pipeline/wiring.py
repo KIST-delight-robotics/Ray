@@ -84,6 +84,8 @@ _AUDIO_QUEUE_SIZE = 300
 _VAD_INFER_INTERVAL = 3  # 3프레임(90ms)마다 추론, 사이는 캐시 반환
 _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
 _LIVE_BACKEND_MODEL = "gpt-5.4-mini"  # GPT-Live responses 위임 백엔드
+# none 은 짧은 첫 턴에서 툴 선택이 미끄러진다(end_conversation 오발). low 는 지연 차이 없이 25/25 (FINDINGS §4)
+_LIVE_BACKEND_REASONING = "low"
 
 Engine = Literal["cascade", "live"]
 
@@ -204,6 +206,7 @@ class ProcessComponents:
                 LiveSessionConfig(
                     instructions=instructions,
                     backend_model=_LIVE_BACKEND_MODEL,
+                    backend_reasoning=_LIVE_BACKEND_REASONING,
                     backend_instructions=build_backend_instructions(tone, self.song_catalog),
                     tools=tools,
                     voice=LIVE_VOICE,

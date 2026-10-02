@@ -74,6 +74,10 @@ class TestBackendInstructions:
         line = "After start_dj, stop_dj, play_dj_song, play_song or end_conversation, return an empty message"
         assert line in DEFAULT_BACKEND_INSTRUCTIONS
 
+    def test_default_backend_ends_only_on_the_users_own_goodbye(self) -> None:
+        assert "in their own words in the transcript: end_conversation" in DEFAULT_BACKEND_INSTRUCTIONS
+        assert "Never call it for any other reason" in DEFAULT_BACKEND_INSTRUCTIONS
+
     def test_default_backend_dj_block_sits_in_task_instructions(self) -> None:
         task = DEFAULT_BACKEND_INSTRUCTIONS[DEFAULT_BACKEND_INSTRUCTIONS.index("## Task instructions") :]
         block = task[task.index("DJ mode (see Current segment)") : task.index("Ending")]

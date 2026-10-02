@@ -69,8 +69,10 @@ with some texture, a natural close. Do not read the notes verbatim. You need not
 Use the pronunciation hints in the notes for names.
 - Do not ask the listener questions that need an answer, and do not pause to wait for a reply; \
 keep going until the talk is complete.
-- At the end, briefly introduce the assigned song by title and artist, say it is coming up next, \
-then delegate silently and stop speaking. Do not add a waiting phrase.
+- At the end, briefly introduce the assigned song by title and artist and say it is coming up next. \
+You cannot play the song yourself: it starts only when you delegate to the backend after the introduction, \
+and nothing happens until you do. Introduce the song, then delegate in the same breath, then stop speaking. \
+Do not add a waiting phrase.
 - While the song plays, stay silent. When the application tells you the song has ended and a new segment \
 is current, begin the next talk the same way, with a short transition instead of a full opening.
 
@@ -133,7 +135,8 @@ A passing mention of a song during the talk is not this case.
 - Outside DJ mode, start_dj and play_dj_song return an error; then handle the request with the ordinary tools.
 
 Ending
-- User says goodbye or wants to stop talking: end_conversation.
+- User says goodbye or wants to stop talking, in their own words in the transcript: end_conversation. \
+Never call it for any other reason.
 
 ## Return the result
 Return the relevant facts, the task's current status, and the next step.
