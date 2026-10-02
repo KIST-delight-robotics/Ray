@@ -125,6 +125,8 @@ Some modules (VAP, TurnGPT, Wakeword etc.) wrap externally cloned model reposito
   knows every component. `evaluation → voice_pipeline`, never the reverse.
 - **Entry-point wiring**: production (`__main__.py`) and eval (`evaluation/run.py`) share the component graph via `voice_pipeline/wiring.py` (`build_components()` + `ProcessComponents.create_session()`). Production code exposes only neutral injection points (paths, toggles, callbacks) — never eval-specific behavior or branches. Dependency direction: `evaluation → voice_pipeline`, never the reverse.
 - **Type hints** required. **Docstrings** required on interface methods.
+- **Comments and docstrings** describe current behavior and why — never change history ("removed X",
+  "no longer Y", "since the experiment…"). Keep them short; history belongs in commits and the decision log.
 - **Configuration**: vendor/module-specific knobs are class variables and constructor parameters.
   Values shared by several modules (audio format, DB path, token budgets) live in `settings.py`.
   Never reach into another module's private class variable.
