@@ -6,7 +6,6 @@ from voice_pipeline.engines.gpt_live.dj import Segment
 from voice_pipeline.engines.gpt_live.instructions import (
     DEFAULT_BACKEND_INSTRUCTIONS,
     DEFAULT_LIVE_INSTRUCTIONS,
-    DJ_BEGIN_INSTRUCTIONS,
     DJ_ENDED_INSTRUCTIONS,
     DJ_RETURN_INSTRUCTIONS,
     DJ_SONG_ENDED_INSTRUCTIONS,
@@ -54,9 +53,10 @@ class TestBuildLiveInstructions:
         assert text.count("Delegate to the backend when:") == 1  # 위임 조건 목록은 대화 모드 한 벌만
 
     def test_dj_hosting_rules_cover_experiment_findings(self) -> None:
-        # 하네스 실험(docs/dj-mode-worknote.md): 소재만 받고 조기 발화, 답하자마자 이어가기, 노트 밖 사실
+        # 실험(docs/dj-mode-worknote.md): 진입 조건, 답하자마자 이어가기, 노트 밖 사실
         dj = DEFAULT_LIVE_INSTRUCTIONS[DEFAULT_LIVE_INSTRUCTIONS.index("## DJ mode") :]
-        assert "Do not start until the application tells you to begin" in dj
+        assert "DJ mode starts when your DJ request has been handled" in DEFAULT_LIVE_INSTRUCTIONS
+        assert "tells you to begin" not in DEFAULT_LIVE_INSTRUCTIONS
         assert "Do not return to the talk on your own" in dj
         assert "Do not state facts that are not in the notes" in dj
         assert "If you already asked and the user stayed silent, continue" in dj
@@ -124,7 +124,7 @@ class TestDJInstructions:
         assert text.rstrip().endswith("- 첫 줄\n- 둘째 줄")
 
     def test_app_signals_are_short_and_distinct(self) -> None:
-        signals = (DJ_BEGIN_INSTRUCTIONS, DJ_SONG_ENDED_INSTRUCTIONS, DJ_RETURN_INSTRUCTIONS, DJ_ENDED_INSTRUCTIONS)
-        assert len(set(signals)) == 4
+        signals = (DJ_SONG_ENDED_INSTRUCTIONS, DJ_RETURN_INSTRUCTIONS, DJ_ENDED_INSTRUCTIONS)
+        assert len(set(signals)) == 3
         assert all(len(s) < 200 for s in signals)  # instructions.append 한도 500 토큰에 한참 못 미친다
-        assert "Begin now" in DJ_BEGIN_INSTRUCTIONS and "Begin now" in DJ_SONG_ENDED_INSTRUCTIONS
+        assert "Begin now" in DJ_SONG_ENDED_INSTRUCTIONS

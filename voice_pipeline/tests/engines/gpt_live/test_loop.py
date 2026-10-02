@@ -26,7 +26,6 @@ from voice_pipeline.adapters.led import LEDState
 from voice_pipeline.engines.gpt_live.dj import Segment, SegmentPicker
 from voice_pipeline.engines.gpt_live.instructions import (
     DEFAULT_BACKEND_INSTRUCTIONS,
-    DJ_BEGIN_INSTRUCTIONS,
     DJ_ENDED_INSTRUCTIONS,
     DJ_RETURN_INSTRUCTIONS,
     DJ_SONG_ENDED_INSTRUCTIONS,
@@ -881,7 +880,7 @@ def _appended(live: MagicMock) -> list[str]:
 
 
 class TestDJ:
-    def test_start_holds_result_pushes_segment_then_signal_then_submits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_start_holds_result_pushes_segment_then_submits_no_signal(self, monkeypatch: pytest.MonkeyPatch) -> None:
         picker = _picker(SEG1)
         loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=picker)
         state: list[tuple[bool, Segment | None]] = []
@@ -911,17 +910,16 @@ class TestDJ:
         picker.pick.assert_called_once()
         # 소재는 대화 모델(thinking)과 백엔드(Current segment 절, 툴은 그대로) 양쪽에
         live.append_thinking.assert_called_once_with(build_segment_thinking(SEG1))
-        assert _appended(live) == [DJ_BEGIN_INSTRUCTIONS]
+        assert _appended(live) == []
         live.update_backend.assert_called_once()
         backend = live.update_backend.call_args.args[0]
         assert backend.startswith(DEFAULT_BACKEND_INSTRUCTIONS) and "## Current segment" in backend
         assert "서랍 속에 남아 있는 것들" in backend and "Ray's voice" not in backend
         assert len(live.update_backend.call_args.args) == 1  # 툴 집합은 세션 시작 그대로
-        # 순서: 소재 → 시작 신호 → 결과 제출 → 이어가기 (제출이 먼저면 모델이 소재 없이 말을 시작한다)
+        # 순서: 소재 → 결과 제출 → 이어가기 (제출이 먼저면 모델이 소재 없이 말을 시작한다)
         names = [c[0] for c in order.mock_calls]
         assert (
             names.index("live.append_thinking")
-            < names.index("live.append_instructions")
             < names.index("live.submit_function_output")
             < names.index("live.continue_response")
         )
@@ -982,7 +980,7 @@ class TestDJ:
             build_segment_thinking(SEG1),
             build_segment_thinking(SEG2),
         ]
-        assert _appended(live) == [DJ_BEGIN_INSTRUCTIONS, SONG_PLAYING_INSTRUCTIONS, DJ_SONG_ENDED_INSTRUCTIONS]
+        assert _appended(live) == [SONG_PLAYING_INSTRUCTIONS, DJ_SONG_ENDED_INSTRUCTIONS]
         assert state[0] == (True, SEG2)  # DJ 는 계속, 소재는 둘째로
         # 백엔드: 소재 1 절 → 노래용 → 소재 2 절 (기본으로의 복원은 없다)
         updates = [c.args[0] for c in live.update_backend.call_args_list]
@@ -1014,7 +1012,7 @@ class TestDJ:
         assert _outputs(live)["c3"] == {"status": "stopped"}
         assert not loop._dj_active and loop._dj_segment is None
         picker.pick.assert_called_once()  # 다음 소재로 넘어가지 않는다
-        assert _appended(live) == [DJ_BEGIN_INSTRUCTIONS, SONG_PLAYING_INSTRUCTIONS, DJ_ENDED_INSTRUCTIONS]
+        assert _appended(live) == [SONG_PLAYING_INSTRUCTIONS, DJ_ENDED_INSTRUCTIONS]
         live.restore_backend.assert_called_once()  # 정지 결과의 후속 응답 뒤 기본으로
 
     def test_stop_dj_restores_backend_and_announces_end(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1037,7 +1035,7 @@ class TestDJ:
         assert _outputs(live)["c2"] == {"status": "stopped"}
         assert not loop._dj_active
         live.restore_backend.assert_called_once()
-        assert _appended(live) == [DJ_BEGIN_INSTRUCTIONS, DJ_ENDED_INSTRUCTIONS]
+        assert _appended(live) == [DJ_ENDED_INSTRUCTIONS]
         assert live.continue_response.call_count == 2  # 종료 결과 뒤에도 이어간다 — 모델이 한마디 한다
 
     def test_dj_tools_outside_dj_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1064,7 +1062,7 @@ class TestDJ:
             ],
         )
         loop.run()
-        assert _appended(m["live"]) == [DJ_BEGIN_INSTRUCTIONS, DJ_RETURN_INSTRUCTIONS]
+        assert _appended(m["live"]) == [DJ_RETURN_INSTRUCTIONS]
 
     def test_no_return_signal_while_song_or_delegation_is_pending(self, monkeypatch: pytest.MonkeyPatch) -> None:
         loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1), dj_quiet=0.05)
@@ -1094,4 +1092,4 @@ class TestDJ:
         loop.run()
         assert loop.exit_reason == "exit_keyword" and not loop._dj_active
         m["live"].restore_backend.assert_not_called()
-        assert _appended(m["live"]) == [DJ_BEGIN_INSTRUCTIONS]
+        assert _appended(m["live"]) == []

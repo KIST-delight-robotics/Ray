@@ -7,8 +7,9 @@
 
 DJ 모드: 진행 규칙은 시작 지시문의 ``# DJ mode`` 절에 상시 들어 있고(모드 밖에선 잠듦), 소재는
 :func:`build_segment_thinking` 을 ``thinking.append`` 로, 백엔드에는 ``## Current segment`` 절을 붙인 같은 지시문으로
-``session.update`` 한다(소재마다 교체, 종료 시 복원). 앱이 보내는 신호(:data:`DJ_BEGIN_INSTRUCTIONS` 등)가 모델을
-깨운다 — 모델은 한 덩어리 말하고 멈추므로 끝이 없는 자리(노래 끝·끼어들기 뒤)는 앱이 깨워야 한다.
+``session.update`` 한다(소재마다 교체, 종료 시 복원). 진입은 ``start_dj`` 결과가, 그 뒤는 앱이 보내는 신호
+(:data:`DJ_SONG_ENDED_INSTRUCTIONS` 등)가 모델을 깨운다 — 모델은 한 덩어리 말하고 멈추므로 끝이 없는 자리
+(노래 끝·끼어들기 뒤)는 앱이 깨워야 한다.
 설계 배경은 docs/dj-mode-worknote.md.
 """
 
@@ -38,7 +39,7 @@ Do not mention the backend. Do not guess a backend result while waiting; do not 
 
 ## Modes
 You are in conversation mode unless DJ mode has been started. Apply only the rules of the current mode.
-DJ mode starts when the application tells you to begin and the current segment has arrived as thinking context.
+DJ mode starts when your DJ request has been handled and the current segment has arrived as thinking context.
 DJ mode ends when the application tells you it is over; it does not end the session.
 
 ## Conversation mode
@@ -65,7 +66,6 @@ You are a calm late-night radio host speaking to one listener who is nearby, pro
 ### Hosting
 - The current segment arrives as thinking context: a topic, notes as bullet points, and an assigned song. \
 Only the latest segment is current; earlier ones are over.
-- A segment may arrive before you are told to begin. Do not start until the application tells you to begin.
 - Develop the notes in your own words into one continuous talk: a gentle opening, a few of the notes developed \
 with some texture, a natural close. Do not read the notes verbatim. You need not use every note.
 - Do not state facts that are not in the notes. Do not invent personal memories, listener letters or quotations. \
@@ -224,8 +224,7 @@ def build_segment_thinking(segment: Segment) -> str:
     )
 
 
-# DJ 모드에서 앱이 대화 모델을 깨우는 신호 (instructions.append). 모델은 조용할 때만 받는다 — 진입·노래 끝·침묵 뒤.
-DJ_BEGIN_INSTRUCTIONS = "DJ: the current segment is ready. Begin now."
+# DJ 모드에서 앱이 대화 모델을 깨우는 신호 (instructions.append). 모델은 조용할 때만 받는다 — 노래 끝·침묵 뒤.
 DJ_SONG_ENDED_INSTRUCTIONS = (
     "DJ: the song has ended and the next segment is current. Begin now with a short transition."
 )
