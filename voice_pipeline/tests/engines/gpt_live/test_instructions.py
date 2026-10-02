@@ -28,7 +28,7 @@ _SONGS = {
 class TestBuildLiveInstructions:
     def test_build_live_instructions_without_context_is_base_only(self) -> None:
         text = build_live_instructions()
-        assert text.startswith("# Ray\nYou are Ray")
+        assert text.startswith("# Voice model (Ray) instructions\n## Ray\nYou are Ray")
         assert "already know about the user, from earlier sessions" not in text
 
     def test_build_live_instructions_appends_profile_and_recent_sessions(self) -> None:
@@ -43,19 +43,19 @@ class TestBuildLiveInstructions:
     def test_mode_sections_in_order_with_delegation_lists(self) -> None:
         # 모드별 구성: 상황마다 한 절만 보면 된다. 위임 조건은 모드마다 명시적인 목록으로(FINDINGS §4)
         text = DEFAULT_LIVE_INSTRUCTIONS
-        assert text.index("# Modes") < text.index("# Conversation mode") < text.index("# DJ mode")
-        conv = text[text.index("# Conversation mode") : text.index("# DJ mode")]
-        dj = text[text.index("# DJ mode") :]
+        assert text.index("## Modes") < text.index("## Conversation mode") < text.index("## DJ mode")
+        conv = text[text.index("## Conversation mode") : text.index("## DJ mode")]
+        dj = text[text.index("## DJ mode") :]
         assert "play or stop music" in conv[conv.index("Delegate to the backend when:") : conv.index("Do not delegate")]
         assert "start DJ mode" in conv and "do not start hosting yourself" in conv
-        assert dj.index("## Hosting") < dj.index("## Listener interruption") < dj.index("## Delegation")
-        delegation = dj[dj.index("## Delegation") :]
+        assert dj.index("### Hosting") < dj.index("### Listener interruption") < dj.index("### Delegation")
+        delegation = dj[dj.index("### Delegation") :]
         assert "Delegate as in conversation mode" in delegation and "reached its song introduction" in delegation
         assert text.count("Delegate to the backend when:") == 1  # 위임 조건 목록은 대화 모드 한 벌만
 
     def test_dj_hosting_rules_cover_experiment_findings(self) -> None:
         # 하네스 실험(docs/dj-mode-worknote.md): 소재만 받고 조기 발화, 답하자마자 이어가기, 노트 밖 사실
-        dj = DEFAULT_LIVE_INSTRUCTIONS[DEFAULT_LIVE_INSTRUCTIONS.index("# DJ mode") :]
+        dj = DEFAULT_LIVE_INSTRUCTIONS[DEFAULT_LIVE_INSTRUCTIONS.index("## DJ mode") :]
         assert "Do not start until the application tells you to begin" in dj
         assert "Do not return to the talk on your own" in dj
         assert "Do not state facts that are not in the notes" in dj
@@ -66,6 +66,7 @@ class TestBackendInstructions:
     def test_default_backend_has_play_song_but_not_stop_song(self) -> None:
         text = DEFAULT_BACKEND_INSTRUCTIONS
         # OpenAI 백엔드 템플릿의 세 섹션 순서, 툴 규칙은 Task instructions 안에
+        assert text.startswith("# Backend instructions\n")
         assert text.index("## Voice conversation context") < text.index("## Task instructions")
         assert text.index("## Task instructions") < text.index("play_song") < text.index("## Return the result")
         assert "stop_song" not in text  # 정지는 재생 중 교체되는 백엔드(SONG_BACKEND_INSTRUCTIONS)만 안다
