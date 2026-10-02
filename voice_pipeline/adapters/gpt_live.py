@@ -19,6 +19,7 @@ API 사실 (scripts/gpt_live/FINDINGS.md 에 실측 근거):
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import queue
 import threading
@@ -203,6 +204,9 @@ class GPTLiveSession:
         self._grouper: Any = None
         self._session_id: str | None = None
         self._active_responses: dict[str | None, str] = {}  # delegation_id → 진행 중 response_id
+        self._delegation_created_at: dict[str | None, float] = {}  # delegation_id → 위임 생성 시각 (조립 지연 측정)
+        self._response_started_at: dict[tuple[str | None, str | None], float] = {}  # (delegation, response) → 시작
+        self._response_calls: dict[tuple[str | None, str | None], list[str]] = {}  # 로그용 함수 호출 이름
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -468,6 +472,7 @@ class GPTLiveSession:
             self._events.put(LiveError(str(getattr(err, "code", "")), str(getattr(err, "message", err))))
         elif t == "session.delegation.created":
             d = getattr(event, "delegation", event)
+            self._delegation_created_at[getattr(d, "id", None)] = time.monotonic()
             logger.info("Delegation created (id=%s, offset=%sms)", getattr(d, "id", "?"), getattr(d, "offset_ms", "?"))
         # 나머지(appended ack, muted, info …)는 상태 변화 없음 — 로그만
         else:
@@ -479,8 +484,11 @@ class GPTLiveSession:
         delegation_id = envelope.delegation_id
         response = inner.get("response") or {}
         response_id = inner.get("response_id") or response.get("id") or self._active_responses.get(delegation_id)
+        key = (delegation_id, response_id)
         if it == "response.created" and response_id:
             self._active_responses[delegation_id] = response_id
+            self._response_started_at[key] = time.monotonic()
+            self._response_calls[key] = []
         elif it == "response.output_item.done":
             item = inner.get("item") or {}
             if item.get("type") == "message":
@@ -488,6 +496,7 @@ class GPTLiveSession:
                 text = "".join(str(p.get("text", "")) for p in parts if isinstance(p, dict)).strip()
                 logger.info("Backend reply: %s", repr(text[:200]) if text else "(empty)")
             if item.get("type") == "function_call":
+                self._response_calls.setdefault(key, []).append(str(item.get("name", "")))
                 self._events.put(
                     LiveFunctionCall(
                         call_id=str(item.get("call_id", "")),
@@ -502,7 +511,30 @@ class GPTLiveSession:
                 logger.warning("Backend response %s", it)
             if self._active_responses.get(delegation_id) == response_id:
                 self._active_responses.pop(delegation_id, None)
+            self._log_backend_timing(delegation_id, key, it.removeprefix("response."))
             self._events.put(LiveResponseDone(delegation_id, response_id, it.removeprefix("response.")))
+
+    def _log_backend_timing(self, delegation_id: str | None, key: tuple[str | None, str | None], status: str) -> None:
+        """백엔드 응답 1건의 소요 시간 — 로그 한 줄 + 호출 스토어. 위임 생성 → 응답 시작(서버 조립) 간격도 함께."""
+        now = time.monotonic()
+        started = self._response_started_at.pop(key, None)
+        calls = self._response_calls.pop(key, [])
+        if started is None:
+            return
+        elapsed_ms = (now - started) * 1000.0
+        created = self._delegation_created_at.pop(delegation_id, None)  # 후속 응답(툴 결과 뒤)엔 없다
+        setup = f", setup {(started - created) * 1000.0:.0f}ms" if created is not None else ""
+        logger.info(
+            "Backend response %.2fs (%s%s, calls=%s)", elapsed_ms / 1000.0, status, setup, calls or "-"
+        )
+        trace.record_call(
+            "gpt_live",
+            "backend_response",
+            self._config.backend_model or "client",
+            elapsed_ms,
+            status=status,
+            metadata=json.dumps({"calls": calls, "setup_ms": round((started - created) * 1000.0) if created else None}),
+        )
 
 
 def _ms(t0: float) -> float:

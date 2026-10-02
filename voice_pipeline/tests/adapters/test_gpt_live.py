@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import time
 from typing import Any
 from unittest.mock import MagicMock
@@ -354,6 +355,29 @@ class TestAppendAndResponseTracking:
         session._dispatch_backend(_backend({"type": f"response.{status}", "response": {"id": "r1"}}))
         done = session.poll_event()
         assert done.response_id == "r1" and done.status == status
+
+    def test_backend_timing_is_logged_and_recorded(self, call_log, caplog) -> None:
+        from types import SimpleNamespace
+
+        session, _ = _session([], LiveSessionConfig(instructions="hi", backend_model="gpt-5.4-mini"))
+        created = SimpleNamespace(type="session.delegation.created", delegation=SimpleNamespace(id="d1"), offset_ms=100)
+        session._dispatch(created)
+        session._dispatch_backend(_backend({"type": "response.created", "response": {"id": "r1"}}))
+        call_item = {"type": "function_call", "call_id": "c1", "name": "start_dj"}
+        done = {"type": "response.output_item.done", "response_id": "r1", "item": call_item}
+        session._dispatch_backend(_backend(done))
+        with caplog.at_level("INFO", logger="voice_pipeline.gpt_live"):
+            session._dispatch_backend(_backend({"type": "response.completed", "response": {"id": "r1"}}))
+        rec = [r for r in call_log.records if r.operation == "backend_response"]
+        assert len(rec) == 1 and rec[0].model == "gpt-5.4-mini" and rec[0].status == "completed"
+        meta = json.loads(rec[0].metadata)
+        assert meta["calls"] == ["start_dj"] and isinstance(meta["setup_ms"], int)  # 위임 생성 → 응답 시작 간격
+        assert any("Backend response" in m and "setup" in m and "start_dj" in m for m in caplog.messages)
+        # 툴 결과 뒤의 후속 응답은 위임 생성 시각이 없다 — setup 없이 기록
+        session._dispatch_backend(_backend({"type": "response.created", "response": {"id": "r2"}}))
+        session._dispatch_backend(_backend({"type": "response.failed", "response": {"id": "r2"}}))
+        rec = [r for r in call_log.records if r.operation == "backend_response"]
+        assert rec[1].status == "failed" and json.loads(rec[1].metadata) == {"calls": [], "setup_ms": None}
 
     def test_interleaved_delegations_keep_response_ids_separate(self) -> None:
         session, _ = _session([])
