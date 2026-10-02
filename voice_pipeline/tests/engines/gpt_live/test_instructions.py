@@ -16,7 +16,6 @@ from voice_pipeline.engines.gpt_live.instructions import (
     build_live_instructions,
     build_segment_thinking,
     build_songs_section,
-    build_voice_section,
 )
 from voice_pipeline.engines.gpt_live.songs import Song
 
@@ -50,7 +49,9 @@ class TestBuildLiveInstructions:
         assert "play or stop music" in conv[conv.index("Delegate to the backend when:") : conv.index("Do not delegate")]
         assert "start DJ mode" in conv and "do not start hosting yourself" in conv
         assert dj.index("## Hosting") < dj.index("## Listener interruption") < dj.index("## Delegation")
-        assert "reached its song introduction" in dj[dj.index("Delegate to the backend when:") :]
+        delegation = dj[dj.index("## Delegation") :]
+        assert "Delegate as in conversation mode" in delegation and "reached its song introduction" in delegation
+        assert text.count("Delegate to the backend when:") == 1  # 위임 조건 목록은 대화 모드 한 벌만
 
     def test_dj_hosting_rules_cover_experiment_findings(self) -> None:
         # 하네스 실험(docs/dj-mode-worknote.md): 소재만 받고 조기 발화, 답하자마자 이어가기, 노트 밖 사실
@@ -82,23 +83,17 @@ class TestBackendInstructions:
         task = DEFAULT_BACKEND_INSTRUCTIONS[DEFAULT_BACKEND_INSTRUCTIONS.index("## Task instructions") :]
         block = task[task.index("DJ mode (see Current segment)") : task.index("Ending")]
         assert "start_dj" in block and "play_dj_song" in block and "stop_dj" in block
-        assert "Do not write an opening or a talk" in block
-        assert "A question alone does not end DJ mode" in block
+        assert "A question alone is not a stop" in block
+        assert "return an error" not in block  # 모순이던 "모드 밖에서 start_dj 는 오류" 줄은 뺐다
 
-    def test_voice_section_default_and_profile_override(self) -> None:
-        plain = build_voice_section()
-        assert plain.startswith("## Ray's voice") and "해요체" in plain and "overrides" not in plain
-        with_pref = build_voice_section("prefers formal tone")
-        assert "overrides the default: prefers formal tone" in with_pref
-
-    def test_backend_builder_appends_voice_section(self) -> None:
-        text = build_backend_instructions("formal")
-        assert text.startswith(DEFAULT_BACKEND_INSTRUCTIONS) and text.rstrip().endswith("formal")
+    def test_backend_builder_has_no_voice_section(self) -> None:
+        # 말투는 백엔드가 함께 받는 대화 모델 세션 지시문에 있다 (FINDINGS §4) — 중복 절을 두지 않는다
+        text = build_backend_instructions()
+        assert text.startswith(DEFAULT_BACKEND_INSTRUCTIONS) and "Ray's voice" not in text
         assert "## Songs on Ray" not in text
 
-    def test_backend_builder_appends_songs_section_after_voice(self) -> None:
-        text = build_backend_instructions("formal", _SONGS)
-        assert text.index("## Ray's voice") < text.index("## Songs on Ray")
+    def test_backend_builder_appends_songs_section(self) -> None:
+        text = build_backend_instructions(_SONGS)
         assert text.rstrip().endswith("IAM: I AM — IVE (아이브)")
         assert build_songs_section({}) == ""
 
@@ -113,12 +108,12 @@ _SEGMENT = Segment(key="drawer", topic="서랍 속에 남아 있는 것들", son
 
 class TestDJInstructions:
     def test_backend_builder_appends_current_segment_last(self) -> None:
-        text = build_backend_instructions("formal", _SONGS, _SEGMENT)
+        text = build_backend_instructions(_SONGS, _SEGMENT)
         assert text.startswith(DEFAULT_BACKEND_INSTRUCTIONS)
-        assert text.index("## Ray's voice") < text.index("## Songs on Ray") < text.index("## Current segment")
+        assert text.index("## Songs on Ray") < text.index("## Current segment")
         assert "Current topic: 서랍 속에 남아 있는 것들" in text and "Assigned song: I AM — IVE" in text
         assert text.rstrip().endswith("- 첫 줄\n- 둘째 줄")
-        assert "## Current segment" not in build_backend_instructions("formal", _SONGS)
+        assert "## Current segment" not in build_backend_instructions(_SONGS)
         assert build_current_segment_section(_SEGMENT).startswith("## Current segment\n")
 
     def test_segment_thinking_marks_replacement_and_carries_notes(self) -> None:

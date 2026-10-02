@@ -209,8 +209,8 @@ class TestCreateSessionLiveEngine:
         # 프로필·최근 세션은 시작 instructions 에 들어간다
         assert "interest::movie: SF" in config.instructions
         assert "User saw Dune 2." in config.instructions
-        # 말투 선호는 백엔드 지시문의 말투 절에 들어간다
-        assert "overrides the default: prefers formal tone" in config.backend_instructions
+        # 말투 선호는 백엔드에 따로 넣지 않는다 — 세션 지시문이 백엔드에도 공유된다 (FINDINGS §4)
+        assert "Ray's voice" not in config.backend_instructions
         kwargs = loop_cls.call_args.kwargs
         assert kwargs["live"] is live_cls.return_value
         assert kwargs["session_id"] == result.session_id
@@ -271,7 +271,7 @@ class TestCreateSessionLiveEngine:
         assert [t["name"] for t in config.tools] == ["end_conversation", "start_dj", "stop_dj", "play_dj_song"]
         comps.dj_picker.new_session.assert_called_once()  # 세션마다 세션 내 사용 기록을 비운다
         kwargs = loop_cls.call_args.kwargs
-        assert kwargs["dj_picker"] is comps.dj_picker and kwargs["tone_preference"] == ""
+        assert kwargs["dj_picker"] is comps.dj_picker
 
     def test_only_end_conversation_without_handlers(self, monkeypatch):
         live_cls = MagicMock(name="GPTLiveSession")

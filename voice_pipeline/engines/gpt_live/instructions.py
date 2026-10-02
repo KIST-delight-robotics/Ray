@@ -88,15 +88,10 @@ If you already asked and the user stayed silent, continue with a short transitio
 Do not resume on your own afterwards.
 
 ## Delegation
-Delegate to the backend when:
-- The talk has reached its song introduction.
-- The user asks to stop or pause DJ mode, to stop the song, or to end the conversation.
-- The user's question needs current information or a fact that is not in the notes or the conversation.
-- The user asks to change the volume or the lights.
-Do not delegate when:
-- You are composing or continuing the talk, or deciding how to close it.
-- The question can be answered from the notes or the conversation.
-- The user is reacting briefly (음, 그렇구나) without asking anything. Keep going.
+Delegate as in conversation mode, and also when the talk has reached its song introduction, \
+or the user asks to stop or pause DJ mode.
+Do not delegate for composing or continuing the talk, for a question the notes or the conversation already answer, \
+or for a brief reaction (음, 그렇구나) that asks nothing. Keep going.
 When the application tells you DJ mode is over, say one short neutral line (쉬어갈게요 정도) and return to \
 conversation mode.
 """
@@ -127,12 +122,10 @@ with artists that fit the conversation, say there are more, and ask which one.
 - No stored song matches: say Ray does not have it. Unclear which one: ask.
 
 DJ mode (see Current segment)
-- User asks to start DJ mode (DJ 모드, 라디오, 혼자 진행): start_dj. Do not write an opening or a talk.
-- Ray has introduced the current segment's song and delegates: play_dj_song. No user permission is needed. \
-A passing mention of a song during the talk is not this case.
-- User asks to stop or pause DJ mode, to wait, or to be quiet: stop_dj. A question alone does not end DJ mode.
-- While a segment is current, answer questions from its notes when they cover it; search only for what they do not.
-- Outside DJ mode, start_dj and play_dj_song return an error; then handle the request with the ordinary tools.
+- Start DJ mode (DJ 모드, 디제이, 라디오, 혼자 진행): start_dj.
+- Ray has introduced the current segment's song and delegates: play_dj_song.
+- Stop or pause DJ mode, wait, be quiet: stop_dj. A question alone is not a stop.
+- Questions during a segment: answer from the notes first; search only for what they do not cover.
 
 Ending
 - User says goodbye or wants to stop talking, in their own words in the transcript: end_conversation. \
@@ -176,21 +169,6 @@ SONG_PLAYING_INSTRUCTIONS = (
 # 노래 재생 종료 시 삽입
 SONG_ENDED_INSTRUCTIONS = "The song has ended. Continue the conversation as usual."
 
-# 백엔드가 "레이 말투" 를 알기 위한 절.
-# 대화 모델은 시작 지시문의 같은 규칙 + 프로필 블록으로 안다. 백엔드에는 프로필 전체가 아니라 말투 선호만 준다.
-RAY_VOICE_DEFAULT = "Ray speaks Korean, warm and plain. Default to polite Korean (해요체)."
-
-
-def build_voice_section(tone_preference: str = "") -> str:
-    """``## Ray's voice`` 절.
-
-    ``tone_preference`` 는 프로필 ``interaction_style::tone_preference`` 내용, 없으면 빈 문자열.
-    """
-    lines = ["## Ray's voice", RAY_VOICE_DEFAULT]
-    if tone_preference.strip():
-        lines.append(f"This user's stated tone preference overrides the default: {tone_preference.strip()}")
-    return "\n".join(lines) + "\n"
-
 
 def build_songs_section(catalog: Mapping[str, Song]) -> str:
     """``## Songs on Ray`` 절 — 백엔드가 목록 질문에 답하고 ``play_song`` id 를 고르는 단일 출처.
@@ -213,18 +191,19 @@ def build_current_segment_section(segment: Segment) -> str:
 
 
 def build_backend_instructions(
-    tone_preference: str = "",
     catalog: Mapping[str, Song] | None = None,
     segment: Segment | None = None,
 ) -> str:
-    """백엔드 지시문 — 기본 지시문 뒤에 말투 절, 곡 목록 절, (DJ 중이면) 현재 소재 절을 붙인다.
+    """백엔드 지시문 — 기본 지시문 뒤에 곡 목록 절, (DJ 중이면) 현재 소재 절을 붙인다.
+
+    레이 말투·사용자 말투 선호는 따로 넣지 않는다 — 백엔드는 대화 모델의 세션 지시문(프로필 블록 포함)을 함께 받는다
+    (FINDINGS §4).
 
     Args:
-        tone_preference: 프로필의 말투 선호. 빈 문자열이면 기본 말투.
         catalog: 재생 가능한 곡. 비면 곡 목록 절 생략.
         segment: DJ 모드의 현재 소재. None 이면 DJ 중이 아니다.
     """
-    sections = build_voice_section(tone_preference) + build_songs_section(catalog or {})
+    sections = build_songs_section(catalog or {})
     if segment is not None:
         sections += build_current_segment_section(segment)
     return DEFAULT_BACKEND_INSTRUCTIONS + "\n" + sections

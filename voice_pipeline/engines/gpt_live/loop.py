@@ -189,7 +189,6 @@ class LiveSessionLoop:
         wait_for_playback_complete: bool = False,
         song_catalog: Mapping[str, Song] | None = None,
         dj_picker: SegmentPicker | None = None,
-        tone_preference: str = "",
         audio_input: AudioInput | None = None,
     ) -> None:
         """
@@ -207,7 +206,6 @@ class LiveSessionLoop:
             input_sample_rate / live_sample_rate: 마이크 레이트와 세션 레이트. 다르면 선형 보간으로 리샘플.
             song_catalog: 재생 가능한 노래 (키 → Song). None/빈 dict 면 play_song 은 unknown 으로 답한다.
             dj_picker: DJ 소재 선택기. None 이면 start_dj 는 unavailable 로 답한다.
-            tone_preference: 프로필의 말투 선호. DJ 중 백엔드 지시문을 다시 만들 때 말투 절에 들어간다.
             audio_input: 있으면 노래 재생 중 원본 마이크 채널로 바꾼다 (:meth:`AudioInput.set_raw_capture`).
         """
         self._live = live
@@ -227,7 +225,6 @@ class LiveSessionLoop:
         self._wait_for_playback_complete = wait_for_playback_complete
         self._song_catalog: Mapping[str, Song] = dict(song_catalog or {})
         self._dj_picker = dj_picker
-        self._tone_preference = tone_preference
         self._dj_active = False
         self._dj_segment: Segment | None = None
         self._dj_future: Future[str] | None = None  # 보류 중인 start_dj 결과. 소재 주입 뒤 완료
@@ -795,9 +792,7 @@ class LiveSessionLoop:
         """노래용 백엔드에서 돌아온다 — DJ 중이면 현재 소재 절을 붙인 지시문으로, 아니면 세션 시작 설정으로."""
         try:
             if self._dj_active and self._dj_segment is not None:
-                self._live.update_backend(
-                    build_backend_instructions(self._tone_preference, self._song_catalog, self._dj_segment)
-                )
+                self._live.update_backend(build_backend_instructions(self._song_catalog, self._dj_segment))
             else:
                 self._live.restore_backend()
         except Exception:

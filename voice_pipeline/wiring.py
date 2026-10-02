@@ -63,7 +63,7 @@ from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
-from voice_pipeline.session_context import format_profile_block, load_session_context, tone_preference
+from voice_pipeline.session_context import format_profile_block, load_session_context
 from voice_pipeline.settings import (
     BRIDGE_SAMPLE_RATE,
     DEFAULT_DB_PATH,
@@ -191,10 +191,8 @@ class ProcessComponents:
                     SEARCH_MEMORY_TOOL, make_memory_search_handler(retriever, {session_id} | included_ids)
                 )
                 instructions = build_live_instructions(format_profile_block(profiles), recent_texts)
-                tone = tone_preference(profiles)
             else:
                 instructions = build_live_instructions()
-                tone = ""
             # 핸들러가 있는 툴만 백엔드에 노출한다 (end_conversation·노래 툴은 루프 내장)
             tools = tuple(t for t in DEFAULT_TOOLS if t["name"] in LOOP_TOOLS or t["name"] in tool_handlers)
             if (play_song := make_play_song_tool_def(self.song_catalog)) is not None:
@@ -207,7 +205,7 @@ class ProcessComponents:
                     instructions=instructions,
                     backend_model=_LIVE_BACKEND_MODEL,
                     backend_reasoning=_LIVE_BACKEND_REASONING,
-                    backend_instructions=build_backend_instructions(tone, self.song_catalog),
+                    backend_instructions=build_backend_instructions(self.song_catalog),
                     tools=tools,
                     voice=LIVE_VOICE,
                     sample_rate=BRIDGE_SAMPLE_RATE,
@@ -227,7 +225,6 @@ class ProcessComponents:
                 executor=self.executor,
                 song_catalog=self.song_catalog,
                 dj_picker=self.dj_picker,
-                tone_preference=tone,
                 audio_input=self.audio_input,
                 **session_loop_kwargs,
             )

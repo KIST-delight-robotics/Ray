@@ -45,14 +45,6 @@ def format_profile_block(profiles: list[Profile]) -> str:
     return "\n".join(lines)
 
 
-def tone_preference(profiles: list[Profile]) -> str:
-    """프로필의 ``interaction_style::tone_preference`` 내용. 없으면 빈 문자열 (백엔드 말투 절에 쓴다)."""
-    for p in profiles:
-        if p.topic == "interaction_style" and p.sub_topic == "tone_preference":
-            return p.content.strip()
-    return ""
-
-
 # ---------------------------------------------------------------------------
 # Block 3: Previous session summaries
 # ---------------------------------------------------------------------------

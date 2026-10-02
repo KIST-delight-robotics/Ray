@@ -114,7 +114,6 @@ def _make_loop(
         wait_for_playback_complete=wait_for_playback,
         song_catalog=song_catalog,
         dj_picker=dj_picker,
-        tone_preference="formal",
         audio_input=audio_input,
     )
     mocks = {"live": live, "bridge": bridge, "history": history, "led": led, "memory": memory}
@@ -916,7 +915,7 @@ class TestDJ:
         live.update_backend.assert_called_once()
         backend = live.update_backend.call_args.args[0]
         assert backend.startswith(DEFAULT_BACKEND_INSTRUCTIONS) and "## Current segment" in backend
-        assert "서랍 속에 남아 있는 것들" in backend and "overrides the default: formal" in backend
+        assert "서랍 속에 남아 있는 것들" in backend and "Ray's voice" not in backend
         assert len(live.update_backend.call_args.args) == 1  # 툴 집합은 세션 시작 그대로
         # 순서: 소재 → 시작 신호 → 결과 제출 → 이어가기 (제출이 먼저면 모델이 소재 없이 말을 시작한다)
         names = [c[0] for c in order.mock_calls]
