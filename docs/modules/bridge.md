@@ -43,7 +43,7 @@ All messages are JSON text frames over WebSocket.
 
 | Message | Format |
 |---------|--------|
-| Stream start | `{"type": "stream_start"}` — 선택 필드 `"live": true` 는 GPT-Live 스트림 표시: C++ 는 프리버퍼와 추가 시작 여유가 찰 때까지 시계를 시작하지 않고(값은 `cpp/main.cpp`의 live 상수 참조), 오디오 기반 헤드모션 생성 대신 대기 모션을 유지한다. 필드가 없으면 기존 TTS 스트림 동작. |
+| Stream start | `{"type": "stream_start"}` — 선택 필드 `"live": true` 는 GPT-Live 스트림 표시: C++ 는 프리버퍼와 추가 시작 여유가 찰 때까지 시계를 시작하지 않는다(값은 `cpp/main.cpp`의 live 상수 참조). 필드가 없으면 기존 TTS 스트림 동작. |
 | Audio | `{"type": "audio", "data": "<base64-pcm>"}` |
 | Audio end | `{"type": "audio_end"}` |
 | Stop | `{"type": "stop"}` |

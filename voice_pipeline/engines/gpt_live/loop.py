@@ -4,8 +4,7 @@
 모델 하나(gpt-live-1)로 대체되므로, 이 루프가 하는 일은 여섯이다.
 
 1. 마이크 프레임을 브리지 레이트로 리샘플해 세션으로 보내고, 모델 출력 오디오를 C++로 그대로 보낸다.
-   세션 전체가 ``stream_start`` 하나로 시작하는 스트림이며 무음 조각도 그대로 흘린다(C++ 는
-   ``head_motion=False`` 로 대기 모션을 유지하고 입만 움직인다).
+   세션 전체가 ``stream_start`` 하나로 시작하는 스트림이며 무음 조각도 그대로 흘린다.
 2. 전사 세그먼트를 히스토리와 utterances(장기기억 입력)에 저장한다.
 3. 백엔드의 함수 툴 호출을 실행한다 — 장기기억 검색 ``search_memory``, 볼륨·밝기 ``adjust_volume`` /
    ``set_brightness`` / ``get_device_settings``, 종료 ``end_conversation``. 핸들러는 executor 에서 돌리고

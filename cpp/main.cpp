@@ -1367,7 +1367,7 @@ void generate_motion(int channels, int samplerate) {
             // ============================================================
             // Head motion 생성
             // ============================================================
-            if (cfg_robot.generate_head_motion && !stream_live) {
+            if (cfg_robot.generate_head_motion) {
                 avg_grad = getSegmentAverageGrad(energy, "one2one", "abs");
                 segClass = assignClassWith1DMiddleBoundary(avg_grad, boundaries);
 
@@ -2953,7 +2953,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
                 }
                 if (stream_live) {
                     std::cout << get_time_str() << " [MainLoop] live stream: prebuffered " << kLivePrebufferCycles << " cycles + "
-                              << kLiveStartSlackMs << " ms slack, head motion = idle" << std::endl;
+                              << kLiveStartSlackMs << " ms slack" << std::endl;
                 }
 
                 if (!responses_stream_buffer.empty() && !user_interruption_flag) {
