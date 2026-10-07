@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import socket
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -140,6 +141,25 @@ class BreathingAnimation:
         b = int(self._color[2] * brightness)
         pixel: RGB = (r, g, b)
         return [(0, 0, 0)] * bar_count + [pixel] * ring_count
+
+
+def _system_stopping() -> bool:
+    """시스템 종료(poweroff/reboot) 진행 중인지.
+
+    종료 중에는 LED를 소등하지 않고 호흡 최저 노랑으로 파킹해 ATtiny 종료
+    호흡(dim에서 시작)이 이음새 없이 이어받게 한다. 판별 실패 시 False
+    (= 기존 소등 동작)로 안전 폴백.
+    """
+    try:
+        out = subprocess.run(
+            ["systemctl", "is-system-running"],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+        return out.stdout.strip() == "stopping"
+    except Exception:
+        return False
 
 
 CONTROL_SOCK = "/run/os-led.sock"
@@ -455,14 +475,25 @@ class LEDController:
         self._thread.join(timeout=self._CLOSE_JOIN_TIMEOUT_SEC)
         if self._thread.is_alive():
             logger.warning("LED animation thread did not exit within timeout")
-        # 즉시 소등하면 종료가 "툭 꺼짐"으로 보인다 — 마지막 프레임에서 검정으로 페이드.
+        # 즉시 소등하면 종료가 "툭 꺼짐"으로 보인다 — 마지막 프레임에서 페이드.
+        # 시스템 종료 중이면 검정 대신 호흡 최저(0.15) 노랑으로 파킹하고 물러난다:
+        # ATtiny 종료 호흡이 dim에서 시작하도록 설계되어 있어(펌웨어 pulse_for_ms 주석)
+        # 그 밝기 그대로 이어받는다. 수동 stop(개발)은 기존대로 소등.
+        parked_lit = False
         if self._strip is not None and self._last_frame is not None:
+            if _system_stopping():
+                target = BreathingAnimation().render(0, self._BAR_COUNT, self._RING_COUNT)
+                parked_lit = True
+                logger.info("System stopping — parking strip at dim yellow for ATtiny handoff")
+            else:
+                target = self._off_frame()
             try:
-                self._crossfade(self._last_frame, self._off_frame())
+                self._crossfade(self._last_frame, target)
             except Exception:
                 logger.debug("Close fade error (suppressed)", exc_info=True)
-        self._apply_off()
-        self._mirror_lower_led(self._off_frame())
+        if not parked_lit:
+            self._apply_off()
+            self._mirror_lower_led(self._off_frame())
         # Fully close our SPI device BEFORE releasing the token, so no RAY-side
         # write can overlap the daemon's breathing resume on the shared bus.
         self._close_strip()

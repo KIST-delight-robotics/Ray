@@ -45,6 +45,7 @@ import math
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -117,6 +118,19 @@ def breath_frame(level):
     lv = max(0.0, min(1.0, level))
     r, g, b = (int(c * lv) for c in BREATH_COLOR)
     return [(r, g, b)] * NUM_LEDS
+
+
+def system_stopping():
+    """시스템 종료 진행 중인지 — 종료 중에는 검정을 쓰지 않고 마지막 프레임을
+    ATtiny 종료 호흡에 그대로 넘긴다 (소등→재점등 깜빡임 방지)."""
+    try:
+        out = subprocess.run(
+            ["systemctl", "is-system-running"],
+            capture_output=True, text=True, timeout=1.0,
+        )
+        return out.stdout.strip() == "stopping"
+    except Exception:
+        return False
 
 
 RAY_BAR_LEDS = 8   # RAY 프레임 레이아웃: bar 8개(앞) + ring 16개(뒤).
@@ -246,7 +260,8 @@ def main():
 
     def cleanup(*_):
         stop_evt.set()
-        spi.writebytes2(black)
+        if not system_stopping():
+            spi.writebytes2(black)   # 종료 중엔 마지막 프레임 유지 → ATtiny가 이어받음
         spi.close()
         ready.off()
         try:
@@ -295,7 +310,10 @@ def main():
                     if pause_req.is_set():
                         paused.set()         # RAY re-acquired during settle
                         continue
-                    spi.writebytes2(black)
+                    if not system_stopping():
+                        spi.writebytes2(black)   # 개발용 수동 stop: 소등 유지
+                    # 시스템 종료 중이면 RAY가 파킹해둔 dim 노랑을 그대로 두어
+                    # ATtiny 종료 호흡으로 이음새 없이 넘어간다.
                     continue
                 time.sleep(FRAME_DT_S)
                 continue
