@@ -27,11 +27,17 @@
 DJ 모드 (설계 배경은 docs/dj-mode-worknote.md):
     ``start_dj`` 는 결과를 보류하고(위임 시 한마디가 끝나 무음 0.5 s) → 소재 ``thinking.append`` → 결과 제출 →
     이어가기가 오프닝 멘트를 시작시킨다. 백엔드는 ``## Current segment`` 절을
-    붙인 지시문으로 ``session.update``(소재마다 교체, 다음 위임부터 적용). ``play_dj_song`` 은 현재 소재의 곡으로
-    노래 흐름을 탄다. 노래 자연 종료 → 다음 소재 + 신호. 사용자 정지·``stop_dj``·세션 종료 → DJ 해제, 백엔드 복원.
+    붙인 지시문으로 ``session.update``(소재마다 교체, 다음 위임부터 적용). ``play_dj_song``(사용자 요청)은 현재
+    소재의 곡으로 노래 흐름을 탄다. 노래 자연 종료 → 다음 소재 + 신호. 사용자 정지·``stop_dj``·세션 종료 → DJ 해제,
+    백엔드 복원.
+    곡은 앱이 튼다(:class:`DJWatch`): 소재를 넣은 뒤 모델의 첫 음성부터 이야기를 지켜보다가, 전사가 종료 문구로
+    끝나고 받은 무음 조각이 ``_DJ_CLOSING_QUIET_SEC`` 면 곡을 튼다. 문구 없이 ``_DJ_CHECK_QUIET_SEC`` 면 백엔드에
+    판정을 요청해 ``play_dj_song`` 이면 곡, 아니면 출력이 조용해진 뒤 복귀 신호로 이어가게 한다. 판정 위임에서는
+    ``play_dj_song`` 외의 툴을 실행하지 않는다. 무음을 받은 조각 길이로 세는 이유는 네트워크 정지를 쉼으로 보지
+    않기 위해서다. 사용자가 말하면 그 소재의 감시는 끈다 — 끼어들기 뒤는 아래 복귀 신호와 사용자 요청으로 진행한다.
     복귀 감시: DJ 중 노래·위임 없이 사용자와 모델이 ``_DJ_QUIET_SEC`` 동안 조용하면 복귀 신호를 한 번 보낸다
     (같은 침묵엔 다시 안 보냄 — 모델이 반응해 말하면 침묵이 새로 시작된다). 모델은 한 덩어리 말하고 멈추므로
-    끝이 없는 자리는 앱이 깨워야 한다.
+    끝이 없는 자리는 앱이 깨워야 한다. 이야기를 지켜보는 동안은 위 감시가 먼저 움직이므로 보내지 않는다.
 
 종료 시퀀스(실측 근거는 scripts/gpt_live/FINDINGS.md §4~5):
     입력 mute → 모델의 마지막 발화가 끝날 때까지(출력이 무음으로 N초) 대기, 상한 있음 →
@@ -61,6 +67,7 @@ from voice_pipeline.adapters.gpt_live import (
     GPTLiveSession,
     LiveAudio,
     LiveClosed,
+    LiveDelegationCreated,
     LiveError,
     LiveFunctionCall,
     LiveResponseDone,
@@ -68,8 +75,10 @@ from voice_pipeline.adapters.gpt_live import (
     LiveUsage,
 )
 from voice_pipeline.adapters.led import LEDController, LEDState
-from voice_pipeline.engines.gpt_live.dj import Segment, SegmentPicker
+from voice_pipeline.engines.gpt_live.dj import Segment, SegmentPicker, ends_with_closing_line
 from voice_pipeline.engines.gpt_live.instructions import (
+    DJ_CHECK_IGNORED_RESULT,
+    DJ_CHECK_MESSAGE,
     DJ_ENDED_INSTRUCTIONS,
     DJ_RETURN_INSTRUCTIONS,
     DJ_SONG_ENDED_INSTRUCTIONS,
@@ -132,6 +141,15 @@ class SongState(enum.Enum):
     STOPPING = "stopping"  # stop 보냄. playback_complete 와 모델 출력 무음을 기다린 뒤 스트림 재개
 
 
+class DJWatch(enum.Enum):
+    """DJ 이야기 끝 감시 — 끼어들기 없이 이야기가 끝나는 경우에 앱이 곡을 튼다."""
+
+    OFF = "off"  # DJ 아님, 노래 중, 또는 이 소재에서 사용자가 말했다
+    WAITING = "waiting"  # 소재·복귀 신호 뒤 모델의 첫 음성을 기다림
+    LISTENING = "listening"  # 이야기 중. 종료 문구 + 무음이면 곡, 문구 없이 무음이면 판정 요청
+    CHECKING = "checking"  # 판정 요청 중. 곡이 아니면 백엔드가 끝나고 출력이 조용해진 뒤 복귀 신호
+
+
 class LiveSessionLoop:
     """GPT-Live 세션 하나를 프레임 루프로 돈다. ``run()`` 이 반환하면 세션이 끝난 것."""
 
@@ -150,6 +168,10 @@ class LiveSessionLoop:
     _DJ_SILENCE_SEC = 0.5  # start_dj 뒤 출력 무음이 이만큼 이어지면 소재 주입 + 결과 제출
     _DJ_MAX_WAIT_SEC = 30.0
     _DJ_QUIET_SEC = 6.0  # DJ 중 사용자·모델 출력이 이만큼 없으면 복귀 신호 (모델의 문장 사이 쉼 1~2 s 보다 넉넉히)
+    # 이야기 끝 감시 (받은 무음 조각 길이 기준). 이야기 중 쉼은 독백 16회에서 최대 1.6 s (docs/dj-mode-worknote.md)
+    _DJ_CLOSING_QUIET_SEC = 2.0  # 종료 문구 뒤 이만큼 조용하면 곡을 튼다
+    _DJ_CHECK_QUIET_SEC = 3.0  # 문구 없이 이만큼 조용하면 백엔드에 판정을 요청한다
+    _DJ_CHECK_MAX_WAIT_SEC = 15.0  # 판정 위임이 끝나지 않을 때의 안전망
     _LEAD_LOG_INTERVAL_SEC = 15.0  # 오디오 전송 상태(추정 밀림, 조각 도착 간격) DEBUG 로그 주기
     _GAP_EVENT_SEC = 0.3  # 조각 도착 간격이 이 이상이면 정지 이벤트로 INFO 로그 (C++ [split] 로그와 대조용)
     # 서버 출력은 실시간보다 1~3% 짧게 온다 — 주로 무음 프레임이 빠지고, 늦게라도 오지 않는다
@@ -230,6 +252,17 @@ class LiveSessionLoop:
         self._dj_signal_time = 0.0  # 마지막 시작·노래 끝 신호 시각 — 복귀 감시의 기준점
         self._dj_nudged_at = 0.0  # 복귀 신호를 보낸 침묵의 시작 시각. 같은 침묵엔 다시 안 보낸다
         self._dj_pushed_at: float | None = None  # 소재를 넣은 시각. 첫 모델 음성까지 간격을 로그로 남기고 지운다
+        self._dj_watch = DJWatch.OFF
+        self._dj_talk_text = ""  # 감시 중 가장 최근 모델 전사 세그먼트의 텍스트 — 종료 문구는 이 끝에서 찾는다
+        self._dj_talk_segment: str | None = None
+        self._dj_talk_seen: set[str] = set()  # 감시 중 본 모델 세그먼트 (늦게 닫히는 이전 세그먼트는 무시)
+        self._dj_check_seq = 0
+        self._dj_check_id: str | None = None  # 판정 요청의 event_id — 위임 생성 이벤트로 그 위임을 알아본다
+        self._dj_check_delegation: str | None = None
+        self._dj_check_sent_at = 0.0
+        self._dj_check_done = False  # 판정 위임이 곡 없이 끝났다
+        self._ignored_call_ids: set[str] = set()  # 실행하지 않고 결과만 돌려준 판정 위임의 툴 호출
+        self._user_segments: set[str] = set()  # 본 사용자 전사 세그먼트 — 새 것이 오면 사용자가 말한 것
         self._audio_input = audio_input
         self._song_state = SongState.NONE
         self._song: Song | None = None
@@ -252,6 +285,7 @@ class LiveSessionLoop:
         self._last_frame_time = 0.0
         self._last_transcript_time = 0.0
         self._last_voice_time: float | None = None
+        self._quiet_audio_sec = 0.0  # 마지막 모델 음성 뒤 받은 무음 조각 길이 — 조각이 안 오는 네트워크 정지는 안 센다
         self._end_started_time = 0.0
         self._end_nudged = False  # 종료 시퀀스에서 작별 인사 유도를 보냈는가 (한 번만)
         self._audio_sent_sec = 0.0  # 현재 스트림에 보낸 출력 누적 (lead 회계용. 스트림을 다시 열면 0 부터)
@@ -437,6 +471,7 @@ class LiveSessionLoop:
             label="DJ start",
         ):
             self._dj_begin()
+        self._update_dj_watch(now)
         self._maybe_nudge_dj(now)
         if (
             self._song_state is SongState.STOPPING
@@ -496,6 +531,9 @@ class LiveSessionLoop:
             self._on_transcript(event)
         elif isinstance(event, LiveFunctionCall):
             self._pending_calls.append(event)
+        elif isinstance(event, LiveDelegationCreated):
+            if self._dj_check_id is not None and event.client_event_id == self._dj_check_id:
+                self._dj_check_delegation = event.delegation_id
         elif isinstance(event, LiveResponseDone):
             self._on_response_done(event)
         elif isinstance(event, LiveUsage):
@@ -532,6 +570,7 @@ class LiveSessionLoop:
         chunk_sec = len(pcm) / (self._live_rate * 2)
         silent = not any(pcm)  # 서버는 말하지 않을 때 값이 전부 0인 조각을 보낸다
         quiet = silent or _rms(pcm) < self._QUIET_RMS  # 어절 사이 쉼, 세션 시작 직후의 미세 잡음(진폭 <50) 포함
+        self._quiet_audio_sec = self._quiet_audio_sec + chunk_sec if quiet else 0.0
         if not quiet:
             self._last_voice_time = now
             if not self._first_voice_logged:
@@ -540,6 +579,8 @@ class LiveSessionLoop:
             if self._dj_pushed_at is not None:
                 logger.info("DJ: model voice %.2fs after segment push", now - self._dj_pushed_at)
                 self._dj_pushed_at = None
+            if self._dj_watch is DJWatch.WAITING:
+                self._dj_watch = DJWatch.LISTENING
 
         lead = self._audio_sent_sec - (now - self._first_audio_time)
         if silent and lead > self._LEAD_DROP_ABOVE_SEC:
@@ -566,6 +607,7 @@ class LiveSessionLoop:
 
     def _on_transcript(self, seg: LiveTranscript) -> None:
         self._last_transcript_time = time.monotonic()
+        self._track_dj_talk(seg)
         can_exit = self._phase == Phase.ACTIVE and self._song_state is SongState.NONE  # 노래 중엔 정지만 받는다
         if seg.speaker == "user" and can_exit and self._matches_exit_keyword(seg.text):
             logger.info("Exit keyword in user speech: %r", seg.text)
@@ -584,9 +626,12 @@ class LiveSessionLoop:
         self._save_utterance(seg.speaker, text)
 
     def _on_response_done(self, event: LiveResponseDone) -> None:
-        """백엔드 응답이 끝났다 — 그 응답의 함수 호출을 실행에 넘긴다. 결과 제출은 :meth:`_poll_tools`."""
-        if not self._pending_calls:
-            return
+        """백엔드 응답이 끝났다 — 그 응답의 함수 호출을 실행에 넘긴다. 결과 제출은 :meth:`_poll_tools`.
+
+        DJ 판정 위임이면 ``play_dj_song`` 만 실행하고 나머지는 실행하지 않은 채 결과만 돌려준다. 호출 없이 끝나면
+        (빈 응답·텍스트·실패) 판정은 곡 없이 끝난 것이다.
+        """
+        dj_check = event.delegation_id is not None and event.delegation_id == self._dj_check_delegation
         calls = [
             c
             for c in self._pending_calls
@@ -594,11 +639,23 @@ class LiveSessionLoop:
         ]
         self._pending_calls = [c for c in self._pending_calls if c not in calls]
         if event.status in ("failed", "incomplete"):
-            logger.warning("Discarding calls from %s backend response", event.status)
+            if calls:
+                logger.warning("Discarding calls from %s backend response", event.status)
+            if dj_check:
+                self._dj_check_finished(f"backend response {event.status}")
+            return
+        if not calls:
+            if dj_check:
+                self._dj_check_finished("no play_dj_song")
             return
         for call in calls:
             logger.info("Tool %s(%s) requested", call.name, call.arguments)
-            self._inflight.append((call, self._submit_tool(call)))
+            if dj_check and call.name != PLAY_DJ_SONG_TOOL:
+                logger.info("DJ check: %s not run", call.name)
+                self._ignored_call_ids.add(call.call_id)
+                self._inflight.append((call, _completed(json.dumps({"error": DJ_CHECK_IGNORED_RESULT}))))
+            else:
+                self._inflight.append((call, self._submit_tool(call)))
         self._poll_tools()  # 인라인 실행이면 여기서 바로 끝난다. executor 면 프레임 루프가 이어서 폴링
 
     def _submit_tool(self, call: LiveFunctionCall) -> Future[str]:
@@ -646,8 +703,10 @@ class LiveSessionLoop:
                 logger.warning("Tool %s failed", call.name, exc_info=True)
             logger.info("Tool %s -> %s", call.name, output if len(output) <= 200 else output[:200] + "…")
             self._live.submit_function_output(call.call_id, output)
-            ending |= call.name == END_CONVERSATION_TOOL and self._song_state is SongState.NONE
-            stopped |= call.name == STOP_SONG_TOOL and '"stopped"' in output
+            ran = call.call_id not in self._ignored_call_ids
+            self._ignored_call_ids.discard(call.call_id)
+            ending |= ran and call.name == END_CONVERSATION_TOOL and self._song_state is SongState.NONE
+            stopped |= ran and call.name == STOP_SONG_TOOL and '"stopped"' in output
         if ending:
             # 이어가면 백엔드가 작별 인사를 또 만들고 모델이 두 번 말할 수 있다(FINDINGS §4). 위임은 미완으로 둔다.
             self._begin_ending("end_conversation_tool")
@@ -859,7 +918,7 @@ class LiveSessionLoop:
         self._set_raw_capture(False)
         self._open_stream()  # 지시 전에 출력 경로를 열어 첫 음성이 버려지지 않게 한다
         if next_segment is not None:
-            self._dj_push_segment(next_segment, DJ_SONG_ENDED_INSTRUCTIONS)
+            self._dj_push_segment(next_segment, starting=False, signal=DJ_SONG_ENDED_INSTRUCTIONS)
         else:
             try:
                 self._live.append_instructions(DJ_ENDED_INSTRUCTIONS if was_dj else SONG_ENDED_INSTRUCTIONS)
@@ -904,14 +963,14 @@ class LiveSessionLoop:
         segment = self._dj_segment
         if future is None or segment is None:
             return
-        self._dj_push_segment(segment)
+        self._dj_push_segment(segment, starting=True)
         if not future.done():
             future.set_result(json.dumps({"status": "started", "segment": segment.key, "song": segment.song.key}))
 
-    def _dj_push_segment(self, segment: Segment, signal: str | None = None) -> None:
+    def _dj_push_segment(self, segment: Segment, *, starting: bool, signal: str | None = None) -> None:
         """대화 모델에 소재(thinking)와, 있으면 앱 신호(instructions)를 넣는다. 모델이 조용할 때만 부른다."""
         try:
-            self._live.append_thinking(build_segment_thinking(segment))
+            self._live.append_thinking(build_segment_thinking(segment, starting=starting))
             if signal is not None:
                 self._live.append_instructions(signal)
         except Exception:
@@ -919,7 +978,97 @@ class LiveSessionLoop:
         self._dj_signal_time = time.monotonic()
         self._dj_nudged_at = 0.0
         self._dj_pushed_at = self._dj_signal_time
+        self._dj_watch_from_next_voice()
         logger.info("DJ: segment %s pushed%s", segment.key, f" — {signal}" if signal else "")
+
+    def _dj_watch_from_next_voice(self) -> None:
+        """이야기 끝 감시를 모델의 다음 첫 음성부터 새로 시작한다 (그 전의 무음은 이야기 끝이 아니다)."""
+        self._dj_watch = DJWatch.WAITING
+        self._dj_talk_text = ""
+        self._dj_talk_segment = None
+        self._dj_talk_seen = set()
+        self._dj_check_id = None
+        self._dj_check_delegation = None
+        self._dj_check_done = False
+
+    def _track_dj_talk(self, seg: LiveTranscript) -> None:
+        """감시 중 모델 전사를 따라간다. 사용자가 새로 말하면 이 소재의 감시를 끈다(끼어들기 뒤는 범위 밖)."""
+        if not seg.text.strip():
+            return
+        if seg.speaker == "user":
+            if seg.segment_id in self._user_segments:
+                return
+            self._user_segments.add(seg.segment_id)
+            if self._dj_watch is not DJWatch.OFF:
+                logger.info("DJ: listener spoke — no automatic song for this segment")
+                self._dj_watch = DJWatch.OFF
+            return
+        if self._dj_watch is DJWatch.OFF:
+            return
+        if seg.segment_id == self._dj_talk_segment or seg.segment_id not in self._dj_talk_seen:
+            self._dj_talk_seen.add(seg.segment_id)
+            self._dj_talk_segment = seg.segment_id
+            self._dj_talk_text = seg.text
+
+    def _update_dj_watch(self, now: float) -> None:
+        """이야기 끝 판정 — 종료 문구 + 무음이면 곡, 문구 없이 무음이면 판정 요청, 판정이 곡 없이 끝나면 복귀 신호."""
+        if self._dj_watch in (DJWatch.OFF, DJWatch.WAITING):
+            return
+        if not self._dj_active or self._dj_segment is None or self._song_state is not SongState.NONE:
+            self._dj_watch = DJWatch.OFF  # 곡이 시작됐거나(판정의 play_dj_song 포함) DJ 가 끝났다
+            return
+        if self._phase is not Phase.ACTIVE or self._inflight or self._pending_calls:
+            return
+        quiet = self._quiet_audio_sec
+        if self._dj_watch is DJWatch.LISTENING:
+            closing = ends_with_closing_line(self._dj_talk_text, self._dj_segment.song)
+            if closing and quiet >= self._DJ_CLOSING_QUIET_SEC:
+                self._dj_play_now(quiet)
+            elif quiet >= self._DJ_CHECK_QUIET_SEC:
+                self._dj_send_check(now, quiet)
+            return
+        if not self._dj_check_done and now - self._dj_check_sent_at > self._DJ_CHECK_MAX_WAIT_SEC:
+            self._dj_check_finished(f"no answer in {self._DJ_CHECK_MAX_WAIT_SEC:.0f}s")
+        if self._dj_check_done and quiet >= self._DJ_SILENCE_SEC:
+            try:
+                self._live.append_instructions(DJ_RETURN_INSTRUCTIONS)
+            except Exception:
+                logger.warning("DJ return signal after check failed", exc_info=True)
+            self._dj_signal_time = self._dj_nudged_at = now  # 같은 침묵에 6 s 복귀 신호를 또 보내지 않는다
+            self._dj_watch_from_next_voice()
+            logger.info("DJ: check gave no song — return signal sent")
+
+    def _dj_play_now(self, quiet: float) -> None:
+        """종료 문구를 들었다 — 곡을 바로 튼다. 결과를 받을 툴 호출이 없어 노래 흐름의 결과 Future 는 쓰지 않는다."""
+        assert self._dj_segment is not None
+        song = self._dj_segment.song
+        logger.info("DJ: closing line heard, output quiet %.1fs — playing %s", quiet, song.key)
+        self._dj_watch = DJWatch.OFF
+        self._begin_song(song)
+        if self._song_state is SongState.PENDING:
+            self._drain_for_song()  # 출력은 이미 조용하다 — 무음을 더 기다리지 않는다
+
+    def _dj_send_check(self, now: float, quiet: float) -> None:
+        """종료 문구 없이 멈췄다 — 백엔드에 곡 소개가 끝났는지 판정을 요청한다."""
+        self._dj_check_seq += 1
+        self._dj_check_id = f"ray_dj_check_{self._dj_check_seq}"
+        self._dj_check_delegation = None
+        self._dj_check_done = False
+        self._dj_check_sent_at = now
+        self._dj_watch = DJWatch.CHECKING
+        tail = self._dj_talk_text[-40:]
+        logger.info("DJ: stopped without the closing line (quiet %.1fs, …%r) — asking the backend", quiet, tail)
+        try:
+            self._live.request_backend(DJ_CHECK_MESSAGE, event_id=self._dj_check_id)
+        except Exception:
+            logger.warning("DJ check request failed", exc_info=True)
+            self._dj_check_finished("request failed")
+
+    def _dj_check_finished(self, reason: str) -> None:
+        """판정 위임이 곡 없이 끝났다 — 출력이 조용해지면 :meth:`_update_dj_watch` 가 복귀 신호를 보낸다."""
+        if self._dj_watch is DJWatch.CHECKING and not self._dj_check_done:
+            self._dj_check_done = True
+            logger.info("DJ check finished without a song (%s)", reason)
 
     def _request_dj_song(self) -> Future[str]:
         """play_dj_song 요청. DJ 중이면 현재 소재의 곡으로 노래 흐름을 탄다."""
@@ -948,6 +1097,9 @@ class LiveSessionLoop:
         self._dj_active = False
         self._dj_segment = None
         self._dj_pushed_at = None
+        self._dj_watch = DJWatch.OFF
+        self._dj_check_id = None
+        self._dj_check_delegation = None
         future, self._dj_future = self._dj_future, None
         if future is not None and not future.done():
             future.set_result(json.dumps({"error": "DJ start cancelled"}))
@@ -956,6 +1108,7 @@ class LiveSessionLoop:
         """DJ 중 사용자와 모델이 함께 조용하면 복귀 신호를 한 번 보낸다 (같은 침묵엔 다시 안 보냄)."""
         if (
             not self._dj_active
+            or self._dj_watch in (DJWatch.LISTENING, DJWatch.CHECKING)  # 이야기 끝 감시가 먼저 움직인다
             or self._dj_future is not None
             or self._song_state is not SongState.NONE
             or self._phase is not Phase.ACTIVE

@@ -13,6 +13,8 @@ API 사실 (scripts/gpt_live/FINDINGS.md 에 실측 근거):
     - 오디오 포맷·목소리·instructions·위임 모드는 세션 시작 후 바꿀 수 없다. 추가는 append 3종만.
     - 서버는 말하지 않을 때도 값이 0인 조각을 실시간 속도로 계속 보낸다.
     - 위임 이벤트에는 요청 텍스트가 없다. responses 위임이면 백엔드가 대화 이력 전체를 받는다.
+    - 앱이 ``response.create`` 로 백엔드를 부르면 서버가 그것도 위임으로 감싼다 — 대화 모델이 받는 말을 하고,
+      결과 반환과 이어가기까지 해야 위임이 닫힌다.
     - instructions.append 는 진행 중 발화를 끊는다. thinking.append 는 끊지 않는다.
 """
 
@@ -83,6 +85,14 @@ class LiveFunctionCall:
 
 
 @dataclass(frozen=True)
+class LiveDelegationCreated:
+    """위임이 생겼다. :meth:`GPTLiveSession.request_backend` 로 만든 위임이면 ``client_event_id`` 가 그 event_id."""
+
+    delegation_id: str | None
+    client_event_id: str | None = None
+
+
+@dataclass(frozen=True)
 class LiveResponseDone:
     """백엔드 응답 하나가 끝났다. 모아둔 함수 호출 결과를 제출하고 이어갈 시점."""
 
@@ -115,7 +125,15 @@ class LiveError:
 
 
 LiveEvent = (
-    LiveStarted | LiveAudio | LiveTranscript | LiveFunctionCall | LiveResponseDone | LiveUsage | LiveClosed | LiveError
+    LiveStarted
+    | LiveAudio
+    | LiveTranscript
+    | LiveDelegationCreated
+    | LiveFunctionCall
+    | LiveResponseDone
+    | LiveUsage
+    | LiveClosed
+    | LiveError
 )
 
 
@@ -379,6 +397,17 @@ class GPTLiveSession:
         self._guard()
         self._send(lambda c: c.response.create(event_id="ray_continue"))
 
+    def request_backend(self, message: str, *, event_id: str) -> None:
+        """사용자 발화 없이 앱이 백엔드 응답을 요청한다 — ``message`` 를 백엔드 대화에 넣고 ``response.create``.
+
+        서버가 이것을 위임으로 감싸므로 :class:`LiveDelegationCreated` 의 ``client_event_id`` 로 알아보고,
+        함수 호출이 오면 다른 위임과 같이 결과 반환과 :meth:`continue_response` 로 닫아야 한다.
+        """
+        self._guard()
+        item = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": message}]}
+        self._send(lambda c: c.response.item.create(item=item, event_id=f"{event_id}_item"))
+        self._send(lambda c: c.response.create(event_id=event_id))
+
     # ------------------------------------------------------------------
     # Server → client
     # ------------------------------------------------------------------
@@ -472,8 +501,16 @@ class GPTLiveSession:
             self._events.put(LiveError(str(getattr(err, "code", "")), str(getattr(err, "message", err))))
         elif t == "session.delegation.created":
             d = getattr(event, "delegation", event)
-            self._delegation_created_at[getattr(d, "id", None)] = time.monotonic()
-            logger.info("Delegation created (id=%s, offset=%sms)", getattr(d, "id", "?"), getattr(d, "offset_ms", "?"))
+            delegation_id = getattr(d, "id", None)
+            client_event_id = getattr(event, "client_event_id", None)
+            self._delegation_created_at[delegation_id] = time.monotonic()
+            self._events.put(LiveDelegationCreated(delegation_id, client_event_id))
+            logger.info(
+                "Delegation created (id=%s, offset=%sms%s)",
+                delegation_id or "?",
+                getattr(event, "offset_ms", "?"),
+                f", by {client_event_id}" if client_event_id else "",
+            )
         # 나머지(appended ack, muted, info …)는 상태 변화 없음 — 로그만
         else:
             logger.debug("GPT-Live event %s", t)
@@ -524,9 +561,7 @@ class GPTLiveSession:
         elapsed_ms = (now - started) * 1000.0
         created = self._delegation_created_at.pop(delegation_id, None)  # 후속 응답(툴 결과 뒤)엔 없다
         setup = f", setup {(started - created) * 1000.0:.0f}ms" if created is not None else ""
-        logger.info(
-            "Backend response %.2fs (%s%s, calls=%s)", elapsed_ms / 1000.0, status, setup, calls or "-"
-        )
+        logger.info("Backend response %.2fs (%s%s, calls=%s)", elapsed_ms / 1000.0, status, setup, calls or "-")
         trace.record_call(
             "gpt_live",
             "backend_response",

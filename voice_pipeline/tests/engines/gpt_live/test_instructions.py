@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from voice_pipeline.engines.gpt_live.dj import Segment
+from voice_pipeline.engines.gpt_live.dj import CLOSING_VERB, Segment
 from voice_pipeline.engines.gpt_live.instructions import (
     DEFAULT_BACKEND_INSTRUCTIONS,
     DEFAULT_LIVE_INSTRUCTIONS,
+    DJ_CHECK_IGNORED_RESULT,
+    DJ_CHECK_MESSAGE,
     DJ_ENDED_INSTRUCTIONS,
     DJ_RETURN_INSTRUCTIONS,
     DJ_SONG_ENDED_INSTRUCTIONS,
@@ -39,18 +41,49 @@ class TestBuildLiveInstructions:
         assert text.index("already know about the user, from earlier sessions:") > base_end
         assert text.index("[User Profile]") < text.index("[2026-09-10 10:00 session]") < text.index("[2026-09-12")
 
-    def test_mode_sections_in_order_with_delegation_lists(self) -> None:
-        # 모드별 구성: 상황마다 한 절만 보면 된다. 위임 조건은 모드마다 명시적인 목록으로(FINDINGS §4)
+    def test_template_policies_come_before_mode_sections(self) -> None:
+        # 공식 프롬프팅 가이드 템플릿 구조 뒤에 모드 절 (decisions-wip.md: 템플릿 구조일 때 위임이 안정적)
         text = DEFAULT_LIVE_INSTRUCTIONS
-        assert text.index("## Modes") < text.index("## Conversation mode") < text.index("## DJ mode")
-        conv = text[text.index("## Conversation mode") : text.index("## DJ mode")]
+        order = [
+            "## Ray",
+            "## Policies",
+            "Backchannel policy:",
+            "Interruption policy:",
+            "Delegation policy:",
+            "Backend tools:",
+            "Delegate to the backend when:",
+            "Do not delegate to the backend when:",
+            "## Modes",
+            "## DJ mode",
+            "### Talk",
+            "### Song",
+            "### Listener interruption",
+        ]
+        positions = [text.index(heading) for heading in order]
+        assert positions == sorted(positions)
+
+    def test_single_delegation_policy_covers_both_modes(self) -> None:
+        text = DEFAULT_LIVE_INSTRUCTIONS
+        assert text.count("Delegate to the backend when:") == 1
+        assert text.count("Do not delegate to the backend when:") == 1
+        tools = text[text.index("Backend tools:") : text.index("Delegate to the backend when:")]
+        assert "- Music:" in tools and "- DJ mode:" in tools
+        do, dont = text.index("Delegate to the backend when:"), text.index("Do not delegate to the backend when:")
+        delegate = text[do:dont]
+        assert "start DJ mode" in delegate and "Do not start hosting yourself" in delegate
+        assert "introduced the assigned song" not in delegate  # 곡은 앱이 튼다 — 소개 뒤 위임 조건이 없다
         dj = text[text.index("## DJ mode") :]
-        assert "play or stop music" in conv[conv.index("Delegate to the backend when:") : conv.index("Do not delegate")]
-        assert "start DJ mode" in conv and "do not start hosting yourself" in conv
-        assert dj.index("### Hosting") < dj.index("### Listener interruption") < dj.index("### Delegation")
-        delegation = dj[dj.index("### Delegation") :]
-        assert "Delegate as in conversation mode" in delegation and "reached its song introduction" in delegation
-        assert text.count("Delegate to the backend when:") == 1  # 위임 조건 목록은 대화 모드 한 벌만
+        assert "Delegate to the backend when" not in dj and "Do not delegate" not in dj  # 모드 절에는 행동만
+
+    def test_talk_ends_with_fixed_closing_line_and_song_starts_on_its_own(self) -> None:
+        # 앱이 이 문구와 무음으로 이야기 끝을 감지한다 (dj.ends_with_closing_line)
+        dj = DEFAULT_LIVE_INSTRUCTIONS[DEFAULT_LIVE_INSTRUCTIONS.index("### Song") :]
+        song = dj[: dj.index("### Listener interruption")]
+        assert f'"<artist>의 <title>, {CLOSING_VERB}."' in song and "say nothing after it" in song
+        assert "The song starts on its own once you stop" in song
+        assert "delegate" not in song and "does not play by itself" not in song
+        assert "except after a song introduction" not in DEFAULT_LIVE_INSTRUCTIONS
+        assert "a short plan" not in DEFAULT_LIVE_INSTRUCTIONS  # 소재 thinking 에 계획은 없다
 
     def test_dj_hosting_rules_cover_experiment_findings(self) -> None:
         # 실험(docs/dj-mode-worknote.md): 진입 조건, 답하자마자 이어가기, 노트 밖 사실
@@ -117,11 +150,30 @@ class TestDJInstructions:
         assert "## Current segment" not in build_backend_instructions(_SONGS)
         assert build_current_segment_section(_SEGMENT).startswith("## Current segment\n")
 
-    def test_segment_thinking_marks_replacement_and_carries_notes(self) -> None:
-        text = build_segment_thinking(_SEGMENT)
-        assert text.startswith("DJ segment (current; replaces any earlier segment).")
+    def test_segment_thinking_states_mode_then_segment(self) -> None:
+        text = build_segment_thinking(_SEGMENT, starting=True)
+        assert text.startswith("DJ mode has started. I am hosting now, following the DJ mode section")
+        assert "Current segment (replaces any earlier segment):" in text
         assert "Topic: 서랍 속에 남아 있는 것들" in text and "Assigned song: I AM — IVE" in text
         assert text.rstrip().endswith("- 첫 줄\n- 둘째 줄")
+        assert "delegate" not in text  # 곡은 앱이 튼다
+
+    def test_next_segment_thinking_continues_mode(self) -> None:
+        text = build_segment_thinking(_SEGMENT, starting=False)
+        assert text.startswith("DJ mode continues with the next segment.")
+
+    def test_segment_thinking_names_song_without_artist(self) -> None:
+        segment = Segment(key="k", topic="t", song=Song("S", "제목만", ""), notes="- n")
+        assert "Assigned song: 제목만\n" in build_segment_thinking(segment, starting=True)
+
+    def test_backend_answers_dj_check_with_play_or_nothing(self) -> None:
+        block = DEFAULT_BACKEND_INSTRUCTIONS[DEFAULT_BACKEND_INSTRUCTIONS.index("DJ mode (see Current segment)") :]
+        rule = block[block.index("- DJ_CHECK") : block.index("- Stop or pause DJ mode")]
+        assert "from the application (not the listener)" in rule
+        assert "play_dj_song if Ray has finished the talk" in rule and "otherwise return an empty message" in rule
+        assert "finished the talk, ending with an introduction" in DJ_CHECK_MESSAGE  # 지시문과 같은 기준
+        assert DJ_CHECK_MESSAGE.startswith("DJ_CHECK") and "this request only" in DJ_CHECK_MESSAGE
+        assert "only play_dj_song" in DJ_CHECK_IGNORED_RESULT and "empty message" in DJ_CHECK_IGNORED_RESULT
 
     def test_app_signals_are_short_and_distinct(self) -> None:
         signals = (DJ_SONG_ENDED_INSTRUCTIONS, DJ_RETURN_INSTRUCTIONS, DJ_ENDED_INSTRUCTIONS)

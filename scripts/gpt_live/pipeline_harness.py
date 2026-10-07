@@ -51,6 +51,7 @@ class Recorder:
         transcripts: 전사 세그먼트 id → 최신 스냅샷(speaker, text, 첫 도착 t). 닫히지 않은 세그먼트도 남는다.
         audio: 모델 출력 조각마다 (도착 t, 바이트 수, 음성 여부).
         frame_hook: 프레임마다 루프 스레드에서 불린다 ``(loop, now)``. 앱 신호를 흉내 낼 때 쓴다.
+        inputs: 첫 음성 뒤에 이어 넣을 사용자 음성(16 kHz PCM). 넣은 순서대로, 앞 음성이 끝나면 흘린다.
     """
 
     def __init__(self, label: str) -> None:
@@ -60,6 +61,7 @@ class Recorder:
         self.audio: list[tuple[float, int, bool]] = []
         self.connected_at: float | None = None
         self.frame_hook: Callable[[LiveSessionLoop, float], None] | None = None
+        self.inputs: queue.Queue[bytes] = queue.Queue()
 
     def mark(self, name: str, **fields: Any) -> None:
         self.events.append({"t": time.monotonic(), "name": name, **fields})
@@ -238,7 +240,7 @@ def tts(text: str) -> bytes:
 
 
 def _feed(q: queue.Queue[bytes], speech: bytes, rec: Recorder, stop: threading.Event) -> None:
-    """연결되면 1 s 무음 → speech → 무음을 실시간 속도로 넣는다."""
+    """연결되면 1 s 무음 → speech → 무음을 실시간 속도로 넣는다. ``rec.inputs`` 에 넣은 음성은 이어서 흘린다."""
     while not stop.is_set() and rec.connected_at is None:
         time.sleep(0.01)
     silence = bytes(FRAME_SIZE_BYTES)
@@ -248,6 +250,14 @@ def _feed(q: queue.Queue[bytes], speech: bytes, rec: Recorder, stop: threading.E
     next_t = time.monotonic()
     i = 0
     while not stop.is_set():
+        if i >= len(frames):  # 앞 음성이 끝났다 — 무음 동안 i 는 계속 늘므로 다음 음성은 처음부터 다시 센다
+            try:
+                more = rec.inputs.get_nowait()
+                more += bytes((-len(more)) % FRAME_SIZE_BYTES)
+                frames = [more[j : j + FRAME_SIZE_BYTES] for j in range(0, len(more), FRAME_SIZE_BYTES)]
+                i = 0
+            except queue.Empty:
+                pass
         try:
             q.put_nowait(frames[i] if i < len(frames) else silence)
         except queue.Full:
@@ -284,11 +294,15 @@ def run_session(
     speech: bytes,
     stop_when: Callable[[Recorder, LiveSessionLoop, float], bool],
     max_sec: float,
+    song_sec: float = 2.0,
     wav_path: Path | None = None,
 ) -> LiveSessionLoop:
-    """세션 하나를 돈다. ``stop_when(rec, loop, now)`` 이 참이 되거나 연결 후 ``max_sec`` 이 지나면 끊는다."""
+    """세션 하나를 돈다. ``stop_when(rec, loop, now)`` 이 참이 되거나 연결 후 ``max_sec`` 이 지나면 끊는다.
+
+    노래는 스텁이 ``song_sec`` 뒤에 끝낸다 — 재생 중 요청을 흉내 내려면 길게 준다.
+    """
     global CURRENT
-    bridge = StubBridge()
+    bridge = StubBridge(song_sec)
     comps.bridge = bridge  # type: ignore[assignment]
     while not comps.audio_queue.empty():
         comps.audio_queue.get_nowait()

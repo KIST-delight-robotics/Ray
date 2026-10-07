@@ -19,7 +19,11 @@ from pathlib import Path
 from openai import OpenAI
 
 from voice_pipeline.engines.gpt_live.dj import load_segments
-from voice_pipeline.engines.gpt_live.instructions import build_backend_instructions, build_live_instructions
+from voice_pipeline.engines.gpt_live.instructions import (
+    DJ_CHECK_MESSAGE,
+    build_backend_instructions,
+    build_live_instructions,
+)
 from voice_pipeline.engines.gpt_live.songs import load_song_catalog
 from voice_pipeline.engines.gpt_live.tools import DEFAULT_TOOLS, DJ_TOOLS, LOOP_TOOLS, make_play_song_tool_def
 from voice_pipeline.settings import DJ_SEGMENTS_DIR
@@ -48,7 +52,22 @@ DJ_TALK = [
         "그런 마음으로 고른 곡, 십센치의 '서랍' 들려드릴게요.",
     ),
 ]
-# 이름: (전사, DJ 중인가, 기대 툴). web_search 는 내장 툴 호출, text 는 툴 없이 답한 경우.
+# 판정 요청(DJ_CHECK): 종료 문구 없이 멈춘 이야기 — 소개까지 끝남 / 소재 이야기 중간
+DJ_TALK_DONE = DJ_TALK[:2] + [
+    (
+        "assistant",
+        DJ_TALK[2][1].removesuffix("그런 마음으로 고른 곡, 십센치의 '서랍' 들려드릴게요.")
+        + "그런 마음을 담은 곡, 십센치의 '서랍'이에요. 함께 들어봐요.",
+    )
+]
+DJ_TALK_MIDWAY = DJ_TALK[:2] + [
+    (
+        "assistant",
+        "오늘은 서랍 이야기를 해볼게요. 서랍은 집에서 가장 느리게 바뀌는 자리예요. 서랍 안은 몇 년째 그대로죠.",
+    ),
+]
+# 이름: (전사, DJ 중인가, 기대, 판정 요청을 붙이나). web_search 는 내장 툴 호출, empty/text 는 툴 없이 빈 답/글 답.
+# 판정 요청은 실제처럼 전사 뒤 user 메시지로 붙인다 (Live 가 넣는 <backend_task> 는 흉내 내지 않는다).
 CASES = {
     "첫 턴 DJ": ([("user", "DJ 모드 틀어줘")], False, "start_dj"),
     "작별": ([("user", "오늘은 여기까지 할게, 잘 가")], False, "end_conversation"),
@@ -67,7 +86,10 @@ CASES = {
     ),
     "DJ 곡 소개 뒤 위임": (DJ_TALK, True, "play_dj_song"),
     "DJ 중 그만": (DJ_TALK[:2] + [("assistant", DJ_TALK[2][1][:60]), ("user", "그만할래")], True, "stop_dj"),
+    "DJ_CHECK 소개까지 끝": (DJ_TALK_DONE, True, "play_dj_song", True),
+    "DJ_CHECK 이야기 중간": (DJ_TALK_MIDWAY, True, "empty", True),
 }
+TEXT_SAMPLES: dict[str, list[str]] = {}  # 툴 없이 글로 답한 경우의 예 (케이스별)
 
 
 def developer_message(live: str, backend: str) -> str:
@@ -107,11 +129,13 @@ def main() -> None:
     backend = {False: build_backend_instructions(catalog), True: build_backend_instructions(catalog, segment)}
     client = OpenAI()
 
-    def one(blocks: list[tuple[str, str]], in_dj: bool) -> str:
+    def one(name: str, blocks: list[tuple[str, str]], in_dj: bool, check: bool) -> str:
         messages = [
             {"role": "developer", "content": developer_message(live, backend[in_dj])},
             {"role": "user", "content": srt(blocks)},
         ]
+        if check:
+            messages.append({"role": "user", "content": DJ_CHECK_MESSAGE})
         for attempt in range(3):
             try:
                 r = client.responses.create(
@@ -128,20 +152,28 @@ def main() -> None:
         calls = [o.name for o in r.output if o.type == "function_call"]
         if calls:
             return calls[0]
-        return "web_search" if any(o.type == "web_search_call" for o in r.output) else "text"
+        if any(o.type == "web_search_call" for o in r.output):
+            return "web_search"
+        text = (r.output_text or "").strip()
+        if text:
+            TEXT_SAMPLES.setdefault(name, []).append(text)
+        return "text" if text else "empty"
 
     t0 = time.monotonic()
     total = ok = 0
     with ThreadPoolExecutor(16) as ex:
-        for name, (blocks, in_dj, expect) in CASES.items():
+        for name, (blocks, in_dj, expect, *check) in CASES.items():
             if args.case and name not in args.case:
                 continue
-            counts = Counter(ex.map(lambda _, b=blocks, d=in_dj: one(b, d), range(args.n)))
+            run = lambda _, n=name, b=blocks, d=in_dj, c=bool(check and check[0]): one(n, b, d, c)  # noqa: E731
+            counts = Counter(ex.map(run, range(args.n)))
             miss = ", ".join(f"{k} {v}" for k, v in counts.items() if k != expect)
             total += args.n
             ok += counts[expect]
             print(f"  {name:22s} {counts[expect]:3d}/{args.n}" + (f"  ({miss})" if miss else ""), flush=True)
     print(f"합계 {ok}/{total}  ({time.monotonic() - t0:.0f}s)")
+    for name, texts in TEXT_SAMPLES.items():
+        print(f"  글 답 예 [{name}]: " + " | ".join(t[:60] for t in texts[:2]))
 
 
 if __name__ == "__main__":

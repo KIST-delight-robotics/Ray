@@ -44,6 +44,31 @@ class Segment:
         return f"{self.song.title} — {self.song.artist}" if self.song.artist else self.song.title
 
 
+CLOSING_VERB = "들려드릴게요"  # 라이브 지시문의 종료 문구 "<artist>의 <title>, 들려드릴게요." 의 끝
+
+
+def _squash(text: str) -> str:
+    """띄어쓰기·문장부호·따옴표를 지우고 소문자로 — 전사 표기 차이("십센치의서랍", '야생화', ‘꿈처럼’)를 없앤다."""
+    return re.sub(r"[\W_]+", "", text).lower()
+
+
+def ends_with_closing_line(text: str, song: Song) -> bool:
+    """모델 전사가 종료 문구 ``<가수>의 <제목>, 들려드릴게요`` 로 끝나는가. 가수·제목은 카탈로그 별칭도 인정한다.
+
+    끝만 본다 — 문구 뒤에 말을 덧붙였으면 이야기가 끝났다고 보지 않는다. 가수가 없는 곡은 ``<제목> 들려드릴게요``.
+    """
+    squashed = _squash(text)
+    verb = _squash(CLOSING_VERB)
+    if not squashed.endswith(verb):
+        return False
+    head = squashed[: -len(verb)]
+    titles = {t for t in map(_squash, (song.title, *song.aliases)) if t}
+    artists = {a for a in map(_squash, (song.artist, *song.artist_aliases)) if a}
+    if not artists:
+        return any(head.endswith(t) for t in titles)
+    return any(head.endswith(f"{a}의{t}") for a in artists for t in titles)
+
+
 def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     m = _FRONTMATTER_RE.match(text)
     if m is None:

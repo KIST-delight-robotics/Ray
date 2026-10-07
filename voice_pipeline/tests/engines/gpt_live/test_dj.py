@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from voice_pipeline.engines.gpt_live.dj import Segment, SegmentLog, SegmentPicker, load_segments
+from voice_pipeline.engines.gpt_live.dj import (
+    Segment,
+    SegmentLog,
+    SegmentPicker,
+    ends_with_closing_line,
+    load_segments,
+)
 from voice_pipeline.engines.gpt_live.songs import Song
 
 SONGS = {"IAM": Song("IAM", "I AM", "IVE"), "snowman": Song("snowman", "눈사람", "정승환")}
@@ -82,3 +88,39 @@ class TestSegmentPicker:
 
     def test_empty_segments_gives_none(self) -> None:
         assert SegmentPicker({}, SegmentLog(":memory:")).pick() is None
+
+
+DRAWER = Song("Drawer_10cm", "서랍", "10CM", aliases=("Drawer",), artist_aliases=("십센치",))
+
+
+class TestClosingLine:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "그런 마음을 담은 곡이 있어요.십센치의 서랍, 들려드릴게요",  # 마침표 없음 (2026-10-06 실험)
+            "…이야기죠. 십센치의 서랍, 들려드릴게요.",
+            "십센치의서랍, 들려드릴게요.",  # 전사 띄어쓰기 누락
+            "10CM의 ‘서랍’, 들려드릴게요!",  # 원래 표기·따옴표
+            "십센치의 Drawer, 들려 드릴게요.",  # 제목 별칭, 동사 띄어쓰기
+        ],
+    )
+    def test_ending_with_the_closing_line(self, text: str) -> None:
+        assert ends_with_closing_line(text, DRAWER)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "십센치의 서랍, 들려드릴게요. 노래가 시작되면 잠시 쉬어 가세요.",  # 문구 뒤에 말을 붙였다
+            "오늘은 서랍 이야기를 들려드릴게요.",  # 소재 단어 + 동사만
+            "이어서 들려드릴 곡은 십센치의 '서랍'이에요.",  # 소개했지만 문구가 아니다
+            "박효신의 야생화, 들려드릴게요.",  # 다른 곡
+            "",
+        ],
+    )
+    def test_not_the_closing_line(self, text: str) -> None:
+        assert not ends_with_closing_line(text, DRAWER)
+
+    def test_song_without_artist_needs_only_the_title(self) -> None:
+        song = Song("S", "제목만", "")
+        assert ends_with_closing_line("제목만, 들려드릴게요.", song)
+        assert not ends_with_closing_line("들려드릴게요.", song)

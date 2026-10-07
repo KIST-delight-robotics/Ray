@@ -113,6 +113,12 @@ def main() -> None:
                 "calls": [e["fn"] for e in rec.all("backend_call")],
                 "assistant": said,
                 "user": rec.said("user"),
+                # 진입(dj_begin) 기준 초. 쉼 길이는 조각 도착 시각 기준이라 네트워크 정지도 쉼으로 잡힌다
+                "voice_segments": [[rel(a), rel(b)] for a, b in rec.voice_segments()],
+                "transcripts": [
+                    {"speaker": s["speaker"], "t": rel(s["t"]), "text": s["text"]}
+                    for s in sorted(rec.transcripts.values(), key=lambda s: s["t"])
+                ],
             }
         )
         h.save_json(out_dir / "results.json", results)

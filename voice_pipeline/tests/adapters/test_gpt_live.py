@@ -24,6 +24,7 @@ from voice_pipeline.adapters.gpt_live import (
     GPTLiveSession,
     LiveAudio,
     LiveClosed,
+    LiveDelegationCreated,
     LiveFunctionCall,
     LiveResponseDone,
     LiveSessionConfig,
@@ -306,6 +307,18 @@ class TestSend:
         assert restored["tools"] == [{"type": "web_search"}, {"type": "function", "name": "play_song"}]
         session.close()
 
+    def test_request_backend_queues_message_then_creates_response(self) -> None:
+        session, conn = _session([])
+        session.start()
+        order = MagicMock()
+        order.attach_mock(conn.response, "response")
+        session.request_backend("DJ_CHECK: ...", event_id="ray_dj_check_1")
+        assert [c[0] for c in order.mock_calls] == ["response.item.create", "response.create"]
+        item = conn.response.item.create.call_args.kwargs["item"]
+        assert item == {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "DJ_CHECK: ..."}]}
+        conn.response.create.assert_called_once_with(event_id="ray_dj_check_1")  # 위임 생성 이벤트로 알아본다
+        session.close()
+
     def test_send_before_start_raises(self) -> None:
         session = GPTLiveSession(LiveSessionConfig(instructions="x"), connection_factory=lambda: None)
         with pytest.raises(RuntimeError, match="not started"):
@@ -378,6 +391,19 @@ class TestAppendAndResponseTracking:
         session._dispatch_backend(_backend({"type": "response.failed", "response": {"id": "r2"}}))
         rec = [r for r in call_log.records if r.operation == "backend_response"]
         assert rec[1].status == "failed" and json.loads(rec[1].metadata) == {"calls": [], "setup_ms": None}
+
+    def test_delegation_created_carries_client_event_id(self) -> None:
+        from types import SimpleNamespace
+
+        session, _ = _session([])
+        delegation = SimpleNamespace(id="d1")
+        session._dispatch(SimpleNamespace(type="session.delegation.created", delegation=delegation, offset_ms=0))
+        by_app = SimpleNamespace(
+            type="session.delegation.created", delegation=SimpleNamespace(id="d2"), client_event_id="ray_dj_check_1"
+        )
+        session._dispatch(by_app)
+        assert session.poll_event() == LiveDelegationCreated("d1", None)  # 대화 모델이 만든 위임
+        assert session.poll_event() == LiveDelegationCreated("d2", "ray_dj_check_1")
 
     def test_interleaved_delegations_keep_response_ids_separate(self) -> None:
         session, _ = _session([])

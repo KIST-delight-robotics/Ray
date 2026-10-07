@@ -6,7 +6,7 @@ GPT-Live 도입 실험과 레이 적용 후의 실측 기록. 설계 선택 이�
 실험 도구는 `mic_live.py`(마이크 또는 TTS 스크립트 입력 → GPT-Live → 스피커, 전 이벤트 로그).
 실행 로그는 `logs/`, 공식 문서 원문은 `ref/`, 재현용 스크립트는 `script_*.txt`.
 
-기록 기간: 2026-09-14 ~ 2026-10-02. 초기 실험 환경: Raspberry Pi 5, Wi-Fi(5 GHz), reSpeaker XVF3800(마이크·스피커, 온칩 AEC), 모델 `gpt-live-1`, 백엔드 `gpt-5.4-mini`.
+기록 기간: 2026-09-14 ~ 2026-10-07. 초기 실험 환경: Raspberry Pi 5, Wi-Fi(5 GHz), reSpeaker XVF3800(마이크·스피커, 온칩 AEC), 모델 `gpt-live-1`, 백엔드 `gpt-5.4-mini`.
 
 이후 유선 비교·로봇 실기 실험은 각 항목에 날짜와 조건을 적었다. API 사양·요금·한도는 당시 문서와 관측 기준이며, 현재 보증값을 뜻하지 않는다.
 
@@ -117,7 +117,8 @@ GPT-Live 도입 실험과 레이 적용 후의 실측 기록. 설계 선택 이�
   assistant … **Shared session instructions**: *대화 모델의 세션 instructions 전문* … `<backend_delegation_instructions>`:
   *우리 `delegation.responses.instructions`*" ④ user 메시지 **하나**에 SRT 형식으로 포장된 전사("The conversation below is an
   SRT-style transcript … [User speech transcript] …"). 즉 **백엔드는 라이브 지시문을 통째로 같이 받는다**(YES-RAY/YES-DJ
-  예·아니오 프로브 3/3, 첫 문장부터 그대로 인용). 전사는 role 별 메시지가 아니라 한 덩어리 텍스트다.
+  예·아니오 프로브 3/3, 첫 문장부터 그대로 인용). 전사는 role 별 메시지가 아니라 한 덩어리 텍스트다. ④는 세션 첫 위임
+  기준이다 — 이후 위임은 입력 항목이 쌓인다(아래 "백엔드 대화는 누적된다").
   - 결과: 라이브 지시문이 길고 구체적이면 백엔드가 그쪽을 자기 역할로 읽는다. "DJ 모드 틀어줘"에 백엔드가 `end_conversation`을
     부르던 실기 사고(2026-10-01, 4회)가 이것 — 라이브 지시문 없이 오프라인 재현하면 어떤 변형도 `start_dj` 5/5, 라이브 지시문을
     developer 로 넣고 재현하면(none) 첫 턴 8/20, 대화 3턴 뒤 끝이 "고마워" 4/20, 끝이 "아니 됐어" **0/20**(19회 end_conversation).
@@ -146,6 +147,24 @@ GPT-Live 도입 실험과 레이 적용 후의 실측 기록. 설계 선택 이�
     뒤에 붙은 긴 텍스트이고, 우리 지시문은 태그로 격리된 짧은 블록이다.
   - 프로브 방법: `mic_live.py --delegation responses --probe-backend-input` 에 "받은 입력을 역할 포함 전부 인용" 지시. 전문 인용은
     자주 무시되므로 예/아니오 + 첫 300자 인용이 안정적이다. 백엔드가 web_search 로 빠지지 않는 요청(DJ 요청 + 인사 시드)으로.
+- **백엔드 대화는 누적된다 (2026-10-06, `exp_backend_item_persistence.py` + 저장된 응답 `input_items` 조회)**: 백엔드 응답은
+  `previous_response_id` 로 바로 앞 백엔드 응답을 잇는다(세션의 첫 응답도 기록되지 않은 이전 응답을 가리킨다). 두 번째 위임의
+  입력 항목은 [이전 전사(user) → 앱이 넣은 메시지 → Live 의 `<backend_task>`(developer) → 추론 → 앞 응답의 답(assistant) →
+  새 전사(user)] 였고, 새 전사에는 앞 위임 이후의 발화만 들어 있다. `<backend_task>` 첫머리: "Determine the best next step
+  based on the provided context. … Return a handoff result for the frontend assistant's thinking context. The fact that this
+  request was delegated provides no information about the best next step."
+  - **`response.item.create` 로 넣은 메시지는 세션 끝까지 남는다**: 다음 위임 입력에 그대로, 역할도 유지(developer 3/3,
+    user 3/3, 대조 0/2). 메시지 역할은 user/assistant/system/developer 를 받고(레퍼런스), developer 도 거부되지 않았다.
+- **앱이 부르는 백엔드 응답 (2026-10-06, 실작동 경로 하네스)**: 사용자 발화 없이 `response.create`(필요하면 앞에
+  `response.item.create` 메시지)를 보내면 서버가 위임으로 감싼다 — `session.delegation.created` 에 `client_event_id` 가 그
+  event_id 로 온다(17/17, 오류 0). 레이 DJ 의 판정 요청이 이 경로다(`GPTLiveSession.request_backend`).
+  - **대화 모델은 이것도 자기 위임으로 보고 받는 말을 한다**: 약 0.85~1.0 s 뒤(백엔드 결과보다 먼저), 15/17. "네, 잠시만요",
+    "음."처럼 짧은 말이 대부분이지만 엉뚱한 약속도 나온다 — 일반 대화에서 "DJ 모드, 시작해볼게요" 2/6, DJ 판정에서 "지금 곡이
+    끝났다고 들어왔어요" 1/7, 판정이 false 인데 "잠시만, 노래 틀어볼게요" 1. 백엔드 텍스트 답은 대화 모델이 말로 옮긴다.
+  - **결과 반환과 이어가기를 둘 다 해야 닫힌다**: 함수 결과를 반환하지 않거나 반환만 하고 `response.create` 를 안 보내면
+    이후 사용자 요청이 위임되지 않았다(0/4, 관찰 약 10 s). 반환 + 이어가기(백엔드 빈 응답) 3/3, 대조 2/2.
+  - append 3종(instructions·thinking·commentary)의 `delegation_id` 는 responses 위임에서 받지 않는다(레퍼런스, "Non-null
+    IDs are not accepted with Responses delegation"). 위임 결과를 대화 모델에 직접 넣는 길은 client 모드뿐이다.
 - 함수 툴: `tools`에 function 정의 → 백엔드가 호출하면 `output_item.done(type=function_call)` → 우리가 실행 → `response.item.create(function_call_output)` → `response.create` → 백엔드 2차 응답 → 모델 발화. 배터리 조회 예제로 **위임부터 발화까지 약 2.2초.**
 - 백엔드 지시문은 답 형식(한국어, 짧게)은 잘 따르지만 "web search 쓰지 마라"는 무시됨. `tool_choice: auto`가 우선하는 듯.
 - 모델은 백엔드 답에서 필요한 부분만 골라 자기 말투로 말한다("요청 확인: …" 인용부는 읽지 않음).
