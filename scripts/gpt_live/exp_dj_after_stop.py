@@ -13,7 +13,7 @@ other. 질문이 위임됐는지와 백엔드 답도 남긴다.
 
     uv run python scripts/gpt_live/exp_dj_after_stop.py --variant base --rounds 3
 
-결과: var/experiments/dj_after_stop/<태그>/ (results.json, pipeline.log)
+결과: var/experiments/dj_after_stop/<번호>_<태그>/ (results.json, pipeline.log)
 """
 
 from __future__ import annotations

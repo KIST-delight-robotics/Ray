@@ -7,7 +7,7 @@
     uv run python scripts/gpt_live/exp_delegation_signal.py --rounds 4
     uv run python scripts/gpt_live/exp_delegation_signal.py --signal "..." --signal "..."
 
-결과: var/experiments/delegation_signal/<태그>/
+결과: var/experiments/delegation_signal/<번호>_<태그>/
 """
 
 from __future__ import annotations

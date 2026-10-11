@@ -14,7 +14,7 @@
     uv run python scripts/gpt_live/exp_dj_song_delegation.py --segment short --quiet 3 --after-signal 6 \\
         --signal "DJ: If you have just introduced the song, delegate now to play it, without speaking. ..."
 
-결과: var/experiments/dj_song_delegation/<태그>/ (results.json, 회차별 WAV, pipeline.log)
+결과: var/experiments/dj_song_delegation/<번호>_<태그>/ (results.json, 회차별 WAV, pipeline.log)
 """
 
 from __future__ import annotations

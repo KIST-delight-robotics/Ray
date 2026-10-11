@@ -12,7 +12,7 @@
 
     uv run python scripts/gpt_live/exp_backend_item_persistence.py --role developer --rounds 3
 
-결과: var/experiments/backend_item_persistence/<태그>/ (results.json, pipeline.log)
+결과: var/experiments/backend_item_persistence/<번호>_<태그>/ (results.json, pipeline.log)
 """
 
 from __future__ import annotations

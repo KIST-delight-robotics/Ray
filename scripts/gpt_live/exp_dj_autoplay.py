@@ -10,7 +10,8 @@
     # 문구 없는 경로: 라이브 지시문에서 종료 문구 규칙을 빼 판정 요청을 일부러 일으킨다
     uv run python scripts/gpt_live/exp_dj_autoplay.py --segment drawer --no-closing-line --songs 1
 
-결과: var/experiments/dj_autoplay/<태그>/ (results.json, 회차별 WAV, pipeline.log). 시각은 진입(dj_begin) 기준 초.
+결과: var/experiments/dj_autoplay/<번호>_<태그>/ (results.json, 회차별 WAV, pipeline.log).
+시각은 진입(dj_begin) 기준 초.
 """
 
 from __future__ import annotations
