@@ -13,6 +13,8 @@
     # 안내: 첫 분량 전에 instructions.append 로 한 번 (--preamble [read|light]), 또는 분량마다 앞머리로 (--prefix)
     uv run python scripts/gpt_live/exp_dj_commentary_chunks.py --runs 3 --preamble
     uv run python scripts/gpt_live/exp_dj_commentary_chunks.py --runs 3 --prefix
+    # 대사를 thinking 으로 (THINKING_TEMPLATE)
+    uv run python scripts/gpt_live/exp_dj_commentary_chunks.py --channel thinking --gap 1.0 --runs 4
     # 분량 키우기(대사 2개씩) + 끼어들기: 2번째 분량 첫 음성 3 s 뒤 사용자 질문, 대화가 3 s 조용하면 다음 분량으로
     uv run python scripts/gpt_live/exp_dj_commentary_chunks.py --preamble --merge 2 --gap 1.0 \\
         --interrupt-chunk 2 --resume next
@@ -148,6 +150,9 @@ PREAMBLE_SETTLE_SEC = 3.0  # 안내 뒤 첫 분량까지 최소 대기
 PREAMBLE_QUIET_SEC = 1.5  # 안내에 대꾸했으면 이만큼 조용해진 뒤 첫 분량
 # --prefix: 분량마다 commentary 앞머리로 (레퍼런스 예시처럼 내용과 지시를 한 commentary 에)
 PREFIX = "Read this line aloud as written, then stop: "
+# --channel thinking: 대사를 commentary 대신 thinking 으로. 라디오 TTS 실험에서 이 문구의 thinking 만으로 모델이 대사를
+# 거의 그대로 소리 내어 읽었다 (안내 없음, exp_radio_tts 01_smoke).
+THINKING_TEMPLATE = "On the radio you are now saying: «{}»"
 
 logger = logging.getLogger("exp_dj_commentary_chunks")
 
@@ -257,7 +262,10 @@ def run_once(n: int, out_dir: Path, args: argparse.Namespace, instructions: str,
         p = pos()
         voiced = last_voice_end is not None and p - last_voice_end <= 0.3
         chunks.append(Chunk(i, texts[i], early, time.monotonic(), p, voiced, resumed=resumed))
-        live.append_commentary((PREFIX if args.prefix else "") + texts[i])
+        if args.channel == "thinking":
+            live.append_thinking(THINKING_TEMPLATE.format(texts[i]))
+        else:
+            live.append_commentary((PREFIX if args.prefix else "") + texts[i])
         mark = " (early)" if early else " (resume)" if resumed else ""
         print(f"  [{p:6.1f}] append #{i + 1}{mark}{' — speaking' if voiced else ''}", flush=True)
 
@@ -546,6 +554,7 @@ def main() -> None:
         help="첫 분량 전에 이름의 안내를 instructions.append 로 (이름 없으면 read)",
     )
     parser.add_argument("--prefix", action="store_true", help="분량마다 commentary 앞에 낭독 안내를 붙인다")
+    parser.add_argument("--channel", choices=("commentary", "thinking"), default="commentary", help="대사를 넣는 채널")
     parser.add_argument("--merge", type=int, default=1, help="대사를 이만큼씩 묶어 한 분량으로")
     parser.add_argument("--interrupt-chunk", type=int, default=None, help="이 분량(1부터)에서 사용자가 끼어든다")
     parser.add_argument("--interrupt-after", type=float, default=3.0, help="그 분량의 첫 음성 뒤 이 초에 끼어든다")
@@ -573,6 +582,8 @@ def main() -> None:
         "chunks": texts,
         "preamble": PREAMBLES[args.preamble] if args.preamble else None,
         "prefix": PREFIX if args.prefix else None,
+        "channel": args.channel,
+        "thinking_template": THINKING_TEMPLATE if args.channel == "thinking" else None,
         "interrupt": (
             {
                 "chunk": args.interrupt_chunk,
