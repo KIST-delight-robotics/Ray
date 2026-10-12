@@ -201,6 +201,11 @@ class AheadSession(Session):
         self.last_len = [len(s) for s in last]
         self.last_start = [self.offsets[i + 1] - len(s) for i, s in enumerate(last)]
 
+    @property
+    def stall_sec(self) -> float:
+        """넣은 뒤 말을 하고 이만큼 조용하면 멈춘 것으로 본다 (``--stall-sec``)."""
+        return getattr(self.args, "stall_sec", STALL_SEC)
+
     def live_instructions(self) -> str:
         return DEFINED_INSTRUCTIONS if self.args.definition else LIVE_RADIO_INSTRUCTIONS
 
@@ -277,7 +282,9 @@ class AheadSession(Session):
             reach, reach_t = b.b + b.size, b.a + b.size
             at_script = self.offsets[base] + b.b
             if last_from is None and at_script + b.size > self.offsets[last]:
-                last_from = max(0, b.a + self.offsets[last] - at_script)
+                # 앞 대사에서 이어진 일치면 경계 자리, 아니면 처음 맞은 글자. 대사 첫머리를 거꾸로 짚으면 모델이
+                # 첫머리를 생략했을 때("…같은 것들요. 왜 버리지…") 앞 대사의 마침표를 이 대사의 문장 끝으로 셌다.
+                last_from = b.a + max(0, self.offsets[last] - at_script)
         # 아직 아무 대사와도 맞지 않은 말(시작·재개 때의 "네, 시작할게요")은 진행으로 치지 않는다
         drift = sum(free[i] for i in idx[reach_t:]) if reach_t else 0
         punct_remain = None
@@ -327,10 +334,10 @@ class AheadSession(Session):
             self.push_by = "punct"
             return True
         # 넣은 뒤 말을 하고 조용해졌다 — 마지막 문장까지 왔으면 바로, 아니면 조금 더 기다려서
-        if self.first_voice is not None and self.quiet >= STALL_SEC:
+        if self.first_voice is not None and self.quiet >= self.stall_sec:
             if self.args.stall == "sentence":
                 return self._stall_sentence(last, prog["reach"])
-            if est > self.last_start[last] or self.quiet >= 2 * STALL_SEC:
+            if est > self.last_start[last] or self.quiet >= 2 * self.stall_sec:
                 self.push_by = "stall"
                 return True
             if self.args.stall == "remainder" and self.repushed != last:
@@ -915,7 +922,7 @@ def run(args: argparse.Namespace) -> None:
         "line_template": LINE_TEMPLATE,
         "push_remain_letters": PUSH_REMAIN_LETTERS,
         "track_block": TRACK_BLOCK,
-        "stall": STALL_SEC,
+        "stall": args.stall_sec,
         "voice": LIVE_VOICE,
         "notes": {
             "paused": EXPLICIT_PAUSE_NOTE if args.pause_note == "explicit" else PAUSE_NOTE,
@@ -970,6 +977,7 @@ def main() -> None:
         "--stall", choices=("next", "remainder", "sentence"), default="next", help="말하고 조용해졌을 때"
     )
     parser.add_argument("--pause-note", choices=("current", "explicit"), default="current")
+    parser.add_argument("--stall-sec", type=float, default=STALL_SEC, help="말하고 이만큼 조용하면 멈춘 것")
     parser.add_argument("--watch-end", action="store_true", help="라디오 진행 중이면 대본 끝까지 지켜본다")
     parser.add_argument("--resume-ask", choices=("alt", "radio", "story"), default="alt", help="재개 요청 표현")
     parser.add_argument("--chunk", type=int, default=4, help="이 대사(1부터)에서 끼어든다")

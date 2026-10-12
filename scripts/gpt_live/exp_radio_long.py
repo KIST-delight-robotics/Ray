@@ -39,7 +39,6 @@ from exp_radio_ahead import (
     MATCH_LETTERS,
     PLACES,
     REPUSH_WAIT_SEC,
-    STALL_SEC,
     START_ASK,
     START_BACKEND_INSTRUCTIONS,
     AheadSession,
@@ -90,7 +89,7 @@ class LongSession(AheadSession):
             return False
         if len(self.appends) >= self.seg_first[self.seg + 1]:
             # 소재 경계 — 다음 소재는 곡이 끝난 뒤. 곡 소개가 끊겼으면(--stall sentence) 다시 넣기만 한다
-            if self.args.stall == "sentence" and self.first_voice is not None and self.quiet >= STALL_SEC:
+            if self.args.stall == "sentence" and self.first_voice is not None and self.quiet >= self.stall_sec:
                 last = len(self.appends) - 1
                 unread = self._unread(last, self._progress()["reach"])
                 if unread and self.repushed != last:
@@ -392,6 +391,7 @@ def run(args: argparse.Namespace) -> None:
         "song_ended_signal": SONG_ENDED_SIGNAL if args.next_start == "signal" else None,
         "closing_quiet": args.closing_quiet,
         "stall": args.stall,
+        "stall_sec": args.stall_sec,
         "session_args": {k: v for k, v in vars(sargs).items() if k not in ("tag", "report")},
         "line_template": LINE_TEMPLATE,
         "start_ask": START_ASK,
@@ -425,6 +425,8 @@ def main() -> None:
     parser.add_argument("--stall", choices=("remainder", "sentence"), default="sentence", help="말하고 조용해졌을 때")
     # 곡 소개를 끝까지 읽고 이만큼 조용하면 곡. 운영은 곡을 틀 때 스트림을 닫으니 덧붙임은 잘린다(long_s 의 10 s 덧붙임)
     parser.add_argument("--closing-quiet", type=float, default=0.5)
+    # 대사 안 자연스러운 쉼은 99%가 0.9 s 안 — 1.5 s 면 다시 넣는 동안 들리는 쉼이 2 s 남짓으로 준다
+    parser.add_argument("--stall-sec", type=float, default=1.5, help="말하고 이만큼 조용하면 멈춘 것")
     parser.add_argument("--next-start", choices=("thinking", "signal"), default="thinking", help="곡 뒤 다음 소재 시작")
     parser.add_argument("--index", type=int, default=0, help="회차 번호 (병렬 실행 때 프로세스마다 다르게)")
     parser.add_argument("--tag", default=time.strftime("%Y%m%d_%H%M%S"))
