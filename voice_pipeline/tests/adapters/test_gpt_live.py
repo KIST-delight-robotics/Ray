@@ -385,12 +385,15 @@ class TestAppendAndResponseTracking:
         assert len(rec) == 1 and rec[0].model == "gpt-5.4-mini" and rec[0].status == "completed"
         meta = json.loads(rec[0].metadata)
         assert meta["calls"] == ["start_radio"] and isinstance(meta["setup_ms"], int)  # 위임 생성 → 응답 시작 간격
-        assert any("Backend response" in m and "setup" in m and "start_radio" in m for m in caplog.messages)
+        assert meta["response_id"] == "r1"  # 나중에 백엔드 입력을 조회할 수 있게
+        logged = [m for m in caplog.messages if "Backend response" in m]
+        assert any("setup" in m and "start_radio" in m and "r1" in m for m in logged)
         # 툴 결과 뒤의 후속 응답은 위임 생성 시각이 없다 — setup 없이 기록
         session._dispatch_backend(_backend({"type": "response.created", "response": {"id": "r2"}}))
         session._dispatch_backend(_backend({"type": "response.failed", "response": {"id": "r2"}}))
         rec = [r for r in call_log.records if r.operation == "backend_response"]
-        assert rec[1].status == "failed" and json.loads(rec[1].metadata) == {"calls": [], "setup_ms": None}
+        expected = {"calls": [], "setup_ms": None, "response_id": "r2"}
+        assert rec[1].status == "failed" and json.loads(rec[1].metadata) == expected
 
     def test_delegation_created_carries_client_event_id(self) -> None:
         from types import SimpleNamespace

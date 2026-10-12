@@ -552,23 +552,31 @@ class GPTLiveSession:
             self._events.put(LiveResponseDone(delegation_id, response_id, it.removeprefix("response.")))
 
     def _log_backend_timing(self, delegation_id: str | None, key: tuple[str | None, str | None], status: str) -> None:
-        """백엔드 응답 1건의 소요 시간 — 로그 한 줄 + 호출 스토어. 위임 생성 → 응답 시작(서버 조립) 간격도 함께."""
+        """백엔드 응답 1건의 소요 시간 — 로그 한 줄 + 호출 스토어. 위임 생성 → 응답 시작(서버 조립) 간격도 함께.
+
+        응답 id 도 남긴다 — 백엔드 응답은 OpenAI 에 저장돼 ``responses.retrieve`` / ``responses.input_items.list`` 로
+        백엔드가 실제로 받은 지시문·입력을 나중에 꺼내 볼 수 있다.
+        """
         now = time.monotonic()
         started = self._response_started_at.pop(key, None)
         calls = self._response_calls.pop(key, [])
         if started is None:
             return
+        response_id = key[1]
         elapsed_ms = (now - started) * 1000.0
         created = self._delegation_created_at.pop(delegation_id, None)  # 후속 응답(툴 결과 뒤)엔 없다
         setup = f", setup {(started - created) * 1000.0:.0f}ms" if created is not None else ""
-        logger.info("Backend response %.2fs (%s%s, calls=%s)", elapsed_ms / 1000.0, status, setup, calls or "-")
+        logger.info(
+            "Backend response %.2fs (%s%s, calls=%s) %s", elapsed_ms / 1000.0, status, setup, calls or "-", response_id
+        )
+        setup_ms = round((started - created) * 1000.0) if created else None
         trace.record_call(
             "gpt_live",
             "backend_response",
             self._config.backend_model or "client",
             elapsed_ms,
             status=status,
-            metadata=json.dumps({"calls": calls, "setup_ms": round((started - created) * 1000.0) if created else None}),
+            metadata=json.dumps({"calls": calls, "setup_ms": setup_ms, "response_id": response_id}),
         )
 
 
