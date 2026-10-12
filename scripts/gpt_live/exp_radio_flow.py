@@ -202,6 +202,8 @@ def group_turns(deltas: list[tuple[float, str, str]], since: float) -> list[tupl
 class Session:
     """세션 하나의 진행과 기록. 위치는 받은 오디오 기준 초."""
 
+    max_sec = MAX_SEC  # 이보다 길면 시간 초과로 끝낸다
+
     def __init__(self, key: str, run: int, args: argparse.Namespace, llm: OpenAILLM, pool: ThreadPoolExecutor) -> None:
         self.key, self.args, self.llm, self.pool = key, args, llm, pool
         self.text = UTTERANCES[key][1]
@@ -211,14 +213,14 @@ class Session:
             LiveSessionConfig(
                 instructions=self.live_instructions(),
                 backend_model=BACKEND_MODEL,
-                backend_instructions=BACKEND_INSTRUCTIONS.format(status="on"),
-                tools=TOOLS,
+                backend_instructions=self.backend_instructions(self.initial_status()),
+                tools=self.backend_tools(),
                 backend_reasoning=BACKEND_REASONING,
                 voice=LIVE_VOICE,
                 sample_rate=BRIDGE_SAMPLE_RATE,
             )
         )
-        self.status = "on"
+        self.status = self.initial_status()
         self.status_pos: float | None = None  # 판정으로 처음 멈추거나 끝난 위치 — 그 뒤는 사용자 차례 진행
         self.plan: list[str] = []  # 멈춘 뒤 사용자가 차례로 할 말
         self.pcm = bytearray()
@@ -248,6 +250,20 @@ class Session:
     def live_instructions(self) -> str:
         """대화 모델의 세션 지시문. 하위 실험이 조건에 따라 바꾼다."""
         return LIVE_RADIO_INSTRUCTIONS
+
+    def initial_status(self) -> str:
+        """세션을 시작할 때의 라디오 상태."""
+        return "on"
+
+    def backend_instructions(self, status: str) -> str:
+        return BACKEND_INSTRUCTIONS.format(status=status)
+
+    def backend_tools(self) -> tuple[dict[str, Any], ...]:
+        return TOOLS
+
+    def status_note(self, status: str) -> str:
+        """상태가 바뀔 때 thinking 으로 넣는 글."""
+        return {"paused": PAUSE_NOTE, "on": RESUME_NOTE, "off": END_NOTE}[status]
 
     def pos(self) -> float:
         return len(self.pcm) / BYTES_PER_SEC
@@ -309,7 +325,7 @@ class Session:
                 elif self.result == "running":
                     self._poll_classifier()
                     self._step(elapsed - preamble_t)
-                if elapsed > MAX_SEC and self.result == "running":
+                if elapsed > self.max_sec and self.result == "running":
                     self.result = "timeout"
                 next_t += FRAME_SEC
                 time.sleep(max(0.0, next_t - time.monotonic()))
@@ -332,8 +348,8 @@ class Session:
     def _set_status(self, status: str) -> None:
         self.status = status
         self._event("status", status=status)
-        self.live.append_thinking({"paused": PAUSE_NOTE, "on": RESUME_NOTE, "off": END_NOTE}[status])
-        self.live.update_backend(BACKEND_INSTRUCTIONS.format(status=status))
+        self.live.append_thinking(self.status_note(status))
+        self.live.update_backend(self.backend_instructions(status))
 
     # -- 판정기 --------------------------------------------------------------
 
