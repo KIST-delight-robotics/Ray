@@ -6,7 +6,7 @@ import json
 import queue
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,36 +17,28 @@ from voice_pipeline.adapters.gpt_live import (
     GPTLiveSession,
     LiveAudio,
     LiveClosed,
-    LiveDelegationCreated,
     LiveFunctionCall,
     LiveResponseDone,
     LiveStarted,
     LiveTranscript,
 )
 from voice_pipeline.adapters.led import LEDState
-from voice_pipeline.engines.gpt_live.dj import Segment, SegmentPicker
 from voice_pipeline.engines.gpt_live.instructions import (
-    DEFAULT_BACKEND_INSTRUCTIONS,
-    DJ_CHECK_IGNORED_RESULT,
-    DJ_CHECK_MESSAGE,
-    DJ_ENDED_INSTRUCTIONS,
-    DJ_RETURN_INSTRUCTIONS,
-    DJ_SONG_ENDED_INSTRUCTIONS,
     FAREWELL_COMMENTARY,
     SONG_BACKEND_INSTRUCTIONS,
     SONG_ENDED_INSTRUCTIONS,
     SONG_PLAYING_INSTRUCTIONS,
-    build_segment_thinking,
+    build_backend_instructions,
 )
-from voice_pipeline.engines.gpt_live.loop import DJWatch, LiveSessionLoop, Phase, SongState
+from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop, Phase, SongState
+from voice_pipeline.engines.gpt_live.radio import PlaySong, Radio, Think, UpdateBackend
 from voice_pipeline.engines.gpt_live.songs import Song
 from voice_pipeline.engines.gpt_live.tools import (
     END_CONVERSATION_TOOL,
-    PLAY_DJ_SONG_TOOL,
     PLAY_SONG_TOOL,
+    RESUME_RADIO_TOOL,
     SEARCH_MEMORY_TOOL,
-    START_DJ_TOOL,
-    STOP_DJ_TOOL,
+    START_RADIO_TOOL,
     STOP_SONG_TOOL,
 )
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE, SAMPLE_RATE
@@ -69,16 +61,12 @@ def _make_loop(
     wait_for_playback: bool = False,
     executor: ThreadPoolExecutor | None = None,
     song_catalog: dict[str, Song] | None = None,
-    dj_picker: SegmentPicker | None = None,
-    dj_quiet: float = 30.0,
+    radio: Radio | None = None,
 ) -> tuple[LiveSessionLoop, dict[str, MagicMock], queue.Queue]:
     """Live 세션·브리지·히스토리를 모킹한 루프. ``live_events`` 는 poll_event 가 순서대로 돌려준다."""
     monkeypatch.setattr(LiveSessionLoop, "_FRAME_TIMEOUT_SEC", 0.005)
     monkeypatch.setattr(LiveSessionLoop, "_SONG_SILENCE_SEC", 0.03)
     monkeypatch.setattr(LiveSessionLoop, "_SONG_MAX_WAIT_SEC", 1.0)
-    monkeypatch.setattr(LiveSessionLoop, "_DJ_SILENCE_SEC", 0.03)
-    monkeypatch.setattr(LiveSessionLoop, "_DJ_MAX_WAIT_SEC", 1.0)
-    monkeypatch.setattr(LiveSessionLoop, "_DJ_QUIET_SEC", dj_quiet)
     monkeypatch.setattr(LiveSessionLoop, "_END_MIN_WAIT_SEC", end_min_wait)
     monkeypatch.setattr(LiveSessionLoop, "_END_SILENCE_SEC", end_silence)
     monkeypatch.setattr(LiveSessionLoop, "_END_MAX_WAIT_SEC", end_max_wait)
@@ -115,7 +103,7 @@ def _make_loop(
         executor=executor,
         wait_for_playback_complete=wait_for_playback,
         song_catalog=song_catalog,
-        dj_picker=dj_picker,
+        radio=radio,
         audio_input=audio_input,
     )
     mocks = {"live": live, "bridge": bridge, "history": history, "led": led, "memory": memory}
@@ -861,17 +849,16 @@ class TestSongPlayback:
 
 
 # ---------------------------------------------------------------------------
-# DJ 모드 (start_dj / play_dj_song / stop_dj)
+# 라디오 (진행 규칙은 test_radio.py — 여기서는 루프와의 연결만)
 # ---------------------------------------------------------------------------
 
-SEG1 = Segment("drawer", "서랍 속에 남아 있는 것들", SONGS["IAM"], "- 서랍은 느리게 바뀐다")
-SEG2 = Segment("rain", "비 오는 날의 소리", SONGS["IAM"], "- 빗소리")
 
-
-def _picker(*segments: Segment | None) -> MagicMock:
-    picker = MagicMock(spec=SegmentPicker)
-    picker.pick.side_effect = list(segments) if segments else [None]
-    return picker
+def _radio(status: str = "off") -> MagicMock:
+    radio = MagicMock(spec=Radio)
+    radio.status = status
+    radio.playing_song = False
+    radio.step.return_value = []
+    return radio
 
 
 def _outputs(live: MagicMock) -> dict[str, dict]:
@@ -882,25 +869,17 @@ def _appended(live: MagicMock) -> list[str]:
     return [c.args[0] for c in live.append_instructions.call_args_list]
 
 
-class TestDJ:
-    def test_start_holds_result_pushes_segment_then_submits_no_signal(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        picker = _picker(SEG1)
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=picker)
-        state: list[tuple[bool, Segment | None]] = []
-
-        def submitted() -> bool:
-            if m["live"].submit_function_output.called:
-                state.append((loop._dj_active, loop._dj_segment))  # 세션 종료가 상태를 지우기 전에 잡아 둔다
-                return True
-            return False
-
+class TestRadio:
+    def test_start_pushes_the_line_before_the_result_and_updates_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        radio = _radio(status="on")
+        radio.start.return_value = (json.dumps({"status": "on"}), [UpdateBackend(), Think("첫 대사")])
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, radio=radio)
         _staged_live_events(
             m,
             [
-                (None, _call(START_DJ_TOOL)),
+                (None, _call(START_RADIO_TOOL)),
                 (None, LiveResponseDone(None)),
-                (None, LiveAudio(VOICE_100MS)),  # 위임 시 한마디 — 끝나길 기다린 뒤 소재를 넣는다
-                (submitted, LiveClosed("x")),
+                (lambda: m["live"].continue_response.called, LiveClosed("x")),
             ],
         )
         order = MagicMock()
@@ -908,389 +887,131 @@ class TestDJ:
         loop.run()
 
         live = m["live"]
-        assert _outputs(live)["c1"] == {"status": "started", "segment": "drawer", "song": "IAM"}
-        live.continue_response.assert_called_once()
-        picker.pick.assert_called_once()
-        # 소재는 대화 모델(thinking)과 백엔드(Current segment 절, 툴은 그대로) 양쪽에
-        live.append_thinking.assert_called_once_with(build_segment_thinking(SEG1, starting=True))
-        assert _appended(live) == []
-        live.update_backend.assert_called_once()
-        backend = live.update_backend.call_args.args[0]
-        assert backend.startswith(DEFAULT_BACKEND_INSTRUCTIONS) and "## Current segment" in backend
-        assert "서랍 속에 남아 있는 것들" in backend and "Ray's voice" not in backend
-        assert len(live.update_backend.call_args.args) == 1  # 툴 집합은 세션 시작 그대로
-        # 순서: 소재 → 결과 제출 → 이어가기 (제출이 먼저면 모델이 소재 없이 말을 시작한다)
+        assert _outputs(live)["c1"] == {"status": "on"}
+        live.update_backend.assert_called_once_with(build_backend_instructions(SONGS, "on"))
+        live.append_thinking.assert_called_once_with("첫 대사")
         names = [c[0] for c in order.mock_calls]
+        # 대사가 결과보다 먼저 — 결과·이어가기 뒤 백엔드는 빈 응답, 모델은 받은 대사를 읽는다
         assert (
-            names.index("live.append_thinking")
+            names.index("live.update_backend")
+            < names.index("live.append_thinking")
             < names.index("live.submit_function_output")
             < names.index("live.continue_response")
         )
-        assert state[0] == (True, SEG1)
+        radio.reset.assert_called()  # 세션 끝
 
-    def test_start_without_picker_or_segments_or_twice_is_an_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, _, _ = _make_loop(monkeypatch, song_catalog=SONGS)
-        assert "unavailable" in json.loads(loop._submit_tool(_call(START_DJ_TOOL)).result())["error"]
-        loop, _, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(None))
-        assert "no DJ segments" in json.loads(loop._submit_tool(_call(START_DJ_TOOL)).result())["error"]
-        loop, _, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1, SEG2))
-        first = loop._submit_tool(_call(START_DJ_TOOL))
-        assert not first.done()
-        assert "already active" in json.loads(loop._submit_tool(_call(START_DJ_TOOL, call_id="c2")).result())["error"]
+    def test_resume_goes_to_the_radio_and_tools_need_a_radio(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        radio = _radio(status="paused")
+        radio.resume.return_value = (json.dumps({"status": "on"}), [Think("남은 대사")])
+        loop, m, _ = _make_loop(monkeypatch, radio=radio)
+        assert json.loads(loop._submit_tool(_call(RESUME_RADIO_TOOL)).result()) == {"status": "on"}
+        m["live"].append_thinking.assert_called_once_with("남은 대사")
+        loop, _, _ = _make_loop(monkeypatch)
+        assert "unavailable" in json.loads(loop._submit_tool(_call(START_RADIO_TOOL)).result())["error"]
 
-    def test_play_dj_song_then_natural_end_pushes_next_segment(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        picker = _picker(SEG1, SEG2)
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=picker)
+    def test_frames_feed_the_radio_and_run_its_commands(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        radio = _radio(status="on")
+        pending = [[Think("다음 대사")]]
+        radio.step.side_effect = lambda now, quiet: pending.pop() if pending else []
+        loop, m, _ = _make_loop(monkeypatch, radio=radio)
+        _staged_live_events(
+            m,
+            [
+                (None, LiveAudio(VOICE_100MS)),
+                (None, _seg("assistant", "오늘은", closed=False)),
+                (None, _seg("user", "응", closed=True, start_ms=2000)),
+                (None, LiveAudio(SILENCE_100MS)),
+                (lambda: radio.step.call_count >= 2, LiveClosed("x")),
+            ],
+        )
+        loop.run()
+
+        radio.on_voice.assert_called()
+        seen = [c.args[1:] for c in radio.on_transcript.call_args_list]
+        assert ("seg-0", "assistant", "오늘은") in seen and ("seg-2000", "user", "응") in seen
+        assert radio.step.call_args_list and all(isinstance(c.args[1], float) for c in radio.step.call_args_list)
+        m["live"].append_thinking.assert_called_once_with("다음 대사")
+
+    def _song_flow(self, monkeypatch: pytest.MonkeyPatch, *, stop: bool) -> tuple[LiveSessionLoop, dict, MagicMock]:
+        radio = _radio(status="on")
+        state = {"fired": False}
+
+        def step(now: float, quiet: float) -> list:
+            if state["fired"]:
+                return []
+            state["fired"] = True
+            radio.playing_song = True
+            return [PlaySong(SONGS["IAM"])]
+
+        def song_end(now: float, *, completed: bool) -> list:
+            radio.playing_song = False
+            if completed:
+                return [Think("다음 대본 첫 대사")]
+            radio.status = "off"
+            return [UpdateBackend(), Think("라디오 끝")]
+
+        radio.step.side_effect = step
+        radio.on_song_end.side_effect = song_end
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, radio=radio)
         bridge_events = _wire_bridge_completion(m["bridge"])
-        started = lambda: "c1" in _outputs(m["live"])  # noqa: E731
-        playing = lambda: loop._song_state is SongState.PLAYING and "c2" in _outputs(m["live"])  # noqa: E731
+        playing = lambda: loop._song_state is SongState.PLAYING  # noqa: E731
+        ended = lambda: radio.on_song_end.called and loop._song_state is SongState.NONE  # noqa: E731
 
-        def song_finishes() -> bool:
+        def finishes() -> bool:
             if playing():
                 bridge_events.put(PLAYBACK_COMPLETE)  # 자연 종료
                 return True
             return False
 
-        state: list[tuple[bool, Segment | None]] = []
-
-        def reopened() -> bool:
-            if loop._song_state is SongState.NONE and picker.pick.call_count == 2:
-                state.append((loop._dj_active, loop._dj_segment))
-                return True
-            return False
-
-        _staged_live_events(
-            m,
-            [
-                (None, _call(START_DJ_TOOL)),
-                (None, LiveResponseDone(None)),
-                (started, _call(PLAY_DJ_SONG_TOOL, call_id="c2")),  # 곡 소개 뒤 위임
-                (started, LiveResponseDone(None)),
-                (started, LiveAudio(VOICE_100MS)),
-                (song_finishes, LiveAudio(SILENCE_100MS)),
-                (reopened, LiveClosed("x")),
-            ],
-        )
-        loop.run()
-
-        live = m["live"]
-        outputs = _outputs(live)
-        assert outputs["c2"] == {"status": "playing", "song": "IAM", "title": "I AM", "artist": "IVE"}
-        m["bridge"].send_play_audio_csv.assert_called_once_with("IAM")  # 인자 없이 현재 소재의 곡
-        # 자연 종료 → 다음 소재가 양쪽에 들어가고 노래 끝 신호로 깨운다. DJ 는 계속
-        assert picker.pick.call_count == 2
-        assert [c.args[0] for c in live.append_thinking.call_args_list] == [
-            build_segment_thinking(SEG1, starting=True),
-            build_segment_thinking(SEG2, starting=False),
-        ]
-        assert _appended(live) == [SONG_PLAYING_INSTRUCTIONS, DJ_SONG_ENDED_INSTRUCTIONS]
-        assert state[0] == (True, SEG2)  # DJ 는 계속, 소재는 둘째로
-        # 백엔드: 소재 1 절 → 노래용 → 소재 2 절 (기본으로의 복원은 없다)
-        updates = [c.args[0] for c in live.update_backend.call_args_list]
-        assert "서랍" in updates[0] and updates[1] == SONG_BACKEND_INSTRUCTIONS and "비 오는 날" in updates[2]
-        live.restore_backend.assert_not_called()
-
-    def test_user_stopping_the_song_leaves_dj_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        picker = _picker(SEG1, SEG2)
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=picker)
-        _wire_bridge_completion(m["bridge"])
-        started = lambda: "c1" in _outputs(m["live"])  # noqa: E731
-        playing = lambda: loop._song_state is SongState.PLAYING and "c2" in _outputs(m["live"])  # noqa: E731
-        reopened = lambda: loop._song_state is SongState.NONE and "c3" in _outputs(m["live"])  # noqa: E731
-        _staged_live_events(
-            m,
-            [
-                (None, _call(START_DJ_TOOL)),
-                (None, LiveResponseDone(None)),
-                (started, _call(PLAY_DJ_SONG_TOOL, call_id="c2")),
-                (started, LiveResponseDone(None)),
-                (playing, _call(STOP_SONG_TOOL, call_id="c3")),
+        if stop:
+            stages = [
+                (playing, _seg("user", "노래 꺼 줘", closed=True, start_ms=3000)),
+                (playing, _call(STOP_SONG_TOOL, call_id="c9")),
                 (playing, LiveResponseDone(None)),
-                (reopened, LiveClosed("x")),
-            ],
-        )
-        loop.run()
-
-        live = m["live"]
-        assert _outputs(live)["c3"] == {"status": "stopped"}
-        assert not loop._dj_active and loop._dj_segment is None
-        picker.pick.assert_called_once()  # 다음 소재로 넘어가지 않는다
-        assert _appended(live) == [SONG_PLAYING_INSTRUCTIONS, DJ_ENDED_INSTRUCTIONS]
-        live.restore_backend.assert_called_once()  # 정지 결과의 후속 응답 뒤 기본으로
-
-    def test_stop_dj_restores_backend_and_announces_end(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1))
-        started = lambda: "c1" in _outputs(m["live"])  # noqa: E731
-        stopped = lambda: "c2" in _outputs(m["live"])  # noqa: E731
-        _staged_live_events(
-            m,
-            [
-                (None, _call(START_DJ_TOOL)),
-                (None, LiveResponseDone(None)),
-                (started, _call(STOP_DJ_TOOL, call_id="c2")),
-                (started, LiveResponseDone(None)),
-                (stopped, LiveClosed("x")),
-            ],
-        )
-        loop.run()
-
-        live = m["live"]
-        assert _outputs(live)["c2"] == {"status": "stopped"}
-        assert not loop._dj_active
-        live.restore_backend.assert_called_once()
-        assert _appended(live) == [DJ_ENDED_INSTRUCTIONS]
-        assert live.continue_response.call_count == 2  # 종료 결과 뒤에도 이어간다 — 모델이 한마디 한다
-
-    def test_dj_tools_outside_dj_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, _, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1))
-        assert json.loads(loop._submit_tool(_call(STOP_DJ_TOOL)).result()) == {"status": "not_active"}
-        assert "not in DJ mode" in json.loads(loop._submit_tool(_call(PLAY_DJ_SONG_TOOL)).result())["error"]
-
-    def test_quiet_during_dj_sends_return_signal_once_per_silence(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1), dj_quiet=0.1)
-        nudged_at: list[float] = []
-
-        def long_after_nudge() -> bool:
-            if DJ_RETURN_INSTRUCTIONS in _appended(m["live"]):
-                nudged_at.append(nudged_at[-1] if nudged_at else time.monotonic())
-                return time.monotonic() - nudged_at[0] > 0.35  # 재촉 뒤 침묵이 이어져도 다시 보내지 않는다
-            return False
-
-        _staged_live_events(
-            m,
-            [
-                (None, _call(START_DJ_TOOL)),
-                (None, LiveResponseDone(None)),
-                (long_after_nudge, LiveClosed("x")),
-            ],
-        )
-        loop.run()
-        assert _appended(m["live"]) == [DJ_RETURN_INSTRUCTIONS]
-
-    def test_no_return_signal_while_song_or_delegation_is_pending(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1), dj_quiet=0.05)
-        loop._dj_active, loop._dj_segment = True, SEG1
-        loop._dj_signal_time = time.monotonic() - 1.0
-        loop._song_state = SongState.PLAYING
-        loop._maybe_nudge_dj(time.monotonic())
-        loop._song_state = SongState.NONE
-        loop._inflight.append((_call(SEARCH_MEMORY_TOOL), Future()))
-        loop._maybe_nudge_dj(time.monotonic())
-        m["live"].append_instructions.assert_not_called()
-        loop._inflight.clear()
-        loop._maybe_nudge_dj(time.monotonic())
-        m["live"].append_instructions.assert_called_once_with(DJ_RETURN_INSTRUCTIONS)
-
-    def test_ending_during_dj_resets_state_without_touching_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1))
-        started = lambda: "c1" in _outputs(m["live"])  # noqa: E731
-        _staged_live_events(
-            m,
-            [
-                (None, _call(START_DJ_TOOL)),
-                (None, LiveResponseDone(None)),
-                (started, _seg("user", "오늘은 여기까지", closed=True)),
-            ],
-        )
-        loop.run()
-        assert loop.exit_reason == "exit_keyword" and not loop._dj_active
-        m["live"].restore_backend.assert_not_called()
-        assert _appended(m["live"]) == []
-
-
-# ---------------------------------------------------------------------------
-# DJ 이야기 끝 감시 — 앱이 곡을 튼다 (끼어들기 없는 경우)
-# ---------------------------------------------------------------------------
-
-CLOSING = "…그런 마음을 담은 곡이에요. IVE의 I AM, 들려드릴게요."
-NO_CLOSING = "…그 서랍을 열 때마다 조금씩 다른 게 보이더라고요."
-SILENT = (None, LiveAudio(SILENCE_100MS))
-
-
-def _fast_watch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """무음 조각 100 ms 기준: 종료 문구 뒤 2 조각, 문구 없이 3 조각."""
-    monkeypatch.setattr(LiveSessionLoop, "_DJ_CLOSING_QUIET_SEC", 0.15)
-    monkeypatch.setattr(LiveSessionLoop, "_DJ_CHECK_QUIET_SEC", 0.25)
-
-
-def _talk(m: dict[str, MagicMock], text: str) -> list:
-    """DJ 진입 → 이야기 첫 음성 → 모델 전사. 이 뒤의 무음 조각이 이야기 끝 판정에 쓰인다."""
-    started = lambda: "c1" in _outputs(m["live"])  # noqa: E731 — 소재가 들어갔다
-    return [
-        (None, _call(START_DJ_TOOL)),
-        (None, LiveResponseDone(None)),
-        (started, LiveAudio(VOICE_100MS)),
-        (None, _seg("assistant", text, closed=False, start_ms=5000)),
-    ]
-
-
-class TestDJWatch:
-    def test_closing_line_then_quiet_plays_song_without_delegation(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1))
-        _fast_watch(monkeypatch)
-        _wire_bridge_completion(m["bridge"])
-        playing = lambda: loop._song_state is SongState.PLAYING  # noqa: E731
-        _staged_live_events(m, [*_talk(m, CLOSING), SILENT, SILENT, (playing, LiveClosed("x"))])
-        loop.run()
-
-        m["bridge"].send_play_audio_csv.assert_called_once_with("IAM")
-        m["live"].request_backend.assert_not_called()
-        assert set(_outputs(m["live"])) == {"c1"}  # 곡에 쓴 툴 호출이 없다
-        assert SONG_PLAYING_INSTRUCTIONS in _appended(m["live"])
-
-    def test_one_quiet_chunk_after_closing_line_is_not_enough(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1))
-        _fast_watch(monkeypatch)
-        state: list[DJWatch] = []
-
-        def settled() -> bool:
-            state.append(loop._dj_watch)
-            return len(state) > 5
-
-        _staged_live_events(m, [*_talk(m, CLOSING), SILENT, (settled, LiveClosed("x"))])
-        loop.run()
-        assert state[-1] is DJWatch.LISTENING
-        m["bridge"].send_play_audio_csv.assert_not_called()
-
-    def test_network_stall_is_not_counted_as_quiet(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1))
-        _fast_watch(monkeypatch)
-        _wire_bridge_completion(m["bridge"])
-        before_quiet: list[SongState] = []
-        talked: list[float] = []
-
-        def stalled() -> bool:  # 조각이 안 오는 동안 실제 시간은 문턱을 넘긴다
-            talked.append(talked[0] if talked else time.monotonic())
-            if time.monotonic() - talked[0] < 0.4:
-                return False
-            before_quiet.append(loop._song_state)
-            return True
-
-        playing = lambda: loop._song_state is SongState.PLAYING  # noqa: E731
-        stages = [*_talk(m, CLOSING), (stalled, LiveAudio(SILENCE_100MS)), SILENT, (playing, LiveClosed("x"))]
+                (lambda: ended() and m["live"].continue_response.called, LiveClosed("x")),
+            ]
+        else:
+            stages = [
+                (playing, _seg("user", "노래 좋다", closed=True, start_ms=3000)),
+                (finishes, LiveAudio(SILENCE_100MS)),
+                (ended, LiveClosed("x")),
+            ]
         _staged_live_events(m, stages)
         loop.run()
-        assert before_quiet == [SongState.NONE]
-        m["bridge"].send_play_audio_csv.assert_called_once_with("IAM")
+        return loop, m, radio
 
-    def test_quiet_before_the_talk_starts_is_not_an_ending(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1))
-        _fast_watch(monkeypatch)
-        started = lambda: "c1" in _outputs(m["live"])  # noqa: E731
-        state: list[DJWatch] = []
+    def test_radio_song_plays_without_a_tool_result_and_the_next_script_follows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        loop, m, radio = self._song_flow(monkeypatch, stop=False)
+        live, bridge = m["live"], m["bridge"]
+        bridge.send_play_audio_csv.assert_called_once_with("IAM")
+        live.submit_function_output.assert_not_called()
+        radio.on_song_end.assert_called_once()
+        assert radio.on_song_end.call_args.kwargs == {"completed": True}
+        assert bridge.send_stream_start.call_count == 2  # 시작 + 곡 뒤 재개
+        live.append_thinking.assert_called_once_with("다음 대본 첫 대사")
+        assert _appended(live) == [SONG_PLAYING_INSTRUCTIONS]  # 곡이 끝났다는 지시 없이 다음 대사만
+        assert [c.args[0] for c in live.update_backend.call_args_list] == [
+            SONG_BACKEND_INSTRUCTIONS,
+            build_backend_instructions(SONGS, "on"),
+        ]
+        assert not any("노래 좋다" in str(c) for c in radio.on_transcript.call_args_list)  # 곡 중 말은 넘기지 않는다
 
-        def settled() -> bool:
-            state.append(loop._dj_watch)
-            return len(state) > 5
-
-        stages = [(None, _call(START_DJ_TOOL)), (None, LiveResponseDone(None)), (started, LiveAudio(SILENCE_100MS))]
-        _staged_live_events(m, [*stages, *[SILENT] * 5, (settled, LiveClosed("x"))])
-        loop.run()
-        assert state[-1] is DJWatch.WAITING  # 첫 음성 전
-        m["live"].request_backend.assert_not_called()
-        m["bridge"].send_play_audio_csv.assert_not_called()
-
-    def test_listener_speaking_turns_the_watch_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1))
-        _fast_watch(monkeypatch)
-        _wire_bridge_completion(m["bridge"])
-        state: list[tuple[DJWatch, SongState]] = []
-
-        def settled() -> bool:
-            state.append((loop._dj_watch, loop._song_state))
-            return len(state) > 5
-
-        user = (None, _seg("user", "잠깐만", closed=False, start_ms=9000))
-        _staged_live_events(m, [*_talk(m, CLOSING), user, *[SILENT] * 4, (settled, LiveClosed("x"))])
-        loop.run()
-        # 종료 문구 뒤 무음이어도 곡을 틀지 않는다 — 끼어들기 뒤는 이번 범위 밖(복귀 신호·사용자 요청으로 진행)
-        assert state[-1] == (DJWatch.OFF, SongState.NONE)
-        m["live"].request_backend.assert_not_called()
-        m["bridge"].send_play_audio_csv.assert_not_called()
-
-    def test_no_closing_line_asks_backend_which_plays_the_song(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1))
-        _fast_watch(monkeypatch)
-        _wire_bridge_completion(m["bridge"])
-        checked = lambda: m["live"].request_backend.called  # noqa: E731
-        playing = lambda: loop._song_state is SongState.PLAYING and "c2" in _outputs(m["live"])  # noqa: E731
-        _staged_live_events(
-            m,
-            [
-                *_talk(m, NO_CLOSING),
-                *[SILENT] * 3,
-                (checked, LiveDelegationCreated("d9", "ray_dj_check_1")),
-                (None, LiveFunctionCall("c2", PLAY_DJ_SONG_TOOL, "{}", "d9")),
-                (None, LiveResponseDone("d9")),
-                (playing, LiveClosed("x")),
-            ],
-        )
-        loop.run()
-
-        m["live"].request_backend.assert_called_once_with(DJ_CHECK_MESSAGE, event_id="ray_dj_check_1")
-        assert _outputs(m["live"])["c2"]["status"] == "playing"
-        m["bridge"].send_play_audio_csv.assert_called_once_with("IAM")
-
-    def test_check_does_not_run_other_tools_and_returns_to_hosting(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1))
-        _fast_watch(monkeypatch)
+    def test_user_stopping_the_radio_song_ends_the_radio(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop, m, radio = self._song_flow(monkeypatch, stop=True)
         live = m["live"]
-        checked = lambda: live.request_backend.called  # noqa: E731
-        answered = lambda: "c2" in _outputs(live)  # noqa: E731
-        state: list[DJWatch] = []
+        assert _outputs(live)["c9"] == {"status": "stopped"}
+        assert radio.on_song_end.call_args.kwargs == {"completed": False}
+        live.append_thinking.assert_called_once_with("라디오 끝")
+        assert _appended(live) == [SONG_PLAYING_INSTRUCTIONS, SONG_ENDED_INSTRUCTIONS]
+        assert live.update_backend.call_args_list[-1].args == (build_backend_instructions(SONGS, "off"),)
+        live.restore_backend.assert_not_called()
 
-        def returned() -> bool:
-            if DJ_RETURN_INSTRUCTIONS in _appended(live):
-                state.append(loop._dj_watch)
-                return True
-            return False
-
-        _staged_live_events(
-            m,
-            [
-                *_talk(m, NO_CLOSING),
-                *[SILENT] * 3,
-                (checked, LiveDelegationCreated("d9", "ray_dj_check_1")),
-                (None, LiveFunctionCall("c2", END_CONVERSATION_TOOL, "{}", "d9", "r1")),  # 잘못된 툴
-                (None, LiveResponseDone("d9", "r1", "completed")),
-                (answered, LiveResponseDone("d9", "r2", "completed")),  # 결과 뒤 빈 후속 응답
-                (returned, LiveClosed("x")),
-            ],
-        )
+    def test_ending_resets_the_radio(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        radio = _radio(status="on")
+        events = [_seg("user", "이제 갈게", closed=True), LiveAudio(SILENCE_100MS)]
+        loop, m, _ = _make_loop(monkeypatch, live_events=events, frames=40, radio=radio)
         loop.run()
-
-        assert _outputs(live)["c2"] == {"error": DJ_CHECK_IGNORED_RESULT}
-        assert loop.exit_reason == "live_closed:x"  # end_conversation 을 실행하지 않았다
-        assert live.continue_response.call_count == 2  # start_dj 결과 뒤, 무시한 결과 뒤 — 위임을 닫는다
-        assert _appended(live) == [DJ_RETURN_INSTRUCTIONS]
-        assert state == [DJWatch.WAITING]  # 다음 첫 음성부터 다시 지켜본다
-        m["bridge"].send_play_audio_csv.assert_not_called()
-
-    def test_check_answered_with_text_only_returns_to_hosting(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS, dj_picker=_picker(SEG1), dj_quiet=0.05)
-        _fast_watch(monkeypatch)
-        live = m["live"]
-        checked = lambda: live.request_backend.called  # noqa: E731
-        returned_at: list[float] = []
-
-        def long_after_return() -> bool:  # 복귀 신호 뒤 침묵이 이어져도 6 s 신호를 또 보내지 않는다
-            if DJ_RETURN_INSTRUCTIONS in _appended(live):
-                returned_at.append(returned_at[0] if returned_at else time.monotonic())
-                return time.monotonic() - returned_at[0] > 0.3
-            return False
-
-        _staged_live_events(
-            m,
-            [
-                *_talk(m, NO_CLOSING),
-                *[SILENT] * 3,
-                (checked, LiveDelegationCreated("d9", "ray_dj_check_1")),
-                (None, LiveAudio(VOICE_100MS)),  # 대화 모델의 받는 말
-                (None, LiveResponseDone("d9", "r1", "completed")),  # 툴 없이 텍스트만
-                SILENT,
-                (long_after_return, LiveClosed("x")),
-            ],
-        )
-        loop.run()
-        assert _appended(live) == [DJ_RETURN_INSTRUCTIONS]
-        live.submit_function_output.assert_called_once()  # start_dj 결과만
+        assert loop.exit_reason == "exit_keyword"
+        assert radio.reset.call_count >= 1

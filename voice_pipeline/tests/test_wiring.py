@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import voice_pipeline.wiring as wiring
+from voice_pipeline.engines.gpt_live.radio import Radio
 from voice_pipeline.engines.gpt_live.tools import SEARCH_MEMORY_TOOL
 from voice_pipeline.memory.types import Episode, Profile
 from voice_pipeline.trace import record_call
@@ -256,22 +257,37 @@ class TestCreateSessionLiveEngine:
         assert {t["name"] for t in config.tools} == {"end_conversation", *device_tools}
         assert set(loop_cls.call_args.kwargs["tool_handlers"]) == device_tools
 
-    def test_dj_tools_are_wired_when_picker_present(self, monkeypatch):
+    def test_radio_tools_are_wired_when_picker_present(self, monkeypatch):
         live_cls = MagicMock(name="GPTLiveSession")
         monkeypatch.setattr(wiring, "GPTLiveSession", live_cls)
         loop_cls = MagicMock(name="LiveSessionLoop")
         monkeypatch.setattr(wiring, "LiveSessionLoop", loop_cls)
         monkeypatch.setattr(wiring, "ConversationHistory", MagicMock())
         comps = _make_components(engine="live")
-        comps.dj_picker = MagicMock()
+        comps.radio_picker = MagicMock()
+        comps.radio_judge = MagicMock()
 
         comps.create_session(memory_enabled=False)
 
         config = live_cls.call_args.args[0]
-        assert [t["name"] for t in config.tools] == ["end_conversation", "start_dj", "stop_dj", "play_dj_song"]
-        comps.dj_picker.new_session.assert_called_once()  # 세션마다 세션 내 사용 기록을 비운다
-        kwargs = loop_cls.call_args.kwargs
-        assert kwargs["dj_picker"] is comps.dj_picker
+        assert [t["name"] for t in config.tools] == ["end_conversation", "start_radio", "resume_radio"]
+        assert config.backend_instructions.rstrip().endswith("Radio talk status: off")
+        comps.radio_picker.new_session.assert_called_once()  # 세션마다 세션 내 사용 기록을 비운다
+        radio = loop_cls.call_args.kwargs["radio"]
+        assert isinstance(radio, Radio) and radio.status == "off"
+
+    def test_no_radio_without_scripts(self, monkeypatch):
+        live_cls = MagicMock(name="GPTLiveSession")
+        monkeypatch.setattr(wiring, "GPTLiveSession", live_cls)
+        loop_cls = MagicMock(name="LiveSessionLoop")
+        monkeypatch.setattr(wiring, "LiveSessionLoop", loop_cls)
+        monkeypatch.setattr(wiring, "ConversationHistory", MagicMock())
+        comps = _make_components(engine="live")
+
+        comps.create_session(memory_enabled=False)
+
+        assert loop_cls.call_args.kwargs["radio"] is None
+        assert "## Radio talk" not in live_cls.call_args.args[0].backend_instructions
 
     def test_only_end_conversation_without_handlers(self, monkeypatch):
         live_cls = MagicMock(name="GPTLiveSession")

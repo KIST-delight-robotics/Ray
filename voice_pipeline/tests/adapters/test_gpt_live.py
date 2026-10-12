@@ -312,11 +312,11 @@ class TestSend:
         session.start()
         order = MagicMock()
         order.attach_mock(conn.response, "response")
-        session.request_backend("DJ_CHECK: ...", event_id="ray_dj_check_1")
+        session.request_backend("CHECK: ...", event_id="ray_app_check_1")
         assert [c[0] for c in order.mock_calls] == ["response.item.create", "response.create"]
         item = conn.response.item.create.call_args.kwargs["item"]
-        assert item == {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "DJ_CHECK: ..."}]}
-        conn.response.create.assert_called_once_with(event_id="ray_dj_check_1")  # 위임 생성 이벤트로 알아본다
+        assert item == {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "CHECK: ..."}]}
+        conn.response.create.assert_called_once_with(event_id="ray_app_check_1")  # 위임 생성 이벤트로 알아본다
         session.close()
 
     def test_send_before_start_raises(self) -> None:
@@ -376,7 +376,7 @@ class TestAppendAndResponseTracking:
         created = SimpleNamespace(type="session.delegation.created", delegation=SimpleNamespace(id="d1"), offset_ms=100)
         session._dispatch(created)
         session._dispatch_backend(_backend({"type": "response.created", "response": {"id": "r1"}}))
-        call_item = {"type": "function_call", "call_id": "c1", "name": "start_dj"}
+        call_item = {"type": "function_call", "call_id": "c1", "name": "start_radio"}
         done = {"type": "response.output_item.done", "response_id": "r1", "item": call_item}
         session._dispatch_backend(_backend(done))
         with caplog.at_level("INFO", logger="voice_pipeline.gpt_live"):
@@ -384,8 +384,8 @@ class TestAppendAndResponseTracking:
         rec = [r for r in call_log.records if r.operation == "backend_response"]
         assert len(rec) == 1 and rec[0].model == "gpt-5.4-mini" and rec[0].status == "completed"
         meta = json.loads(rec[0].metadata)
-        assert meta["calls"] == ["start_dj"] and isinstance(meta["setup_ms"], int)  # 위임 생성 → 응답 시작 간격
-        assert any("Backend response" in m and "setup" in m and "start_dj" in m for m in caplog.messages)
+        assert meta["calls"] == ["start_radio"] and isinstance(meta["setup_ms"], int)  # 위임 생성 → 응답 시작 간격
+        assert any("Backend response" in m and "setup" in m and "start_radio" in m for m in caplog.messages)
         # 툴 결과 뒤의 후속 응답은 위임 생성 시각이 없다 — setup 없이 기록
         session._dispatch_backend(_backend({"type": "response.created", "response": {"id": "r2"}}))
         session._dispatch_backend(_backend({"type": "response.failed", "response": {"id": "r2"}}))
@@ -399,11 +399,11 @@ class TestAppendAndResponseTracking:
         delegation = SimpleNamespace(id="d1")
         session._dispatch(SimpleNamespace(type="session.delegation.created", delegation=delegation, offset_ms=0))
         by_app = SimpleNamespace(
-            type="session.delegation.created", delegation=SimpleNamespace(id="d2"), client_event_id="ray_dj_check_1"
+            type="session.delegation.created", delegation=SimpleNamespace(id="d2"), client_event_id="ray_app_check_1"
         )
         session._dispatch(by_app)
         assert session.poll_event() == LiveDelegationCreated("d1", None)  # 대화 모델이 만든 위임
-        assert session.poll_event() == LiveDelegationCreated("d2", "ray_dj_check_1")
+        assert session.poll_event() == LiveDelegationCreated("d2", "ray_app_check_1")
 
     def test_interleaved_delegations_keep_response_ids_separate(self) -> None:
         session, _ = _session([])

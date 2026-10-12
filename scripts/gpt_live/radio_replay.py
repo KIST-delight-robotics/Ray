@@ -19,6 +19,8 @@ long_t~long_v2(긴 대본). 각 회차의 전사 조각(도착 위치), 넣기·
   실험 규칙(남은 2자)과 정한 규칙(확실할 때만, on 판정 뒤 대답은 뺌) 및 그 사이 변형의 판단을 사후 정답과 비교.
 - ``pauses``: 대사 안 무음 길이 분포와 무음 문턱별로 잘못 걸렸을 쉼(앱이 아무것도 넣지 않았는데 모델이 스스로 이음).
 - ``done``: 끝남 판정 시각(일치 최소 글자 5 / 8)과 곡 시작이 곡 소개 끝 뒤였는지.
+- ``production``: 운영 추적기(:class:`voice_pipeline.engines.gpt_live.radio.Tracker`)를 같은 기록으로 돌려, 앞서 넣기
+  시각과 멈춘 뒤 판단이 정한 규칙(``DECIDED``)의 재현과 같은지.
 
     uv run python scripts/gpt_live/radio_replay.py push
 """
@@ -41,6 +43,8 @@ import exp_radio_ahead as ea
 import numpy as np
 from exp_dirs import EXPERIMENTS
 from exp_radio_tts import sentences
+
+from voice_pipeline.engines.gpt_live import radio as production
 
 SHORT = [
     "11_l4", "13_l5n", "14_l5", "15_l6c", "16_l6g", "17_l7", "18_l7d", "19_l8c", "20_l8r",
@@ -913,7 +917,121 @@ def cmd_done(runs: list[Run]) -> None:
     print(f"곡 소개 끝 → 곡 {gaps.min():.1f}~{gaps.max():.1f} s")
 
 
-COMMANDS = {"validate": cmd_validate, "push": cmd_push, "stall": cmd_stall, "pauses": cmd_pauses, "done": cmd_done}
+def _segment_of(run: Run, unit: int) -> tuple[int, int]:
+    """대사가 든 대본의 [첫 대사, 끝) — 운영 추적기는 대본 하나씩 따라간다."""
+    if run.kind == "long":
+        u0 = max(x for x in run.seg_first[:-1] if x <= unit)
+        return u0, next(x for x in run.seg_first if x > unit)
+    return 0, len(run.units)
+
+
+def _production_tracker(run: Run, u0: int, u1: int, until: dict[str, Any]) -> production.Tracker:
+    """운영 추적기에 기록을 ``until`` 이벤트(포함)까지 넣는다 — 재현(:func:`snapshots`)과 같은 순서로."""
+    tracker = production.Tracker(run.units[u0:u1])
+    deltas = sorted(run.deltas, key=lambda x: x[0])
+    di = 0
+    started = False
+    for e in sorted(run.events, key=lambda e: (e["pos"], _after_decision(e))):
+        while di < len(deltas) and deltas[di][0] <= e["pos"] + 1e-9:
+            t, sp, d = deltas[di]
+            if sp == "assistant" and started:
+                tracker.add_voice(t)
+                tracker.add_output(t, d)
+            di += 1
+        if e["name"] == "push" and u0 <= e["unit"] - 1 < u1:
+            if e.get("by") == "resume":
+                tracker.resume(e["pos"])
+                if tracker.pushed != e["unit"] - 1 - u0:  # 실험은 자기 규칙(5자 일치)의 끝난 대사에서 재개했다
+                    tracker.resume_mismatch = (tracker.pushed, e["unit"] - 1 - u0)  # type: ignore[attr-defined]
+            tracker.mark_pushed(e["pos"])
+            started = True
+        elif e["name"] == "repush" and started:
+            tracker.mark_repushed(e["pos"])
+        elif e["name"] == "hold" and started:
+            tracker.hold(e["pos"])
+        elif e["name"] in ("decision", "hold_release") and started:
+            tracker.release(e["pos"])
+        if e is until:
+            break
+    return tracker
+
+
+def _production_run(run: Run) -> list[tuple[str, bool, str]]:
+    rows = []
+    snaps = snapshots(run, as_run(run.cond))
+    for o in opportunities(run):
+        k = o["unit"]
+        u0, u1 = _segment_of(run, k - 1)
+        if not u0 <= k < u1:
+            continue
+        pe = next(pe for pe, st in reversed(snaps) if pe["unit"] == k and pe["pos"] <= o["event"]["pos"])
+        tracker = _production_tracker(run, u0, u1, pe)
+        holds = [x for x in run.events if x["pos"] > pe["pos"] and x["name"] in ("hold", "decision", "hold_release")]
+        expected = first_push(run, o["state"], DECIDED, o["t_stop"])
+        got = None
+        holding = any(x["name"] == "hold" for x in run.events if x["pos"] <= pe["pos"]) and not any(
+            x["name"] in ("decision", "hold_release") and x["pos"] <= pe["pos"]
+            for x in run.events
+            if x["pos"]
+            >= max((h["pos"] for h in run.events if h["name"] == "hold" and h["pos"] <= pe["pos"]), default=0)
+        )
+        for t in sorted({d[0] for d in run.deltas if pe["pos"] < d[0] <= o["t_stop"]}):
+            for x in holds:
+                if x.get("_done") is None and x["pos"] <= t:
+                    (tracker.hold if x["name"] == "hold" else tracker.release)(x["pos"])
+                    holding = x["name"] == "hold"
+                    x["_done"] = True
+            for p, sp, d in run.deltas:
+                if sp == "assistant" and p == t:
+                    tracker.add_voice(p)
+                    tracker.add_output(p, d)
+            if holding:  # 라디오는 보류 중 넣기 판단을 하지 않는다
+                continue
+            action = tracker.next_action(t, 0.0)
+            if isinstance(action, production.Push):
+                got = (t, "text")
+                break
+        for x in holds:
+            x.pop("_done", None)
+        note = f" (재개 지점 운영/실험 {tracker.resume_mismatch})" if hasattr(tracker, "resume_mismatch") else ""
+        rows.append(("push", got == expected, f"{run.name} {k + 1}번 대사: 재현 {expected} / 운영 {got}{note}"))
+        g = o["gt"]
+        if expected is None and g is not None and g.end is not None:  # 멈춘 뒤 판단 — 말을 마친 시점
+            st = o["state"].clone()
+            advance(run, st, g.end, DECIDED)
+            want = " ".join(stall_repush(st, DECIDED))
+            prod = _production_tracker(run, u0, u1, pe)
+            for p, sp, d in sorted(run.deltas, key=lambda x: x[0]):
+                if sp == "assistant" and pe["pos"] < p <= g.end + 1e-9:
+                    prod.add_voice(p)
+                    prod.add_output(p, d)
+            for x in holds:
+                if x["pos"] <= g.end:
+                    (prod.hold if x["name"] == "hold" else prod.release)(x["pos"])
+            action = prod.next_action(g.end + 1.6, production.Tracker.STALL_SEC + 0.1)
+            have = action.text if isinstance(action, production.Repush) else ""
+            rows.append(("stall", have == want, f"{run.name} {k}번 대사 멈춤: 재현 {want!r} / 운영 {have!r}"))
+    return rows
+
+
+def cmd_production(runs: list[Run]) -> None:
+    rows = [r for rs in _map(_production_run, runs) for r in rs]
+    for kind, label in (("push", "앞서 넣기 시각"), ("stall", "멈춘 뒤 다시 넣을 글")):
+        sel = [r for r in rows if r[0] == kind]
+        print(f"{label}: 운영 추적기 = 정한 규칙 재현 {sum(r[1] for r in sel)}/{len(sel)}")
+        for r in sel:
+            if not r[1]:
+                print("   ", r[2])
+
+
+COMMANDS = {
+    "validate": cmd_validate,
+    "push": cmd_push,
+    "stall": cmd_stall,
+    "pauses": cmd_pauses,
+    "done": cmd_done,
+    "production": cmd_production,
+}
 
 
 def main() -> None:

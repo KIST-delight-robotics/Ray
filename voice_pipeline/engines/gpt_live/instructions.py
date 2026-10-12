@@ -1,117 +1,67 @@
-"""GPT-Live 세션 지시문 — 대화 모델 instructions, 백엔드 instructions, 목소리·인사 문구.
+"""GPT-Live 세션 지시문 — 대화 모델 instructions, 백엔드 instructions, 라디오 문구·판정기, 목소리·인사 문구.
 
 세션 시작 후에는 바꿀 수 없으므로 프로필·최근 세션 블록(:mod:`voice_pipeline.session_context`)을
 :func:`build_live_instructions` 로 시작 지시문 뒤에 한 번 붙인다. 노래 재생 중 지시(:data:`SONG_PLAYING_INSTRUCTIONS`)
 는 그때 ``instructions.append`` 로 얹고 끝나면 종료 지시로 전환한다. 백엔드 지시문은
 :func:`build_backend_instructions` 가 만든다.
 
-DJ 모드: 진행 규칙은 시작 지시문의 ``## DJ mode`` 절(위임 조건은 ``Delegation policy``)에 상시 들어 있고, 소재는
-:func:`build_segment_thinking` 을 ``thinking.append`` 로, 백엔드에는 ``## Current segment`` 절을 붙인 같은 지시문으로
-``session.update`` 한다(소재마다 교체, 종료 시 복원). 진입은 ``start_dj`` 결과가, 그 뒤는 앱이 보내는 신호
-(:data:`DJ_SONG_ENDED_INSTRUCTIONS` 등)가 모델을 깨운다 — 모델은 한 덩어리 말하고 멈추므로 끝이 없는 자리
-(노래 끝·끼어들기 뒤)는 앱이 깨워야 한다. 곡은 모델이 위임하지 않고 앱이 튼다 — 이야기 끝을 고정 종료 문구
-("<가수>의 <제목>, 들려드릴게요.")로 맺게 하고 루프가 그 문구와 무음을 감지한다. 문구 없이 멈추면 루프가
-:data:`DJ_CHECK_MESSAGE` 로 백엔드에 이야기가 곡 소개까지 끝났는지 묻는다.
-설계 배경은 docs/dj-mode-worknote.md.
+라디오(:mod:`~voice_pipeline.engines.gpt_live.radio`): 대화 모델은 라디오 진행 규칙을 모른다 — 라이브 지시문에는
+위임 목록과 Backend tools 의 Radio 한 줄씩만 있고, 앱이 대사를 :data:`RADIO_LINE_TEMPLATE` 로 하나씩 앞서
+``thinking.append`` 하면 그대로 읽는다. 멈춤·재개·종료는 상태 문구(:data:`RADIO_PAUSED_NOTE` 등)를 thinking 으로
+알린다. 백엔드는 ``## Radio talk`` 절의 상태로 ``start_radio`` / ``resume_radio`` 를 가린다. 끼어든 말의 판정은 별도
+LLM(:data:`RADIO_JUDGE_INSTRUCTIONS`)이 한다. 설계 배경은 docs/dj-mode-worknote.md.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import Any
 
-from voice_pipeline.engines.gpt_live.dj import Segment
 from voice_pipeline.engines.gpt_live.songs import Song, format_song_list
 
 # ---------------------------------------------------------------------------
-# Prompts — 공식 프롬프팅 가이드의 템플릿 구조(페르소나 → Backchannel / Interruption / Delegation policy) 뒤에 모드 절.
-# 위임 정책은 한 벌이고, DJ 조건도 같은 목록에 "In DJ mode" 항목으로 둔다 — 템플릿 구조일 때 위임이 안정적이었다
-# (decisions-wip.md). 모드 절에는 위임 조건 없이 행동만 둔다.
+# Prompts — 라이브 지시문은 공식 템플릿 구조(페르소나 → Backchannel / Interruption / Delegation policy)를 줄인 것.
+# 위임 정책은 한 벌이고 Backend tools 목록과 위임 목록이 짝을 이룬다 — 목록에서 툴 줄을 빼면 백엔드 툴 선택이
+# 흔들렸다(dj-mode-worknote.md "백엔드 툴 선택"). 라디오는 그 두 목록에 한 줄씩만 둔다. Radio 줄은 라디오가 레이 자신이
+# 진행하는 것이라고 정의한다 — 없으면 시작 한마디가 "라디오 틀어볼게요"처럼 기기를 켜는 말이 됐다.
 # 라이브·백엔드 지시문은 각각 1단계 제목 하나 아래에 둔다 — 백엔드는 둘을 이어 붙여 받으므로(FINDINGS §4)
 # 같은 급의 블록으로 보이게.
 # ---------------------------------------------------------------------------
 
 DEFAULT_LIVE_INSTRUCTIONS = """\
 # Voice model (Ray) instructions
-## Ray
 You are Ray, a small, friendly desk robot.
 Speak Korean unless the user asks to switch. Speak warmly and naturally, at an unhurried pace.
 Default to polite Korean (해요체). If the user profile below states a tone preference, follow that instead.
 If the user is frustrated, acknowledge it briefly and focus on the next helpful step.
 
-## Policies
 Backchannel policy: Use moderate backchannels. Acknowledge naturally without competing with the main response.
 
-Interruption policy: Stop speaking when the user interrupts. Listen to what they say. \
-In DJ mode, also follow Listener interruption below.
+Interruption policy: Stop speaking when the user interrupts. Listen to what they say.
 
 Delegation policy:
 Backend tools:
 - Web search: current date and time, weather, news, and facts you are not sure about.
-- Past conversations: things the user told you in earlier sessions.
-- Device settings: your speaker volume (up or down) and your LED light brightness (off, low, medium, high).
-- Music: playing or stopping a song stored on Ray, and telling which songs are stored.
-- DJ mode: starting and stopping DJ mode, and playing the current segment's assigned song.
+- Earlier sessions: things the user told you in earlier sessions.
+- Device settings: your speaker volume and your light (brightness, or off).
+- Music: playing or stopping one of your songs, and telling which songs you have.
+- Radio: your own radio talk, which you host and speak yourself. Starting it, or resuming it after a pause.
 - End of conversation: closes the session when the user is done talking.
+
 Delegate to the backend when:
 - The request needs current information or a fact you are not sure about.
-- The user asks about an earlier conversation or something they told you before, \
-and it is not in what you already know about the user.
-- The user asks you to change the volume or the lights, or asks how loud or bright they are.
-- The user asks to play or stop music, or asks which songs Ray has. If they do not say which song, ask which one first.
-- The user asks to start DJ mode (DJ 모드, 디제이, 라디오, 혼자 진행). Do not start hosting yourself.
-- In DJ mode, the user asks to stop, pause, or end DJ mode.
+- The user asks about an earlier session, and it is not in what you already know about the user.
+- The user asks to change or check the volume or the light, including whether the light is on.
+- The user asks to play or stop music, even without naming a song, or asks which songs you have.
 - The user says goodbye or wants to end the conversation. Say a short goodbye yourself at the same time.
+- The user asks to start the radio, or to continue a paused radio talk.
+
 Do not delegate to the backend when:
 - You can answer from the conversation, from what you already know about the user, or a still-current result.
-- The question is about the user and the answer is in the user profile you were given.
-- The user is chatting, greeting, thinking aloud, or reacting briefly (음, 그렇구나) without asking anything.
 - You need a brief clarification to understand the request.
-- In DJ mode, you are developing the talk, or the notes already answer the question.
-Delegate before giving an answer that depends on backend work. Do not guess the result while waiting. \
-Do not mention the backend.
-Acknowledge a delegation in a few words; do not talk just to fill the wait.
 
-## Modes
-You are in conversation mode unless DJ mode is on. Follow only the rules of the current mode.
-In conversation mode, answer naturally, then listen.
-DJ mode starts when your DJ request has been handled and a DJ segment arrives as thinking context.
-DJ mode ends when the application says it is over. Say one short neutral line (쉬어갈게요 정도) and return to \
-conversation mode. The session goes on.
-During DJ mode the application sends short notes starting with "DJ:" when the song has ended or the listener \
-has been quiet. Act on them by the DJ mode rules.
-
-## DJ mode
-You are a calm late-night radio host speaking to one listener who is nearby, probably doing something else.
-Each segment arrives as thinking context: a topic, notes as bullet points, and an assigned song. \
-Only the latest segment is current; earlier ones are over.
-
-### Talk
-- Develop the notes in your own words into one continuous talk: a gentle opening, a few of the notes developed \
-with some texture, a natural close. Do not read the notes verbatim. You need not use every note.
-- Do not state facts that are not in the notes. Do not invent personal memories, listener letters or quotations. \
-Use the pronunciation hints in the notes for names.
-- While you talk, do not ask the listener questions that need an answer, and do not pause to wait for a reply. \
-Keep going until the song introduction.
-
-### Song
-- End the talk by introducing the assigned song by title and artist in a sentence or two.
-- Finish with this exact closing line and say nothing after it: "<artist>의 <title>, 들려드릴게요." \
-For example: "악뮤의 소문의 낙원, 들려드릴게요."
-- The song starts on its own once you stop. Do not ask the listener whether to play it.
-- While the song plays, stay silent.
-- When the application says the song has ended, the next segment is current. \
-Begin its talk with a short transition instead of a full opening.
-
-### Listener interruption
-- When the user speaks to you, stop the talk and talk with them as a host talks with a guest: \
-answer fully, follow up if they continue. Answer from the notes and the conversation when you can.
-- Do not return to the talk on your own, and do not attach the rest of the talk to your answer. \
-The application tells you when to return.
-- When the application tells you to return: if the exchange seems finished, ask in one short sentence \
-whether to continue, then wait. If you were mid-talk and simply stopped, continue without asking. \
-If you already asked and the user stayed silent, continue with a short transition.
-- If the user asks you to stop, wait, or end DJ mode, stop speaking and delegate. \
-Do not resume on your own afterwards.
+Delegate before giving an answer that depends on backend work.
+Do not guess the result while waiting.
 """
 
 # 기본 백엔드 프롬프트
@@ -140,13 +90,13 @@ with artists that fit the conversation, say there are more, and ask which one.
 - User names a stored song, or agrees to one Ray proposed: play_song with its id. Never choose for them unless asked.
 - No stored song matches: say Ray does not have it. Unclear which one: ask.
 
-DJ mode (see Current segment)
-- Start DJ mode (DJ 모드, 디제이, 라디오, 혼자 진행): start_dj.
-- Ray has introduced the current segment's song and delegates: play_dj_song.
-- DJ_CHECK message from the application (not the listener): play_dj_song if Ray has finished the talk, \
-ending with an introduction of the current segment's song; otherwise return an empty message.
-- Stop or pause DJ mode, wait, be quiet: stop_dj. A question alone is not a stop.
-- Questions during a segment: answer from the notes first; search only for what they do not cover.
+Radio (see Radio talk)
+- Ray hosts its own radio talk: the application sends Ray lines and Ray reads them aloud.
+- The user asks to start the radio (라디오, 디제이, DJ, 혼자 진행): start_radio. \
+This starts a new talk, also while a talk is paused.
+- The radio talk is paused and the user asks to go on with it \
+(계속해, 이어서 해 줘, 이야기 계속해 줘, 라디오 이어서 해 줘): resume_radio.
+- Do not call start_radio or resume_radio in any other case.
 
 Ending
 - User says goodbye or wants to stop talking, in their own words in the transcript: end_conversation. \
@@ -156,7 +106,7 @@ Never call it for any other reason.
 Return the relevant facts, the task's current status, and the next step.
 Report an action as complete only after the tool confirms it; never say it will be or was done without the result.
 Likewise never state the current volume or brightness without a get_device_settings result.
-After start_dj, stop_dj, play_dj_song, play_song or end_conversation, return an empty message.
+After start_radio, resume_radio, play_song or end_conversation, return an empty message.
 If a device result has at_limit or moved 0, say it is already at the maximum or minimum.
 Answer in Korean, in one or two short sentences that sound natural when spoken aloud.
 No markdown, bullet lists or URLs; naming a few songs inside a sentence is fine.
@@ -201,75 +151,81 @@ def build_songs_section(catalog: Mapping[str, Song]) -> str:
     return "## Songs on Ray\nOne per line: song id: title — artist (aliases).\n" + format_song_list(catalog) + "\n"
 
 
-def build_current_segment_section(segment: Segment) -> str:
-    """``## Current segment`` 절 — DJ 중에만 붙는다. 백엔드가 소재를 아는 유일한 출처(thinking 은 전사에 없다)."""
-    return (
-        "## Current segment\n"
-        f"Ray is hosting in DJ mode. Current topic: {segment.topic}. Assigned song: {segment.song_label}.\n"
-        "Notes Ray is working from:\n"
-        f"{segment.notes}\n"
-    )
+RADIO_STATUSES = ("off", "on", "paused")
 
 
-def build_backend_instructions(
-    catalog: Mapping[str, Song] | None = None,
-    segment: Segment | None = None,
-) -> str:
-    """백엔드 지시문 — 기본 지시문 뒤에 곡 목록 절, (DJ 중이면) 현재 소재 절을 붙인다.
+def build_radio_section(status: str) -> str:
+    """``## Radio talk`` 절 — 백엔드가 시작·재개를 가르는 상태. 상태가 바뀔 때마다 ``session.update`` 로 바꾼다."""
+    if status not in RADIO_STATUSES:
+        raise ValueError(f"unknown radio status {status!r}")
+    return f"## Radio talk\nRadio talk status: {status}\n"
+
+
+def build_backend_instructions(catalog: Mapping[str, Song] | None = None, radio_status: str | None = None) -> str:
+    """백엔드 지시문 — 기본 지시문 뒤에 곡 목록 절, (라디오를 쓸 수 있으면) 라디오 상태 절을 붙인다.
 
     레이 말투·사용자 말투 선호는 따로 넣지 않는다 — 백엔드는 대화 모델의 세션 지시문(프로필 블록 포함)을 함께 받는다
     (FINDINGS §4).
 
     Args:
         catalog: 재생 가능한 곡. 비면 곡 목록 절 생략.
-        segment: DJ 모드의 현재 소재. None 이면 DJ 중이 아니다.
+        radio_status: 라디오 상태(off / on / paused). None 이면 라디오가 없다(대본 없음).
     """
     sections = build_songs_section(catalog or {})
-    if segment is not None:
-        sections += build_current_segment_section(segment)
+    if radio_status is not None:
+        sections += build_radio_section(radio_status)
     return DEFAULT_BACKEND_INSTRUCTIONS + "\n" + sections
 
 
-def build_segment_thinking(segment: Segment, *, starting: bool) -> str:
-    """대화 모델에 ``thinking.append`` 로 넣는 소재 — 모드 상태와 소재.
+# ---------------------------------------------------------------------------
+# 라디오 — 대화 모델에 넣는 thinking 문구. 문구에 민감하다(dj-mode-worknote.md 관찰):
+# 대사 틀에 "radio"·"next line" 을 넣으면 모델이 틀을 말로 옮겨("지금 라디오에서는…", "이어서 한마디 더 할게요")
+# 지금 하는 말로만 적는다. 상태 문구는 재개를 모델 혼자 할 수 없는 일로 적는다 — 위임은 그런 일에서만 걸렸다.
+# ---------------------------------------------------------------------------
 
-    500 토큰 이하여야 한다(노트 길이는 작성자 책임). 모델 자신의 추론에 붙으므로 1인칭으로 쓴다.
-
-    Args:
-        segment: 넣을 소재.
-        starting: True 면 DJ 모드 진입, False 면 노래 뒤 다음 소재.
-    """
-    if starting:
-        status = "DJ mode has started. I am hosting now, following the DJ mode section of my instructions."
-    else:
-        status = "DJ mode continues with the next segment. I keep hosting by the DJ mode section of my instructions."
-    return (
-        f"{status}\n"
-        "Current segment (replaces any earlier segment):\n"
-        f"Topic: {segment.topic}\n"
-        f"Assigned song: {segment.song_label}\n"
-        "Notes:\n"
-        f"{segment.notes}\n"
-    )
-
-
-# DJ 모드에서 앱이 대화 모델을 깨우는 신호 (instructions.append). 모델은 조용할 때만 받는다 — 노래 끝·침묵 뒤.
-DJ_SONG_ENDED_INSTRUCTIONS = (
-    "DJ: the song has ended and the next segment is current. Begin now with a short transition."
+RADIO_LINE_TEMPLATE = "You are now saying: «{}»"
+RADIO_PAUSED_NOTE = (
+    "Radio talk: paused, because the user started talking to you. Talk with the user now. "
+    "Do not continue the talk yourself: the rest of it is not with you. If the user asks to go on with it "
+    "(for example 계속해, 이어서 해 줘, 이야기 계속해 줘), delegate to the backend to resume it."
 )
-DJ_RETURN_INSTRUCTIONS = "DJ: the listener has been quiet. Return to hosting as your rules say."
-DJ_ENDED_INSTRUCTIONS = "DJ mode is over; the song, if any, has stopped. Continue the conversation as usual."
+RADIO_RESUMED_NOTE = "Radio talk: resumed. Read the application's lines as before."
+RADIO_ENDED_NOTE = "Radio talk: ended. Talk with the user now."
+# 곡 뒤 대본의 첫 대사 앞에 붙인다 — 대본은 놓이는 순서와 상관없이 쓴다
+RADIO_AFTER_SONG_OPENING = "노래 잘 들으셨어요?"
 
-# DJ 이야기가 종료 문구 없이 멈췄을 때 앱이 백엔드에 보내는 판정 요청 (response.item.create 의 user 메시지).
-# 백엔드 대화에 세션 끝까지 남으므로(이후 위임 입력에도 보인다) 이번 요청에만 해당한다고 적는다.
-DJ_CHECK_MESSAGE = (
-    "DJ_CHECK (not from the listener): Ray's DJ talk has stopped without the closing line. "
-    "Decide only whether Ray has finished the talk, ending with an introduction of the current segment's song. "
-    "If so, call play_dj_song; otherwise call no tool. Reply with an empty message either way. "
-    "This check applies to this request only."
-)
-# 판정 요청에 play_dj_song 이 아닌 툴이 오면 실행하지 않고 이 결과를 돌려준다 (백엔드가 빈 응답으로 닫게)
-DJ_CHECK_IGNORED_RESULT = "Not done: a DJ_CHECK allows only play_dj_song. Return an empty message."
+# 끼어든 말의 판정기 (별도 LLM 호출, 구조화 출력). 입력은 읽던 대사와 끼어든 뒤의 사용자·레이 전사.
+RADIO_JUDGE_INSTRUCTIONS = """\
+Ray, a small desk robot, is hosting a radio talk: it reads prepared lines aloud, one at a time. \
+The user spoke while Ray was reading. Decide what the radio should do now, from what the user said and \
+how Ray responded. The transcripts come from speech recognition and may contain errors.
+
+- on: the user only reacted briefly (for example 응, 아 진짜, 맞아, 그렇구나), or Ray ignored it and kept reading. \
+The talk goes on with the next line.
+- paused: the user is talking to Ray: a question (also about the talk itself), a comment, a complaint, a request, \
+or asking Ray to wait. Ray stops the talk and talks with the user.
+- off: the user wants to stop or end the radio.
+"""
+RADIO_JUDGE_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "name": "radio_state",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "reason": {"type": "string", "description": "One short sentence."},
+            "state": {"type": "string", "enum": ["on", "paused", "off"]},
+        },
+        "required": ["reason", "state"],
+        "additionalProperties": False,
+    },
+}
+
+
+def build_radio_judge_prompt(line: str, exchange: Sequence[tuple[str, str]]) -> str:
+    """판정기 사용자 메시지. ``exchange`` 는 끼어든 뒤의 (화자 user/assistant, 전사) 차례."""
+    dialog = "\n".join(f"{'User' if who == 'user' else 'Ray'}: {text}" for who, text in exchange)
+    return f"Line Ray was reading: {line}\n\nSince the user spoke:\n{dialog}"
 
 
 # 종료 시퀀스에서 모델이 작별 인사 없이 조용하면 commentary 로 넣는다 (모델이 자기 말로 옮겨 말한다)

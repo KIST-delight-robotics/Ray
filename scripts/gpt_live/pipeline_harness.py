@@ -56,7 +56,8 @@ class Recorder:
 
     Attributes:
         events: ``{"t", "name", ...}`` 목록. delegation_created, backend_call(fn), backend_reply(text),
-            append_thinking / append_instructions(text), submit_function_output, dj_begin, song_play(song) 등.
+            append_thinking / append_instructions(text), submit_function_output, song_play(song) 등. 라디오 대사·상태
+            문구는 append_thinking 으로 남는다.
         transcripts: 전사 세그먼트 id → 최신 스냅샷(speaker, text, 첫 도착 t). 닫히지 않은 세그먼트도 남는다.
         audio: 모델 출력 조각마다 (도착 t, 바이트 수, 음성 여부).
         pcm: 받은 모델 출력 오디오 전부 (``BRIDGE_SAMPLE_RATE``). 루프가 채우거나 버리기 전이라 ``audio`` 와
@@ -157,8 +158,7 @@ def install() -> None:
     orig_start = LiveSessionLoop._start_session
     orig_on_audio = LiveSessionLoop._on_audio
     orig_on_transcript = LiveSessionLoop._on_transcript
-    orig_dj_begin = LiveSessionLoop._dj_begin
-    orig_nudge = LiveSessionLoop._maybe_nudge_dj
+    orig_log_lead = LiveSessionLoop._maybe_log_lead
 
     def start_session(self: LiveSessionLoop) -> None:
         orig_start(self)
@@ -181,21 +181,15 @@ def install() -> None:
             }
         orig_on_transcript(self, seg)
 
-    def dj_begin(self: LiveSessionLoop) -> None:
-        if CURRENT is not None:
-            CURRENT.mark("dj_begin")
-        orig_dj_begin(self)
-
-    def frame(self: LiveSessionLoop, now: float) -> None:  # _maybe_nudge_dj 는 매 프레임 불린다
+    def frame(self: LiveSessionLoop, now: float) -> None:  # _maybe_log_lead 는 매 프레임 끝에 불린다
         if CURRENT is not None and CURRENT.frame_hook is not None:
             CURRENT.frame_hook(self, now)
-        orig_nudge(self, now)
+        orig_log_lead(self, now)
 
     LiveSessionLoop._start_session = start_session  # type: ignore[method-assign]
     LiveSessionLoop._on_audio = on_audio  # type: ignore[method-assign]
     LiveSessionLoop._on_transcript = on_transcript  # type: ignore[method-assign]
-    LiveSessionLoop._dj_begin = dj_begin  # type: ignore[method-assign]
-    LiveSessionLoop._maybe_nudge_dj = frame  # type: ignore[method-assign]
+    LiveSessionLoop._maybe_log_lead = frame  # type: ignore[method-assign]
 
     # 하드웨어 대역 — wiring 이 조립 때 읽는 이름을 바꾼다
     songs._SONG_FILES = tuple(f for f in songs._SONG_FILES if f[0] != "audio/music")

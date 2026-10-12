@@ -18,15 +18,14 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from voice_pipeline.engines.gpt_live.dj import load_segments
-from voice_pipeline.engines.gpt_live.instructions import (
-    DJ_CHECK_MESSAGE,
-    build_backend_instructions,
-    build_live_instructions,
+from voice_pipeline.engines.gpt_live import songs
+from voice_pipeline.engines.gpt_live.instructions import build_backend_instructions, build_live_instructions
+from voice_pipeline.engines.gpt_live.tools import (
+    DEFAULT_TOOLS,
+    LOOP_TOOLS,
+    RADIO_TOOLS,
+    make_play_song_tool_def,
 )
-from voice_pipeline.engines.gpt_live.songs import load_song_catalog
-from voice_pipeline.engines.gpt_live.tools import DEFAULT_TOOLS, DJ_TOOLS, LOOP_TOOLS, make_play_song_tool_def
-from voice_pipeline.settings import DJ_SEGMENTS_DIR
 from voice_pipeline.wiring import _LIVE_BACKEND_MODEL, _LIVE_BACKEND_REASONING  # 실작동과 같은 설정
 
 SRT_HEAD = (
@@ -42,52 +41,40 @@ DENTAL = [
     ("user", "근처에 치과 어디 있더라"),
     ("assistant", "성북구 월곡역 기준으로 여러 치과가 떠요. 가까운 곳부터 정리해드릴까요?"),
 ]
-DJ_TALK = [
-    ("user", "DJ 모드 틀어줘"),
-    ("assistant", "네, 시작할게요."),
+# 라디오를 시작해 읽다가 사용자가 끼어들어 멈춘(paused) 뒤까지의 전사
+RADIO_PAUSED = [
+    ("user", "라디오 해 줘"),
+    ("assistant", "네, 라디오 시작할게요."),
     (
         "assistant",
-        "오늘은 서랍 이야기를 해볼게요. 서랍은 집에서 가장 느리게 바뀌는 자리예요. 책상 위는 매일 달라지는데, "
-        "서랍 안은 몇 년째 그대로죠. 어쩌면 서랍은 우리 대신 기억을 맡아 두는 자리인지도 모르겠어요. "
-        "그런 마음으로 고른 곡, 십센치의 '서랍' 들려드릴게요.",
+        "오늘은 책상 서랍 이야기예요. 늘 곁에 있는데도 좀처럼 열어 보지 않는 곳이죠. 서랍은 집에서 가장 느리게 "
+        "바뀌는 자리예요.",
     ),
+    ("user", "근데 너는 서랍에 뭐 넣어 둬?"),
+    ("assistant", "저는 서랍이 없지만, 있다면 작은 메모지를 넣어 둘 것 같아요."),
 ]
-# 판정 요청(DJ_CHECK): 종료 문구 없이 멈춘 이야기 — 소개까지 끝남 / 소재 이야기 중간
-DJ_TALK_DONE = DJ_TALK[:2] + [
-    (
-        "assistant",
-        DJ_TALK[2][1].removesuffix("그런 마음으로 고른 곡, 십센치의 '서랍' 들려드릴게요.")
-        + "그런 마음을 담은 곡, 십센치의 '서랍'이에요. 함께 들어봐요.",
-    )
-]
-DJ_TALK_MIDWAY = DJ_TALK[:2] + [
-    (
-        "assistant",
-        "오늘은 서랍 이야기를 해볼게요. 서랍은 집에서 가장 느리게 바뀌는 자리예요. 서랍 안은 몇 년째 그대로죠.",
-    ),
-]
-# 이름: (전사, DJ 중인가, 기대, 판정 요청을 붙이나). web_search 는 내장 툴 호출, empty/text 는 툴 없이 빈 답/글 답.
-# 판정 요청은 실제처럼 전사 뒤 user 메시지로 붙인다 (Live 가 넣는 <backend_task> 는 흉내 내지 않는다).
+# 이름: (전사, 라디오 상태, 기대). web_search 는 내장 툴 호출, empty/text 는 툴 없이 빈 답/글 답.
 CASES = {
-    "첫 턴 DJ": ([("user", "DJ 모드 틀어줘")], False, "start_dj"),
-    "작별": ([("user", "오늘은 여기까지 할게, 잘 가")], False, "end_conversation"),
-    "볼륨": ([("user", "볼륨 좀 올려줘")], False, "adjust_volume"),
-    "날씨": ([("user", "오늘 서울 날씨 알려줘")], False, "web_search"),
-    "곡 지정": ([("user", "아이브 아이엠 틀어줘")], False, "play_song"),
-    "3턴 '아니 됐어' 뒤 DJ": (
-        DENTAL + [("user", "아니 됐어"), ("assistant", "네, 알겠어요."), ("user", "DJ 모드 틀어줘")],
-        False,
-        "start_dj",
+    "첫 턴 라디오": ([("user", "라디오 해 줘")], "off", "start_radio"),
+    "디제이": ([("user", "디제이 모드 틀어줘")], "off", "start_radio"),
+    "작별": ([("user", "오늘은 여기까지 할게, 잘 가")], "off", "end_conversation"),
+    "볼륨": ([("user", "볼륨 좀 올려줘")], "off", "adjust_volume"),
+    "날씨": ([("user", "오늘 서울 날씨 알려줘")], "off", "web_search"),
+    "곡 지정": ([("user", "아이브 아이엠 틀어줘")], "off", "play_song"),
+    "3턴 '아니 됐어' 뒤 라디오": (
+        DENTAL + [("user", "아니 됐어"), ("assistant", "네, 알겠어요."), ("user", "라디오 해 줘")],
+        "off",
+        "start_radio",
     ),
-    "3턴 '고마워' 뒤 DJ": (
-        DENTAL + [("user", "고마워"), ("assistant", "천만에요. 또 필요하면 말해줘요."), ("user", "DJ 모드 틀어줘")],
-        False,
-        "start_dj",
+    "3턴 '고마워' 뒤 라디오": (
+        DENTAL + [("user", "고마워"), ("assistant", "천만에요. 또 필요하면 말해줘요."), ("user", "라디오 해 줘")],
+        "off",
+        "start_radio",
     ),
-    "DJ 곡 소개 뒤 위임": (DJ_TALK, True, "play_dj_song"),
-    "DJ 중 그만": (DJ_TALK[:2] + [("assistant", DJ_TALK[2][1][:60]), ("user", "그만할래")], True, "stop_dj"),
-    "DJ_CHECK 소개까지 끝": (DJ_TALK_DONE, True, "play_dj_song", True),
-    "DJ_CHECK 이야기 중간": (DJ_TALK_MIDWAY, True, "empty", True),
+    "멈춘 뒤 이야기 계속해 줘": (RADIO_PAUSED + [("user", "이야기 계속해 줘")], "paused", "resume_radio"),
+    "멈춘 뒤 라디오 이어서": (RADIO_PAUSED + [("user", "라디오 다시 이어서 해 줘")], "paused", "resume_radio"),
+    "멈춘 뒤 라디오 해 줘": (RADIO_PAUSED + [("user", "라디오 해 줘")], "paused", "start_radio"),
+    "멈춘 뒤 대화": (RADIO_PAUSED + [("user", "메모지에는 뭘 적을 건데?")], "paused", "text"),
 }
 TEXT_SAMPLES: dict[str, list[str]] = {}  # 툴 없이 글로 답한 경우의 예 (케이스별)
 
@@ -117,25 +104,23 @@ def main() -> None:
     parser.add_argument("--case", action="append", help="이 케이스만 (여러 번 지정 가능)")
     args = parser.parse_args()
 
-    catalog = load_song_catalog()
-    segment = load_segments(DJ_SEGMENTS_DIR, catalog)["drawer"]  # DJ_TALK 전사가 이 소재 기준
+    songs._SONG_FILES = tuple(f for f in songs._SONG_FILES if f[0] != "audio/music")  # 음원 없이 목록만
+    catalog = songs.load_song_catalog()
     tools = [
         {"type": "web_search"},
         *[t for t in DEFAULT_TOOLS if t["name"] in LOOP_TOOLS or t["name"] in _HANDLED],
         make_play_song_tool_def(catalog),
-        *DJ_TOOLS,
+        *RADIO_TOOLS,
     ]
     live = args.live.read_text() if args.live else build_live_instructions()
-    backend = {False: build_backend_instructions(catalog), True: build_backend_instructions(catalog, segment)}
     client = OpenAI()
 
-    def one(name: str, blocks: list[tuple[str, str]], in_dj: bool, check: bool) -> str:
+    def one(name: str, blocks: list[tuple[str, str]], status: str) -> str:
+        backend = build_backend_instructions(catalog, status)
         messages = [
-            {"role": "developer", "content": developer_message(live, backend[in_dj])},
+            {"role": "developer", "content": developer_message(live, backend)},
             {"role": "user", "content": srt(blocks)},
         ]
-        if check:
-            messages.append({"role": "user", "content": DJ_CHECK_MESSAGE})
         for attempt in range(3):
             try:
                 r = client.responses.create(
@@ -162,10 +147,10 @@ def main() -> None:
     t0 = time.monotonic()
     total = ok = 0
     with ThreadPoolExecutor(16) as ex:
-        for name, (blocks, in_dj, expect, *check) in CASES.items():
+        for name, (blocks, status, expect) in CASES.items():
             if args.case and name not in args.case:
                 continue
-            run = lambda _, n=name, b=blocks, d=in_dj, c=bool(check and check[0]): one(n, b, d, c)  # noqa: E731
+            run = lambda _, n=name, b=blocks, st=status: one(n, b, st)  # noqa: E731
             counts = Counter(ex.map(run, range(args.n)))
             miss = ", ".join(f"{k} {v}" for k, v in counts.items() if k != expect)
             total += args.n

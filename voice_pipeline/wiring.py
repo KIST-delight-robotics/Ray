@@ -42,18 +42,18 @@ from voice_pipeline.engines.cascade.loop import SessionLoop
 from voice_pipeline.engines.cascade.summarizer import HistorySummarizer
 from voice_pipeline.engines.cascade.text_session import TextSession
 from voice_pipeline.engines.cascade.turn_detector import TurnDetector
-from voice_pipeline.engines.gpt_live.dj import SegmentLog, SegmentPicker, load_segments
 from voice_pipeline.engines.gpt_live.instructions import (
     LIVE_VOICE,
     build_backend_instructions,
     build_live_instructions,
 )
 from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop
+from voice_pipeline.engines.gpt_live.radio import Radio, RadioJudge, ScriptLog, ScriptPicker, load_scripts
 from voice_pipeline.engines.gpt_live.songs import Song, load_song_catalog
 from voice_pipeline.engines.gpt_live.tools import (
     DEFAULT_TOOLS,
-    DJ_TOOLS,
     LOOP_TOOLS,
+    RADIO_TOOLS,
     SEARCH_MEMORY_TOOL,
     make_device_settings_handlers,
     make_memory_search_handler,
@@ -68,9 +68,9 @@ from voice_pipeline.settings import (
     BRIDGE_SAMPLE_RATE,
     DEFAULT_DB_PATH,
     DEVICE_SETTINGS_PATH,
-    DJ_SEGMENTS_DIR,
     ENGINE,
     HISTORY_TOKEN_BUDGET,
+    RADIO_SCRIPTS_DIR,
     SAMPLE_RATE,
     SONG_CATALOG_PATH,
     SUMMARY_MAX_TOKENS,
@@ -137,7 +137,8 @@ class ProcessComponents:
     shutdown_event: threading.Event
     device_settings: DeviceSettings | None = None  # 볼륨·밝기 (live 툴). None 이면 툴 미노출
     song_catalog: dict[str, Song] = field(default_factory=dict)  # 재생 가능한 노래 (live 툴). 비면 툴 미노출
-    dj_picker: SegmentPicker | None = None  # DJ 소재 선택 (live 툴). None 이면 DJ 툴 미노출
+    radio_picker: ScriptPicker | None = None  # 라디오 대본 선택 (live 툴). None 이면 라디오 툴 미노출
+    radio_judge: RadioJudge | None = None  # 라디오 끼어들기 판정기. radio_picker 와 함께 있다
     _prev_threaded: list[ThreadedTurnGPT] = field(default_factory=list)
     _prev_summarizers: list[HistorySummarizer] = field(default_factory=list)
 
@@ -197,15 +198,19 @@ class ProcessComponents:
             tools = tuple(t for t in DEFAULT_TOOLS if t["name"] in LOOP_TOOLS or t["name"] in tool_handlers)
             if (play_song := make_play_song_tool_def(self.song_catalog)) is not None:
                 tools += (play_song,)
-            if self.dj_picker is not None:
-                tools += DJ_TOOLS
-                self.dj_picker.new_session()
+            radio = None
+            if self.radio_picker is not None and self.radio_judge is not None:
+                tools += RADIO_TOOLS
+                self.radio_picker.new_session()
+                radio = Radio(self.radio_picker, self.radio_judge, self.executor)
             live = GPTLiveSession(
                 LiveSessionConfig(
                     instructions=instructions,
                     backend_model=_LIVE_BACKEND_MODEL,
                     backend_reasoning=_LIVE_BACKEND_REASONING,
-                    backend_instructions=build_backend_instructions(self.song_catalog),
+                    backend_instructions=build_backend_instructions(
+                        self.song_catalog, radio.status if radio is not None else None
+                    ),
                     tools=tools,
                     voice=LIVE_VOICE,
                     sample_rate=BRIDGE_SAMPLE_RATE,
@@ -224,7 +229,7 @@ class ProcessComponents:
                 tool_handlers=tool_handlers,
                 executor=self.executor,
                 song_catalog=self.song_catalog,
-                dj_picker=self.dj_picker,
+                radio=radio,
                 audio_input=self.audio_input,
                 **session_loop_kwargs,
             )
@@ -322,7 +327,7 @@ def build_components(
     language_code: str = "en-US",
     engine: Engine = ENGINE,
     song_catalog_path: str = SONG_CATALOG_PATH,
-    dj_segments_dir: str = DJ_SEGMENTS_DIR,
+    radio_scripts_dir: str = RADIO_SCRIPTS_DIR,
 ) -> ProcessComponents:
     """Build the process-level component graph shared by all sessions.
 
@@ -335,7 +340,7 @@ def build_components(
         language_code: ASR 언어 코드 (cascade 엔진과 웨이크워드).
         engine: 대화 엔진. ``live`` 면 ASR·VAP·TurnGPT 를 만들지 않는다 (settings.ENGINE 기본).
         song_catalog_path: 노래 카탈로그(``songs.json``) 경로. 없거나 비면 노래 툴을 노출하지 않는다.
-        dj_segments_dir: DJ 소재 폴더. 없거나 비면(또는 곡이 하나도 재생 불가면) DJ 툴을 노출하지 않는다.
+        radio_scripts_dir: 라디오 대본 폴더. 없거나 비면(또는 곡이 하나도 재생 불가면) 라디오 툴을 노출하지 않는다.
 
     Returns:
         조립된 :class:`ProcessComponents`. ``audio_input.start()``/``bridge.connect()``
@@ -413,8 +418,14 @@ def build_components(
     audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=_AUDIO_QUEUE_SIZE)
     audio_input = AudioInput(audio_queue)
     song_catalog = load_song_catalog(song_catalog_path) if engine == "live" else {}
-    segments = load_segments(dj_segments_dir, song_catalog) if song_catalog else {}
-    dj_picker = SegmentPicker(segments, SegmentLog(db_path)) if segments else None
+    scripts = load_scripts(radio_scripts_dir, song_catalog) if song_catalog else {}
+    radio_picker = ScriptPicker(scripts, ScriptLog(db_path)) if scripts else None
+    # 끼어든 말 판정 — 응답 지연이 판정 시점을 정하므로 추론 없이, 구조화 출력으로 짧게
+    radio_judge = (
+        RadioJudge(OpenAILLM(model="gpt-5.4-mini", temperature=0.0, reasoning_effort="none", max_tokens=120, tools=[]))
+        if radio_picker is not None
+        else None
+    )
 
     return ProcessComponents(
         engine=engine,
@@ -443,7 +454,8 @@ def build_components(
         shutdown_event=threading.Event(),
         device_settings=device_settings,
         song_catalog=song_catalog,
-        dj_picker=dj_picker,
+        radio_picker=radio_picker,
+        radio_judge=radio_judge,
     )
 
 
