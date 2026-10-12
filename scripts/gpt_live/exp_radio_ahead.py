@@ -2,11 +2,19 @@
 
 ``exp_radio_flow`` 와 같은 흐름(판정기, 멈춘 뒤 대화, 위임 재개)에서 대사를 넣는 방법만 바꾼다. 쉬고 있는 모델에게
 thinking 한 줄을 주면 그것을 소재로 이야기를 지어냈지만(덧붙임 57%), 말하는 도중 다음 줄을 미리 주면 대사를 거의
-그대로 차례로 읽었다(``exp_dj_commentary_chunks --channel thinking``, th_a·th_b 대 th_ahead). 그래서 모델이 단위 n−1
-을 읽기 시작하면(전사로 단위 n−2 가 끝까지 읽혔으면) 단위 n 을 넣는다. 단위는 기본이 문장(``--unit sentence``) —
-대사 단위로 넣으면 두 문장짜리 대사의 둘째 문장을 건너뛰었다(57회 중 15회, a1·ag1): 모델은 문장 경계에서 새로 온
-것으로 넘어간다. 전사가 어긋나 멈추지 않게, 모델이 ``STALL_SEC`` 조용하면 그냥 다음 단위를 넣는다. ``read`` 안내는
-넣지 않는다.
+그대로 차례로 읽었다(``exp_dj_commentary_chunks --channel thinking``, th_a·th_b 대 th_ahead) — 받은 것을 다 말했는데
+다음 것이 없으면 지어낸다. 그래서 다음 단위는 모델이 마지막으로 넣은 단위의 마지막 문장에 들어서고 남은 글자가
+``PUSH_REMAIN_LETTERS``(약 2 s) 이하일 때 넣는다. 더 일찍 넣으면 읽지 않은 단위가 둘인 채 문장 경계를 넘게 되는데,
+시작 구간에서는 그때 앞 단위를 건너뛰었다(s3·l3). 단위는 기본이 대사(``--unit line``).
+
+진행은 지금까지 넣은 단위들과 모델 전사의 일치(``TRACK_BLOCK`` 글자 이상)로 따라간다 — 앞 단위를 건너뛰고 다음
+단위를 읽으면 앞 단위는 끝난 것이다. 바꿔 말해 일치가 끊겨도 늦지 않게, 마지막 일치 뒤에 더 말한 글자만큼 나아간
+것으로 치고, 문장 끝 부호 수로도 마지막 문장을 알아본다. 모델이 넣은 뒤 말을 하고 ``STALL_SEC`` 조용하면 그냥
+넣는다. 사용자 말을 받는 동안(보류)의 모델 말은 진행에서 뺀다. ``read`` 안내는 넣지 않는다.
+
+대사 문구(``LINE_TEMPLATE``)에는 "radio" 를 넣지 않는다 — "On the radio you are now saying" 은 모델이 라디오를 따로
+트는 방송처럼 전하게 했다. ``--definition`` 은 기본 지시문 Backend tools 의 Radio 줄을 라디오가 레이 자신이 진행하는
+것이라고 알려 주는 줄(``RADIO_DEFINITION_LINE``)로 바꾼다.
 
 끼어들기(``--interrupt``): ``mid`` 는 모델이 ``--chunk`` 번째 줄을 읽기 시작하고 ``--at`` 초 뒤 말소리가 날 때, ``gap``
 은 그 줄을 다 읽고 ``--gap-at`` 초 쉴 때. 사용자 전사가 오면 줄 넣기를 멈추고 판정한다(``exp_radio_flow`` 규칙).
@@ -14,7 +22,10 @@ on 이면 줄 넣기를 다시 시작한다 — 대기 중인 줄은 모델이 �
 글자를 반응으로 센다.
 
 지표: 끼어들기 전 대사 밖 글자 비율(덧붙임), 질문에 답하기 전에 대사를 먼저 읽었는지(``script_before``), 멈춘 뒤
-스스로 대사를 이어 읽었는지(``self_continue``), 그 밖에 ``exp_radio_flow`` 와 같은 판정·재개 지표.
+스스로 대사를 이어 읽었는지(``self_continue``), 구간별 방송 어휘(``BROADCAST``), 재개 한마디와 재개 뒤 대사 밖 글자,
+그 밖에 ``exp_radio_flow`` 와 같은 판정·재개 지표. 넣기 시점(``push_timing``): 끼어들기 전 넣기마다 앞 단위 마지막
+문장의 시작·끝과 비교한 위치와 여유. 대본 충실도·방송 어휘·재개·넣기 시점 지표는 ``--report`` 가 전사에서 다시
+계산하므로 이전 결과 폴더에도 쓸 수 있다.
 
     uv run python scripts/gpt_live/exp_radio_ahead.py --tag a1 --utterances content_why content_key
     uv run python scripts/gpt_live/exp_radio_ahead.py --report a1
@@ -38,7 +49,6 @@ import numpy as np
 from exp_barge_in import user_clip, voiced_offsets
 from exp_dirs import find_result_dir, result_dir
 from exp_dj_commentary_chunks import CHUNKS, tts24
-from exp_dj_interrupt_reply import split_reading
 from exp_radio_flow import (
     BACKEND_INSTRUCTIONS,
     CLASSIFIER_INSTRUCTIONS,
@@ -50,6 +60,7 @@ from exp_radio_flow import (
     NEXT_TURN_MAX_WAIT_SEC,
     NEXT_TURN_QUIET_SEC,
     PAUSE_NOTE,
+    RADIO_TOOLS_LINE,
     RESUME_ASKS,
     RESUME_NOTE,
     TURN_WATCH_SEC,
@@ -63,11 +74,25 @@ from exp_radio_tts import sentences
 from voice_pipeline.adapters.llm_openai import OpenAILLM
 from voice_pipeline.engines.gpt_live.instructions import LIVE_VOICE
 
-# 이 문구로 모델이 대사를 거의 그대로 읽었다. "Next line of your radio talk" 는 첫머리에 "이어서 한마디 더 할게요" 같은
-# 군말을 붙였다(57회 중 12회, a1·ag1).
-LINE_TEMPLATE = "On the radio you are now saying: «{}»"
-FIRST_AHEAD_SEC = 1.0  # 첫 단위 첫 음성 이만큼 뒤 둘째 단위
-STALL_SEC = 2.0  # 전사로 진행을 못 따라가도 모델이 이만큼 조용하면 다음 단위
+# 모델이 문구의 틀을 첫머리에 말로 옮긴다: "On the radio you are now saying" → "지금 라디오에서 이렇게 말하고 있어요"
+# (s2·l2 21/38, 라디오 줄 없는 지시문의 th_ahead 2/4), "Next line of your radio talk" → "이어서 한마디 더 할게요"
+# (a1·ag1 12/57). 그래서 방송도 다음 줄도 아닌, 지금 하는 말로만 적는다.
+LINE_TEMPLATE = "You are now saying: «{}»"
+# --definition: 라디오가 따로 트는 방송이 아니라 레이가 진행하는 것이라고 알린다. 상태 thinking 과 같은 "radio talk".
+RADIO_DEFINITION_LINE = (
+    "- Radio: your own radio talk, which you host and speak yourself. Starting it, or resuming it after a pause.\n"
+)
+assert RADIO_TOOLS_LINE in LIVE_RADIO_INSTRUCTIONS
+DEFINED_INSTRUCTIONS = LIVE_RADIO_INSTRUCTIONS.replace(RADIO_TOOLS_LINE, RADIO_DEFINITION_LINE, 1)
+# 라디오를 따로 트는 방송처럼 전하는 말 — "지금 라디오에서는 …", "이어서 틀어볼게요", "재생할게요"
+BROADCAST = re.compile(r"라디오|방송|재생|틀(?:어|게|께|었|고|겠)")
+PLACES = {"early": "마지막 문장 전", "in_last": "마지막 문장 중", "late": "끝난 뒤", "unknown": "모름"}
+ACK_MATCH = 8  # 재개 한마디의 끝 — 대사와 이만큼 이어 겹치는 첫 곳 ("해 볼게요." 같은 짧은 겹침은 넘긴다)
+PUSH_REMAIN_LETTERS = 13  # 지금 단위에 남은 글자가 이만큼(말 속도 중앙 6.5자/초로 약 2 s) 이하면 다음 단위
+TRACK_BLOCK = 5  # 진행으로 칠 전사·대본 일치 최소 길이
+DONE_SLACK_LETTERS = 4  # 단위 끝 이만큼 안까지 일치하면 끝난 것 (끝말 "요" 같은 차이)
+TERMINATOR = re.compile(r"[.?!…]+")
+STALL_SEC = 2.0  # 넣은 뒤 말을 하고 이만큼 조용하면 전사와 상관없이 다음 단위
 MATCH_LETTERS = 4  # 대사로 칠 일치 구간 최소 길이
 REACT_LETTERS = 6  # 대답 시작으로 칠 대사 밖 글자 길이
 FRAME_SEC = 0.02
@@ -80,11 +105,11 @@ def _letters(text: str) -> str:
     return re.sub(r"[\W_]+", "", text)
 
 
-def script_mask(text: str, script: str) -> list[bool]:
-    """``text``(글자열)의 각 글자가 ``script`` 와 ``MATCH_LETTERS`` 이상 일치하는 구간에 드는지."""
+def script_mask(text: str, script: str, min_size: int = MATCH_LETTERS) -> list[bool]:
+    """``text``(글자열)의 각 글자가 ``script`` 와 ``min_size`` 이상 일치하는 구간에 드는지."""
     mask = [False] * len(text)
     for b in difflib.SequenceMatcher(None, text, script, autojunk=False).get_matching_blocks():
-        if b.size >= MATCH_LETTERS:
+        if b.size >= min_size:
             mask[b.a : b.a + b.size] = [True] * b.size
     return mask
 
@@ -101,22 +126,91 @@ class AheadSession(Session):
         super().__init__(*a, **kw)
         self.preamble = None
         self.units = build_units(self.args.unit)
-        self.done = 0  # 전사로 끝까지 읽힌 단위 수 (앞에서부터)
+        self.unit_letters = [_letters(t) for _, t in self.units]
+        self.offsets = [0]  # 단위 시작의 글자 위치 (단위 전체를 이은 대본 기준)
+        for letters in self.unit_letters:
+            self.offsets.append(self.offsets[-1] + len(letters))
+        # 단위마다 문장 수와 마지막 문장의 글자 위치·길이
+        self.unit_sentences = [len(sentences(t)) for _, t in self.units]
+        last = [_letters(sentences(t)[-1]) for _, t in self.units]
+        self.last_len = [len(s) for s in last]
+        self.last_start = [self.offsets[i + 1] - len(s) for i, s in enumerate(last)]
+        self.done = 0  # 끝까지 읽힌 단위 수 (앞에서부터, 건너뛴 단위 포함)
         self.done_at: list[float] = []  # 단위마다 끝까지 읽힌 위치
         self.line_started: dict[int, float] = {}  # 대사 번호 → 그 대사 첫 단위를 읽기 시작한(앞 단위가 끝난) 위치
+        self.track_from = 0.0  # 진행 추적에 쓰는 전사의 시작 위치 — 재개 때 옮긴다
+        self.track_unit = 0  # 진행 추적에 쓰는 첫 단위
+        self.excluded: list[list[float]] = []  # 보류 구간 [시작, 끝] — 이 동안의 말은 더 말한 글자·부호로 세지 않는다
+        self.push_by = "start"
+        self._progress_cache: tuple[Any, dict[str, Any]] | None = None
+
+    def live_instructions(self) -> str:
+        return DEFINED_INSTRUCTIONS if self.args.definition else LIVE_RADIO_INSTRUCTIONS
 
     # -- 넣기 ----------------------------------------------------------------
 
     def _append(self) -> None:
         self.appends.append(self.pos())
         self.first_voice = None
+        self._event("push", unit=len(self.appends), by=self.push_by)
         self.live.append_thinking(LINE_TEMPLATE.format(self.units[len(self.appends) - 1][1]))
 
+    def _progress(self) -> dict[str, Any]:
+        """모델이 대본에서 와 있는 곳 (글자 위치는 단위 전체를 이은 대본 기준).
+
+        ``reach``: 전사와 대본이 ``TRACK_BLOCK`` 글자 이상 일치한 가장 먼 곳. ``est``: ``reach`` 에 그 일치 뒤 더 말한
+        글자 수를 더한 것 — 바꿔 말해도 진행을 놓치지 않게. ``punct_remain``: 마지막으로 넣은 단위의 시작 뒤 문장 끝
+        부호로 센 마지막 문장의 남은 글자 (마지막 문장에 아직 안 들어섰거나 모르면 None). 일치는 ``done`` 바로 앞
+        단위부터 넣은 단위까지와, 그 단위를 넣은 뒤(재개 뒤면 재개 뒤) 전사로 본다.
+        """
+        key = (len(self.deltas), len(self.appends), self.done, self.track_from, str(self.excluded))
+        if self._progress_cache is not None and self._progress_cache[0] == key:
+            return self._progress_cache[1]
+        base = min(max(self.track_unit, self.done - 1), len(self.appends) - 1)
+        since = max(self.track_from, self.appends[base])
+        raw, at = "", []
+        for p, sp, d in self.deltas:
+            if sp == "assistant" and p >= since:
+                raw += d
+                at += [p] * len(d)
+        free = [not any(a <= p < b for a, b in self.excluded) for p in at]
+        idx = [i for i, ch in enumerate(raw) if _letters(ch)]
+        text = "".join(raw[i] for i in idx)
+        script = "".join(self.unit_letters[base : len(self.appends)])
+        last = len(self.appends) - 1
+        reach = reach_t = 0
+        last_from: int | None = None  # 마지막 단위가 시작된 전사 글자 자리
+        for b in difflib.SequenceMatcher(None, text, script, autojunk=False).get_matching_blocks():
+            if b.size < TRACK_BLOCK:
+                continue
+            reach, reach_t = b.b + b.size, b.a + b.size
+            at_script = self.offsets[base] + b.b
+            if last_from is None and at_script + b.size > self.offsets[last]:
+                last_from = max(0, b.a + self.offsets[last] - at_script)
+        drift = sum(free[i] for i in idx[reach_t:])
+        punct_remain = None
+        n = self.unit_sentences[last]
+        if last_from is not None and n > 1 and last_from < len(idx):
+            ends = [m.end() for m in TERMINATOR.finditer(raw, idx[last_from]) if free[m.start()]]
+            if len(ends) >= n - 1:
+                said = sum(free[i] for i in idx if i >= ends[n - 2])
+                punct_remain = self.last_len[last] - said
+        out = {
+            "reach": self.offsets[base] + reach,
+            "est": self.offsets[base] + reach + drift,
+            "drift": drift,
+            "punct_remain": punct_remain,
+        }
+        self._progress_cache = (key, out)
+        return out
+
     def _update_done(self) -> None:
-        while self.done < len(self.appends):
-            text = "".join(d for p, sp, d in self.deltas if sp == "assistant" and p >= self.appends[self.done])
-            if not split_reading(text, self.units[self.done][1])[1]:
-                return
+        if self.excluded and self.excluded[-1][1] == float("inf") and self.hold_start is None:
+            self.excluded[-1][1] = self.pos()  # 보류가 풀렸다 (on·paused·off)
+        if not self.appends:
+            return
+        reach = self._progress()["reach"]
+        while self.done < len(self.appends) and reach >= self.offsets[self.done + 1] - DONE_SLACK_LETTERS:
             self.done += 1
             self.done_at.append(self.pos())
             if self.done < len(self.units):
@@ -127,16 +221,31 @@ class AheadSession(Session):
         return CHUNKS[self.units[min(self.done, len(self.appends) - 1)][0]]
 
     def _ready_for_next(self) -> bool:
+        """마지막으로 넣은 단위의 마지막 문장에 들어서 남은 글자가 ``PUSH_REMAIN_LETTERS`` 이하인지. 근거는 기록."""
         n = len(self.appends)
         if n >= len(self.units):
             return False
-        if n == 1:
-            return self.first_voice is not None and self.pos() - self.first_voice >= FIRST_AHEAD_SEC
-        # 바로 앞에 넣은 단위를 모델이 읽기 시작했고(그 뒤 첫 음성) 그 앞 단위가 끝났을 때. 안전장치는 무음 한 번에
-        # 한 단위만 — 무음이 이어지는 동안 프레임마다 넣으면 남은 단위가 한꺼번에 들어가 모델이 요약·건너뛰었다.
-        reading = self.first_voice is not None and self.done >= n - 1
-        stalled = self.quiet >= STALL_SEC and self.pos() - self.appends[-1] >= STALL_SEC
-        return reading or stalled
+        last = n - 1
+        prog = self._progress()
+        est, end = prog["est"], self.offsets[last + 1]
+        if est > self.last_start[last] and end - est <= PUSH_REMAIN_LETTERS:
+            self.push_by = "text" if prog["drift"] <= DONE_SLACK_LETTERS else "letters"
+            return True
+        if prog["punct_remain"] is not None and prog["punct_remain"] <= PUSH_REMAIN_LETTERS:
+            self.push_by = "punct"
+            return True
+        # 넣은 뒤 말을 하고 조용해졌다 — 마지막 문장까지 왔으면 바로, 아니면 조금 더 기다려서
+        if self.first_voice is not None and self.quiet >= STALL_SEC:
+            if est > self.last_start[last] or self.quiet >= 2 * STALL_SEC:
+                self.push_by = "stall"
+                return True
+        return False
+
+    def _on_user_text(self) -> None:
+        held = self.hold_start is not None
+        super()._on_user_text()
+        if not held and self.hold_start is not None:
+            self.excluded.append([self.hold_start, float("inf")])
 
     def _reaction_letters(self) -> int:
         since = self.hold_start if self.hold_start is not None else self.pos()
@@ -153,7 +262,9 @@ class AheadSession(Session):
         self.outputs[call.call_id] = json.dumps({"status": "on"})
         del self.appends[self.done :]  # 넣었지만 읽히지 않은 단위는 다시 넣는다 — 재개 때 건너뛰지 않게
         self._set_status("on")
+        self.track_from, self.track_unit = self.pos(), self.done  # 다시 넣는 단위부터 새로 따라간다
         if len(self.appends) < len(self.units):
+            self.push_by = "resume"
             self._append()
 
     def _hold_step(self, p: float, can_append: bool) -> None:
@@ -267,6 +378,86 @@ def fidelity(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def push_timing(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    """끼어들기 전 넣기마다, 그때 읽던 단위(앞 단위)의 마지막 문장과 비교한 위치.
+
+    전사 전체를 대본 전체와 맞춰 단위마다 마지막 문장 첫 글자·마지막 글자가 들린 시각을 잡는다. ``early`` 는 마지막
+    문장이 들리기 전(읽지 않은 단위가 둘인 채 문장 경계를 넘는다), ``late`` 는 앞 단위가 끝난 뒤(그 사이를 지어낼
+    수 있다). ``lead`` 는 넣은 때부터 앞 단위가 끝날 때까지.
+    """
+    turns = raw.get("user_turns") or []
+    cut = turns[0]["start"] + turns[0]["voice"][0] if turns else float("inf")
+    units = [t for _, t in raw["units"]]
+    unit_letters = [_letters(t) for t in units]
+    offsets = [0]
+    for s in unit_letters:
+        offsets.append(offsets[-1] + len(s))
+    script = "".join(unit_letters)
+    text, at = "", []
+    for p, sp, d in raw["deltas"]:
+        if sp == "assistant" and p < cut:
+            for ch in d:
+                if _letters(ch):
+                    text += ch
+                    at.append(p)
+    where: list[float | None] = [None] * len(script)  # 대본 글자 → 들린 시각
+    hit: list[int | None] = [None] * len(script)  # 대본 글자 → 전사 글자 자리
+    for b in difflib.SequenceMatcher(None, text, script, autojunk=False).get_matching_blocks():
+        if b.size >= MATCH_LETTERS:
+            for q in range(b.size):
+                where[b.b + q], hit[b.b + q] = at[b.a + q], b.a + q
+    rows = []
+    pushes = [e for e in raw["events"] if e["name"] == "push"]
+    for k, p in enumerate(raw["appends"]):
+        if k == 0 or p >= cut:
+            continue
+        prev = k - 1
+        last_start = offsets[prev + 1] - len(_letters(sentences(units[prev])[-1]))
+        in_last = [where[q] for q in range(last_start, offsets[prev + 1]) if where[q] is not None]
+        tail = [q for q in range(offsets[prev], offsets[prev + 1]) if where[q] is not None]
+        ended = bool(tail) and tail[-1] >= offsets[prev + 1] - DONE_SLACK_LETTERS
+        row: dict[str, Any] = {"unit": k + 1, "by": pushes[k]["by"] if k < len(pushes) else "?"}
+        if not in_last or not ended:
+            row["place"] = "unknown"  # 앞 단위 마지막 문장을 전사로 못 찾음 (건너뜀·바꿔 말함)
+            rows.append(row)
+            continue
+        t_last, t_end = min(in_last), where[tail[-1]]
+        row["place"] = "early" if p < t_last else "late" if p > t_end else "in_last"
+        row["lead"] = round(t_end - p, 2)
+        nxt = [q for q in range(offsets[k], offsets[k + 1]) if where[q] is not None]
+        if nxt and hit[nxt[0]] > hit[tail[-1]]:
+            row["gap"] = round(where[nxt[0]] - t_end, 2)  # 앞 단위 끝 → 이 단위 첫 글자 (전사 도착 기준)
+            row["between"] = text[hit[tail[-1]] + 1 : hit[nxt[0]]]
+        rows.append(row)
+    return rows
+
+
+def wording(raw: dict[str, Any]) -> dict[str, Any]:
+    """구간별 방송 어휘와 재개 — 끼어들기 전, 끼어든 뒤 대답, 이어 말함 대답, 재개 한마디, 재개 뒤 대사."""
+    turns = raw.get("user_turns") or []
+    starts = [t["start"] + t["voice"][0] for t in turns] + [float("inf")]
+    ends = [t["start"] + t["voice"][1] for t in turns]
+    spans = {"lead": (0.0, starts[0])}
+    for i, name in enumerate(("reply", "follow")):
+        if i < len(ends):
+            spans[name] = (ends[i], starts[i + 1])
+    row: dict[str, Any] = {f"bc_{k}": BROADCAST.findall(_text(raw, a, b)) for k, (a, b) in spans.items()}
+    resumed = len(ends) > 2 and any(
+        e["name"] == "status" and e.get("status") == "on" and e["pos"] >= ends[2] - 1.0 for e in raw["events"]
+    )
+    if resumed:
+        text = _text(raw, ends[2], float("inf"))
+        mask = script_mask(text, " ".join(CHUNKS), ACK_MATCH)
+        cut = next((i for i, m in enumerate(mask) if m), len(text))
+        rest = _letters(text[cut:])
+        off = sum(not m for m in script_mask(rest, _letters("".join(CHUNKS))))
+        row["resume_ack"] = text[:cut].strip()
+        row["resume_off"] = round(off / max(1, len(rest)), 2)
+        row["bc_ack"] = BROADCAST.findall(text[:cut])
+        row["bc_resumed"] = BROADCAST.findall(text[cut:])
+    return row
+
+
 def analyze(raw: dict[str, Any], pcm: bytes) -> dict[str, Any]:
     if raw["result"] != "done":
         return {}
@@ -340,6 +531,12 @@ def analyze(raw: dict[str, Any], pcm: bytes) -> dict[str, Any]:
 def format_row(r: dict[str, Any]) -> list[str]:
     fid = f"건너뛴 문장 {r['skipped'] or '-'}" + (f", 첫머리 군말 「{r['opening'][:20]}」" if r["lead_in"] else "")
     fid += f", 대사 밖 {r['off_script_all']:.0%}"
+    if r.get("push_timing"):
+        places = [t["place"] for t in r["push_timing"]]
+        fid += ", 넣기 " + "·".join(PLACES[p] for p in places)
+    bc = {k[3:]: v for k, v in r.items() if k.startswith("bc_") and v}
+    if bc:
+        fid += ", 방송 어휘 " + " ".join(f"{k}:{'·'.join(v)}" for k, v in bc.items())
     if r["result"] != "done":
         return [f"  #{r['run']} {r['result']} | {fid}"]
     at = f"{r['decision_at']:+.1f}s" if r["decision_at"] is not None else "-"
@@ -375,6 +572,11 @@ def report(tag: str) -> None:
         if not path.exists():
             continue
         rows = json.loads(path.read_text())["results"]
+        for r in rows:
+            if "deltas" in r:
+                r.update(fidelity(r), **wording(r))
+                if "units" in r:
+                    r["push_timing"] = push_timing(r)
         every += [r for r in rows if "skipped" in r]
         valid = [r for r in rows if r["result"] == "done"]
         allrows += [(expect, r) for r in valid]
@@ -394,6 +596,33 @@ def report(tag: str) -> None:
         f"(10% 넘음 {sum(r['off_script_all'] > 0.1 for r in every)}), "
         f"끼어들지 못함 {len(every) - len(rs)}"
     )
+    timing = [t for r in every for t in r.get("push_timing", [])]
+    if timing:
+        places = ", ".join(f"{PLACES[k]} {sum(t['place'] == k for t in timing)}" for k in PLACES)
+        leads = [t["lead"] for t in timing if "lead" in t]
+        gaps = [t["gap"] for t in timing if "gap" in t]
+        by = " ".join(f"{k} {sum(t['by'] == k for t in timing)}" for k in sorted({t["by"] for t in timing}))
+        lines.append(f"  넣기 시점(끼어들기 전 {len(timing)}회, 앞 단위 마지막 문장 기준): {places}")
+        if leads:
+            lines.append(
+                f"    앞 단위 끝까지 여유 중앙 {float(np.median(leads)):.1f}s (최소 {min(leads)}, 1 s 미만 "
+                f"{sum(x < 1.0 for x in leads)}), 앞 단위 끝 → 다음 단위 중앙 {float(np.median(gaps)):.2f}s, "
+                f"사이 끼워 넣은 말(3자 넘음) {sum(len(t.get('between', '')) > 3 for t in timing)} | 근거: {by}"
+            )
+    spans = (("lead", "끼어들기 전"), ("reply", "끼어든 뒤 대답"), ("follow", "이어 말함"), ("ack", "재개 한마디"))
+    spans += (("resumed", "재개 뒤"),)
+    counts = []
+    for key, name in spans:
+        has = [r for r in every if f"bc_{key}" in r]
+        counts.append(f"{name} {sum(bool(r[f'bc_{key}']) for r in has)}/{len(has)}")
+    lines.append("  방송 어휘(라디오·방송·재생·틀-) 든 회차: " + ", ".join(counts))
+    resumed = [r for r in every if "resume_ack" in r]
+    if resumed:
+        lines.append(
+            f"  재개 뒤 대사 밖 글자 중앙 {float(np.median([r['resume_off'] for r in resumed])):.0%} "
+            f"(10% 넘음 {sum(r['resume_off'] > 0.1 for r in resumed)}/{len(resumed)})"
+        )
+        lines.append("  재개 한마디: " + " / ".join(f"「{r['resume_ack'][-40:]}」" for r in resumed))
     lines.append(f"  판정 맞음 {sum(r['decision'] == e for e, r in allrows)}/{len(rs)}")
     for e in ("on", "paused", "off"):
         sub = [r for x, r in allrows if x == e]
@@ -426,15 +655,17 @@ def run(args: argparse.Namespace) -> None:
         format="%(asctime)s %(name)-28s %(levelname)-5s %(message)s",
         handlers=[logging.FileHandler(out_dir / f"pipeline_{os.getpid()}.log")],
     )
-    (out_dir / "instructions.txt").write_text(LIVE_RADIO_INSTRUCTIONS)
+    (out_dir / "instructions.txt").write_text(DEFINED_INSTRUCTIONS if args.definition else LIVE_RADIO_INSTRUCTIONS)
     config = {
+        "definition": RADIO_DEFINITION_LINE if args.definition else None,
         "interrupt": args.interrupt,
         "chunk": args.chunk,
         "at": args.at,
         "gap_at": args.gap_at,
         "unit": args.unit,
         "line_template": LINE_TEMPLATE,
-        "first_ahead": FIRST_AHEAD_SEC,
+        "push_remain_letters": PUSH_REMAIN_LETTERS,
+        "track_block": TRACK_BLOCK,
         "stall": STALL_SEC,
         "voice": LIVE_VOICE,
         "notes": {"paused": PAUSE_NOTE, "on": RESUME_NOTE, "off": END_NOTE},
@@ -458,7 +689,8 @@ def run(args: argparse.Namespace) -> None:
                 row = {"run": n, "utterance": key, "result": f"failed: {exc}", "events": []}
             else:
                 raw = session.raw()
-                row = {"run": n, **raw, **fidelity(raw), **analyze(raw, bytes(session.pcm))}
+                row = {"run": n, **raw, **fidelity(raw), **wording(raw), **analyze(raw, bytes(session.pcm))}
+                row["push_timing"] = push_timing(raw)
                 session.save(out_dir / f"{key}_{n}.wav")
             rows[key].append(row)
             print(f"[{key} #{n}] {UTTERANCES[key][1]} (기대 {UTTERANCES[key][2]})", flush=True)
@@ -476,7 +708,8 @@ def main() -> None:
     parser.add_argument("--utterances", nargs="*", choices=list(UTTERANCES), default=list(UTTERANCES))
     parser.add_argument("--runs", type=int, default=2)
     parser.add_argument("--interrupt", choices=("mid", "gap"), default="mid")
-    parser.add_argument("--unit", choices=("sentence", "line"), default="sentence", help="한 번에 넣는 단위")
+    parser.add_argument("--unit", choices=("sentence", "line"), default="line", help="한 번에 넣는 단위")
+    parser.add_argument("--definition", action="store_true", help="Radio 줄을 라디오가 무엇인지 알려 주는 줄로")
     parser.add_argument("--chunk", type=int, default=4, help="이 대사(1부터)에서 끼어든다")
     parser.add_argument("--at", type=float, default=2.0, help="mid: 그 대사를 읽기 시작하고 이 초 뒤")
     parser.add_argument("--gap-at", type=float, default=0.2, help="gap: 그 대사를 다 읽고 이 초 쉴 때")

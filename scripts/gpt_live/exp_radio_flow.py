@@ -209,7 +209,7 @@ class Session:
         self.turns = [(self.text, user_clip(self.text, trim=True), voiced_offsets(self.text, trim=True))]
         self.live = GPTLiveSession(
             LiveSessionConfig(
-                instructions=LIVE_RADIO_INSTRUCTIONS,
+                instructions=self.live_instructions(),
                 backend_model=BACKEND_MODEL,
                 backend_instructions=BACKEND_INSTRUCTIONS.format(status="on"),
                 tools=TOOLS,
@@ -244,6 +244,10 @@ class Session:
         self.calls: list[dict[str, Any]] = []  # 판정 기록
         self.preamble: str | None = PREAMBLE  # 라디오 시작 때 instructions.append (없으면 넣지 않는다)
         self.result = "running"
+
+    def live_instructions(self) -> str:
+        """대화 모델의 세션 지시문. 하위 실험이 조건에 따라 바꾼다."""
+        return LIVE_RADIO_INSTRUCTIONS
 
     def pos(self) -> float:
         return len(self.pcm) / BYTES_PER_SEC
