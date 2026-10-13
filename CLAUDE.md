@@ -84,7 +84,7 @@ WebSocket (port 9200).
 - **docs/ARCHITECTURE.md**: System architecture details.
 - **docs/eval-system.md**: Evaluation system design.
 - **docs/ray-memory/**: Long-term memory system design (overview, session, read, write, storage).
-- **docs/troubleshooting/**: Hardware issue investigations (DAC I2S/DMA, ReSpeaker USB).
+- **docs/troubleshooting/**: Hardware issue investigations (DAC I2S/DMA, ReSpeaker USB, ReSpeaker AEC).
 - **docs/benchmarks/**: Model benchmark reports (TurnGPT, VAP).
 - **docs/modules/**: Setup guides for adapters with external repos/hardware/API constraints
   (asr, tts, turn_taking, wakeword, led, bridge protocol). Parameter tables belong in code, not here.

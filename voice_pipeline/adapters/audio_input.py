@@ -1,7 +1,8 @@
 """AudioInput: microphone capture on a daemon thread.
 
 reSpeaker 는 6채널로 열어 한 채널만 mono 로 뽑는다. 기본은 CH0(후처리 출력), 노래 재생 중에는
-:meth:`AudioInput.set_raw_capture` 로 원본 채널(+게인)로 바꾼다.
+:meth:`AudioInput.set_raw_capture` 로 원본 채널(+게인)로 바꾼다. ``dump_dir`` 를 주면 뽑기 전 전 채널을 채널별
+WAV 로 계속 남긴다 — 후처리 출력과 원본 마이크를 한 시간축에서 비교하는 AEC 진단용.
 """
 
 from __future__ import annotations
@@ -10,6 +11,9 @@ import array
 import logging
 import queue
 import threading
+import wave
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -36,17 +40,20 @@ class AudioInput:
     _DEVICE_INDEX: int | None = None  # PyAudio 입력 디바이스 인덱스 명시 오버라이드. None이면 _DEVICE_NAME으로 탐색
     _DEVICE_NAME: str | None = "respeaker"  # 장치 이름 부분 문자열 매칭 (대소문자 무시). 인덱스와 달리 재열거에 안정적
     _CAPTURE_CHANNELS: int | None = 6  # 디바이스에서 캡처할 채널 수. None은 mono (ReSpeaker 6ch는 6)
-    _EXTRACT_CHANNEL = 0  # 다중 채널 캡처 시 mono 추출에 사용할 채널 인덱스 (0-based). CH0 = 후처리 출력
-    _RAW_CHANNEL = 2  # set_raw_capture 가 쓰는 원본 마이크 채널 (CH2~5 가 원본, CH1 은 에코 통과라 제외)
+    _EXTRACT_CHANNEL = 0  # 다중 채널 캡처 시 mono 추출에 사용할 채널 인덱스 (0-based). CH0 = 처리 출력 (Conference)
+    _RAW_CHANNEL = 2  # set_raw_capture 가 쓰는 원본 마이크 채널 (CH2~5 가 게인 없는 원본, CH1 은 ASR 용 처리 출력)
     _RAW_GAIN_DB = 15.0  # 원본 채널 소프트웨어 게인 (CH0 와 레벨을 맞추는 값)
 
-    def __init__(self, audio_queue: queue.Queue[AudioFrame]) -> None:
+    def __init__(self, audio_queue: queue.Queue[AudioFrame], dump_dir: str | None = None) -> None:
         """Initialize capture state and ensure PyAudio is importable.
 
         Args:
             audio_queue: 캡처된 오디오 프레임을 push할 공유 큐.
+            dump_dir: 있으면 장치에서 읽은 프레임을 게인 없이 채널별로 이 폴더의
+                ``<스트림 연 시각>/ch<N>.wav`` 에 계속 쓴다. None 이면 쓰지 않는다.
         """
         self._queue = audio_queue
+        self._dump_dir = dump_dir
         self._extract: tuple[int, float] = (self._EXTRACT_CHANNEL, 0.0)  # (채널, 게인 dB). 캡처 스레드가 매 프레임 읽음
 
         self._stop_event = threading.Event()
@@ -134,6 +141,7 @@ class AudioInput:
         """Thread target: open stream, read frames, push to queue."""
         pa = None
         stream = None
+        dump: list[wave.Wave_write] | None = None
         try:
             pa = self._pyaudio_module.PyAudio()
 
@@ -159,9 +167,20 @@ class AudioInput:
                     capture_ch,
                     self._extract[0],
                 )
+            if self._dump_dir is not None:
+                dump = self._open_dump(self._dump_dir, capture_ch)
 
             while not self._stop_event.is_set():
                 data = stream.read(FRAME_SIZE_SAMPLES, exception_on_overflow=False)
+                if dump is not None:
+                    try:
+                        channels = np.frombuffer(data, dtype=np.int16).reshape(-1, capture_ch)
+                        for ch, wf in enumerate(dump):
+                            wf.writeframes(channels[:, ch].tobytes())  # 매번 헤더를 고쳐 써서 프로세스가 죽어도 유효
+                    except Exception:
+                        logger.warning("Mic dump write failed — dump stopped", exc_info=True)
+                        self._close_dump(dump)
+                        dump = None
                 if need_extract:
                     ch_idx, gain_db = self._extract
                     samples = array.array("h", data)
@@ -180,6 +199,8 @@ class AudioInput:
             logger.error("AudioInput capture error: %s", exc, exc_info=True)
             self._error = exc
         finally:
+            if dump is not None:
+                self._close_dump(dump)
             if stream is not None:
                 try:
                     stream.stop_stream()
@@ -191,3 +212,31 @@ class AudioInput:
                     pa.terminate()
                 except Exception:
                     logger.debug("Error terminating PyAudio", exc_info=True)
+
+    @classmethod
+    def _open_dump(cls, dump_dir: str, channels: int) -> list[wave.Wave_write] | None:
+        """``dump_dir/<시각>/`` 에 채널별 mono WAV 를 연다. 실패하면 경고만 남기고 None — 캡처는 계속된다."""
+        folder = Path(dump_dir) / f"{datetime.now():%Y%m%d_%H%M%S}"
+        dump: list[wave.Wave_write] = []
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            for ch in range(channels):
+                wf = wave.open(str(folder / f"ch{ch}.wav"), "wb")
+                dump.append(wf)
+                wf.setnchannels(1)
+                wf.setsampwidth(SAMPLE_WIDTH)
+                wf.setframerate(SAMPLE_RATE)
+        except Exception:
+            logger.warning("Mic dump disabled: cannot open %s", folder, exc_info=True)
+            cls._close_dump(dump)
+            return None
+        logger.info("Mic dump → %s/ch0..%d.wav (sample 0 ≈ this log time)", folder, channels - 1)
+        return dump
+
+    @staticmethod
+    def _close_dump(dump: list[wave.Wave_write]) -> None:
+        for wf in dump:
+            try:
+                wf.close()
+            except Exception:
+                logger.debug("Error closing mic dump", exc_info=True)

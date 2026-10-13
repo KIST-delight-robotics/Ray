@@ -1,6 +1,7 @@
 """ReSpeaker Flex (XVF3800) USB 제어 어댑터.
 
-- ``reset()``: 벤더 제어 전송으로 XVF3800 칩을 리부트한다 — 보드의 RST 버튼과 같은 효과.
+- ``reset()``: 벤더 제어 전송으로 XVF3800 펌웨어를 재시작한다. 보드 RST 버튼(하드웨어 리셋)과는 같지 않다 —
+  버튼으로만 풀리는 AEC 이상 상태가 있다(docs/troubleshooting/respeaker-aec-degradation.md).
   장치는 USB 버스에서 잠시 사라졌다가 재열거되며(실측: 사라짐 0.17 s, ALSA/PyAudio 재인식 ~1.1 s),
   모든 XVF3800 파라미터가 기본값으로 돌아간다.
 - ``wait_present()``: 장치가 USB 버스에 보일 때까지 대기. 리셋 뒤 마이크를 열기 전 가드용.

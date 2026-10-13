@@ -74,6 +74,7 @@ from voice_pipeline.settings import (
     SAMPLE_RATE,
     SONG_CATALOG_PATH,
     SUMMARY_MAX_TOKENS,
+    VAR_DIR,
 )
 from voice_pipeline.trace import OpenAIRetryHandler, SQLiteCallStore, SQLiteTraceStore, TrackedEmbedder, TrackedTTS
 from voice_pipeline.types import ITTS, AudioFrame
@@ -81,6 +82,7 @@ from voice_pipeline.types import ITTS, AudioFrame
 logger = logging.getLogger("voice_pipeline.wiring")
 
 _AUDIO_QUEUE_SIZE = 300
+_MIC_DUMP_DIR = f"{VAR_DIR}/log/mic"  # MIC_DUMP=1 일 때 마이크 전 채널 녹음 위치 (6ch 분당 ~11.5 MB)
 _VAD_INFER_INTERVAL = 3  # 3프레임(90ms)마다 추론, 사이는 캐시 반환
 _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
 _LIVE_BACKEND_MODEL = "gpt-5.4-mini"  # GPT-Live responses 위임 백엔드
@@ -416,7 +418,8 @@ def build_components(
         vector_index.load(ids, vectors)
 
     audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=_AUDIO_QUEUE_SIZE)
-    audio_input = AudioInput(audio_queue)
+    mic_dump = os.environ.get("MIC_DUMP", "0").strip().lower() in ("1", "true", "yes", "on")
+    audio_input = AudioInput(audio_queue, dump_dir=_MIC_DUMP_DIR if mic_dump else None)
     song_catalog = load_song_catalog(song_catalog_path) if engine == "live" else {}
     scripts = load_scripts(radio_scripts_dir, song_catalog) if song_catalog else {}
     radio_picker = ScriptPicker(scripts, ScriptLog(db_path)) if scripts else None

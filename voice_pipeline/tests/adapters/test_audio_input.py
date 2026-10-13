@@ -8,6 +8,7 @@ import struct
 import sys
 import threading
 import time
+import wave
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,6 +31,7 @@ def _make_audio_input(
     device_name: str | None = None,
     capture_channels: int | None = None,
     extract_channel: int = 0,
+    dump_dir: str | None = None,
 ):
     """Create AudioInput with mocked PyAudio."""
     monkeypatch.setattr(AudioInput, "_DEVICE_INDEX", device_index)
@@ -45,6 +47,7 @@ def _make_audio_input(
 
     ai._queue = audio_queue
     ai._extract = (extract_channel, 0.0)
+    ai._dump_dir = dump_dir
     ai._stop_event = threading.Event()
     ai._thread = None
     ai._error = None
@@ -436,3 +439,40 @@ class TestRawCapture:
         ai, _ = _make_audio_input(monkeypatch, capture_channels=None, extract_channel=0)
         ai.set_raw_capture(True)
         assert ai._extract == (0, 0.0)
+
+
+class TestMicDump:
+    """dump_dir: 채널 추출 전 전 채널이 채널별 WAV 로 남고, 덤프 실패가 캡처를 멈추지 않는다."""
+
+    @staticmethod
+    def _run(ai, frames: list[bytes]) -> None:
+        mock_pa_instance = MagicMock()
+        mock_stream = MagicMock()
+        mock_stream.read.side_effect = _frames_then_stop(ai, frames)
+        mock_pa_instance.open.return_value = mock_stream
+        ai._pyaudio_module.PyAudio.return_value = mock_pa_instance
+        ai.start()
+        ai._thread.join(timeout=2.0)
+
+    def test_writes_each_channel_to_own_file(self, monkeypatch, tmp_path) -> None:
+        ai, audio_queue = _make_audio_input(monkeypatch, capture_channels=6, dump_dir=str(tmp_path / "mic"))
+        raw = TestRawCapture._six_channel_frame()
+        self._run(ai, [raw, raw])
+
+        (folder,) = (tmp_path / "mic").iterdir()
+        assert sorted(p.name for p in folder.iterdir()) == [f"ch{ch}.wav" for ch in range(6)]
+        for ch in range(6):
+            with wave.open(str(folder / f"ch{ch}.wav")) as wf:
+                assert wf.getnchannels() == 1
+                assert wf.getnframes() == 2 * FRAME_SIZE_SAMPLES
+                assert set(array.array("h", wf.readframes(wf.getnframes()))) == {(ch + 1) * 100}  # 게인 없음
+        assert all(v == 100 for v in array.array("h", audio_queue.get_nowait()))  # 큐는 여전히 CH0 mono
+
+    def test_open_failure_keeps_capturing(self, monkeypatch, tmp_path) -> None:
+        blocker = tmp_path / "not_a_dir"
+        blocker.write_text("")
+        ai, audio_queue = _make_audio_input(monkeypatch, dump_dir=str(blocker))
+        self._run(ai, [b"\x01" * 960])
+
+        assert ai._error is None
+        assert audio_queue.get_nowait() == b"\x01" * 960
