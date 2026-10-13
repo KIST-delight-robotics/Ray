@@ -597,9 +597,10 @@ class TestSongPlayback:
                 (reopened, LiveClosed("close_requested")),
             ],
         )
-        order = MagicMock()  # 브리지·세션 호출 순서를 한 곳에 기록
+        order = MagicMock()  # 브리지·세션·마이크 호출 순서를 한 곳에 기록
         order.attach_mock(m["bridge"], "bridge")
         order.attach_mock(m["live"], "live")
+        order.attach_mock(m["audio_input"], "audio_input")
         loop.run()
 
         live, bridge, ai = m["live"], m["bridge"], m["audio_input"]
@@ -617,7 +618,14 @@ class TestSongPlayback:
         # 2) 위임 시 한마디는 스트림으로 나갔고, 그 뒤 스트림을 닫았다 (audio_end 는 send_audio 뒤)
         assert [c.args[0] for c in bridge.send_audio.call_args_list] == [VOICE_100MS]
         assert names.index("bridge.send_audio") < names.index("bridge.send_audio_end")
-        # 3) 배수 완료 → 원본 채널·재생 지시 → play_audio_csv. 백엔드는 요청 수락 시 교체, 끝나면 복원
+        # 3) 스트림 닫음 → 재생 지시 → (배수 완료) → 원본 채널 → play_audio_csv. 백엔드는 요청 수락 시 교체, 끝나면 복원
+        playing_note = next(
+            i
+            for i, c in enumerate(order.mock_calls)
+            if c[0] == "live.append_instructions" and c[1][0] == SONG_PLAYING_INSTRUCTIONS
+        )
+        raw_on = names.index("audio_input.set_raw_capture")
+        assert names.index("bridge.send_audio_end") < playing_note < raw_on < names.index("bridge.send_play_audio_csv")
         bridge.send_play_audio_csv.assert_called_once_with("IAM")
         live.update_backend.assert_called_once()
         assert live.update_backend.call_args.args[0] == SONG_BACKEND_INSTRUCTIONS
@@ -846,6 +854,38 @@ class TestSongPlayback:
         assert not loop._inflight
         m["bridge"].send_play_audio_csv.assert_not_called()
         m["live"].submit_function_output.assert_not_called()
+
+    def test_stop_while_draining_cancels_the_song_and_pairs_the_notes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # 스트림을 닫은 뒤 곡이 시작되기 전(남은 출력을 내보내는 중)에 정지 요청 — 곡은 틀지 않고,
+        # 스트림을 닫을 때 넣은 재생 지시는 종료 지시와 짝을 이룬다
+        loop, m, _ = _make_loop(monkeypatch, song_catalog=SONGS)
+        bridge_events = _wire_bridge_completion(m["bridge"])
+        m["bridge"].send_audio_end.side_effect = None  # playback_complete 를 바로 주지 않아 DRAINING 에 머문다
+        draining = lambda: loop._song_state is SongState.DRAINING  # noqa: E731
+
+        def drained_after_stop() -> bool:
+            if loop._song_cancelled:
+                bridge_events.put(PLAYBACK_COMPLETE)
+                return True
+            return False
+
+        _staged_live_events(
+            m,
+            [
+                (None, _call(PLAY_SONG_TOOL, {"song": "IAM"})),
+                (None, LiveResponseDone(None)),
+                (draining, _call(STOP_SONG_TOOL, call_id="c2")),
+                (draining, LiveResponseDone(None)),
+                (drained_after_stop, LiveAudio(SILENCE_100MS)),
+                (lambda: m["live"].submit_function_output.call_count >= 2, LiveClosed("x")),
+            ],
+        )
+        loop.run()
+        m["bridge"].send_play_audio_csv.assert_not_called()
+        outputs = {c.args[0]: json.loads(c.args[1]) for c in m["live"].submit_function_output.call_args_list}
+        assert outputs["c2"] == {"status": "stopped"}
+        appended = [c.args[0] for c in m["live"].append_instructions.call_args_list]
+        assert appended == [SONG_PLAYING_INSTRUCTIONS, SONG_ENDED_INSTRUCTIONS]
 
 
 # ---------------------------------------------------------------------------

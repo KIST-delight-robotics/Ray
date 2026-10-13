@@ -15,8 +15,8 @@
    세션 만료/연결 끊김, 브리지 오류, 오디오 기아, 외부 stop.
 
 노래 재생 (C++ 는 재생 하나를 끝까지 처리하므로 라이브 스트림과 교대한다):
-    ``play_song`` 호출은 결과를 보류한 채(PENDING) 모델 출력이 무음이 되길 기다림 → ``audio_end`` 뒤
-    ``playback_complete`` 대기(DRAINING) → 마이크 원본 채널 + 재생 지시 append + ``play_audio_csv``(PLAYING) →
+    ``play_song`` 호출은 결과를 보류한 채(PENDING) 모델 출력이 무음이 되길 기다림 → ``audio_end`` + 재생 지시
+    append 뒤 ``playback_complete`` 대기(DRAINING) → 마이크 원본 채널 + ``play_audio_csv``(PLAYING) →
     보류한 툴 결과 제출 → ``playback_complete``(끝) → 마이크·지시 복원, ``stream_start`` 로 재개.
     ``stop_song`` 도 결과를 보류한다(STOPPING): ``stop`` 은 즉시 보내되, 위임 시 모델의 한마디("끌게")가 스트림이
     닫힌 채 끝나길 기다린 뒤 스트림을 열고 결과를 제출한다 — 그래야 "끌게" 는 버려지고 결과 뒤의 "껐어" 만 들린다.
@@ -776,12 +776,20 @@ class LiveSessionLoop:
             logger.warning("backend update failed", exc_info=True)
 
     def _drain_for_song(self) -> None:
-        """라이브 스트림을 닫고 playback_complete 를 기다린다."""
+        """라이브 스트림을 닫고 playback_complete 를 기다린다.
+
+        재생 지시도 여기서 넣는다 — 이제부터 모델 말은 들리지 않으니 곡이 실제로 시작되기 전(남은 출력을 내보내는
+        동안)에도 정지 요청만 받게. 지시에 반응한 말은 닫힌 스트림에서 버려진다.
+        """
         if self._stream_open:
             self._stream_open = False
             self._bridge.send_audio_end()
         self._stream_start_pending = False  # 인사 중이면 인사의 playback_complete 가 DRAINING 을 끝낸다
         self._song_state = SongState.DRAINING
+        try:
+            self._live.append_instructions(SONG_PLAYING_INSTRUCTIONS)
+        except Exception:
+            logger.warning("append for song failed", exc_info=True)
         logger.info("Song: live stream closed, waiting for drain")
 
     def _start_song(self) -> None:
@@ -791,11 +799,7 @@ class LiveSessionLoop:
             logger.info("Song %s cancelled before start — reopening stream", self._song.key)
             self._end_song()
             return
-        self._set_raw_capture(True)
-        try:
-            self._live.append_instructions(SONG_PLAYING_INSTRUCTIONS)
-        except Exception:
-            logger.warning("append for song failed", exc_info=True)
+        self._set_raw_capture(True)  # 남은 레이 목소리가 다 나간 뒤에 — 원본 채널엔 AEC 가 없다
         self._bridge.send_play_audio_csv(self._song.key)
         self._song_state = SongState.PLAYING
         self._resolve_song_future("playing")  # 이제 결과를 제출한다 — 백엔드 완료 뒤 모델 말은 스트림이 없어 버려진다
