@@ -34,14 +34,15 @@
   종료(종료 문구 + 노래 종료 지시).
 - **끼어들기**: 라디오 on 중 사용자 전사가 오면 보류(넣기·멈춤 판단 중지). 판정기(`RadioJudge`, gpt-5.4-mini, 추론 없음,
   구조화 출력, 입력 = 읽던 대사 + 사용자 전사 1.3 s 전부터의 사용자·레이 전사)를 사용자 전사가 0.6 s 멈추면 부르고,
-  모델이 대본 밖 말을 6자 더 하면 다시 부른다. paused·off 는 오는 즉시, on 은 그 판정 뒤 새 사용자 말·새 반응이 없을 때
-  적용. 2 s 안에 답이 없으면 on(늦게 온 paused·off 는 적용). 판정을 기다리지 않는데 10 s 조용하면 보류를 푼다. on 뒤
+  모델이 대본 밖 말을 6자 더 하면 다시 부른다. 판정은 on·paused 둘. paused 는 오는 즉시, on 은 그 판정 뒤 새 사용자
+  말·새 반응이 없을 때 적용. 2 s 안에 답이 없으면 on(늦게 온 paused 는 적용). 판정을 기다리지 않는데 10 s 조용하면 보류를 푼다. on 뒤
   모델 말은 대본과 다시 8자 일치할 때까지 "말한 글자"에서 뺀다.
 - **멈춤·재개**: paused → thinking "Radio talk: paused, … Do not continue the talk yourself: the rest of it is not with
   you. If the user asks to go on with it (for example 계속해, 이어서 해 줘, 이야기 계속해 줘), delegate to the backend to
   resume it." + 백엔드 상태 paused. 멈춘 동안의 대화는 진행 계산에 넣지 않는다. 재개 → `resume_radio` → "Radio talk:
   resumed. …" + 안 읽힌 첫 대사부터 다시 넣는다. 멈춘 상태에서 `start_radio` 는 새 대본(재개 문구를 함께 넣는다, 실험
-  안 함). off(판정·곡 정지) → "Radio talk: ended. Talk with the user now." + 상태 off. 노래 중엔 라디오를 돌리지 않는다.
+  안 함). off(사용자가 곡을 멈춤) → "Radio talk: ended. Talk with the user now." + 상태 off. 노래 중엔 라디오를 돌리지
+  않는다.
 - **지시문**: 라이브는 정리본(`live_instructions_simple.txt` 와 같은 내용) + Backend tools "Radio: your own radio talk,
   which you host and speak yourself. Starting it, or resuming it after a pause." + 위임 목록 "The user asks to start the
   radio, or to continue a paused radio talk." 진행 규칙은 대화 모델에 없다. 백엔드는 Task instructions 의 Radio 블록 +
@@ -54,7 +55,8 @@
     읽거나 대답에 섞는다.
   - 끼어들기 감지는 앱의 판정기(대화 모델에게 위임으로 알리게 하는 방식은 걸리지 않았다). 판정 기준: on = 짧은 반응·
     감탄이거나 모델이 흘리고 계속 읽음, paused = 그 밖에 레이에게 말을 건 모든 것(질문, 자기 이야기, "지루해", "잠깐만",
-    "방금 뭐라고 했어?" 같은 진행 질문 포함), off = 그만두자는 말.
+    "방금 뭐라고 했어?" 같은 진행 질문 포함). 그만두자는 말도 paused — 책갈피를 남겨, 잘못 들었어도 이어 달라면
+    되돌린다(10-13, 실기에서 잘못 들은 "그만해줄래"가 off 로 가 책갈피를 잃었다). off 는 사용자가 곡을 멈출 때뿐.
   - 멈춘 뒤 혼자 다시 시작하지 않는다. 이어 달라면 재개, 그대로 두었다가 나중에 "라디오 해 줘" 하면 새로 시작 —
     일시정지는 "종료 + 책갈피", 멈춘 뒤의 레이는 일반 대화와 같다. 멈춘 동안 판정기를 돌리지 않는다.
   - 노래 중엔 레이 말이 나가지 않으므로 곡 정지 요청에만 반응한다. 곡 소개 직후 끼어든 말이 보류보다 늦게 와서 곡이
@@ -66,7 +68,7 @@
 - **유휴 타임아웃 180 s** 그대로. **백엔드 추론 low**.
 - **로그**: `Radio started: <대본> (song …)`, `Radio: line N/M pushed (start|text|stall|resume)`, `Radio: quiet after
   speaking — pushing again: …`, `Radio: user spoke — holding lines`, `Radio: judging (user|reaction)`, `Radio judge: <상태>
-  (<이유>)`, `Radio: <상태> by the judge`, `Radio: hold released (judge on|judge timeout|quiet)`, `Radio: song introduced
+  (<이유>)`, `Radio: paused by the judge`, `Radio: hold released (judge on|judge timeout|quiet)`, `Radio: song introduced
   (closing|quiet|cap) — playing …`, `Radio: next script …`.
 - **실험 도구** (`scripts/gpt_live/`, 결과는 `var/experiments/<실험>/<번호>_<태그>/`, 녹음은 스테레오(왼쪽 사용자, 오른쪽
   로봇) + Audacity 레이블):

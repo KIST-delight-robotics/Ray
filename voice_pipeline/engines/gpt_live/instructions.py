@@ -203,8 +203,7 @@ how Ray responded. The transcripts come from speech recognition and may contain 
 - on: the user only reacted briefly (for example 응, 아 진짜, 맞아, 그렇구나), or Ray ignored it and kept reading. \
 The talk goes on with the next line.
 - paused: the user is talking to Ray: a question (also about the talk itself), a comment, a complaint, a request, \
-or asking Ray to wait. Ray stops the talk and talks with the user.
-- off: the user wants to stop or end the radio.
+asking Ray to wait, or asking to stop the talk. Ray stops the talk and talks with the user.
 """
 RADIO_JUDGE_FORMAT: dict[str, Any] = {
     "type": "json_schema",
@@ -214,7 +213,7 @@ RADIO_JUDGE_FORMAT: dict[str, Any] = {
         "type": "object",
         "properties": {
             "reason": {"type": "string", "description": "One short sentence."},
-            "state": {"type": "string", "enum": ["on", "paused", "off"]},
+            "state": {"type": "string", "enum": ["on", "paused"]},
         },
         "required": ["reason", "state"],
         "additionalProperties": False,

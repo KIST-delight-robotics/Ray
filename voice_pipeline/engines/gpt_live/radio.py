@@ -12,8 +12,8 @@
 것만 다시 넣거나 다음 대사로 넘어간다. 곡 소개 대사를 다 읽고 조용하면 곡을 튼다. 근거는 radio_replay.py 의 재생
 평가(기록 321회, 사후 정답 대비).
 
-끼어들기(:class:`Radio`): 사용자 전사가 오면 넣기를 보류하고 판정기(:class:`RadioJudge`, 별도 LLM)에 on / paused /
-off 를 묻는다. paused·off 는 오는 즉시, on 은 그 뒤 새 사용자 말도 새 반응도 없을 때 적용한다. on 뒤 모델의 대답은
+끼어들기(:class:`Radio`): 사용자 전사가 오면 넣기를 보류하고 판정기(:class:`RadioJudge`, 별도 LLM)에 on / paused 를
+묻는다. paused 는 오는 즉시, on 은 그 뒤 새 사용자 말도 새 반응도 없을 때 적용한다. on 뒤 모델의 대답은
 대본과 다시 일치할 때까지 진행에서 뺀다. 멈추면 혼자 다시 시작하지 않는다 — 사용자가 이어 달라고 하면 백엔드가
 ``resume_radio`` 를 부르고, 아직 안 읽힌 대사부터 다시 넣는다.
 
@@ -483,9 +483,10 @@ class Tracker:
 
 
 class RadioJudge:
-    """끼어든 말을 보고 라디오가 on / paused / off 중 어디여야 하는지 판정한다 (별도 LLM 호출, 구조화 출력).
+    """끼어든 말을 보고 라디오가 on / paused 중 어디여야 하는지 판정한다 (별도 LLM 호출, 구조화 출력).
 
-    on = 짧은 반응·감탄이거나 레이가 흘리고 계속 읽음. paused = 그 밖에 레이에게 말을 건 모든 것. off = 그만두자는 말.
+    on = 짧은 반응·감탄이거나 레이가 흘리고 계속 읽음. paused = 그 밖에 레이에게 말을 건 모든 것 — 그만두자는 말도
+    멈춤으로 받아 책갈피를 남긴다(잘못 들었어도 이어 달라면 되돌릴 수 있게).
     """
 
     def __init__(self, llm: ILLM) -> None:
@@ -508,7 +509,7 @@ class RadioJudge:
         )
         out = json.loads("".join(stream))
         state = str(out.get("state", ""))
-        if state not in ("on", "paused", "off"):
+        if state not in ("on", "paused"):
             raise RuntimeError(f"radio judge: unexpected state {state!r}")
         logger.info("Radio judge: %s (%s)", state, out.get("reason", ""))
         return state
@@ -580,14 +581,14 @@ class _Transcripts:
 class Radio:
     """세션 하나의 라디오 — 시작·진행·끼어들기 판정·멈춤·재개.
 
-    상태: off → (start_radio) on → (판정 paused) paused → (resume_radio) on … / (판정 off·곡 정지) off.
+    상태: off → (start_radio) on → (판정 paused) paused → (resume_radio) on … / (사용자가 곡을 멈춤) off.
     멈춘 동안 남은 대사가 책갈피다 — 재개하면 거기부터, 새로 시작하면 버린다. 곡은 루프가 틀고 끝나면
     :meth:`on_song_end` 로 알린다.
     """
 
     USER_QUIET_SEC = 0.6  # 사용자 전사가 이만큼 멈추면 판정한다
     RECHECK_LETTERS = 6  # 판정 뒤 모델이 대본 밖 말을 이만큼 더 하면 다시 판정한다
-    JUDGE_TIMEOUT_SEC = 2.0  # 판정이 이만큼 안 오면 on 으로 본다 (늦게 온 paused·off 는 적용)
+    JUDGE_TIMEOUT_SEC = 2.0  # 판정이 이만큼 안 오면 on 으로 본다 (늦게 온 paused 는 적용)
     HOLD_MAX_QUIET_SEC = 10.0  # 판정을 기다리지 않는데 모델이 이만큼 조용하면 보류를 푼다 (안전망)
     TRANSCRIPT_LAG_SEC = 1.3  # 사용자 전사는 목소리 시작보다 이만큼 늦게 온다 — 판정 입력은 그때부터의 대화
 
@@ -818,25 +819,23 @@ class Radio:
                 except Exception:
                     logger.warning("Radio judge failed — treating as on", exc_info=True)
                     state = "on"
-                if state != "on":
-                    commands += self._decide(state, now)
+                if state == "paused":
+                    commands += self._pause(now)
                 elif not call.timed_out and self._hold is not None:
                     self._hold.latest_on = call
             elif now - call.sent_at >= self.JUDGE_TIMEOUT_SEC and not call.timed_out:
-                call.timed_out = True  # 결과는 계속 기다린다 — 늦게 온 paused·off 는 적용
+                call.timed_out = True  # 결과는 계속 기다린다 — 늦게 온 paused 는 적용
                 if self._hold is not None:
                     self._hold.latest_on = call
         return commands
 
-    def _decide(self, state: str, now: float) -> list[Command]:
-        """paused·off 적용 — 라디오가 진행 중이면 언제나."""
+    def _pause(self, now: float) -> list[Command]:
+        """paused 적용 — 라디오가 진행 중이면 언제나."""
         if self.status != "on" or self.playing_song:
             return []
-        logger.info("Radio: %s by the judge", state)
+        logger.info("Radio: paused by the judge")
         self._hold = None
         if self.tracker is not None:
             self.tracker.release(now)
-        if state == "off":
-            return self._end()
         self.status = "paused"
         return [UpdateBackend(), Think(RADIO_PAUSED_NOTE)]

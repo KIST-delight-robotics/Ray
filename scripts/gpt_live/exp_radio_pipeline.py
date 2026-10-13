@@ -271,7 +271,8 @@ def run(args: argparse.Namespace) -> None:
     data = {
         "scenario": args.scenario,
         "utterance": key,
-        "expected": UTTERANCES[key][2] if key in UTTERANCES else None,
+        # 운영 판정기는 off 를 내지 않는다 — 그만두자는 말도 paused (exp_radio_flow 의 기대값은 직접 실험 판정기 기준)
+        "expected": {"off": "paused"}.get(UTTERANCES[key][2], UTTERANCES[key][2]) if key in UTTERANCES else None,
         "index": args.index,
         "result": driver.result,
         "t0": t0,

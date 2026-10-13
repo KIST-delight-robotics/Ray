@@ -323,11 +323,15 @@ class TestRadioJudge:
         assert messages[1]["content"] == "Line Ray was reading: 읽던 대사\n\nSince the user spoke:\nUser: 왜?\nRay: 음,"
         assert llm.generate.call_args.kwargs == {"tools": [], "response_format": RADIO_JUDGE_FORMAT}
 
-    def test_unknown_state_raises(self) -> None:
+    @pytest.mark.parametrize("state", ["maybe", "off"])  # 그만두자는 말도 paused — off 는 판정하지 않는다
+    def test_unknown_state_raises(self, state: str) -> None:
         llm = MagicMock(spec=ILLM)
-        llm.generate.return_value = iter([json.dumps({"reason": "", "state": "maybe"})])
+        llm.generate.return_value = iter([json.dumps({"reason": "", "state": state})])
         with pytest.raises(RuntimeError):
             RadioJudge(llm).classify("l", [])
+
+    def test_schema_offers_only_on_and_paused(self) -> None:
+        assert RADIO_JUDGE_FORMAT["schema"]["properties"]["state"]["enum"] == ["on", "paused"]
 
 
 # ---------------------------------------------------------------------------
@@ -420,12 +424,6 @@ class TestRadioInterruption:
         radio.step(t + 0.8, 0.0)
         _read(radio, "늘 곁에 있는데도 좀처럼 열어 보지 않는 곳이죠. 그런 데가 있잖아요.", t + 1.0)  # 대사와 같은 말
         assert radio.resume(t + 5.0)[1][-1] == _line(LINES[0])  # 1번 대사부터 다시
-
-    def test_off_ends_the_radio(self) -> None:
-        radio, t = self._interrupted("off")
-        radio.step(t + 0.7, 0.0)
-        assert radio.step(t + 0.8, 0.0) == [UpdateBackend(), Think(RADIO_ENDED_NOTE)]
-        assert radio.status == "off" and radio.tracker is None
 
     def test_new_user_words_make_an_on_stale(self) -> None:
         radio, t = self._interrupted("on", "paused")
