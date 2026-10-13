@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
+import re
 from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -330,6 +332,24 @@ class TestRadioJudge:
         with pytest.raises(RuntimeError):
             RadioJudge(llm).classify("l", [])
 
+    def test_records_the_call_and_logs_the_time(self, call_log, caplog: pytest.LogCaptureFixture) -> None:
+        llm = MagicMock(spec=ILLM)
+        llm.model = "gpt-5.4-mini"
+        llm.generate.return_value = iter([json.dumps({"reason": "질문", "state": "paused"})])
+        with caplog.at_level(logging.INFO, logger="voice_pipeline.radio"):
+            RadioJudge(llm).classify("읽던 대사", [("user", "왜?")])
+        (rec,) = [r for r in call_log.records if r.operation == "judge"]
+        assert (rec.module, rec.model, rec.status) == ("radio", "gpt-5.4-mini", "ok")
+        assert json.loads(rec.metadata) == {"state": "paused", "reason": "질문"}
+        assert re.search(r"Radio judge: paused \d+\.\d\ds \(질문\)", caplog.text)
+
+    def test_failed_call_is_recorded_as_an_error(self, call_log) -> None:
+        llm = MagicMock(spec=ILLM)
+        llm.generate.side_effect = RuntimeError("timeout")
+        with pytest.raises(RuntimeError):
+            RadioJudge(llm).classify("l", [])
+        assert [r.status for r in call_log.records if r.operation == "judge"] == ["error"]
+
     def test_schema_offers_only_on_and_paused(self) -> None:
         assert RADIO_JUDGE_FORMAT["schema"]["properties"]["state"]["enum"] == ["on", "paused"]
 
@@ -407,6 +427,13 @@ class TestRadioInterruption:
         assert radio.step(t, 0.0) == []  # 판정을 보낸다
         radio._judge.classify.assert_called_once()  # type: ignore[attr-defined]
         assert radio.step(t + 0.1, 0.0) == [_line(LINES[1])]  # on — 보류를 풀고 바로 다음 대사
+
+    def test_judging_logs_the_judge_input(self, caplog: pytest.LogCaptureFixture) -> None:
+        radio, t = self._interrupted("on")
+        with caplog.at_level(logging.INFO, logger="voice_pipeline.radio"):
+            radio.step(t + 0.7, 0.0)
+        assert f"Radio: judging (user) — reading «{LINES[0]}» | Ray: 오늘은 책상 서랍 이야기예요." in caplog.text
+        assert "| User: 근데 서랍에 뭐 넣어 둬?" in caplog.text
 
     def test_paused_stops_the_talk_and_resume_continues_from_the_unread_line(self) -> None:
         radio, t = self._interrupted("paused")

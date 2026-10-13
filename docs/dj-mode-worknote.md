@@ -67,9 +67,10 @@
   - 이번 범위 밖: 진입 위임 누락·완전 침묵 폴백, 로컬 음성 감지(10-12).
 - **유휴 타임아웃 180 s** 그대로. **백엔드 추론 low**.
 - **로그**: `Radio started: <대본> (song …)`, `Radio: line N/M pushed (start|text|stall|resume)`, `Radio: quiet after
-  speaking — pushing again: …`, `Radio: user spoke — holding lines`, `Radio: judging (user|reaction)`, `Radio judge: <상태>
-  (<이유>)`, `Radio: paused by the judge`, `Radio: hold released (judge on|judge timeout|quiet)`, `Radio: song introduced
-  (closing|quiet|cap) — playing …`, `Radio: next script …`.
+  speaking — pushing again: …`, `Radio: user spoke — holding lines`, `Radio: judging (user|reaction) — reading «읽던 대사» |
+  Ray: … | User: …`(판정기 입력 그대로), `Radio judge: <상태> <초>s (<이유>)`, `Radio: paused by the judge`, `Radio: hold
+  released (judge on|judge timeout|quiet)`, `Radio: song introduced (closing|quiet|cap) — playing …`, `Radio: next script
+  …`. 판정 호출은 `call_records`(module `radio`, operation `judge`, metadata 상태·이유)에도 남는다.
 - **실험 도구** (`scripts/gpt_live/`, 결과는 `var/experiments/<실험>/<번호>_<태그>/`, 녹음은 스테레오(왼쪽 사용자, 오른쪽
   로봇) + Audacity 레이블):
   - `exp_radio_pipeline.py` — 운영 루프 그대로(하네스)로 `--scenario long|interrupt|multi|chat`. `--report` 가 넣기

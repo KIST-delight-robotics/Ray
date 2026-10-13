@@ -30,6 +30,7 @@ import random
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
@@ -48,6 +49,7 @@ from voice_pipeline.engines.gpt_live.instructions import (
 )
 from voice_pipeline.engines.gpt_live.songs import Song
 from voice_pipeline.settings import DEFAULT_DB_PATH, RADIO_SCRIPTS_DIR
+from voice_pipeline.trace import record_call
 from voice_pipeline.types import ILLM
 
 logger = logging.getLogger("voice_pipeline.radio")
@@ -493,26 +495,41 @@ class RadioJudge:
         self._llm = llm
 
     def classify(self, line: str, exchange: Sequence[tuple[str, str]]) -> str:
-        """판정 하나. 실패하면 예외 — 호출자가 on 으로 본다.
+        """판정 하나. 실패하면 예외 — 호출자가 on 으로 본다. 걸린 시간은 로그와 호출 기록에 남긴다.
 
         Args:
             line: 레이가 읽던 대사.
             exchange: 끼어든 뒤의 (화자 user/assistant, 전사) 차례.
         """
-        stream = self._llm.generate(
-            [
-                {"role": "system", "content": RADIO_JUDGE_INSTRUCTIONS},
-                {"role": "user", "content": build_radio_judge_prompt(line, exchange)},
-            ],
-            tools=[],
-            response_format=RADIO_JUDGE_FORMAT,
-        )
-        out = json.loads("".join(stream))
-        state = str(out.get("state", ""))
-        if state not in ("on", "paused"):
-            raise RuntimeError(f"radio judge: unexpected state {state!r}")
-        logger.info("Radio judge: %s (%s)", state, out.get("reason", ""))
+        start = time.monotonic()
+        state = reason = ""
+        try:
+            stream = self._llm.generate(
+                [
+                    {"role": "system", "content": RADIO_JUDGE_INSTRUCTIONS},
+                    {"role": "user", "content": build_radio_judge_prompt(line, exchange)},
+                ],
+                tools=[],
+                response_format=RADIO_JUDGE_FORMAT,
+            )
+            out = json.loads("".join(stream))
+            state, reason = str(out.get("state", "")), str(out.get("reason", ""))
+            if state not in ("on", "paused"):
+                raise RuntimeError(f"radio judge: unexpected state {state!r}")
+        except Exception:
+            self._record(start, "error", state, reason)
+            raise
+        elapsed = self._record(start, "ok", state, reason)
+        logger.info("Radio judge: %s %.2fs (%s)", state, elapsed, reason)
         return state
+
+    def _record(self, start: float, status: str, state: str, reason: str) -> float:
+        """호출 기록 한 건. 걸린 시간(초)을 돌려준다."""
+        elapsed = time.monotonic() - start
+        model = getattr(self._llm, "model", "unknown")
+        metadata = json.dumps({"state": state, "reason": reason}, ensure_ascii=False)
+        record_call("radio", "judge", model, elapsed * 1000.0, status=status, metadata=metadata)
+        return elapsed
 
 
 # ---------------------------------------------------------------------------
@@ -781,11 +798,12 @@ class Radio:
         line = self.tracker.reading_line()
         exchange = self._exchange(hold.start - self.TRANSCRIPT_LAG_SEC)
         hold.judged_user, hold.judged_reaction = self._last_user_text, reaction
+        dialog = " | ".join(f"{'User' if who == 'user' else 'Ray'}: {text}" for who, text in exchange)
+        logger.info("Radio: judging (%s) — reading «%s» | %s", "user" if new_user else "reaction", line, dialog)
         call = _JudgeCall(
             self._submit(lambda: self._judge.classify(line, exchange)), now, self._last_user_text, reaction
         )
         self._calls.append(call)
-        logger.info("Radio: judging (%s)", "user" if new_user else "reaction")
 
     def _submit(self, fn: Callable[[], str]) -> Future[str]:
         if self._executor is not None:
