@@ -606,6 +606,7 @@ class Radio:
     USER_QUIET_SEC = 0.6  # 사용자 전사가 이만큼 멈추면 판정한다
     RECHECK_LETTERS = 6  # 판정 뒤 모델이 대본 밖 말을 이만큼 더 하면 다시 판정한다
     JUDGE_TIMEOUT_SEC = 2.0  # 판정이 이만큼 안 오면 on 으로 본다 (늦게 온 paused 는 적용)
+    JUDGE_LATE_MAX_SEC = 5.0  # 이보다 늦은 판정은 버린다 — 정상은 거의 3 s 안(10-13 측정), 더 늦으면 재시도 같은 이상
     HOLD_MAX_QUIET_SEC = 10.0  # 판정을 기다리지 않는데 모델이 이만큼 조용하면 보류를 푼다 (안전망)
     TRANSCRIPT_LAG_SEC = 1.3  # 사용자 전사는 목소리 시작보다 이만큼 늦게 온다 — 판정 입력은 그때부터의 대화
 
@@ -830,6 +831,7 @@ class Radio:
     def _poll_judge(self, now: float) -> list[Command]:
         commands: list[Command] = []
         for call in list(self._calls):
+            age = now - call.sent_at
             if call.future.done():
                 self._calls.remove(call)
                 try:
@@ -841,7 +843,10 @@ class Radio:
                     commands += self._pause(now)
                 elif not call.timed_out and self._hold is not None:
                     self._hold.latest_on = call
-            elif now - call.sent_at >= self.JUDGE_TIMEOUT_SEC and not call.timed_out:
+            elif age >= self.JUDGE_LATE_MAX_SEC:
+                self._calls.remove(call)  # 끼어들기와 무관해졌을 수 있다 — 나중에 끝나도 적용하지 않는다
+                logger.info("Radio: no judgment in %.0f s — dropped", age)
+            elif age >= self.JUDGE_TIMEOUT_SEC and not call.timed_out:
                 call.timed_out = True  # 결과는 계속 기다린다 — 늦게 온 paused 는 적용
                 if self._hold is not None:
                     self._hold.latest_on = call

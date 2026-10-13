@@ -35,8 +35,8 @@
 - **끼어들기**: 라디오 on 중 사용자 전사가 오면 보류(넣기·멈춤 판단 중지). 판정기(`RadioJudge`, gpt-5.4-mini, 추론 없음,
   구조화 출력, 입력 = 읽던 대사 + 사용자 전사 1.3 s 전부터의 사용자·레이 전사)를 사용자 전사가 0.6 s 멈추면 부르고,
   모델이 대본 밖 말을 6자 더 하면 다시 부른다. 판정은 on·paused 둘. paused 는 오는 즉시, on 은 그 판정 뒤 새 사용자
-  말·새 반응이 없을 때 적용. 2 s 안에 답이 없으면 on(늦게 온 paused 는 적용). 판정을 기다리지 않는데 10 s 조용하면 보류를 푼다. on 뒤
-  모델 말은 대본과 다시 8자 일치할 때까지 "말한 글자"에서 뺀다.
+  말·새 반응이 없을 때 적용. 2 s 안에 답이 없으면 on(호출 뒤 5 s 안에 온 paused 는 적용, 더 늦으면 버림). 판정을
+  기다리지 않는데 10 s 조용하면 보류를 푼다. on 뒤 모델 말은 대본과 다시 8자 일치할 때까지 "말한 글자"에서 뺀다.
 - **멈춤·재개**: paused → thinking "Radio talk: paused, … Do not continue the talk yourself: the rest of it is not with
   you. If the user asks to go on with it (for example 계속해, 이어서 해 줘, 이야기 계속해 줘), delegate to the backend to
   resume it." + 백엔드 상태 paused. 멈춘 동안의 대화는 진행 계산에 넣지 않는다. 재개 → `resume_radio` → "Radio talk:
@@ -68,9 +68,10 @@
 - **유휴 타임아웃 180 s** 그대로. **백엔드 추론 low**.
 - **로그**: `Radio started: <대본> (song …)`, `Radio: line N/M pushed (start|text|stall|resume)`, `Radio: quiet after
   speaking — pushing again: …`, `Radio: user spoke — holding lines`, `Radio: judging (user|reaction) — reading «읽던 대사» |
-  Ray: … | User: …`(판정기 입력 그대로), `Radio judge: <상태> <초>s (<이유>)`, `Radio: paused by the judge`, `Radio: hold
-  released (judge on|judge timeout|quiet)`, `Radio: song introduced (closing|quiet|cap) — playing …`, `Radio: next script
-  …`. 판정 호출은 `call_records`(module `radio`, operation `judge`, metadata 상태·이유)에도 남는다.
+  Ray: … | User: …`(판정기 입력 그대로), `Radio judge: <상태> <초>s (<이유>)`, `Radio: no judgment in N s — dropped`,
+  `Radio: paused by the judge`, `Radio: hold released (judge on|judge timeout|quiet)`, `Radio: song introduced
+  (closing|quiet|cap) — playing …`, `Radio: next script …`. 판정 호출은 `call_records`(module `radio`, operation
+  `judge`, metadata 상태·이유)에도 남는다.
 - **실험 도구** (`scripts/gpt_live/`, 결과는 `var/experiments/<실험>/<번호>_<태그>/`, 녹음은 스테레오(왼쪽 사용자, 오른쪽
   로봇) + Audacity 레이블):
   - `exp_radio_pipeline.py` — 운영 루프 그대로(하네스)로 `--scenario long|interrupt|multi|chat`. `--report` 가 넣기

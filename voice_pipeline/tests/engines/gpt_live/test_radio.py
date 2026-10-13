@@ -473,6 +473,18 @@ class TestRadioInterruption:
         pending.set_result("paused")
         assert radio.step(t2 + 0.1, 0.0) == [UpdateBackend(), Think(RADIO_PAUSED_NOTE)]
 
+    def test_a_pause_later_than_the_cap_is_dropped(self) -> None:
+        pending: Future[str] = Future()
+        executor = MagicMock()
+        executor.submit.return_value = pending
+        radio, t = self._interrupted(executor=executor)
+        radio.step(t + 0.7, 0.0)
+        radio.step(t + 0.7 + Radio.JUDGE_TIMEOUT_SEC, 0.0)  # 시간 초과 → on
+        radio.step(t + 0.7 + Radio.JUDGE_LATE_MAX_SEC, 0.0)  # 상한 — 이 판정은 더 기다리지 않는다
+        pending.set_result("paused")
+        assert radio.step(t + 0.8 + Radio.JUDGE_LATE_MAX_SEC, 0.0) == []
+        assert radio.status == "on"
+
     def test_start_while_paused_begins_a_new_script(self) -> None:
         radio, t = self._interrupted("paused")
         radio.step(t + 0.7, 0.0)
