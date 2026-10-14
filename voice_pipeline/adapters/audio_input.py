@@ -1,8 +1,8 @@
 """AudioInput: microphone capture on a daemon thread.
 
-reSpeaker 는 6채널로 열어 한 채널만 mono 로 뽑는다. 기본은 CH0(후처리 출력), 노래 재생 중에는
-:meth:`AudioInput.set_raw_capture` 로 원본 채널(+게인)로 바꾼다. ``dump_dir`` 를 주면 뽑기 전 전 채널을 채널별
-WAV 로 계속 남긴다 — 후처리 출력과 원본 마이크를 한 시간축에서 비교하는 AEC 진단용.
+reSpeaker 는 6채널로 열어 CH1(ASR 처리 출력)에 고정 게인을 곱해 mono 로 내보낸다. CH0(Conference)은 후처리가
+더블토크·음악 재생 중 근단까지 눌러 말이 잘리고, CH1 은 후처리를 거치지 않는다. ``dump_dir`` 를 주면 뽑기 전
+전 채널을 채널별 WAV 로 계속 남긴다 — 처리 출력과 원본 마이크를 한 시간축에서 비교하는 AEC 진단용.
 """
 
 from __future__ import annotations
@@ -40,9 +40,8 @@ class AudioInput:
     _DEVICE_INDEX: int | None = None  # PyAudio 입력 디바이스 인덱스 명시 오버라이드. None이면 _DEVICE_NAME으로 탐색
     _DEVICE_NAME: str | None = "respeaker"  # 장치 이름 부분 문자열 매칭 (대소문자 무시). 인덱스와 달리 재열거에 안정적
     _CAPTURE_CHANNELS: int | None = 6  # 디바이스에서 캡처할 채널 수. None은 mono (ReSpeaker 6ch는 6)
-    _EXTRACT_CHANNEL = 0  # 다중 채널 캡처 시 mono 추출에 사용할 채널 인덱스 (0-based). CH0 = 처리 출력 (Conference)
-    _RAW_CHANNEL = 2  # set_raw_capture 가 쓰는 원본 마이크 채널 (CH2~5 가 게인 없는 원본, CH1 은 ASR 용 처리 출력)
-    _RAW_GAIN_DB = 15.0  # 원본 채널 소프트웨어 게인 (CH0 와 레벨을 맞추는 값)
+    _EXTRACT_CHANNEL = 1  # mono 로 뽑는 채널 (0-based). CH1 = ASR 출력: AEC·빔포밍만, 억제·AGC·잡음 억제 없음
+    _EXTRACT_GAIN_DB = 20.0  # 뽑은 채널 소프트웨어 게인. CH1 은 AGC 가 없어 CH0 보다 ~25 dB 작다
 
     def __init__(self, audio_queue: queue.Queue[AudioFrame], dump_dir: str | None = None) -> None:
         """Initialize capture state and ensure PyAudio is importable.
@@ -54,7 +53,6 @@ class AudioInput:
         """
         self._queue = audio_queue
         self._dump_dir = dump_dir
-        self._extract: tuple[int, float] = (self._EXTRACT_CHANNEL, 0.0)  # (채널, 게인 dB). 캡처 스레드가 매 프레임 읽음
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -89,20 +87,6 @@ class AudioInput:
     def error(self) -> Exception | None:
         """Return the captured error if the capture thread has died."""
         return self._error
-
-    def set_raw_capture(self, enabled: bool) -> None:
-        """Switch between the processed channel (default) and the raw microphone channel with gain.
-
-        다음 프레임부터 적용된다. 단일 채널 캡처에서는 무시된다.
-
-        Args:
-            enabled: True 면 ``_RAW_CHANNEL`` 에 ``_RAW_GAIN_DB`` 를 적용해 내보낸다. False 면 기본 채널.
-        """
-        capture_ch = self._CAPTURE_CHANNELS or CHANNELS
-        if capture_ch == CHANNELS:
-            return
-        self._extract = (self._RAW_CHANNEL, self._RAW_GAIN_DB) if enabled else (self._EXTRACT_CHANNEL, 0.0)
-        logger.info("Capture channel → CH%d (gain %+.0f dB)", *self._extract)
 
     def _resolve_device_index(self, pa: Any) -> int | None:
         """입력 장치 인덱스 결정: 명시 인덱스 > 이름 매칭 > 시스템 기본(None).
@@ -158,15 +142,11 @@ class AudioInput:
                 frames_per_buffer=FRAME_SIZE_SAMPLES,
             )
 
+            ch_idx, gain_db = self._EXTRACT_CHANNEL, self._EXTRACT_GAIN_DB
             if need_extract:
-                for ch_idx in (self._EXTRACT_CHANNEL, self._RAW_CHANNEL):
-                    if ch_idx >= capture_ch:
-                        raise RuntimeError(f"extract_channel ({ch_idx}) >= capture_channels ({capture_ch})")
-                logger.info(
-                    "Capturing %dch, extracting CH%d as mono",
-                    capture_ch,
-                    self._extract[0],
-                )
+                if ch_idx >= capture_ch:
+                    raise RuntimeError(f"extract_channel ({ch_idx}) >= capture_channels ({capture_ch})")
+                logger.info("Capturing %dch, extracting CH%d (gain %+.0f dB) as mono", capture_ch, ch_idx, gain_db)
             if self._dump_dir is not None:
                 dump = self._open_dump(self._dump_dir, capture_ch)
 
@@ -182,7 +162,6 @@ class AudioInput:
                         self._close_dump(dump)
                         dump = None
                 if need_extract:
-                    ch_idx, gain_db = self._extract
                     samples = array.array("h", data)
                     mono = samples[ch_idx::capture_ch]
                     if gain_db:

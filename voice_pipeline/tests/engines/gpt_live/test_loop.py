@@ -11,7 +11,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from voice_pipeline.adapters.audio_input import AudioInput
 from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEvent, CppEventType
 from voice_pipeline.adapters.gpt_live import (
     GPTLiveSession,
@@ -84,7 +83,6 @@ def _make_loop(
     history = MagicMock()
     led = MagicMock()
     memory = MagicMock()
-    audio_input = MagicMock(spec=AudioInput)
 
     audio_queue: queue.Queue = queue.Queue()
     for _ in range(frames):
@@ -104,10 +102,8 @@ def _make_loop(
         wait_for_playback_complete=wait_for_playback,
         song_catalog=song_catalog,
         radio=radio,
-        audio_input=audio_input,
     )
     mocks = {"live": live, "bridge": bridge, "history": history, "led": led, "memory": memory}
-    mocks["audio_input"] = audio_input
     return loop, mocks, audio_queue
 
 
@@ -597,13 +593,12 @@ class TestSongPlayback:
                 (reopened, LiveClosed("close_requested")),
             ],
         )
-        order = MagicMock()  # 브리지·세션·마이크 호출 순서를 한 곳에 기록
+        order = MagicMock()  # 브리지·세션 호출 순서를 한 곳에 기록
         order.attach_mock(m["bridge"], "bridge")
         order.attach_mock(m["live"], "live")
-        order.attach_mock(m["audio_input"], "audio_input")
         loop.run()
 
-        live, bridge, ai = m["live"], m["bridge"], m["audio_input"]
+        live, bridge = m["live"], m["bridge"]
         names = [c[0] for c in order.mock_calls]
         # 1) 결과는 노래가 시작된 뒤에 제출된다 (play_audio_csv 가 submit 보다 먼저)
         outputs = {c.args[0]: json.loads(c.args[1]) for c in live.submit_function_output.call_args_list}
@@ -618,14 +613,13 @@ class TestSongPlayback:
         # 2) 위임 시 한마디는 스트림으로 나갔고, 그 뒤 스트림을 닫았다 (audio_end 는 send_audio 뒤)
         assert [c.args[0] for c in bridge.send_audio.call_args_list] == [VOICE_100MS]
         assert names.index("bridge.send_audio") < names.index("bridge.send_audio_end")
-        # 3) 스트림 닫음 → 재생 지시 → (배수 완료) → 원본 채널 → play_audio_csv. 백엔드는 요청 수락 시 교체, 끝나면 복원
+        # 3) 스트림 닫음 → 재생 지시 → (배수 완료) → play_audio_csv. 백엔드는 요청 수락 시 교체, 끝나면 복원
         playing_note = next(
             i
             for i, c in enumerate(order.mock_calls)
             if c[0] == "live.append_instructions" and c[1][0] == SONG_PLAYING_INSTRUCTIONS
         )
-        raw_on = names.index("audio_input.set_raw_capture")
-        assert names.index("bridge.send_audio_end") < playing_note < raw_on < names.index("bridge.send_play_audio_csv")
+        assert names.index("bridge.send_audio_end") < playing_note < names.index("bridge.send_play_audio_csv")
         bridge.send_play_audio_csv.assert_called_once_with("IAM")
         live.update_backend.assert_called_once()
         assert live.update_backend.call_args.args[0] == SONG_BACKEND_INSTRUCTIONS
@@ -634,7 +628,6 @@ class TestSongPlayback:
         assert names.index("live.update_backend") < names.index("bridge.send_audio_end")
         continues = [i for i, n in enumerate(names) if n == "live.continue_response"]
         assert continues[1] < names.index("live.restore_backend") < names.index("live.close")  # 정지 후속 응답 뒤 복원
-        assert [c.args[0] for c in ai.set_raw_capture.call_args_list][:2] == [True, False]
         appended = [
             c.args[0].split("\nCurrent transfer:")[0]
             for c in live.append_instructions.call_args_list

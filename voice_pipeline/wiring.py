@@ -232,7 +232,6 @@ class ProcessComponents:
                 executor=self.executor,
                 song_catalog=self.song_catalog,
                 radio=radio,
-                audio_input=self.audio_input,
                 **session_loop_kwargs,
             )
             return SessionComponents(session_loop=live_loop, history=history, session_id=session_id)

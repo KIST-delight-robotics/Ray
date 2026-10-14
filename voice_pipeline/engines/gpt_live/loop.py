@@ -16,8 +16,8 @@
 
 노래 재생 (C++ 는 재생 하나를 끝까지 처리하므로 라이브 스트림과 교대한다):
     ``play_song`` 호출은 결과를 보류한 채(PENDING) 모델 출력이 무음이 되길 기다림 → ``audio_end`` + 재생 지시
-    append 뒤 ``playback_complete`` 대기(DRAINING) → 마이크 원본 채널 + ``play_audio_csv``(PLAYING) →
-    보류한 툴 결과 제출 → ``playback_complete``(끝) → 마이크·지시 복원, ``stream_start`` 로 재개.
+    append 뒤 ``playback_complete`` 대기(DRAINING) → ``play_audio_csv``(PLAYING) →
+    보류한 툴 결과 제출 → ``playback_complete``(끝) → 지시 복원, ``stream_start`` 로 재개.
     ``stop_song`` 도 결과를 보류한다(STOPPING): ``stop`` 은 즉시 보내되, 위임 시 모델의 한마디("끌게")가 스트림이
     닫힌 채 끝나길 기다린 뒤 스트림을 열고 결과를 제출한다 — 그래야 "끌게" 는 버려지고 결과 뒤의 "껐어" 만 들린다.
     결과를 노래 시작 뒤에 제출하므로 위임 시 모델의 한마디는 잘리지 않고, 결과 뒤의 말은 스트림이 없어 버려진다.
@@ -53,7 +53,6 @@ from typing import Any
 
 import numpy as np
 
-from voice_pipeline.adapters.audio_input import AudioInput
 from voice_pipeline.adapters.cpp_bridge import CppBridge, CppEventType
 from voice_pipeline.adapters.gpt_live import (
     GPTLiveSession,
@@ -177,7 +176,6 @@ class LiveSessionLoop:
         wait_for_playback_complete: bool = False,
         song_catalog: Mapping[str, Song] | None = None,
         radio: Radio | None = None,
-        audio_input: AudioInput | None = None,
     ) -> None:
         """
         Args:
@@ -194,7 +192,6 @@ class LiveSessionLoop:
             input_sample_rate / live_sample_rate: 마이크 레이트와 세션 레이트. 다르면 선형 보간으로 리샘플.
             song_catalog: 재생 가능한 노래 (키 → Song). None/빈 dict 면 play_song 은 unknown 으로 답한다.
             radio: 이 세션의 라디오. None 이면 라디오 툴은 unavailable 로 답한다.
-            audio_input: 있으면 노래 재생 중 원본 마이크 채널로 바꾼다 (:meth:`AudioInput.set_raw_capture`).
         """
         self._live = live
         self._bridge = cpp_bridge
@@ -213,7 +210,6 @@ class LiveSessionLoop:
         self._wait_for_playback_complete = wait_for_playback_complete
         self._song_catalog: Mapping[str, Song] = dict(song_catalog or {})
         self._radio = radio
-        self._audio_input = audio_input
         self._song_state = SongState.NONE
         self._song: Song | None = None
         self._song_future: Future[str] | None = None  # 보류 중인 play_song 결과. 노래 시작(또는 취소) 시 완료
@@ -329,7 +325,6 @@ class LiveSessionLoop:
                 self._bridge.send_stop()
             except Exception:
                 logger.warning("stop for playing song failed", exc_info=True)
-        self._set_raw_capture(False)
         if self._radio is not None:
             self._radio.reset()
         self._clear_song()
@@ -799,7 +794,6 @@ class LiveSessionLoop:
             logger.info("Song %s cancelled before start — reopening stream", self._song.key)
             self._end_song()
             return
-        self._set_raw_capture(True)  # 남은 레이 목소리가 다 나간 뒤에 — 원본 채널엔 AEC 가 없다
         self._bridge.send_play_audio_csv(self._song.key)
         self._song_state = SongState.PLAYING
         self._resolve_song_future("playing")  # 이제 결과를 제출한다 — 백엔드 완료 뒤 모델 말은 스트림이 없어 버려진다
@@ -827,7 +821,6 @@ class LiveSessionLoop:
             assert self._radio is not None
             commands = self._radio.on_song_end(time.monotonic(), completed=completed)
         self._clear_song()  # 백엔드는 여기서(정지 결과가 남았으면 그 제출 뒤) 지금 라디오 상태로 돌아간다
-        self._set_raw_capture(False)
         self._open_stream()  # 지시 전에 출력 경로를 열어 첫 음성이 버려지지 않게 한다
         self._run_radio([c for c in commands if not isinstance(c, UpdateBackend)])
         if not (radio_song and completed and self._radio is not None and self._radio.status == "on"):
@@ -837,14 +830,6 @@ class LiveSessionLoop:
                 logger.warning("append after song failed", exc_info=True)
         self._last_transcript_time = time.monotonic()  # 유휴 타임아웃 재시작
         logger.info("Song ended: %s — stream reopened", key)
-
-    def _set_raw_capture(self, enabled: bool) -> None:
-        if self._audio_input is None:
-            return
-        try:
-            self._audio_input.set_raw_capture(enabled)
-        except Exception:
-            logger.warning("set_raw_capture(%s) failed", enabled, exc_info=True)
 
     # ------------------------------------------------------------------
     # Radio

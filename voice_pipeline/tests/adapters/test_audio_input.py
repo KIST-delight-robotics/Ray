@@ -31,6 +31,7 @@ def _make_audio_input(
     device_name: str | None = None,
     capture_channels: int | None = None,
     extract_channel: int = 0,
+    extract_gain_db: float = 0.0,
     dump_dir: str | None = None,
 ):
     """Create AudioInput with mocked PyAudio."""
@@ -38,6 +39,7 @@ def _make_audio_input(
     monkeypatch.setattr(AudioInput, "_DEVICE_NAME", device_name)
     monkeypatch.setattr(AudioInput, "_CAPTURE_CHANNELS", capture_channels)
     monkeypatch.setattr(AudioInput, "_EXTRACT_CHANNEL", extract_channel)
+    monkeypatch.setattr(AudioInput, "_EXTRACT_GAIN_DB", extract_gain_db)
     audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=queue_size)
 
     # Provide a mock pyaudio module
@@ -46,7 +48,6 @@ def _make_audio_input(
         ai = AudioInput.__new__(AudioInput)
 
     ai._queue = audio_queue
-    ai._extract = (extract_channel, 0.0)
     ai._dump_dir = dump_dir
     ai._stop_event = threading.Event()
     ai._thread = None
@@ -374,71 +375,36 @@ def _frames_then_stop(ai, frames: list[bytes]):
     return _read
 
 
-class TestRawCapture:
-    """set_raw_capture: 스트림을 유지한 채 다음 프레임부터 원본 채널(+게인)로 바뀐다."""
+class TestExtractGain:
+    """뽑은 채널에 고정 게인을 곱하고, int16 범위를 넘으면 자른다."""
 
     @staticmethod
     def _six_channel_frame() -> bytes:
         raw = b""
         for _ in range(FRAME_SIZE_SAMPLES):
             for ch in range(6):
-                raw += struct.pack("<h", (ch + 1) * 100)  # ch0=100, ch2=300 …
+                raw += struct.pack("<h", (ch + 1) * 100)  # ch0=100, ch1=200 …
         return raw
 
-    def test_switches_channel_and_gain_mid_stream(self, monkeypatch) -> None:
-        ai, audio_queue = _make_audio_input(monkeypatch, capture_channels=6, extract_channel=0)
-        monkeypatch.setattr(AudioInput, "_RAW_CHANNEL", 2)
-        monkeypatch.setattr(AudioInput, "_RAW_GAIN_DB", 20.0)  # ×10
-
-        mock_pa_instance = MagicMock()
-        mock_stream = MagicMock()
-        raw = self._six_channel_frame()
-        calls = {"n": 0}
-
-        def read(*_args, **_kwargs):
-            calls["n"] += 1
-            if calls["n"] == 2:
-                ai.set_raw_capture(True)  # 두 번째 프레임부터 원본 채널
-            if calls["n"] == 3:
-                ai.set_raw_capture(False)  # 세 번째 프레임은 다시 기본 채널
-            if calls["n"] > 3:
-                ai._stop_event.set()
-                time.sleep(0.01)
-            return raw
-
-        mock_stream.read.side_effect = read
-        mock_pa_instance.open.return_value = mock_stream
-        ai._pyaudio_module.PyAudio.return_value = mock_pa_instance
-
-        ai.start()
-        ai._thread.join(timeout=2.0)
-
-        frames = [array.array("h", audio_queue.get_nowait()) for _ in range(3)]
-        assert all(v == 100 for v in frames[0])  # CH0
-        assert all(v == 3000 for v in frames[1])  # CH2 (300) × 10
-        assert all(v == 100 for v in frames[2])  # CH0 복귀
-        assert mock_pa_instance.open.call_count == 1  # 스트림은 한 번만 열렸다
-
-    def test_gain_clips_instead_of_wrapping(self, monkeypatch) -> None:
-        ai, audio_queue = _make_audio_input(monkeypatch, capture_channels=6, extract_channel=0)
-        monkeypatch.setattr(AudioInput, "_RAW_CHANNEL", 5)
-        monkeypatch.setattr(AudioInput, "_RAW_GAIN_DB", 60.0)  # ×1000 → 600 * 1000 은 int16 범위 밖
-        ai.set_raw_capture(True)
-
+    def _run(self, ai) -> None:
         mock_pa_instance = MagicMock()
         mock_stream = MagicMock()
         mock_stream.read.side_effect = _frames_then_stop(ai, [self._six_channel_frame()])
         mock_pa_instance.open.return_value = mock_stream
         ai._pyaudio_module.PyAudio.return_value = mock_pa_instance
-
         ai.start()
         ai._thread.join(timeout=2.0)
-        assert all(v == 32767 for v in array.array("h", audio_queue.get_nowait()))
 
-    def test_noop_for_mono_capture(self, monkeypatch) -> None:
-        ai, _ = _make_audio_input(monkeypatch, capture_channels=None, extract_channel=0)
-        ai.set_raw_capture(True)
-        assert ai._extract == (0, 0.0)
+    def test_applies_gain_to_extracted_channel(self, monkeypatch) -> None:
+        ai, audio_queue = _make_audio_input(monkeypatch, capture_channels=6, extract_channel=1, extract_gain_db=20.0)
+        self._run(ai)
+        assert all(v == 2000 for v in array.array("h", audio_queue.get_nowait()))  # CH1 (200) × 10
+
+    def test_gain_clips_instead_of_wrapping(self, monkeypatch) -> None:
+        # ×1000 → 600 * 1000 은 int16 범위 밖
+        ai, audio_queue = _make_audio_input(monkeypatch, capture_channels=6, extract_channel=5, extract_gain_db=60.0)
+        self._run(ai)
+        assert all(v == 32767 for v in array.array("h", audio_queue.get_nowait()))
 
 
 class TestMicDump:
@@ -456,7 +422,7 @@ class TestMicDump:
 
     def test_writes_each_channel_to_own_file(self, monkeypatch, tmp_path) -> None:
         ai, audio_queue = _make_audio_input(monkeypatch, capture_channels=6, dump_dir=str(tmp_path / "mic"))
-        raw = TestRawCapture._six_channel_frame()
+        raw = TestExtractGain._six_channel_frame()
         self._run(ai, [raw, raw])
 
         (folder,) = (tmp_path / "mic").iterdir()
