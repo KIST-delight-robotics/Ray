@@ -8,7 +8,8 @@
 라디오(:mod:`~voice_pipeline.engines.gpt_live.radio`): 대화 모델은 라디오 진행 규칙을 모른다 — 라이브 지시문에는
 위임 목록과 Backend tools 의 Radio 한 줄씩만 있고, 앱이 대사를 :data:`RADIO_LINE_TEMPLATE` 로 하나씩 앞서
 ``thinking.append`` 하면 그대로 읽는다. 멈춤·재개·종료는 상태 문구(:data:`RADIO_PAUSED_NOTE` 등)를 thinking 으로
-알린다. 백엔드는 ``## Radio talk`` 절의 상태로 ``start_radio`` / ``resume_radio`` 를 가린다. 끼어든 말의 판정은 별도
+알린다. 사용자가 말하기 시작한 뒤 대사가 들어갔으면 :data:`RADIO_LATE_LINE_NOTE` 로 대답을 먼저 하게 한다. 백엔드는
+``## Radio talk`` 절의 상태로 ``start_radio`` / ``resume_radio`` 를 가린다. 끼어든 말의 판정은 별도
 LLM(:data:`RADIO_JUDGE_INSTRUCTIONS`)이 한다. 설계 배경은 docs/dj-mode-worknote.md.
 """
 
@@ -191,19 +192,25 @@ RADIO_PAUSED_NOTE = (
 )
 RADIO_RESUMED_NOTE = "Radio talk: resumed. Read the application's lines as before."
 RADIO_ENDED_NOTE = "Radio talk: ended. Talk with the user now."
+# 사용자 전사가 오기 직전(목소리는 이미 시작)에 넣은 대사 — 모델은 사용자 말 도중 받은 대사를 대답보다 먼저 읽는다
+RADIO_LATE_LINE_NOTE = (
+    "The user started talking to you. Respond to the user first; do not say the line you were just given yet."
+)
 # 곡 뒤 대본의 첫 대사 앞에 붙인다 — 대본은 놓이는 순서와 상관없이 쓴다
 RADIO_AFTER_SONG_OPENING = "노래 잘 들으셨어요?"
 
 # 끼어든 말의 판정기 (별도 LLM 호출, 구조화 출력). 입력은 읽던 대사와 끼어든 뒤의 사용자·레이 전사.
+# 기본값은 on(판정 실패·지연도 on) — 판정기는 사용자가 레이에게 말한 게 분명할 때만 paused 를 낸다.
 RADIO_JUDGE_INSTRUCTIONS = """\
 Ray, a small desk robot, is hosting a radio talk: it reads prepared lines aloud, one at a time. \
-The user spoke while Ray was reading. Decide what the radio should do now, from what the user said and \
-how Ray responded. The transcripts come from speech recognition and may contain errors.
+Someone spoke while Ray was reading. The talk goes on by default; decide whether it must pause because the user \
+is talking to Ray. The transcripts come from speech recognition and may contain errors.
 
-- on: the user only reacted briefly (for example 응, 아 진짜, 맞아, 그렇구나), or Ray ignored it and kept reading. \
-The talk goes on with the next line.
-- paused: the user is talking to Ray: a question (also about the talk itself), a comment, a complaint, a request, \
-asking Ray to wait, or asking to stop the talk. Ray stops the talk and talks with the user.
+- paused: the user is clearly talking to Ray: a question (also about the talk itself), a request, asking Ray to \
+wait or to stop the talk, a complaint about the talk, or a comment or their own story in response to the talk \
+(for example 나도 그런 적 있어) — even if Ray kept reading. Ray stops the talk and talks with the user.
+- on: everything else — a brief reaction (for example 응, 아 진짜, 맞아, 그렇구나), talking on the phone or to \
+someone else, talking to themselves, or words that are unclear. The talk goes on.
 """
 RADIO_JUDGE_FORMAT: dict[str, Any] = {
     "type": "json_schema",

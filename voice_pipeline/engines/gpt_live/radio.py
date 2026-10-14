@@ -14,8 +14,9 @@
 
 끼어들기(:class:`Radio`): 사용자 전사가 오면 넣기를 보류하고 판정기(:class:`RadioJudge`, 별도 LLM)에 on / paused 를
 묻는다. paused 는 오는 즉시, on 은 그 뒤 새 사용자 말도 새 반응도 없을 때 적용한다. on 뒤 모델의 대답은
-대본과 다시 일치할 때까지 진행에서 뺀다. 멈추면 혼자 다시 시작하지 않는다 — 사용자가 이어 달라고 하면 백엔드가
-``resume_radio`` 를 부르고, 아직 안 읽힌 대사부터 다시 넣는다.
+대본과 다시 일치할 때까지 진행에서 뺀다. 사용자 전사는 목소리보다 늦게 오므로, 보류 직전에 넣은 대사는 사용자가 말하는
+도중에 들어간 것이다 — 모델은 그 대사를 대답보다 먼저 읽으므로 대답을 먼저 하라는 문구를 넣는다. 멈추면 혼자 다시
+시작하지 않는다 — 사용자가 이어 달라고 하면 백엔드가 ``resume_radio`` 를 부르고, 아직 안 읽힌 대사부터 다시 넣는다.
 
 이 모듈은 세션 I/O 를 하지 않는다. 루프가 시각·전사·무음을 넣고, 돌려받은 할 일(:class:`Think`, :class:`UpdateBackend`,
 :class:`PlaySong`)을 실행한다.
@@ -42,6 +43,7 @@ from voice_pipeline.engines.gpt_live.instructions import (
     RADIO_ENDED_NOTE,
     RADIO_JUDGE_FORMAT,
     RADIO_JUDGE_INSTRUCTIONS,
+    RADIO_LATE_LINE_NOTE,
     RADIO_LINE_TEMPLATE,
     RADIO_PAUSED_NOTE,
     RADIO_RESUMED_NOTE,
@@ -352,6 +354,11 @@ class Tracker:
         return len(self._pushes)
 
     @property
+    def last_pushed_at(self) -> float | None:
+        """마지막으로 대사를 넣은 시각."""
+        return self._pushes[-1] if self._pushes else None
+
+    @property
     def done(self) -> int:
         self._update_done()
         return self._done
@@ -609,6 +616,7 @@ class Radio:
     JUDGE_LATE_MAX_SEC = 5.0  # 이보다 늦은 판정은 버린다 — 정상은 거의 3 s 안(10-13 측정), 더 늦으면 재시도 같은 이상
     HOLD_MAX_QUIET_SEC = 10.0  # 판정을 기다리지 않는데 모델이 이만큼 조용하면 보류를 푼다 (안전망)
     TRANSCRIPT_LAG_SEC = 1.3  # 사용자 전사는 목소리 시작보다 이만큼 늦게 온다 — 판정 입력은 그때부터의 대화
+    LATE_PUSH_SEC = 1.5  # 보류 직전 이 안에 넣은 대사는 사용자가 말하는 도중에 들어갔다 (전사 지연 + 여유)
 
     def __init__(self, picker: ScriptPicker, judge: RadioJudge, executor: Executor | None = None) -> None:
         self._picker = picker
@@ -622,6 +630,7 @@ class Radio:
         self._hold: _Hold | None = None
         self._last_user_text: float | None = None
         self._calls: list[_JudgeCall] = []
+        self._notes: list[Command] = []  # 다음 step 에 낼 문구
 
     # -- 툴 ------------------------------------------------------------------
 
@@ -657,19 +666,20 @@ class Radio:
     # -- 입력 ----------------------------------------------------------------
 
     def on_transcript(self, now: float, segment_id: str, speaker: str, text: str) -> None:
-        """전사 세그먼트 스냅샷 (닫히지 않은 것 포함)."""
-        if self.status == "off" or self.playing_song:
-            return
+        """전사 세그먼트 스냅샷 (닫히지 않은 것 포함).
+
+        구간별 글자는 라디오가 꺼져 있거나 곡 중에도 기록한다 — 시작 요청처럼 그 전에 시작된 구간의 마무리 갱신이 늦게
+        와도 새 말로 보지 않게.
+        """
         delta = self._transcripts.add(now, segment_id, speaker, text)
-        if not delta:
+        if not delta or self.status == "off" or self.playing_song:
             return
         if speaker == "user":
+            if not letters(delta):
+                return  # 마무리 갱신에 붙은 문장부호 — 새 말이 아니다
             self._last_user_text = now
             if self.status == "on" and self._hold is None:
-                self._hold = _Hold(start=now)
-                if self.tracker is not None:
-                    self.tracker.hold(now)
-                logger.info("Radio: user spoke — holding lines")
+                self._start_hold(now)
         elif self.status == "on" and self.tracker is not None:
             self.tracker.add_output(now, delta)  # 멈춘 동안의 대화는 대사를 읽은 것이 아니다 — 재개 지점을 지킨다
 
@@ -698,6 +708,7 @@ class Radio:
         """세션이 끝난다 — 상태를 지운다 (백엔드·지시는 건드리지 않는다)."""
         self.status = "off"
         self._reset_reading()
+        self._transcripts = _Transcripts()
         self.playing_song = False
         self._calls.clear()
 
@@ -710,7 +721,8 @@ class Radio:
             now: 지금 시각.
             quiet: 마지막 모델 음성 뒤 받은 무음 조각 길이(초).
         """
-        commands = self._poll_judge(now)
+        commands, self._notes = self._notes, []
+        commands += self._poll_judge(now)
         if self.status != "on" or self.tracker is None or self.playing_song:
             return commands
         if self._hold is not None:
@@ -746,11 +758,12 @@ class Radio:
         return [Think(RADIO_LINE_TEMPLATE.format(push.text))]
 
     def _reset_reading(self) -> None:
+        """대본 하나의 진행을 지운다. 전사 기록은 세션 동안 남긴다 — 판정 입력은 시각으로 자른다."""
         self.script = None
         self.tracker = None
         self._hold = None
-        self._transcripts = _Transcripts()
         self._last_user_text = None
+        self._notes.clear()
 
     def _end(self) -> list[Command]:
         self.status = "off"
@@ -758,6 +771,19 @@ class Radio:
         return [UpdateBackend(), Think(RADIO_ENDED_NOTE)]
 
     # -- 끼어들기 판정 --------------------------------------------------------
+
+    def _start_hold(self, now: float) -> None:
+        """사용자 말이 왔다 — 넣기를 멈춘다. 직전에 넣은 대사는 사용자 말 도중 들어갔으니 대답을 먼저 하게 한다."""
+        self._hold = _Hold(start=now)
+        logger.info("Radio: user spoke — holding lines")
+        if self.tracker is None:
+            return
+        self.tracker.hold(now)
+        pushed = self.tracker.last_pushed_at
+        if pushed is not None and now - pushed <= self.LATE_PUSH_SEC:
+            self._notes.append(Think(RADIO_LATE_LINE_NOTE))
+            gap = now - pushed
+            logger.info("Radio: line pushed %.1f s before the user's words arrived — asking to answer first", gap)
 
     def _hold_step(self, now: float, quiet: float) -> None:
         hold = self._hold

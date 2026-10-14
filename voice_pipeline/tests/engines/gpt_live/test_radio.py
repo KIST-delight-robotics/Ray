@@ -16,6 +16,7 @@ from voice_pipeline.engines.gpt_live.instructions import (
     RADIO_AFTER_SONG_OPENING,
     RADIO_ENDED_NOTE,
     RADIO_JUDGE_FORMAT,
+    RADIO_LATE_LINE_NOTE,
     RADIO_LINE_TEMPLATE,
     RADIO_PAUSED_NOTE,
     RADIO_RESUMED_NOTE,
@@ -434,6 +435,41 @@ class TestRadioInterruption:
             radio.step(t + 0.7, 0.0)
         assert f"Radio: judging (user) — reading «{LINES[0]}» | Ray: 오늘은 책상 서랍 이야기예요." in caplog.text
         assert "| User: 근데 서랍에 뭐 넣어 둬?" in caplog.text
+
+    def test_a_line_pushed_just_before_the_user_words_asks_to_answer_first(self) -> None:
+        radio = _radio("on")
+        radio.start(0.0)  # 첫 대사를 0.0 에 넣었다
+        _read(radio, "오늘은 책상", 0.2)
+        _user(radio, "잠깐만", 1.0)  # 전사는 목소리보다 늦다 — 대사는 사용자가 말하는 도중 들어갔다
+        assert radio.step(1.0, 0.0) == [Think(RADIO_LATE_LINE_NOTE)]
+        assert radio.step(1.1, 0.0) == []  # 한 번만
+
+    def test_no_answer_first_note_when_the_line_went_in_earlier(self) -> None:
+        radio = _radio("on")
+        radio.start(0.0)
+        _user(radio, "잠깐만", Radio.LATE_PUSH_SEC + 0.1)
+        assert radio.step(Radio.LATE_PUSH_SEC + 0.1, 0.0) == []
+
+    def test_the_start_request_closing_late_is_not_new_speech(self) -> None:
+        radio = _radio("paused")
+        _user(radio, "라디오 해줘", 0.0)  # 라디오가 꺼져 있을 때 들어온 시작 요청
+        radio.start(0.5)
+        _user(radio, "라디오 해줘", 0.9)  # 같은 구간의 마무리 갱신이 시작 뒤에 온다
+        _user(radio, "라디오 해줘.", 1.0)  # 문장부호만 붙은 갱신
+        assert radio._hold is None
+        radio.step(2.0, 0.0)
+        radio._judge.classify.assert_not_called()  # type: ignore[attr-defined]
+        _user(radio, "근데 잠깐만", 2.5, segment="in-2")  # 시작 뒤 새로 한 말은 보류한다
+        assert radio._hold is not None
+
+    def test_speech_during_the_song_closing_late_is_not_new_speech(self) -> None:
+        radio = _radio("paused")
+        radio.start(0.0)
+        radio.playing_song = True
+        _user(radio, "노래 좋다", 5.0, segment="in-song")  # 곡 중에 한 말
+        radio.on_song_end(9.0, completed=True)  # 다음 대본
+        _user(radio, "노래 좋다.", 9.2, segment="in-song")  # 그 구간의 마무리 갱신이 곡 뒤에 온다
+        assert radio.status == "on" and radio._hold is None
 
     def test_paused_stops_the_talk_and_resume_continues_from_the_unread_line(self) -> None:
         radio, t = self._interrupted("paused")
