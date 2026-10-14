@@ -13,10 +13,12 @@
 평가(기록 321회, 사후 정답 대비).
 
 끼어들기(:class:`Radio`): 사용자 전사가 오면 넣기를 보류하고 판정기(:class:`RadioJudge`, 별도 LLM)에 on / paused 를
-묻는다. paused 는 오는 즉시, on 은 그 뒤 새 사용자 말도 새 반응도 없을 때 적용한다. on 뒤 모델의 대답은
-대본과 다시 일치할 때까지 진행에서 뺀다. 사용자 전사는 목소리보다 늦게 오므로, 보류 직전에 넣은 대사는 사용자가 말하는
-도중에 들어간 것이다 — 모델은 그 대사를 대답보다 먼저 읽으므로 대답을 먼저 하라는 문구를 넣는다. 멈추면 혼자 다시
-시작하지 않는다 — 사용자가 이어 달라고 하면 백엔드가 ``resume_radio`` 를 부르고, 아직 안 읽힌 대사부터 다시 넣는다.
+묻는다. paused 는 오는 즉시, on 은 그 뒤 새 사용자 말도 새 반응도 없을 때 적용한다. 판정이 늦어도 보류를 유지하고,
+넣을 때가 되면 :attr:`Radio.DUE_WAIT_SEC` 더 기다린 뒤 on 으로 진행한다(늦게 온 paused 는 그 뒤에도 적용). on 뒤
+모델의 대답은 대본과 다시 일치할 때까지 진행에서 뺀다. 사용자 전사는 목소리보다 늦게 오므로, 보류 직전에 넣은 대사는
+사용자가 말하는 도중에 들어간 것이다 — 모델은 그 대사를 대답보다 먼저 읽으므로 대답을 먼저 하라는 문구를 넣는다.
+멈추면 혼자 다시 시작하지 않는다 — 사용자가 이어 달라고 하면 백엔드가 ``resume_radio`` 를 부르고, 아직 안 읽힌
+대사부터 다시 넣는다.
 
 이 모듈은 세션 I/O 를 하지 않는다. 루프가 시각·전사·무음을 넣고, 돌려받은 할 일(:class:`Think`, :class:`UpdateBackend`,
 :class:`PlaySong`)을 실행한다.
@@ -572,7 +574,7 @@ class _JudgeCall:
     sent_at: float
     upto_user: float  # 이 판정이 본 마지막 사용자 전사 시각
     upto_reaction: int  # 이 판정이 본 반응 글자 수
-    timed_out: bool = False
+    hold_start: float  # 이 판정이 속한 끼어들기(보류)
 
 
 @dataclass
@@ -583,6 +585,8 @@ class _Hold:
     judged_user: float = -1.0
     judged_reaction: int = 0
     latest_on: _JudgeCall | None = None
+    last_sent: float | None = None  # 마지막 판정 호출 시각
+    due_since: float | None = None  # 판정 없이 넣어야 할 순간(넣기·무음 폴백·곡)이 온 시각
 
 
 @dataclass
@@ -612,8 +616,8 @@ class Radio:
 
     USER_QUIET_SEC = 0.6  # 사용자 전사가 이만큼 멈추면 판정한다
     RECHECK_LETTERS = 6  # 판정 뒤 모델이 대본 밖 말을 이만큼 더 하면 다시 판정한다
-    JUDGE_TIMEOUT_SEC = 2.0  # 판정이 이만큼 안 오면 on 으로 본다 (늦게 온 paused 는 적용)
-    JUDGE_LATE_MAX_SEC = 5.0  # 이보다 늦은 판정은 버린다 — 정상은 거의 3 s 안(10-13 측정), 더 늦으면 재시도 같은 이상
+    DUE_WAIT_SEC = 3.0  # 넣을 때가 됐는데 판정이 없으면 이만큼 기다린다 (그때와 판정 호출 중 늦은 쪽부터)
+    JUDGE_LATE_MAX_SEC = 8.0  # 호출 뒤 이보다 늦은 판정은 버린다 — 기다림이 호출보다 늦게 시작할 수 있어 넉넉히
     HOLD_MAX_QUIET_SEC = 10.0  # 판정을 기다리지 않는데 모델이 이만큼 조용하면 보류를 푼다 (안전망)
     TRANSCRIPT_LAG_SEC = 1.3  # 사용자 전사는 목소리 시작보다 이만큼 늦게 온다 — 판정 입력은 그때부터의 대화
     LATE_PUSH_SEC = 1.5  # 보류 직전 이 안에 넣은 대사는 사용자가 말하는 도중에 들어갔다 (전사 지연 + 여유)
@@ -630,6 +634,7 @@ class Radio:
         self._hold: _Hold | None = None
         self._last_user_text: float | None = None
         self._calls: list[_JudgeCall] = []
+        self._last_hold_start: float | None = None  # 가장 최근 끼어들기 — 판정은 이것에 대한 것만 적용한다
         self._notes: list[Command] = []  # 다음 step 에 낼 문구
 
     # -- 툴 ------------------------------------------------------------------
@@ -727,7 +732,7 @@ class Radio:
             return commands
         if self._hold is not None:
             self._hold_step(now, quiet)
-            if self._hold is not None:
+            if self._hold is not None and not self._due_while_holding(now, quiet):
                 return commands
         action = self.tracker.next_action(now, quiet)
         if isinstance(action, Push):
@@ -775,6 +780,7 @@ class Radio:
     def _start_hold(self, now: float) -> None:
         """사용자 말이 왔다 — 넣기를 멈춘다. 직전에 넣은 대사는 사용자 말 도중 들어갔으니 대답을 먼저 하게 한다."""
         self._hold = _Hold(start=now)
+        self._last_hold_start = now
         logger.info("Radio: user spoke — holding lines")
         if self.tracker is None:
             return
@@ -791,9 +797,30 @@ class Radio:
         self._maybe_judge(now, hold)
         on = hold.latest_on
         if on is not None and not self._waiting() and not self._stale(on, hold):
-            self._release(now, "judge timeout" if on.timed_out else "judge on")
+            self._release(now, "judge on")
         elif not self._waiting() and quiet >= self.HOLD_MAX_QUIET_SEC:
             self._release(now, "quiet")
+
+    def _due_while_holding(self, now: float, quiet: float) -> bool:
+        """판정을 기다리는 중 넣어야 할 순간(넣기·무음 폴백·곡)이 왔으면 판정을 :attr:`DUE_WAIT_SEC` 더 기다리고, 그래도
+        없으면 보류를 푼다(on 으로 보고 진행한다). 풀었으면 True.
+
+        보류 중에는 아무것도 넣지 않는다 — 사용자 말 도중 들어간 대사는 대답보다 먼저 읽히고, 조용한 레이는 사용자를
+        기다리는 것일 수 있다. 기다림은 그 순간과 판정 호출 중 늦은 쪽부터 센다(사용자가 길게 말하면 판정을 부르기 전에
+        무음이 먼저 찬다).
+        """
+        hold = self._hold
+        assert hold is not None and self.tracker is not None
+        if self.tracker.next_action(now, quiet) is None:
+            hold.due_since = None
+            return False
+        if hold.due_since is None:
+            hold.due_since = now
+            logger.info("Radio: due to go on while judging — waiting up to %.0f s", self.DUE_WAIT_SEC)
+        if hold.last_sent is None or now - max(hold.due_since, hold.last_sent) < self.DUE_WAIT_SEC:
+            return False
+        self._release(now, "no judgment")
+        return True
 
     def _release(self, now: float, why: str) -> None:
         self._hold = None
@@ -802,7 +829,7 @@ class Radio:
         logger.info("Radio: hold released (%s) — talk goes on", why)
 
     def _waiting(self) -> bool:
-        return any(not c.timed_out and not c.future.done() for c in self._calls)
+        return any(not c.future.done() and c.hold_start == self._last_hold_start for c in self._calls)
 
     def _reaction(self, hold: _Hold) -> int:
         assert self.tracker is not None
@@ -828,8 +855,9 @@ class Radio:
         dialog = " | ".join(f"{'User' if who == 'user' else 'Ray'}: {text}" for who, text in exchange)
         logger.info("Radio: judging (%s) — reading «%s» | %s", "user" if new_user else "reaction", line, dialog)
         call = _JudgeCall(
-            self._submit(lambda: self._judge.classify(line, exchange)), now, self._last_user_text, reaction
+            self._submit(lambda: self._judge.classify(line, exchange)), now, self._last_user_text, reaction, hold.start
         )
+        hold.last_sent = now
         self._calls.append(call)
 
     def _submit(self, fn: Callable[[], str]) -> Future[str]:
@@ -865,17 +893,15 @@ class Radio:
                 except Exception:
                     logger.warning("Radio judge failed — treating as on", exc_info=True)
                     state = "on"
-                if state == "paused":
-                    commands += self._pause(now)
-                elif not call.timed_out and self._hold is not None:
+                if call.hold_start != self._last_hold_start:
+                    logger.info("Radio: judgment for an earlier interruption — dropped")  # 사용자가 그 뒤에 또 말했다
+                elif state == "paused":
+                    commands += self._pause(now)  # 보류가 이미 풀렸어도(넣은 뒤) 적용한다 — 곡 중이면 버린다
+                elif self._hold is not None:
                     self._hold.latest_on = call
             elif age >= self.JUDGE_LATE_MAX_SEC:
-                self._calls.remove(call)  # 끼어들기와 무관해졌을 수 있다 — 나중에 끝나도 적용하지 않는다
+                self._calls.remove(call)  # 아무도 말하지 않는데 갑자기 멈추지 않게 — 나중에 끝나도 적용하지 않는다
                 logger.info("Radio: no judgment in %.0f s — dropped", age)
-            elif age >= self.JUDGE_TIMEOUT_SEC and not call.timed_out:
-                call.timed_out = True  # 결과는 계속 기다린다 — 늦게 온 paused 는 적용
-                if self._hold is not None:
-                    self._hold.latest_on = call
         return commands
 
     def _pause(self, now: float) -> list[Command]:

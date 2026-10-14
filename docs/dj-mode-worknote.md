@@ -35,8 +35,9 @@
 - **끼어들기**: 라디오 on 중 사용자 전사가 오면 보류(넣기·멈춤 판단 중지). 판정기(`RadioJudge`, gpt-5.4-mini, 추론 없음,
   구조화 출력, 입력 = 읽던 대사 + 사용자 전사 1.3 s 전부터의 사용자·레이 전사)를 사용자 전사가 0.6 s 멈추면 부르고,
   모델이 대본 밖 말을 6자 더 하면 다시 부른다. 판정은 on·paused 둘. paused 는 오는 즉시, on 은 그 판정 뒤 새 사용자
-  말·새 반응이 없을 때 적용. 2 s 안에 답이 없으면 on(호출 뒤 5 s 안에 온 paused 는 적용, 더 늦으면 버림). 판정을
-  기다리지 않는데 10 s 조용하면 보류를 푼다. on 뒤 모델 말은 대본과 다시 8자 일치할 때까지 "말한 글자"에서 뺀다.
+  말·새 반응이 없을 때 적용. 판정이 늦어도 보류를 유지하고(그동안 아무것도 넣지 않는다), 넣을 때(넣기·무음 폴백·곡)가
+  되면 그때와 판정 호출 중 늦은 쪽부터 3 s 기다린 뒤 그래도 없으면 on 으로 진행한다. 늦게 온 paused 는 가장 최근 끼어들기의
+  것이고 호출 뒤 8 s 안이면 적용(곡 중 제외), 아니면 버린다. 판정을 기다리지 않는데 10 s 조용하면 보류를 푼다. on 뒤 모델 말은 대본과 다시 8자 일치할 때까지 "말한 글자"에서 뺀다.
   보류가 걸린 순간 직전 1.5 s 안에 넣은 대사가 있으면(사용자 목소리는 이미 시작됐고 전사만 늦었다) thinking "The user
   started talking to you. Respond to the user first; do not say the line you were just given yet." 를 한 번 넣는다.
   전사 구간별 글자는 라디오가 꺼져 있거나 곡 중에도 기록한다 — 시작 요청·곡 중 말의 마무리 갱신이 늦게 와도 새 말로
@@ -66,6 +67,10 @@
     사용자가 곡을 멈출 때뿐.
   - 모델 행동은 운영 문제(멈추지 말아야 할 때 멈춤, 멈춰야 할 때 안 멈춤)가 아니면 받아들인다 — 대답에 받아 둔 대사 내용을
     끌어다 쓰기, 맞장구에 대사를 풀어 말하기 등(10-14).
+  - 판정이 늦을 때: 판정 시간 초과로 on 을 정하지 않는다 — 시간 초과는 그 순간 아무것도 하지 않고, 넣을 일이 생겼을 때만
+    문제가 된다. 넣을 때가 됐는데 판정이 없으면 기다리고, 상한은 그 기다림에 둔다(3 s). 보류 중 넣기 지점에 닿아도 바로
+    넣지 않는다 — 서버가 레이 말을 끊기 전의 말로 진도가 차면 사용자 말 도중 대사가 들어가므로. 판정기 자체 시간 제한은
+    두지 않는다(10-14).
   - 멈춘 뒤 혼자 다시 시작하지 않는다. 이어 달라면 재개, 그대로 두었다가 나중에 "라디오 해 줘" 하면 새로 시작 —
     일시정지는 "종료 + 책갈피", 멈춘 뒤의 레이는 일반 대화와 같다. 멈춘 동안 판정기를 돌리지 않는다.
   - 노래 중엔 레이 말이 나가지 않으므로 곡 정지 요청에만 반응한다. 곡 소개 직후 끼어든 말이 보류보다 늦게 와서 곡이
@@ -79,7 +84,8 @@
   speaking — pushing again: …`, `Radio: user spoke — holding lines`, `Radio: line pushed N s before the user's words arrived — asking to
   answer first`, `Radio: judging (user|reaction) — reading «읽던 대사» |
   Ray: … | User: …`(판정기 입력 그대로), `Radio judge: <상태> <초>s (<이유>)`, `Radio: no judgment in N s — dropped`,
-  `Radio: paused by the judge`, `Radio: hold released (judge on|judge timeout|quiet)`, `Radio: song introduced
+  `Radio: judgment for an earlier interruption — dropped`, `Radio: due to go on while judging — waiting up to 3 s`,
+  `Radio: paused by the judge`, `Radio: hold released (judge on|no judgment|quiet)`, `Radio: song introduced
   (closing|quiet|cap) — playing …`, `Radio: next script …`. 판정 호출은 `call_records`(module `radio`, operation
   `judge`, metadata 상태·이유)에도 남는다.
 - **실험 도구** (`scripts/gpt_live/`, 결과는 `var/experiments/<실험>/<번호>_<태그>/`, 녹음은 스테레오(왼쪽 사용자, 오른쪽
@@ -732,6 +738,12 @@ instructions.append "Radio talk: the song has ended. Go on with your talk.", 10�
   someone … a direct comment rather than a brief reaction").
 - 시작 요청 "라디오 해줘" 전사의 마무리 갱신(같은 글자)이 start_radio 0.35 s 뒤 도착 → 시작 때 비운 전사 기록에 새 말로
   잡혀 보류 → 판정 paused, 시작하자마자 멈춤(하네스 시작 30회 중 1).
+
+**운영 반영 확인 (10-14, exp_radio_pipeline.py --scenario window --window text, 2회)**
+- "이거 무슨 얘기야?": 넣기 +0.47 s, 보류 +1.10 s 에 `line pushed 0.6 s before the user's words arrived`, 레이는 새 대사 대신
+  "네, 지금은 책상 서랍에 대해 이야기하고 있었어요. …" — 판정 paused 1.45 s.
+- "잠깐만"(넣기가 틈 밖): 레이 "네." 하고 조용 → 판정 2.42 s 라 2 s 시간 초과로 보류가 풀린 순간 무음 폴백이 4번 남은 문장을
+  다시 넣음 → 0.4 s 뒤 paused 적용, 레이는 "음, 다 쓴 볼펜, 어디 건지 모를 열쇠, 접힌 영수증 같은 것들이요."를 읽음.
 
 **판정기 문구 비교 (10-14, 일회용 벤치, mini, 97케이스 × 3 — 레이 반응 없음·대답·계속 읽음 등 변형 포함)**
 

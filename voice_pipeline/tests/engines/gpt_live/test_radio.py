@@ -496,26 +496,59 @@ class TestRadioInterruption:
         assert radio.step(t + 1.5, 0.0) == []  # 다시 판정
         assert radio.step(t + 1.6, 0.0) == [UpdateBackend(), Think(RADIO_PAUSED_NOTE)]
 
-    def test_slow_judge_counts_as_on_but_a_late_pause_still_applies(self) -> None:
-        pending: Future[str] = Future()
+    def _slow(self, *futures: Future[str]) -> tuple[Radio, float]:
         executor = MagicMock()
-        executor.submit.return_value = pending
-        radio, t = self._interrupted(executor=executor)
-        radio.step(t + 0.7, 0.0)
-        assert radio.step(t + 0.7 + Radio.JUDGE_TIMEOUT_SEC - 0.1, 0.0) == []
-        radio.step(t + 0.7 + Radio.JUDGE_TIMEOUT_SEC, 0.0)  # 시간 초과 → on 으로 보고 보류를 푼다
-        t2 = _read(radio, "늘 곁에 있는데도", t + 3.0)
-        assert radio.step(t2, 0.0) == [_line(LINES[1])]
-        pending.set_result("paused")
-        assert radio.step(t2 + 0.1, 0.0) == [UpdateBackend(), Think(RADIO_PAUSED_NOTE)]
+        executor.submit.side_effect = list(futures)
+        return self._interrupted(executor=executor)
 
-    def test_a_pause_later_than_the_cap_is_dropped(self) -> None:
+    def test_a_slow_judge_holds_until_a_line_is_due_then_waits_before_going_on(self) -> None:
         pending: Future[str] = Future()
-        executor = MagicMock()
-        executor.submit.return_value = pending
-        radio, t = self._interrupted(executor=executor)
+        radio, t = self._slow(pending)
+        radio.step(t + 0.7, 0.0)  # 판정을 보낸다
+        assert radio.step(t + 3.0, 0.0) == []  # 넣을 일이 없으면 판정이 늦어도 보류를 유지한다
+        t2 = _read(radio, "늘 곁에 있는데도", t + 3.0)  # 레이가 이어 읽어 넣기 지점에 닿았다
+        assert radio.step(t2, 0.0) == []  # 판정이 없으니 기다린다
+        assert radio.step(t2 + Radio.DUE_WAIT_SEC - 0.1, 0.0) == []
+        assert radio.step(t2 + Radio.DUE_WAIT_SEC, 0.0) == [_line(LINES[1])]  # 그래도 없으면 on 으로 보고 넣는다
+        pending.set_result("paused")  # 늦게 온 paused 도 적용한다
+        assert radio.step(t2 + Radio.DUE_WAIT_SEC + 0.1, 0.0) == [UpdateBackend(), Think(RADIO_PAUSED_NOTE)]
+
+    def test_a_pause_while_waiting_stops_before_the_due_line(self) -> None:
+        pending: Future[str] = Future()
+        radio, t = self._slow(pending)
+        radio.step(t + 0.7, 2.0)  # 판정을 보낸다 — 레이가 조용해 무음 폴백을 할 때가 됐다
+        assert radio.step(t + 2.0, 3.0) == []  # 판정을 기다린다
+        pending.set_result("paused")
+        assert radio.step(t + 2.1, 3.0) == [UpdateBackend(), Think(RADIO_PAUSED_NOTE)]  # 다시 넣지 않고 멈춘다
+
+    def test_the_wait_counts_from_the_judge_call_when_the_user_talks_long(self) -> None:
+        pending: Future[str] = Future()
+        radio, t = self._slow(pending)
+        assert radio.step(t + 0.3, 2.0) == []  # 무음이 찼지만 사용자가 아직 말하는 중 — 판정 전
+        _user(radio, "근데 서랍에 뭐 넣어 둬? 진짜 궁금해", t + 2.0)
+        radio.step(t + 2.6, 4.0)  # 사용자 전사가 멈췄다 — 이제 판정을 부른다
+        assert radio.step(t + 2.6 + Radio.DUE_WAIT_SEC - 0.1, 6.0) == []  # 기다림은 판정 호출부터
+        rest = "늘 곁에 있는데도 좀처럼 열어 보지 않는 곳이죠."  # 1번 대사의 안 읽은 문장
+        assert radio.step(t + 2.6 + Radio.DUE_WAIT_SEC, 6.0) == [_line(rest)]
+
+    def test_a_judgment_for_an_earlier_interruption_is_dropped(self) -> None:
+        first: Future[str] = Future()
+        second: Future[str] = Future()
+        radio, t = self._slow(first, second)
+        radio.step(t + 0.7, 2.0)  # 첫 끼어들기 판정 — 레이가 조용하다
+        radio.step(t + 0.7 + Radio.DUE_WAIT_SEC, 4.0)  # 판정 없이 기다림이 끝나 보류를 풀고 진행
+        assert radio._hold is None
+        _user(radio, "아 그렇구나", t + 5.0, segment="in-2")  # 새 끼어들기
+        radio.step(t + 5.7, 0.0)  # 앞 판정이 아직 없어도 새 판정을 부른다
+        assert len(radio._calls) == 2
+        first.set_result("paused")
+        assert radio.step(t + 5.8, 0.0) == []  # 앞 끼어들기의 판정은 버린다
+        assert radio.status == "on"
+
+    def test_a_judgment_later_than_the_cap_is_dropped(self) -> None:
+        pending: Future[str] = Future()
+        radio, t = self._slow(pending)
         radio.step(t + 0.7, 0.0)
-        radio.step(t + 0.7 + Radio.JUDGE_TIMEOUT_SEC, 0.0)  # 시간 초과 → on
         radio.step(t + 0.7 + Radio.JUDGE_LATE_MAX_SEC, 0.0)  # 상한 — 이 판정은 더 기다리지 않는다
         pending.set_result("paused")
         assert radio.step(t + 0.8 + Radio.JUDGE_LATE_MAX_SEC, 0.0) == []
@@ -553,6 +586,24 @@ class TestRadioSong:
         commands = radio.on_song_end(t + 10.0, completed=True)
         assert commands == [_line(f"{RADIO_AFTER_SONG_OPENING} {LINES[0]}")]
         assert radio.status == "on" and not radio.playing_song
+
+    def test_the_song_waits_for_a_slow_judgment_too(self) -> None:
+        pending: Future[str] = Future()
+        executor = MagicMock()
+        executor.submit.return_value = pending
+        radio = _radio(executor=executor)
+        radio.start(0.0)
+        t = 0.5
+        for line in LINES:
+            t = _read(radio, line, t)
+            for _ in range(3):
+                radio.step(t, 0.0)
+                t += 0.1
+        t += Radio.LATE_PUSH_SEC  # 곡 소개 대사를 넣은 지 한참 뒤
+        _user(radio, "잠깐만", t)  # 곡 소개를 다 읽은 직후 끼어들었다
+        assert radio.step(t + 0.7, 1.0) == []  # 판정을 보낸다 — 곡을 틀 때가 됐지만 기다린다
+        assert radio.step(t + 0.7 + Radio.DUE_WAIT_SEC - 0.1, 4.0) == []
+        assert radio.step(t + 0.7 + Radio.DUE_WAIT_SEC, 4.0) == [PlaySong(SONGS["IAM"])]  # 그래도 없으면 곡
 
     def test_user_stopping_the_song_ends_the_radio(self) -> None:
         radio, t = self._at_song()
