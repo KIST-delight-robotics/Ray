@@ -102,7 +102,9 @@
   - `radio_replay.py` — API 없이 기존 결과(radio_ahead l4~l11c, radio_long)로 추적·넣기·멈춤 규칙을 다시 돌려 사후
     정답(전사 전체를 대본에 아핀 갭 정렬)과 비교. `validate`, `push`, `stall`, `pauses`, `done`, `production`(운영
     `Tracker` 가 정한 규칙 재현과 같은지). 규칙은 `Rule` 하나로 바꿔 끼운다
-  - `bench_backend_tools.py` — 백엔드 툴 선택(라디오 상태별 케이스 포함), `exp_live_conversation.py` — 일반 대화·위임
+  - `bench_backend_tools.py` — 백엔드 툴 선택(서버가 만드는 요청 모양 그대로, 라디오 상태별 케이스 포함),
+    `replay_backend.py` — 운영 로그의 백엔드 응답을 같은 맥락에서 다시 돌림(백엔드 지시문을 지금 코드로 바꿔 비교),
+    `exp_live_conversation.py` — 일반 대화·위임
   - 실험용 직접 세션(운영 코드와 규칙이 다르다 — 5자 일치·받침 신호·남은 2자): `exp_radio_ahead.py`(B′, 끼어들기),
     `exp_radio_long.py`(긴 대본), `exp_radio_flow.py`(B + 판정기), `exp_radio_tts.py`(A), `exp_dj_commentary_chunks.py`,
     `exp_barge_in.py`, `exp_dj_interrupt_reply.py`, `exp_radio_delegation.py`. DJ 시절 하네스 실험(`exp_dj_autoplay.py`,
@@ -786,6 +788,14 @@ instructions.append "Radio talk: the song has ended. Go on with your talk.", 10�
   레이가 "네, 잠깐 멈출게요." → "멈추라고 한 적 없어"에도 시 설명. "라디오 이어가 줄래"에 resume_radio.
 - 노래 중 "멈춰줘" → stop_song, "잘 들었어. 안녕, 다음에 얘기하자" → end_conversation.
 
+**백엔드 요청 모양 맞춤 (10-14, replay_backend.py·bench_backend_tools.py, 확인 실행)** — 요청 모양은 FINDINGS §4
+"백엔드 요청의 실제 모양"
+- 실기 4차 응답 다시 돌리기(원래 지시문, 입력 토큰은 모두 원래와 같음): "음. 계속해줘" resume_radio 2/2(원래 resume),
+  "아니야, 하던 거 계속해 줘" 글 답 1·resume_radio 1(원래 글 답 — 시 설명을 이어 감). 지금 코드 지시문으로: "음. 계속해줘"
+  resume 1/1, 곡 중 "멈춰줘" stop_song 1/1(정지 분류기).
+- 벤치(13케이스 × 1): 11/13. 다른 둘은 "멈춘 뒤 라디오 해 줘" → resume_radio(기대 start), "곡 정지 뒤 라디오 이어가 줘"(off)
+  → resume_radio(기대 start). "멈춘 뒤 대화"("너는 아는 풀 이름 많아?")는 글 답.
+
 **출력 출처 표시 (10-11, exp_dj_interrupt_reply ids_smoke 1회)**: commentary·instructions 에 event_id 를 붙여 보내면 수락
 이벤트(`*.appended`)엔 그 id 가 오지만, 출력 전사 142조각엔 모두 `client_event_id` 가 없었다.
 
@@ -859,10 +869,10 @@ instructions.append "Radio talk: the song has ended. Go on with your talk.", 10�
 - **"이야기 계속해 줘" 재개**: 실험에서 4번에 1번꼴로 위임 없이 혼자 이어 감(새 멈춤 문구로 32/32), 운영 확인 2/2.
 - **재개 시퀀스** (10-12 미룸): 백엔드 툴을 라디오 상태별로 둘지(off 는 start_radio 만, paused 는 start·resume). 멈춘
   상태에서 대화 주제가 따로 있으면 "하던 거 계속해 줘"가 라디오인지 그 주제인지 애매하다(10-14 실기, 백엔드는 주제로 봄).
-  off 상태 "이어가줘"에 벤치는 resume_radio 60/60 인데 10-12 실기는 start_radio — 벤치 입력이 실제와 다르다. 이제 운영
-  로그의 백엔드 응답 id 로 실제 입력(`responses.input_items`)을 꺼내 비교할 수 있다.
-- **멈춘 상태에서 "라디오 해 줘"**: 백엔드는 start_radio 를 고르지만(10/10) 새 대본 + 재개 문구에 모델이 어떻게 반응하는지는
-  안 쟀다.
+  off 상태 "이어가줘"에 옛 벤치는 resume_radio 60/60, 10-12 실기(판정 off 뒤)는 start_radio. 벤치를 실제 요청 모양으로
+  맞춘 뒤 곡 정지 뒤 off 의 "라디오 이어가 줘"도 resume_radio(1회, 관찰 "백엔드 요청 모양 맞춤").
+- **멈춘 상태에서 "라디오 해 줘"**: 옛 벤치는 start_radio 10/10, 실제 요청 모양 벤치 1회는 resume_radio. 새 대본 + 재개
+  문구에 모델이 어떻게 반응하는지는 안 쟀다.
 - **노래 질문**: 곡 이름이 든 대사 전이면 모델·백엔드가 곡을 몰라 틀리게 답한다. 곡을 미리 알려 줄지(이야기 도중 곡을
   먼저 꺼낼 위험), 백엔드에 대본 주제·곡을 알려 줄지.
 - **"지루해" 처리**: 대화로 받는다. 다른 이야기·노래·그만두기를 되묻게 할지, 그 지시를 어디에 둘지(멈춤 thinking 등).

@@ -152,7 +152,8 @@ GPT-Live 도입 실험과 레이 적용 후의 실측 기록. 설계 선택 이�
   1.3 s 중앙값)과 전사 대기·반환 홉이 그대로 얹혀 **+1~2 s, 검색은 그 이상**. 추론 설정으로 줄어드는 성격이 아니다.
   기능은 됨 — `thinking.append(delegation_id)` 로 위임을 조용히 닫아도 모델이 "잠깐만" 없이 진행(3/3), commentary 로 "DJ 모드
   시작됨"을 줘도 읽지 않고 진행(2/2). 결정: 당분간 responses 모드 유지(2026-10-02).
-  - **공유 지시문의 포장 (2026-10-02, 마커 지시문 + 예/아니오 프로브 2/2)**: 라이브 지시문은 세 번째 developer 메시지 안에
+  - **공유 지시문의 포장 (2026-10-02, 마커 지시문 + 예/아니오 프로브 2/2)** — 10-14 요청 조회와 다르다(아래 "백엔드 요청의
+    실제 모양": `instructions` 문자열, 태그 있음): 라이브 지시문은 세 번째 developer 메시지 안에
     **태그 없이** 들어간다("Shared session instructions" 표제 아래 맨몸 텍스트, 앞뒤 60자에 XML 태그 없음). 우리 백엔드 지시문만
     `<backend_delegation_instructions>` 로 감싸인다. 지시문 문자열은 통째로 가므로 `build_live_instructions` 가 붙이는
     프로필·최근 세션 블록도 백엔드에 간다. 표제와 본문 사이의 정확한 연결 문구는 못 봤다 — 전문 인용은 모델이 거부하고,
@@ -168,6 +169,24 @@ GPT-Live 도입 실험과 레이 적용 후의 실측 기록. 설계 선택 이�
   request was delegated provides no information about the best next step."
   - **`response.item.create` 로 넣은 메시지는 세션 끝까지 남는다**: 다음 위임 입력에 그대로, 역할도 유지(developer 3/3,
     user 3/3, 대조 0/2). 메시지 역할은 user/assistant/system/developer 를 받고(레퍼런스), developer 도 거부되지 않았다.
+- **백엔드 요청의 실제 모양 (2026-10-14, 운영 로그의 응답 id 로 `responses.retrieve`·`input_items` 조회, 실기 세션 하나의
+  응답 17개)**:
+  - 지시문은 요청의 `instructions` 문자열 하나다: 서버 머리말(역할, SRT 읽는 법 — "Delegation context is background
+    information, not proof that something was said to the user", 작업 태도 등 약 20줄) → `<shared_session_instructions>`
+    (라이브 지시문, 장기기억 블록 포함) → `<backend_delegation_instructions>`(우리 백엔드 지시문, 글자 그대로).
+  - 입력은 위임마다 지난 위임 뒤의 전사 조각이 SRT user 메시지로 쌓인다. `<backend_task>` developer 는 세션 첫 조각 뒤 한
+    번. 앱이 `thinking.append` 로 넣은 것(라디오 대사·상태 문구)은 SRT 의 `[Delegation context]` 블록이 되고, 레이 전사는 그
+    자리에서 쪼개진다. `instructions.append`(곡 재생·종료 문구)는 developer 메시지가 되고, 그 앞까지 쌓인 전사는 위임이
+    없어도 SRT 조각으로 끊겨 들어간다.
+  - 툴은 앱이 보낸 순서와 달리 web_search 가 맨 뒤. 요청 설정 `reasoning.context=current_turn` — 앞 위임의 추론 항목은
+    입력 토큰에 잡히지 않는다(추론 항목을 빼고 다시 센 수가 실제와 같다).
+  - 입력 토큰: 첫 위임 8,006 = web_search 툴이 붙이는 숨은 안내문 약 4,400(토큰 카운트 API 로 툴을 켜고 끈 차이) + 지시문
+    2,839 + 함수 툴 8개 약 540 + 전사. 라디오 중엔 위임마다 0.2~0.9K 씩 늘고(대사가 Delegation context 와 레이 전사로 두 번
+    들어간다), 웹 검색 한 번의 결과가 약 7.7K 로 세션 끝까지 남아 19.3K 가 됐다. 대부분 캐시(19,588 중 19,328).
+  - 저장된 응답은 우리 키로 꺼낼 수 있고 `previous_response_id` 로 이어 다시 부를 수 있다 — 입력 토큰이 원래와 같다(응답 3개 모두).
+    세션 첫 응답이 가리키는 이전 응답은 404. `input_items.list` 의 SDK 자동 페이지 넘김은 개수가 틀려(30개를 3개로)
+    `after` 로 직접 넘긴다. 도구: `replay_backend.py`(실기 응답 다시 돌리기), `bench_backend_tools.py`(이 모양을 흉내 —
+    재구성한 실제 요청 둘의 입력 토큰이 같다).
 - **사용자 말이 잘린 채 위임될 수 있다 (2026-10-14 실기, 운영 로그의 백엔드 응답 id 로 `input_items` 조회)**: 대화 모델은
   오디오를 듣고 위임하므로, 사용자 입력 전사가 끝나기 전에 위임이 생기면 백엔드는 그 순간까지의 전사만 받는다. 노래 중
   "레이야. 레이야. 노래 꺼줘" 의 위임이 전사 완성 0.6 s 전에 생겨 백엔드 입력이 "…노래" 에서 끝났고, 백엔드는 빈 답(툴
