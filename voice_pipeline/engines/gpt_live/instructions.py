@@ -228,10 +228,19 @@ RADIO_JUDGE_FORMAT: dict[str, Any] = {
 }
 
 
-def build_radio_judge_prompt(line: str, exchange: Sequence[tuple[str, str]]) -> str:
-    """판정기 사용자 메시지. ``exchange`` 는 끼어든 뒤의 (화자 user/assistant, 전사) 차례."""
-    dialog = "\n".join(f"{'User' if who == 'user' else 'Ray'}: {text}" for who, text in exchange)
-    return f"Line Ray was reading: {line}\n\nSince the user spoke:\n{dialog}"
+def build_radio_judge_prompt(
+    line: str, exchange: Sequence[tuple[str, str]], earlier: Sequence[tuple[str, str]] = ()
+) -> str:
+    """판정기 사용자 메시지. ``exchange`` 는 끼어든 뒤의 (화자 user/assistant, 전사) 차례, ``earlier`` 는 같은 대사
+    안에서 앞서 있었던 끼어들기의 차례(그 뒤 이어 읽은 낭독은 빼고) — 두 번째 말이 레이에게 한 대답인지 알게."""
+
+    def dialog(turns: Sequence[tuple[str, str]]) -> str:
+        return "\n".join(f"{'User' if who == 'user' else 'Ray'}: {text}" for who, text in turns)
+
+    text = f"Line Ray was reading: {line}\n\n"
+    if earlier:
+        text += f"Earlier during this line:\n{dialog(earlier)}\n\n"
+    return text + f"Since the user spoke:\n{dialog(exchange)}"
 
 
 # 종료 시퀀스에서 모델이 작별 인사 없이 조용하면 commentary 로 넣는다 (모델이 자기 말로 옮겨 말한다)

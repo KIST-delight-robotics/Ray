@@ -33,7 +33,8 @@
   면 그냥 곡. 자연 종료 → 다음 대본 첫 대사(곡이 끝났다는 instructions 신호 없음). 사용자가 곡을 멈추면 라디오
   종료(종료 문구 + 노래 종료 지시).
 - **끼어들기**: 라디오 on 중 사용자 전사가 오면 보류(넣기·멈춤 판단 중지). 판정기(`RadioJudge`, gpt-5.4-mini, 추론 없음,
-  구조화 출력, 입력 = 읽던 대사 + 사용자 전사 1.3 s 전부터의 사용자·레이 전사)를 사용자 전사가 0.6 s 멈추면 부르고,
+  구조화 출력, 입력 = 읽던 대사 + 사용자 전사 1.3 s 전부터의 사용자·레이 전사 + 같은 대사 안 앞 끼어들기의 사용자 말·레이
+  반응(최근 2개, 30 s 안, 레이가 대본으로 돌아온 뒤 낭독은 뺌))를 사용자 전사가 0.6 s 멈추면 부르고,
   모델이 대본 밖 말을 6자 더 하면 다시 부른다. 판정은 on·paused 둘. paused 는 오는 즉시, on 은 그 판정 뒤 새 사용자
   말·새 반응이 없을 때 적용. 판정이 늦어도 보류를 유지하고(그동안 아무것도 넣지 않는다), 넣을 때(넣기·무음 폴백·곡)가
   되면 그때와 판정 호출 중 늦은 쪽부터 3 s 기다린 뒤 그래도 없으면 on 으로 진행한다. 늦게 온 paused 는 가장 최근 끼어들기의
@@ -71,6 +72,10 @@
     문제가 된다. 넣을 때가 됐는데 판정이 없으면 기다리고, 상한은 그 기다림에 둔다(3 s). 보류 중 넣기 지점에 닿아도 바로
     넣지 않는다 — 서버가 레이 말을 끊기 전의 말로 진도가 차면 사용자 말 도중 대사가 들어가므로. 판정기 자체 시간 제한은
     두지 않는다(10-14).
+  - 판정 입력의 맥락: 같은 대사 안 앞 끼어들기 대화만 더한다. 대사 시작부터의 낭독까지 넣으면 판정기가 애매한 말을
+    이야기에 대한 반응으로 읽어 paused 를 남발했다(10-14 벤치). "읽던 대사"는 레이가 실제로 들어선 대사 — 다음 대사를
+    넣어 두기만 했으면 방금 끝난 대사. 대사 시작은 앞 대사가 끝난 때와 그 대사를 넣은 때 중 늦은 쪽(첫 대사·재개·곡
+    뒤는 넣은 때)(10-14).
   - 멈춘 뒤 혼자 다시 시작하지 않는다. 이어 달라면 재개, 그대로 두었다가 나중에 "라디오 해 줘" 하면 새로 시작 —
     일시정지는 "종료 + 책갈피", 멈춘 뒤의 레이는 일반 대화와 같다. 멈춘 동안 판정기를 돌리지 않는다.
   - 노래 중엔 레이 말이 나가지 않으므로 곡 정지 요청에만 반응한다. 곡 소개 직후 끼어든 말이 보류보다 늦게 와서 곡이
@@ -83,7 +88,7 @@
 - **로그**: `Radio started: <대본> (song …)`, `Radio: line N/M pushed (start|text|stall|resume)`, `Radio: quiet after
   speaking — pushing again: …`, `Radio: user spoke — holding lines`, `Radio: line pushed N s before the user's words arrived — asking to
   answer first`, `Radio: judging (user|reaction) — reading «읽던 대사» |
-  Ray: … | User: …`(판정기 입력 그대로), `Radio judge: <상태> <초>s (<이유>)`, `Radio: no judgment in N s — dropped`,
+  Ray: … | User: …`(판정기 입력 그대로, 앞 끼어들기가 있으면 `| earlier: … ||` 가 앞에 붙는다), `Radio judge: <상태> <초>s (<이유>)`, `Radio: no judgment in N s — dropped`,
   `Radio: judgment for an earlier interruption — dropped`, `Radio: due to go on while judging — waiting up to 3 s`,
   `Radio: paused by the judge`, `Radio: hold released (judge on|no judgment|quiet)`, `Radio: song introduced
   (closing|quiet|cap) — playing …`, `Radio: next script …`. 판정 호출은 `call_records`(module `radio`, operation
@@ -756,6 +761,16 @@ instructions.append "Radio talk: the song has ended. Go on with your talk.", 10�
 - 운영 문구가 남긴 15: "아니 그건 내일 하자니까." 9 ("postpone the talk"), "야, 그거 거기 놔둬." 4, "내 폰 어디 갔지?" 2.
   실험에서 실제로 들어갔던 통화 입력은 이전 문구 paused 3/3, 운영 문구 on 3/3.
 
+**판정 입력 맥락 (10-14, 일회용 벤치, mini, 판정기 문구 운영(v3))**
+- 대사 시작부터 넣기("During this line", 레이가 이번 대사를 읽은 부분 + 오간 말) 대 지금("Since the user spoke", 말꼬리부터),
+  101케이스 × 3: 반드시 멈출 말 168/168 둘 다, 멈추면 안 될 말 멈춤 27/135 대 15/135. 늘어난 것은 "내 폰 어디 갔지?" 9/9
+  ("clearly asking Ray a question and needs help" — 열쇠·영수증 낭독 뒤라 레이에게 묻는 말로 읽음) 등.
+- 같은 대사 안 두 번째 말이 그것만으로는 애매한 6케이스 × 레이 반응 3 × 3: 앞 끼어들기 대화(사용자 말·레이 반응)를 더하면
+  레이에게 한 대답을 멈춤 25/27 대 6/27, 멈추면 안 될 말 멈춤 0/27 둘 다. 예: "배고프다." → 레이 "배고프세요? 뭐
+  드실래요?" → "음… 라면?" — 더하면 paused("responding to Ray with a food choice"), 없으면 on("an unclear reaction").
+  통화 뒤 "응, 응. 알았어."는 더해도 on. 놓친 2는 "피곤하네" → "그러게, 일이 너무 많았어." 반응 없는 변형("not directing
+  Ray to stop or wait").
+
 **출력 출처 표시 (10-11, exp_dj_interrupt_reply ids_smoke 1회)**: commentary·instructions 에 event_id 를 붙여 보내면 수락
 이벤트(`*.appended`)엔 그 id 가 오지만, 출력 전사 142조각엔 모두 `client_event_id` 가 없었다.
 
@@ -825,8 +840,6 @@ instructions.append "Radio talk: the song has ended. Go on with your talk.", 10�
 - **목소리와 전사 사이 틈**: 사용자 전사가 목소리 시작 1.2~1.4 s 뒤에 와서, 그 사이 들어간 대사를 모델이 대답보다 먼저
   읽는다 — 대답 먼저 문구로 막았다(10-14). 남는 것: 대사 사이 틈에 끼어들면 모델이 받아 둔 대사를 사용자 전사 전에 읽기
   시작하기도 한다(l6g 2/13). 로컬 음성 감지(XVF3800)는 틈을 없애지만 큰 작업.
-- **판정기 입력의 맥락**: 사용자가 이어 말해도 판정 입력은 이번 보류 앞뒤만 본다 — 애매해서 on 으로 둔 첫 말 뒤의 두 번째
-  말도 따로 애매하게 보일 수 있다. 직전 끼어들기 대화를 넣을지.
 - **끼어든 뒤 넣어 둔 대사를 대답에 섞음** (B′ 구조 비용): 실험 l5 1/14, 운영 multi 1/9. 재개 때 다시 읽어 되풀이된다.
 - **"이야기 계속해 줘" 재개**: 실험에서 4번에 1번꼴로 위임 없이 혼자 이어 감(새 멈춤 문구로 32/32), 운영 확인 2/2.
 - **멈춘 상태에서 "라디오 해 줘"**: 백엔드는 start_radio 를 고르지만(10/10) 새 대본 + 재개 문구에 모델이 어떻게 반응하는지는

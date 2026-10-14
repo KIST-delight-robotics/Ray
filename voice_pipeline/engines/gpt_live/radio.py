@@ -306,7 +306,9 @@ class Tracker:
         self._repushed = -1  # 다시 넣은 대사
         self._repushed_at = 0.0
         self._first_voice: float | None = None  # 마지막으로 넣은 뒤 첫 모델 음성
-        self._cache: tuple[tuple[object, ...], tuple[int, int]] | None = None
+        self._done_at: list[float] = []  # 대사마다 끝난 것으로 센 시각
+        # (키, (reach, said_after), 보류 구간 [(시작, 레이가 대본으로 돌아온 시각)])
+        self._cache: tuple[tuple[object, ...], tuple[int, int], list[tuple[float, float]]] | None = None
 
     # -- 입력 ----------------------------------------------------------------
 
@@ -365,9 +367,28 @@ class Tracker:
         self._update_done()
         return self._done
 
-    def reading_line(self) -> str:
-        """지금 읽는 대사 — 넣은 대사 중 끝나지 않은 첫 대사."""
-        return self.lines[min(self.done, max(self.pushed - 1, 0))]
+    def reading(self) -> tuple[int, float]:
+        """(읽던 대사 번호, 그 대사를 읽기 시작한 무렵).
+
+        넣은 대사 중 끝나지 않은 첫 대사다. 다만 앞서 넣어 두기만 하고 아직 들어서지 않았으면(대사 사이) 방금 끝난 앞
+        대사다. 시작은 앞 대사가 끝난 때와 이 대사를 넣은 때 중 늦은 쪽 — 첫 대사·재개·곡 뒤는 넣은 때가 된다.
+        """
+        i = min(self.done, max(self.pushed - 1, 0))
+        if 0 < i < self.pushed and i <= len(self._done_at) and self._pushes[i] < self._done_at[i - 1]:
+            if self._progress()[0] <= self._offsets[i]:
+                i -= 1
+        start = self._pushes[i] if i < self.pushed else 0.0
+        if 0 < i <= len(self._done_at):
+            start = max(start, self._done_at[i - 1])
+        return i, start
+
+    def interruptions(self) -> list[tuple[float, float]]:
+        """보류마다 (시작, 레이가 대본으로 돌아온 시각) — 사용자 말과 레이 반응이 오간 때. 안 돌아왔으면 끝이 inf."""
+        if not self._pushes:
+            return []
+        self._progress()
+        assert self._cache is not None
+        return list(self._cache[2])
 
     def off_script_letters(self, since: float) -> int:
         """``since`` 뒤 모델 말 가운데 읽던 대사·넣어 둔 대사와 맞지 않는 글자 수 — 끼어든 뒤의 반응."""
@@ -445,6 +466,7 @@ class Tracker:
         reach, _ = self._progress()
         while self._done < len(self._pushes) and reach >= self._offsets[self._done + 1] - self.DONE_SLACK:
             self._done += 1
+            self._done_at.append(self._out[-1][0] if self._out else 0.0)
 
     def _progress(self) -> tuple[int, int]:
         """(reach, said_after) — 일치한 가장 먼 대본 글자 위치와, 그 일치 뒤 말한 글자 수(보류·대답 빼고).
@@ -484,7 +506,7 @@ class Tracker:
         if reach_t:
             said_after = sum(1 for i in idx[reach_t:] if not any(a <= at[i] < e for a, e in excluded))
         result = (self._offsets[base] + reach, said_after)
-        self._cache = (key, result)
+        self._cache = (key, result, excluded)
         return result
 
 
@@ -503,12 +525,13 @@ class RadioJudge:
     def __init__(self, llm: ILLM) -> None:
         self._llm = llm
 
-    def classify(self, line: str, exchange: Sequence[tuple[str, str]]) -> str:
+    def classify(self, line: str, exchange: Sequence[tuple[str, str]], earlier: Sequence[tuple[str, str]] = ()) -> str:
         """판정 하나. 실패하면 예외 — 호출자가 on 으로 본다. 걸린 시간은 로그와 호출 기록에 남긴다.
 
         Args:
             line: 레이가 읽던 대사.
             exchange: 끼어든 뒤의 (화자 user/assistant, 전사) 차례.
+            earlier: 같은 대사 안에서 앞서 있었던 끼어들기의 차례.
         """
         start = time.monotonic()
         state = reason = ""
@@ -516,7 +539,7 @@ class RadioJudge:
             stream = self._llm.generate(
                 [
                     {"role": "system", "content": RADIO_JUDGE_INSTRUCTIONS},
-                    {"role": "user", "content": build_radio_judge_prompt(line, exchange)},
+                    {"role": "user", "content": build_radio_judge_prompt(line, exchange, earlier)},
                 ],
                 tools=[],
                 response_format=RADIO_JUDGE_FORMAT,
@@ -621,6 +644,8 @@ class Radio:
     HOLD_MAX_QUIET_SEC = 10.0  # 판정을 기다리지 않는데 모델이 이만큼 조용하면 보류를 푼다 (안전망)
     TRANSCRIPT_LAG_SEC = 1.3  # 사용자 전사는 목소리 시작보다 이만큼 늦게 온다 — 판정 입력은 그때부터의 대화
     LATE_PUSH_SEC = 1.5  # 보류 직전 이 안에 넣은 대사는 사용자가 말하는 도중에 들어갔다 (전사 지연 + 여유)
+    PRIOR_MAX = 2  # 판정 입력에 넣는 같은 대사 안 앞 끼어들기 수 (최근 것부터)
+    PRIOR_MAX_SEC = 30.0  # 그중 시작한 지 이 안의 것만 — 대사가 비정상적으로 길어져도 한참 전 일은 넣지 않는다
 
     def __init__(self, picker: ScriptPicker, judge: RadioJudge, executor: Executor | None = None) -> None:
         self._picker = picker
@@ -849,13 +874,24 @@ class Radio:
         if not new_user and reaction - hold.judged_reaction < self.RECHECK_LETTERS:
             return
         assert self.tracker is not None
-        line = self.tracker.reading_line()
+        index, line_start = self.tracker.reading()
+        line = self.tracker.lines[index]
         exchange = self._exchange(hold.start - self.TRANSCRIPT_LAG_SEC)
+        earlier = self._earlier(hold, line_start, now)
         hold.judged_user, hold.judged_reaction = self._last_user_text, reaction
-        dialog = " | ".join(f"{'User' if who == 'user' else 'Ray'}: {text}" for who, text in exchange)
-        logger.info("Radio: judging (%s) — reading «%s» | %s", "user" if new_user else "reaction", line, dialog)
+
+        def joined(turns: list[tuple[str, str]]) -> str:
+            return " | ".join(f"{'User' if who == 'user' else 'Ray'}: {text}" for who, text in turns)
+
+        before = f" | earlier: {joined(earlier)} ||" if earlier else ""
+        why = "user" if new_user else "reaction"
+        logger.info("Radio: judging (%s) — reading «%s»%s | %s", why, line, before, joined(exchange))
         call = _JudgeCall(
-            self._submit(lambda: self._judge.classify(line, exchange)), now, self._last_user_text, reaction, hold.start
+            self._submit(lambda: self._judge.classify(line, exchange, earlier)),
+            now,
+            self._last_user_text,
+            reaction,
+            hold.start,
         )
         hold.last_sent = now
         self._calls.append(call)
@@ -870,11 +906,27 @@ class Radio:
             future.set_exception(exc)
         return future
 
-    def _exchange(self, since: float) -> list[tuple[str, str]]:
-        """``since`` 뒤 전사 조각을 화자가 바뀔 때마다 묶는다."""
+    def _earlier(self, hold: _Hold, line_start: float, now: float) -> list[tuple[str, str]]:
+        """같은 대사 안에서 앞서 있었던 끼어들기의 사용자 말·레이 반응 (최근 :attr:`PRIOR_MAX` 개, :attr:`PRIOR_MAX_SEC`
+        안). 레이가 대본으로 돌아온 뒤의 낭독은 넣지 않는다 — 낭독이 길게 붙으면 판정기가 사용자 말을 이야기에 대한
+        반응으로 읽는 쪽으로 기운다(10-14 벤치)."""
+        assert self.tracker is not None
+        spans = [
+            (a, e)
+            for a, e in self.tracker.interruptions()
+            if line_start <= a < hold.start and now - a <= self.PRIOR_MAX_SEC
+        ][-self.PRIOR_MAX :]
+        turns: list[tuple[str, str]] = []
+        for k, (a, e) in enumerate(spans):
+            nxt = spans[k + 1][0] if k + 1 < len(spans) else hold.start
+            turns += self._exchange(a, min(e, nxt - self.TRANSCRIPT_LAG_SEC))
+        return turns
+
+    def _exchange(self, since: float, until: float = float("inf")) -> list[tuple[str, str]]:
+        """``since`` 부터 ``until`` 전까지의 전사 조각을 화자가 바뀔 때마다 묶는다."""
         turns: list[list[str]] = []
         for t, who, d in self._transcripts.deltas:
-            if t < since:
+            if t < since or t >= until:
                 continue
             if turns and turns[-1][0] == who:
                 turns[-1][1] += d

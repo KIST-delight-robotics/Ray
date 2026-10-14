@@ -130,3 +130,11 @@ class TestRadioInstructions:
     def test_judge_prompt_lists_the_exchange(self) -> None:
         text = build_radio_judge_prompt("읽던 대사", [("user", "왜?"), ("assistant", "음,")])
         assert text == "Line Ray was reading: 읽던 대사\n\nSince the user spoke:\nUser: 왜?\nRay: 음,"
+
+    def test_judge_prompt_puts_an_earlier_exchange_first(self) -> None:
+        earlier = [("user", "배고프다."), ("assistant", "아.")]
+        text = build_radio_judge_prompt("읽던 대사", [("user", "응, 너무 배고파.")], earlier)
+        assert text == (
+            "Line Ray was reading: 읽던 대사\n\nEarlier during this line:\nUser: 배고프다.\nRay: 아.\n\n"
+            "Since the user spoke:\nUser: 응, 너무 배고파."
+        )

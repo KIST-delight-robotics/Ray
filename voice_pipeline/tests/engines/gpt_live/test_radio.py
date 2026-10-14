@@ -307,9 +307,23 @@ class TestTrackerInterruption:
         m = _started()
         m.say(LINES[0])
         assert m.tracker.pushed == 2 and m.tracker.done == 1
-        assert m.tracker.reading_line() == LINES[1]
+        assert m.tracker.reading() == (0, 0.0)  # 2번 대사는 넣어 두기만 했다 — 대사 사이엔 방금 끝난 1번 대사
         assert m.tracker.resume(m.t) == 1
         assert m.tracker.pushed == 1
+
+    def test_reading_moves_to_the_next_line_once_the_model_starts_it(self) -> None:
+        m = _started()
+        m.say(LINES[0])
+        m.say("서랍은 집에서 가장 느리게")  # 2번 대사에 들어섰다
+        index, start = m.tracker.reading()
+        assert index == 1 and start == m.tracker._done_at[0]  # 미리 넣은 때가 아니라 1번 대사가 끝난 때부터
+
+    def test_reading_after_resume_starts_at_the_resume(self) -> None:
+        m = _started()
+        m.say(LINES[0])
+        m.tracker.resume(m.t + 5.0)
+        m.tracker.mark_pushed(m.t + 5.0)  # 안 읽힌 2번 대사를 다시 넣었다
+        assert m.tracker.reading() == (1, m.t + 5.0)
 
 
 # ---------------------------------------------------------------------------
@@ -371,13 +385,13 @@ def _line(text: str) -> Think:
     return Think(RADIO_LINE_TEMPLATE.format(text))
 
 
-def _read(radio: Radio, text: str, t: float) -> float:
+def _read(radio: Radio, text: str, t: float, segment: str = "out-1") -> float:
     """모델이 ``text`` 를 말한다 — 어절마다 출력 전사 스냅샷과 음성. 끝난 시각."""
     said = ""
     for word in text.split(" "):
         said += " " + word
         radio.on_voice(t)
-        radio.on_transcript(t, "out-1", "assistant", said)
+        radio.on_transcript(t, segment, "assistant", said)
         t += 0.3
     return t
 
@@ -470,6 +484,51 @@ class TestRadioInterruption:
         radio.on_song_end(9.0, completed=True)  # 다음 대본
         _user(radio, "노래 좋다.", 9.2, segment="in-song")  # 그 구간의 마무리 갱신이 곡 뒤에 온다
         assert radio.status == "on" and radio._hold is None
+
+    def _judge_input(self, radio: Radio) -> tuple:
+        return radio._judge.classify.call_args.args  # type: ignore[attr-defined]
+
+    def test_the_judge_sees_an_earlier_exchange_in_the_same_line(self) -> None:
+        radio = _radio("on", "paused")
+        radio.start(0.0)
+        t = _read(radio, "오늘은 책상 서랍 이야기예요.", 0.5)
+        _user(radio, "배고프다.", t)  # 첫 끼어들기
+        radio.step(t + 0.7, 0.0)  # 판정
+        radio.step(t + 0.8, 0.0)  # on — 보류를 푼다
+        assert radio._hold is None
+        _read(radio, "아, 배고프시구나.", 2.6, segment="out-2")  # 레이의 반응 (대본 밖)
+        _read(radio, "늘 곁에 있는데도 좀처럼", 3.4, segment="out-3")  # 대본으로 돌아왔다
+        _user(radio, "응, 너무 배고파.", 4.6, segment="in-2")  # 같은 대사 안 두 번째 끼어들기
+        radio.step(5.3, 0.0)
+        line, exchange, earlier = self._judge_input(radio)
+        assert line == LINES[0]
+        assert earlier == [("user", "배고프다."), ("assistant", "아, 배고프시구나.")]  # 이어 읽은 낭독은 빼고
+        assert exchange == [("assistant", "늘 곁에 있는데도 좀처럼"), ("user", "응, 너무 배고파.")]
+
+    def test_an_interruption_in_an_earlier_line_is_left_out(self) -> None:
+        radio = _radio("on", "paused")
+        radio.start(0.0)
+        _read(radio, "오늘은 책상", 0.5)
+        _user(radio, "배고프다.", 1.2)  # 1번 대사에서 끼어듦
+        radio.step(1.9, 0.0)
+        radio.step(2.0, 0.0)  # on
+        t = _read(radio, "서랍 이야기예요. 늘 곁에 있는데도 좀처럼 열어 보지 않는 곳이죠.", 2.2)
+        radio.step(t, 0.0)  # 2번 대사를 넣는다
+        t = _read(radio, "서랍은 집에서 가장 느리게", t + 1.0, segment="out-2")
+        _user(radio, "너는 그런 거 있어?", t, segment="in-2")
+        radio.step(t + 0.7, 0.0)
+        line, _, earlier = self._judge_input(radio)
+        assert line == LINES[1] and earlier == []
+
+    def test_an_interruption_before_a_resume_is_left_out(self) -> None:
+        radio, t = self._interrupted("paused", "paused")
+        radio.step(t + 0.7, 0.0)
+        radio.step(t + 0.8, 0.0)  # paused
+        radio.resume(t + 5.0)  # 1번 대사를 다시 넣는다
+        t2 = _read(radio, "오늘은 책상 서랍 이야기예요.", t + 5.5, segment="out-2")
+        _user(radio, "잠깐만", t2, segment="in-2")
+        radio.step(t2 + 0.7, 0.0)
+        assert self._judge_input(radio)[2] == []  # 멈추기 전의 끼어들기는 넣지 않는다
 
     def test_paused_stops_the_talk_and_resume_continues_from_the_unread_line(self) -> None:
         radio, t = self._interrupted("paused")
