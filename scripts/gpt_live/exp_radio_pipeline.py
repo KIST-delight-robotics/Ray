@@ -13,9 +13,18 @@
   요청(번갈아). 마지막 재개 뒤 곡까지.
 - ``chat``: ``--at-line`` 번째 대사에서 레이에게 직접 묻고, 멈춘 뒤 재개 없이 대화를 이어 간다(``CHAT_TURNS``, 대답이
   끝날 때마다 하나씩). 멈춘 뒤 대화가 라디오와 상관없이 평소처럼 흘러가는지 본다.
+- ``window``: 사용자 목소리 시작 → 첫 사용자 전사(보류) 사이의 틈(약 1.2~1.4 s)에 대사가 들어가게 끼어든다. 앞뒤 무음을
+  자른 발화를 넣고 ``--watch`` 초 지켜본 뒤 끝낸다(재개 없음).
+  ``--window text``: ``--at-line`` 번째 이후 대사의 넣기 지점(마지막 문장 끝 ``PUSH_REMAIN`` 자)까지 ``--lead`` 자
+  남았을 때 끼어든다 — 평소 넣기가 틈에 걸린다.
+  ``--window stall``: ``--at-line`` 번째 대사 뒤의 앞서 넣기를 막아(실험 훅) 받아 둔 대사 없이 조용해지게 하고, 조용해진
+  지 ``--quiet`` 초에 끼어든다 — 무음 폴백(``STALL_SEC``)의 넣기가 틈에 걸린다.
+  ``--text``/``--label`` 로 ``UTTERANCES`` 밖의 문장을 넣을 수 있다. 리포트는 운영 라디오가 넣은 "대답 먼저" 문구
+  (``RADIO_LATE_LINE_NOTE``)의 시각도 보인다.
 
     uv run python scripts/gpt_live/exp_radio_pipeline.py --scenario long --tag p1 --index 0
     uv run python scripts/gpt_live/exp_radio_pipeline.py --scenario interrupt --tag p2 --utterance content_key
+    uv run python scripts/gpt_live/exp_radio_pipeline.py --scenario window --window stall --utterance what --tag w1
     uv run python scripts/gpt_live/exp_radio_pipeline.py --report p1
 
 결과: var/experiments/radio_pipeline/<번호>_<태그>/<시나리오>_<발화>_<회차>/ — run.json(이벤트·전사 조각·넣기·판정),
@@ -38,6 +47,7 @@ from exp_dirs import find_result_dir
 from exp_radio_flow import FOLLOW_UP, RESUME_ASKS, UTTERANCES
 
 from voice_pipeline.engines.gpt_live import radio
+from voice_pipeline.engines.gpt_live.instructions import RADIO_LATE_LINE_NOTE
 from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop
 
 START_ASK = "라디오 해 줘."
@@ -49,6 +59,8 @@ WATCH_MAX_SEC = 150.0  # 재개 뒤 곡까지 지켜보는 상한
 MULTI_LINES = (3, 7, 11)  # multi: 이 대사(1부터)를 읽기 시작하고 --at 초 뒤 끼어든다
 MULTI_QUESTIONS = ("잠깐만, 너는 어떻게 생각해?", "근데 그게 무슨 뜻이야?", "아 그거 나도 궁금했는데, 왜 그런 거야?")
 SPEAKING_SEC = 0.2  # 이 안에 모델 말소리가 있었으면 말하는 중
+TRIM_PAD_SEC = 0.1  # window: 발화 앞뒤로 남기는 무음 — 넣는 순간 ≈ 목소리 시작
+TRIM_RMS = 200  # window: 이 rms(20 ms) 이상이 목소리
 CHAT_INTERRUPT = "근데 너는 버리지 못하는 물건 같은 거 있어?"
 CHAT_TURNS = (
     "나는 옛날 편지를 아직도 못 버리겠더라. 그걸 다시 읽으면 좀 슬퍼지거든.",
@@ -107,6 +119,36 @@ def install_radio_hooks() -> None:
     wrap(radio.Radio, "resume", lambda rec, s, a, k, o: rec.mark("radio_resume", output=o[0]))
 
 
+_block_push: int | None = None  # window stall: 이 번호(0부터) 대사는 앞서 넣지 않는다 — 무음 폴백으로만 들어간다
+
+
+def install_block_hook() -> None:
+    """``_block_push`` 대사의 글자 일치 넣기를 막는다 (실험 훅). 무음 폴백 분기에 닿도록 넣기 문턱만 끈다."""
+    orig = radio.Tracker.next_action
+
+    def next_action(self: radio.Tracker, t: float, quiet: float) -> radio.Action | None:
+        if _block_push is not None and self.pushed == _block_push:
+            self.PUSH_REMAIN = -1  # type: ignore[misc]
+        else:
+            self.__dict__.pop("PUSH_REMAIN", None)
+        return orig(self, t, quiet)
+
+    radio.Tracker.next_action = next_action  # type: ignore[method-assign]
+
+
+def trim_voice(pcm: bytes) -> bytes:
+    """16 kHz 발화의 앞뒤 무음을 자르고 ``TRIM_PAD_SEC`` 만 남긴다 (TTS 는 앞에 1 s 넘는 무음을 붙이기도 한다)."""
+    hop = int(0.02 * 16000)
+    x = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    n = len(x) // hop
+    idx = np.flatnonzero(np.sqrt(np.mean(x[: n * hop].reshape(n, hop) ** 2, axis=1)) >= TRIM_RMS)
+    if not len(idx):
+        return pcm
+    pad = int(TRIM_PAD_SEC / 0.02)
+    a, b = max(0, int(idx[0]) - pad) * hop, min(n, int(idx[-1]) + 1 + pad) * hop
+    return pcm[a * 2 : b * 2]
+
+
 # ---------------------------------------------------------------------------
 # 진행
 # ---------------------------------------------------------------------------
@@ -130,8 +172,8 @@ class Driver:
         self.songs = 0
         self.chat = list(CHAT_TURNS) if args.scenario == "chat" else []
 
-    def say(self, text: str, now: float) -> None:
-        clip = h.tts(text)
+    def say(self, text: str, now: float, clip: bytes | None = None) -> None:
+        clip = clip if clip is not None else h.tts(text)
         self.rec.inputs.put(clip)
         self.rec.mark("user_say", text=text)
         self.speech_end = now + len(clip) / (16000 * 2) + 0.1
@@ -159,6 +201,9 @@ class Driver:
                 self.state = "reading"
             elif self.rec.connected_at is not None and now - self.rec.connected_at > 2.0 + START_TIMEOUT_SEC:
                 self.finish("no_start")
+            return
+        if self.args.scenario == "window":
+            self._window(r, now)
             return
         if self.state == "reading":
             if self.plan:
@@ -219,15 +264,53 @@ class Driver:
             if now >= self.speech_end and self._quiet_after(self.since, now):
                 self.finish("ended")
 
+    def _window(self, r: radio.Radio, now: float) -> None:
+        if self.state == "watch":
+            if now - self.since >= self.args.watch:
+                self.finish("done")
+            return
+        if self.rec.all("song_play"):
+            self.finish("missed")  # 끼어들 자리를 지나 곡까지 갔다
+            return
+        tr = r.tracker
+        if r.status != "on" or tr is None:
+            return
+        line = self.args.at_line  # 1부터
+        if self.args.window == "stall":
+            # line 번째 대사를 다 읽었고 다음 대사는 막혀 있다 — 조용해진 지 --quiet 초에 끼어든다
+            quiet = now - self.last_voice
+            if tr.done >= line and tr.pushed == line and self.last_voice > 0 and quiet >= self.args.quiet:
+                self._fire(now, line=line, quiet=round(quiet, 2))
+            return
+        # text: line 번째 이후 대사를 읽는 중, 넣기 지점까지 --lead 자 남았을 때
+        last = tr.pushed - 1
+        if last < line - 1 or tr.done != last or now - self.last_voice >= SPEAKING_SEC:
+            return
+        reach, _ = tr._progress()
+        remain = tr._offsets[last + 1] - reach
+        if reach > tr._last_start[last] and tr.PUSH_REMAIN < remain <= tr.PUSH_REMAIN + self.args.lead:
+            self._fire(now, line=last + 1, remain=remain)
+
+    def _fire(self, now: float, **info: Any) -> None:
+        text = self.args.text or UTTERANCES[self.args.utterance][1]
+        self.rec.mark("window_fire", **info)
+        self.say(text, now, clip=trim_voice(h.tts(text)))
+        self.state, self.since = "watch", now
+
     def finish(self, result: str) -> None:
         self.result, self.done = result, True
         self.rec.mark("finish", result=result)
 
 
 def run(args: argparse.Namespace) -> None:
+    global _block_push
     install_radio_hooks()
-    key = args.utterance if args.scenario == "interrupt" else "-"
-    comps, out_dir = h.setup("radio_pipeline", args.tag, subdir=f"{args.scenario}_{key}_{args.index}")
+    key = args.label or args.utterance if args.scenario in ("interrupt", "window") else "-"
+    scenario = f"{args.scenario}-{args.window}" if args.scenario == "window" else args.scenario
+    comps, out_dir = h.setup("radio_pipeline", args.tag, subdir=f"{scenario}_{key}_{args.index}")
+    if args.scenario == "window" and args.window == "stall":
+        install_block_hook()
+        _block_push = args.at_line  # at_line 번째(1부터) 다음 대사의 번호(0부터)
     assert comps.radio_picker is not None, "radio scripts not loaded"
     if args.first:  # 첫 대본을 고정한다 (끼어드는 말이 대본 내용을 묻는다)
         picker = comps.radio_picker
@@ -381,9 +464,50 @@ def report(tag: str) -> None:
     inter = [d for d in entered if d["scenario"] in ("interrupt", "multi")]
     if inter:
         _report_interrupts(inter)
+    window = [d for d in entered if d["scenario"] == "window"]
+    if window:
+        _report_window(window)
     for d in entered:
         if d["scenario"] == "chat":
             _report_chat(d)
+
+
+def _report_window(runs: list[dict[str, Any]]) -> None:
+    """틈 끼어들기 — 목소리 시작 기준으로 넣기·첫 사용자 전사(보류)·판정, 그 뒤 레이 말."""
+    print("  틈 끼어들기 (목소리 시작 기준 s, 넣기가 첫 사용자 전사보다 먼저면 틈 안)")
+    for d in runs:
+        ev = d["events"]
+        fire = next((e for e in ev if e["name"] == "window_fire"), None)
+        if fire is None:
+            print(f"    {d['config']['window']} {d['utterance']} #{d['index']}: 끼어들지 못함 ({d['result']})")
+            continue
+        clip_t, clip_n = next(((t, n) for t, n in d["user_clips"] if t >= fire["t"] - 0.05), (fire["t"], 0))
+        v0, v1 = clip_t + TRIM_PAD_SEC, clip_t + clip_n / (16000 * 2) - TRIM_PAD_SEC
+        push = next((e for e in ev if e["name"] == "radio_push" and e["t"] > fire["t"] - 0.05), None)
+        deltas = _deltas(d["snapshots"])
+        hold = next((t for t, who, _ in deltas if who == "user" and t > v0), None)
+        dec = next((e for e in ev if e["name"] in ("radio_decision", "radio_release") and e["t"] > v0), None)
+        note = next(
+            (e for e in ev if e["name"] == "append_thinking" and e.get("text") == RADIO_LATE_LINE_NOTE and e["t"] > v0),
+            None,
+        )
+        overlap = sum(n / (24000 * 2) for t, n, v in d["audio"] if v and v0 <= t < v1)
+        said = "".join(x for t, who, x in deltas if who == "assistant" and t > v0).strip()
+
+        def rel(t: float | None, v0: float = v0) -> str:
+            return f"{t - v0:+.2f}" if t is not None else "-"
+
+        inside = push is not None and hold is not None and push["t"] < hold
+        line = d["scripts"][d["config"]["first"]][push["index"]] if push else ""
+        decision = f"{dec['name'].split('_')[1]} {rel(dec['t'])}" if dec else "-"
+        print(
+            f"    {d['config']['window']} {d['utterance']} #{d['index']} {fire.get('remain', fire.get('quiet'))}: "
+            f"넣기 {rel(push['t'] if push else None)}({push['by'] if push else '-'}) 전사 {rel(hold)} "
+            f"{'틈 안' if inside else '틈 밖'} | 판정 {decision} | 겹침 {overlap:.1f}s / 목소리 {v1 - v0:.1f}s"
+            + (f" | 대답 먼저 문구 {rel(note['t'])}" if note else "")
+        )
+        print(f"      넣은 대사: {line}")
+        print(f"      레이: {said[:160]}")
 
 
 def _report_chat(d: dict[str, Any]) -> None:
@@ -473,7 +597,13 @@ def _report_interrupts(runs: list[dict[str, Any]]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--scenario", choices=("long", "interrupt", "multi", "chat"), default="long")
+    parser.add_argument("--scenario", choices=("long", "interrupt", "multi", "chat", "window"), default="long")
+    parser.add_argument("--window", choices=("text", "stall"), default="stall", help="window: 틈에 걸릴 넣기")
+    parser.add_argument("--lead", type=int, default=4, help="window text: 넣기 지점까지 이만큼(자) 남았을 때 끼어든다")
+    parser.add_argument("--quiet", type=float, default=0.6, help="window stall: 모델이 조용해진 지 이만큼 뒤 끼어든다")
+    parser.add_argument("--watch", type=float, default=15.0, help="window: 끼어든 뒤 이만큼 지켜보고 끝낸다")
+    parser.add_argument("--text", default=None, help="window: UTTERANCES 대신 이 문장으로 끼어든다")
+    parser.add_argument("--label", default=None, help="--text 를 쓸 때 결과 폴더·리포트에 쓸 이름")
     parser.add_argument("--utterance", choices=list(UTTERANCES), default="content_key")
     parser.add_argument("--first", default=None, help="첫 대본 키 (interrupt·multi 는 drawer 기본)")
     parser.add_argument("--at-line", type=int, default=4, help="interrupt: 이 대사(1부터)에서 끼어든다")

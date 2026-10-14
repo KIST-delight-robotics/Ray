@@ -168,6 +168,11 @@ GPT-Live 도입 실험과 레이 적용 후의 실측 기록. 설계 선택 이�
   request was delegated provides no information about the best next step."
   - **`response.item.create` 로 넣은 메시지는 세션 끝까지 남는다**: 다음 위임 입력에 그대로, 역할도 유지(developer 3/3,
     user 3/3, 대조 0/2). 메시지 역할은 user/assistant/system/developer 를 받고(레퍼런스), developer 도 거부되지 않았다.
+- **사용자 말이 잘린 채 위임될 수 있다 (2026-10-14 실기, 운영 로그의 백엔드 응답 id 로 `input_items` 조회)**: 대화 모델은
+  오디오를 듣고 위임하므로, 사용자 입력 전사가 끝나기 전에 위임이 생기면 백엔드는 그 순간까지의 전사만 받는다. 노래 중
+  "레이야. 레이야. 노래 꺼줘" 의 위임이 전사 완성 0.6 s 전에 생겨 백엔드 입력이 "…노래" 에서 끝났고, 백엔드는 빈 답(툴
+  없음) — 대화 모델은 "지금 노래 끌게요" 라고 했지만 곡은 계속됐다. 10-13~14 실기 위임 12건 중 핵심어가 빠진 것은 이 1건.
+  위임 시점은 앱이 정할 수 없어 대처하지 않는다(사용자가 다시 말하면 처리된다).
 - **앱이 부르는 백엔드 응답 (2026-10-06, 실작동 경로 하네스)**: 사용자 발화 없이 `response.create`(필요하면 앞에
   `response.item.create` 메시지)를 보내면 서버가 위임으로 감싼다 — `session.delegation.created` 에 `client_event_id` 가 그
   event_id 로 온다(17/17, 오류 0). 레이 DJ 의 판정 요청이 이 경로다(`GPTLiveSession.request_backend`).
@@ -255,6 +260,11 @@ GPT-Live 도입 실험과 레이 적용 후의 실측 기록. 설계 선택 이�
   "You are now saying: «…»" 는 1/19·0/19.
 - 이미 넣은 줄은 모델이 안다. 줄 도중에 사용자가 끼어들면 그 줄의 남은 문장을 대답 앞뒤에 읽거나 대답에 섞기도 한다
   (1/14~6/9).
+- **사용자 말 도중에 도착한 줄은 대답보다 먼저 읽는다** (2026-10-14, `exp_radio_pipeline.py --scenario window`). 줄이
+  사용자가 말하기 전에 와 있으면 대답을 먼저 하지만(대답 전에 새 줄 0/14 수준), 사용자 목소리가 시작된 뒤 도착하면
+  "잠깐만"·질문에도 그 줄을 먼저 읽거나 대답에 섞었다 4/5 + 1/5. 사용자 전사가 온 순간(+1.0~1.7 s) thinking "The user
+  started talking to you. Respond to the user first; do not say the line you were just given yet." 을 넣자 먼저 읽음
+  0/6, 맞장구엔 그대로 이어 읽음 2/2. "If they are talking to you, …; otherwise go on" 단서를 붙인 문구는 1/2 먼저 읽음.
 - 읽다가 조용해진 모델에게 그 줄의 남은 문장을 같은 문구로 다시 넣으면 대개 이어 읽는다(6 초 안 13/15). 대신 다음 줄을
   넣으면 남은 문장을 버리고 새 줄로 넘어간다.
 - 변형별 수치는 [DJ 작업노트](../../docs/dj-mode-worknote.md) 관찰.
