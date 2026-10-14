@@ -49,6 +49,13 @@
   resumed. …" + 안 읽힌 첫 대사부터 다시 넣는다. 멈춘 상태에서 `start_radio` 는 새 대본(재개 문구를 함께 넣는다, 실험
   안 함). off(사용자가 곡을 멈춤) → "Radio talk: ended. Talk with the user now." + 상태 off. 노래 중엔 라디오를 돌리지
   않는다.
+- **자동 복귀** (`RadioResumeJudge`, gpt-5.4-mini 추론 low): 멈춘 뒤 마지막 사용자 전사·레이 말소리·백엔드 위임(루프가
+  위임 생성부터 마지막 응답 완료까지, 상한 20 s) 중 늦은 것부터 6.5 s 에 판정을 부르고 8 s 에 적용한다. 그 사이 누가
+  말하면 버리고 다음 잠잠함에 다시. go_back → 상태 on, "Radio talk: resumed. …" + "그럼 하던 이야기로 돌아가 볼게요."
+  를 붙인 안 읽힌 첫 대사. wait_for_answer → 잠잠함 20 s 에 다시(2차 지시문, go_back·stay_paused 만). stay_paused 나
+  멈춘 동안 사용자가 곡을 틀면 자동 복귀를 끄고, 이어 달라는 요청으로만 돌아간다. 판정이 실패하면 조용한 동안 바로
+  다시(잠잠함마다 3번까지). 판정 입력은 멈출 때 읽던 대사, 낭독을 멈추게 한 사용자 말(끼어들기 시작 1.3 s 전부터 멈출
+  때까지), 멈춘 뒤 대화(레이 말은 끝 문장만).
 - **지시문**: 라이브는 정리본(`live_instructions_simple.txt` 와 같은 내용) + Backend tools "Radio: your own radio talk,
   which you host and speak yourself. Starting it, or resuming it after a pause." + 위임 목록 "The user asks to start the
   radio, or to continue a paused radio talk." 진행 규칙은 대화 모델에 없다. 백엔드는 Task instructions 의 Radio 블록 +
@@ -78,8 +85,33 @@
     뒤는 넣은 때)(10-14).
   - 판정기 모델은 gpt-5.4-mini 그대로 — gpt-6-luna 는 정답률 차이를 가릴 수 없고 0.5 s 느리다(10-13, 관찰 "판정기 속도").
   - 재개 때 끝나지 않은 대사를 처음부터 다시 읽어 앞부분이 되풀이되는 것은 자연스러운 정도라 받아들인다(10-14 실기).
-  - 멈춘 뒤 혼자 다시 시작하지 않는다. 이어 달라면 재개, 그대로 두었다가 나중에 "라디오 해 줘" 하면 새로 시작 —
-    일시정지는 "종료 + 책갈피", 멈춘 뒤의 레이는 일반 대화와 같다. 멈춘 동안 판정기를 돌리지 않는다.
+  - **멈춘 뒤 자동 복귀** (10-15): 끼어든 대화가 잠잠해지면 레이가 혼자 이야기로 돌아간다. 이어 달라면 재개,
+    "라디오 해 줘" 하면 새로 시작은 그대로, 멈춘 동안의 레이는 일반 대화와 같다. 10-12 의 "멈춘 뒤 혼자 다시 시작하지
+    않는다"를 바꾼 이유: paused 에서 돌아가는 길이 사용자 요청 → 위임 → 백엔드 `resume_radio` 하나뿐이라, 잘못 멈추거나
+    한 단계라도 놓치면(10-14 실기 "하던 거 계속해 줘") 라디오가 그대로 끝난다. 자동 복귀면 잘못 멈춤의 비용이 "끝나
+    버림(사용자가 살림)"에서 "잠깐 끊김 + 재개 문구(저절로 살아남)"로 준다.
+    - 멈춤은 두 축 — 책갈피(새 대본·곡 정지·세션 끝까지 남김)와 자동 복귀(켬/끔). 자동 복귀는 복귀 판정이 stay 를
+      내거나 멈춘 동안 곡을 틀면 꺼지고, 그 뒤엔 이어 달라는 요청으로만 돌아간다(다시 묻지 않는다). 백엔드 상태는 둘 다
+      paused(이어 달라면 재개).
+    - stay 는 둘뿐이다. ① 라디오를 끝내 달라는 말을 거두지 않음 — 낭독을 멈추게 한 말은 라디오에 대한 것, 대화 중
+      말은 라디오를 직접 말하거나 레이의 라디오 질문에 답할 때만(레이 대답을 끊거나 마무리하는 그만·됐어는 아니다).
+      ② 사용자가 레이에게 한 마지막 말이 기다려 달라는 말 — 말할 틈을 달라는 "멈춰봐"도 같고, 레이에게 무슨 말이든 더
+      하면 끝난다(통화 등 다른 사람에게 한 말은 아니다). 멈추게 한 말이 끝냄인지 잠깐인지 애매하면 뒤 대화로 —
+      라디오 이야기를 했으면 ②, 아니면 ①(대화가 라디오 밖으로 가서 안 돌아가는 건 괜찮다).
+    - 판정: 레이 말소리·사용자 전사·백엔드 위임·곡이 모두 없이 8 s(실기에서 조절)면 복귀 직전에 판정기를 한 번 부른다
+      (조금 일찍 불러 지연을 숨긴다). 출력은 go_back(기본) / wait_for_answer(레이가 묻거나 제안했는데 답이 없음, 약
+      20 s 에 다시 — 그때는 go_back·stay_paused 만) / stay_paused. 위임 대기를 무음에서 빼는 이유: 10-14 실기의 웹 검색
+      위임이 8.2 s.
+    - 판정기(관찰 "복귀 판정 벤치"): gpt-5.4-mini 추론 low(none 은 같은 문구로 63/87 대 82/87). 입력은 태그 셋 —
+      `<radio_line>` 읽던 대사, `<interruption>` 낭독을 멈추게 한 말, `<conversation>` 그 뒤 대화(레이 말은 끝 문장만).
+      지시문은 라디오 토크를 "레이가 읽는 준비된 대사뿐, 대화 속 레이 말은 같은 주제여도 대답"으로 정의하고, 입력
+      부분은 태그 이름으로만 가리키며 뜻은 따로 한 줄씩 쓴다. 이름에 설명을 섞지 않고 예시(단어)는 넣지 않는다 — 예시
+      단어와 설명 섞인 이름은 판정기가 겉글자로 맞춰 보는 미끼가 됐다.
+    - 진행 중 판정기(on/paused)에 off 를 넣지 않는다 — 끼어든 순간엔 paused 와 동작 차이가 없고, 나중에 고친 말(10-12
+      "아니, 멈추는 게 아니고…")을 못 보며, 애매할 때의 기울기가 반대다(진행 중은 on, 종료는 복귀).
+    - 재개 문구는 앱 문구("그럼 하던 이야기로 돌아가 볼게요." 등 몇 개를 돌려 씀)를 첫 대사 앞에 붙인다 — 곡 뒤 문구와
+      같은 방식. 모델에게 맡기면 방송 어휘("라디오 다시 켤게요")가 나온다. 모델에게 자동 복귀를 미리 알리지 않는다(대답
+      끝마다 "돌아갈게요"를 미리 말할 위험). 재개 뒤 끼어들기는 지금 처리 그대로.
   - 노래 중엔 레이 말이 나가지 않으므로 곡 정지 요청에만 반응한다. 곡 소개 직후 끼어든 말이 보류보다 늦게 와서 곡이
     먼저 나가도 막지 않고 이 동작에 맡긴다(10-13). "지루해"는 다음 소재로 넘기지 않고 대화로 받는다.
   - 대사 사이 쉼(앞 대사 끝 → 다음 대사 첫 글자 중앙 약 1 s)은 괜찮다.
@@ -93,12 +125,17 @@
   Ray: … | User: …`(판정기 입력 그대로, 앞 끼어들기가 있으면 `| earlier: … ||` 가 앞에 붙는다), `Radio judge: <상태> <초>s (<이유>)`, `Radio: no judgment in N s — dropped`,
   `Radio: judgment for an earlier interruption — dropped`, `Radio: due to go on while judging — waiting up to 3 s`,
   `Radio: paused by the judge`, `Radio: hold released (judge on|no judgment|quiet)`, `Radio: song introduced
-  (closing|quiet|cap) — playing …`, `Radio: next script …`. 판정 호출은 `call_records`(module `radio`, operation
-  `judge`, metadata 상태·이유)에도 남는다.
+  (closing|quiet|cap) — playing …`, `Radio: next script …`, `Radio: quiet N s while paused — asking whether to go
+  back[ (again)] | reading «…» | interruption «…» | Ray: … | User: …`(복귀 판정 입력), `Radio resume judge: <결정>
+  <초>s (<이유>)`, `Radio resumed[ on its own] at line N`, `Radio: line N/M pushed (auto)`, `Radio: Ray is waiting for an
+  answer — asking again at 20 s of quiet`, `Radio: staying paused until the user asks`, `Radio: new speech while asking
+  whether to go back — judgment dropped`, `Radio: a song was played while paused — staying paused …`. 판정 호출은
+  `call_records`(module `radio`, operation `judge` / `resume_judge`, metadata 상태·결정·이유)에도 남는다.
 - **실험 도구** (`scripts/gpt_live/`, 결과는 `var/experiments/<실험>/<번호>_<태그>/`, 녹음은 스테레오(왼쪽 사용자, 오른쪽
   로봇) + Audacity 레이블):
-  - `exp_radio_pipeline.py` — 운영 루프 그대로(하네스)로 `--scenario long|interrupt|multi|chat`. `--report` 가 넣기
-    위치(사후 정답 대비)·곡 시작·판정·재개·멈춘 동안 대본 낭독을 센다. 프로세스마다 하위 폴더라 병렬 실행
+  - `exp_radio_pipeline.py` — 운영 루프 그대로(하네스)로 `--scenario long|interrupt|multi|chat|window|autoresume`.
+    `--report` 가 넣기 위치(사후 정답 대비)·곡 시작·판정·재개·멈춘 동안 대본 낭독·자동 복귀를 센다. 프로세스마다 하위
+    폴더라 병렬 실행
   - `radio_replay.py` — API 없이 기존 결과(radio_ahead l4~l11c, radio_long)로 추적·넣기·멈춤 규칙을 다시 돌려 사후
     정답(전사 전체를 대본에 아핀 갭 정렬)과 비교. `validate`, `push`, `stall`, `pauses`, `done`, `production`(운영
     `Tracker` 가 정한 규칙 재현과 같은지). 규칙은 `Rule` 하나로 바꿔 끼운다
@@ -796,6 +833,51 @@ instructions.append "Radio talk: the song has ended. Go on with your talk.", 10�
 - 벤치(13케이스 × 1): 11/13. 다른 둘은 "멈춘 뒤 라디오 해 줘" → resume_radio(기대 start), "곡 정지 뒤 라디오 이어가 줘"(off)
   → resume_radio(기대 start). "멈춘 뒤 대화"("너는 아는 풀 이름 많아?")는 글 답.
 
+**복귀 판정 벤치 (10-15, `var/experiments/radio_resume_judge/` bench.py~bench10.py·heldout.py·probe.py, 일회용, gpt-5.4-mini,
+손으로 쓴 케이스 20→36개(10-12·10-14 실기 대화 5 포함) × 3, 출력 resume/later/stop → go_back/wait_for_answer/stay_paused)**
+
+| 차수 | 바꾼 것 | 추론 | 맞음 |
+|---|---|---|---|
+| 1 | 계기 말 + 사용자 말 목록 + 레이 마지막 말 | none | 58/72 |
+| 2 | 대화를 순서대로(레이 말 끝 문장), 그만·잠깐만은 그 순간 레이가 하던 말을 끊는 말 | none | 71/87 |
+| 3 | 라벨을 결과 기준으로, 예시 붙은 규칙 | none / low | 63/87 / 82/87 |
+| 4 | 3차에서 예시 뺌 / 2차 문구 | low | 78/93 / 78/93 |
+| 5 | 그만·기다려 말이 무엇에 대한 것인지 먼저 답하는 칸 | low | 82/93 |
+| 6 | stay 는 라디오에 대한 말일 때만(지시) | low | 81/93 |
+| 7 | 기다려는 레이에게 한 마지막 말일 때만 | low | 89/93 |
+| 8 | 라디오 토크 정의(준비된 대사뿐), 대화 중 레이 말 "Ray (reply)" | low | 87/93 |
+| 9 | 끝냄 / 잠깐(멈춰봐)으로 나눔, 애매한 멈춤 말은 뒤 대화로, 케이스 5 추가 | low | 100/108 |
+| 10 | 입력을 태그로, 규칙은 태그 이름으로, "잠깐(for a moment)" 뺌 | low | 107/108 |
+
+- 3차의 예시 두 개("…씨앗은 비에 젖으면 → 그만, 알았어", "잠깐만 전화 좀")는 케이스 문장 그대로였고, 예시를 뺀 4차에서
+  두 케이스가 바로 틀렸다.
+- 1~4차 예시의 "라디오는 이제 됐어"가 있는 동안 설명 뒤 "오케이 이제 됐어"는 stop 3/3("이제 됐어라고 했다"를 인용).
+- 대화 중 레이 설명을 끊은 "그만, 알았어"는 1~9차 모두 stay(이유 "라디오 토크를 멈추라고 했다"), 10차 3/3 go_back.
+  probe P1: 같은 입력에 결정 대신 "그 말이 라디오 / 레이 대답 중 무엇에 대한 것인가"만 물으면 레이 대답 6/6. P2: 대화
+  주제만 날씨로 바꾸면 "이제 됐어" go_back 3/3.
+- 9차에서 넣은 "for a moment"·"ended it" 문구 뒤 "잠깐만, 전화 좀" go_back 1/3("잠깐 기다리랬으니 돌아가도 된다"),
+  "이제 됐어" stay 2/3("잠깐이 아니라 끝냈다"). 10차에서 뺀 뒤 둘 다 3/3.
+- 10차 남은 1: "지루해" 2차 판정 stay 1/3. 판정 시간 중앙 1.46 s, 최대 3.19 s(none 은 중앙 1.2 s 안팎).
+- 확인(heldout, 10차 문구, 다듬을 때 안 본 14케이스 × 3, end_of_day·doing_nothing 대사): 43/48. 틀린 5 모두 go_back 쪽 —
+  "됐어 됐어" 뒤 내일 일어날 시간 이야기 2/3(읽던 대사가 "침대에 누워 내일 할 일을…"), "잠깐만" 뒤 "엄마 나 이거 듣고
+  있어, 조금 이따 갈게" 1/3, 레이 "이야기 이어서 할까요?" → "아니 그건 됐고"(뒤 말 없음) 2/3("사용자는 내용을 물었다").
+  처음 쓴 표현("야 스톱 스톱, 그거 내 얘기잖아", "아 됐어 됐어 알았어", "잠시만, 누가 왔나 봐", "그만 듣고 싶어", "라디오
+  꺼 줘", "스톱" 뒤 라디오 질문)은 모두 맞음.
+- 추론 low 는 OpenAI 어댑터가 늘 보내는 temperature 를 거부한다("Unsupported parameter"). 출력 한도에 추론 토큰이 같이 잡힌다.
+
+**자동 복귀 하네스 (10-15, exp_radio_pipeline.py --scenario autoresume, 운영 경로, drawer 4번 대사를 읽기 시작하고
+2 s 뒤 끼어들고 멈춘 뒤 사용자는 말하지 않음, 조건 4 × 3, Live 약 20분)**
+- 내용 질문("어디 건지 모를 열쇠는 왜 안 버리는 거야?"): 복귀 3/3. 판정 go_back 1.2~1.5 s, 레이 마지막 말소리 →
+  복귀 8.1~8.2 s, 복귀 → 첫 음성 0.9~1.0 s.
+- "근데 너도 나한테 하나 물어봐 줘.": 레이가 되물음("요즘 책상 서랍 안에 가장 오래 남아있는 물건이 뭐예요?" 등) →
+  wait_for_answer → 2차 go_back, 복귀 3/3. 레이 마지막 말소리 → 복귀 20.1~20.2 s, 첫 음성 0.8~1.1 s.
+- "그만하자.": stay_paused 3/3(판정 1.1·1.2·5.85 s). 멈춘 뒤 레이 "네, 여기서 잠깐 멈출게요." / "네, 그만할게요." / 말 없음.
+- "잠깐만.": 안 돌아옴 3/3 — 바로 stay_paused 2, 레이 "멈췄어요. 이어서 더 얘기할까요?" → wait_for_answer → 2차
+  stay_paused("잠깐만 기다리라고 했으니") 1.
+- 복귀 뒤 레이는 재개 문구를 그대로 말함 6/6(1회 "그러면 하던 이야기로…"), 이어 4번 대사를 처음부터 읽음 6/6. 내용 질문
+  1회는 멈춘 뒤 4번 대사 끝("…영수증 같은 것들요.")까지 읽고 대답했는데, 복귀 때 4번을 다시 읽었다.
+- 판정 실패 0, 판정 뒤 새 말로 버린 판정 0, 위임 상한 도달 0.
+
 **출력 출처 표시 (10-11, exp_dj_interrupt_reply ids_smoke 1회)**: commentary·instructions 에 event_id 를 붙여 보내면 수락
 이벤트(`*.appended`)엔 그 id 가 오지만, 출력 전사 142조각엔 모두 `client_event_id` 가 없었다.
 
@@ -868,7 +950,8 @@ instructions.append "Radio talk: the song has ended. Go on with your talk.", 10�
 - **끼어든 뒤 넣어 둔 대사를 대답에 섞음** (B′ 구조 비용): 실험 l5 1/14, 운영 multi 1/9. 재개 때 다시 읽어 되풀이된다.
 - **"이야기 계속해 줘" 재개**: 실험에서 4번에 1번꼴로 위임 없이 혼자 이어 감(새 멈춤 문구로 32/32), 운영 확인 2/2.
 - **재개 시퀀스** (10-12 미룸): 백엔드 툴을 라디오 상태별로 둘지(off 는 start_radio 만, paused 는 start·resume). 멈춘
-  상태에서 대화 주제가 따로 있으면 "하던 거 계속해 줘"가 라디오인지 그 주제인지 애매하다(10-14 실기, 백엔드는 주제로 봄).
+  상태에서 대화 주제가 따로 있으면 "하던 거 계속해 줘"가 라디오인지 그 주제인지 애매하다(10-14 실기, 백엔드는 주제로 봄,
+  다시 돌리면 1/2 재개) — 자동 복귀(10-15)가 들어가면 잠잠해질 때 돌아가므로 이 애매함의 비용은 준다.
   off 상태 "이어가줘"에 옛 벤치는 resume_radio 60/60, 10-12 실기(판정 off 뒤)는 start_radio. 벤치를 실제 요청 모양으로
   맞춘 뒤 곡 정지 뒤 off 의 "라디오 이어가 줘"도 resume_radio(1회, 관찰 "백엔드 요청 모양 맞춤").
 - **멈춘 상태에서 "라디오 해 줘"**: 옛 벤치는 start_radio 10/10, 실제 요청 모양 벤치 1회는 resume_radio. 새 대본 + 재개

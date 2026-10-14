@@ -14,12 +14,16 @@ import pytest
 
 from voice_pipeline.engines.gpt_live.instructions import (
     RADIO_AFTER_SONG_OPENING,
+    RADIO_AUTO_RESUME_OPENING,
     RADIO_ENDED_NOTE,
     RADIO_JUDGE_FORMAT,
     RADIO_LATE_LINE_NOTE,
     RADIO_LINE_TEMPLATE,
     RADIO_PAUSED_NOTE,
+    RADIO_RESUME_JUDGE_INSTRUCTIONS,
+    RADIO_RESUME_JUDGE_SECOND,
     RADIO_RESUMED_NOTE,
+    radio_resume_judge_format,
 )
 from voice_pipeline.engines.gpt_live.radio import (
     Closing,
@@ -27,6 +31,7 @@ from voice_pipeline.engines.gpt_live.radio import (
     Push,
     Radio,
     RadioJudge,
+    RadioResumeJudge,
     RadioScript,
     Repush,
     ScriptLog,
@@ -369,6 +374,51 @@ class TestRadioJudge:
         assert RADIO_JUDGE_FORMAT["schema"]["properties"]["state"]["enum"] == ["on", "paused"]
 
 
+class TestRadioResumeJudge:
+    def _judge(self, decision: str) -> tuple[RadioResumeJudge, MagicMock]:
+        llm = MagicMock(spec=ILLM)
+        llm.model = "gpt-5.4-mini"
+        llm.generate.return_value = iter([json.dumps({"reason": "이유", "decision": decision})])
+        return RadioResumeJudge(llm), llm
+
+    def test_sends_three_tagged_parts_with_ray_cut_to_its_last_sentence(self) -> None:
+        judge, llm = self._judge("go_back")
+        conversation = [
+            ("assistant", "질경이예요.길가에서 자주 보여요."),
+            ("user", "그만, 알았어"),
+            ("assistant", "네."),
+        ]
+        assert judge.decide("읽던 대사", "그 풀 이름이 뭐야?", conversation) == "go_back"
+        system, user = (m["content"] for m in llm.generate.call_args.args[0])
+        assert system == RADIO_RESUME_JUDGE_INSTRUCTIONS
+        assert user == (
+            "<radio_line>읽던 대사</radio_line>\n<interruption>그 풀 이름이 뭐야?</interruption>\n"
+            "<conversation>\nRay: 길가에서 자주 보여요.\nUser: 그만, 알았어\nRay: 네.\n</conversation>"
+        )
+        assert llm.generate.call_args.kwargs == {"tools": [], "response_format": radio_resume_judge_format()}
+
+    def test_second_judgment_has_no_wait_for_answer(self) -> None:
+        judge, llm = self._judge("go_back")
+        judge.decide("l", "잠깐만", [], second=True)
+        system, user = (m["content"] for m in llm.generate.call_args.args[0])
+        assert system == RADIO_RESUME_JUDGE_INSTRUCTIONS + RADIO_RESUME_JUDGE_SECOND
+        assert user.endswith("<conversation></conversation>")
+        schema = llm.generate.call_args.kwargs["response_format"]["schema"]
+        assert schema["properties"]["decision"]["enum"] == ["go_back", "stay_paused"]
+        judge, _ = self._judge("wait_for_answer")
+        with pytest.raises(RuntimeError):
+            judge.decide("l", "잠깐만", [], second=True)
+
+    def test_records_the_call(self, call_log, caplog: pytest.LogCaptureFixture) -> None:
+        judge, _ = self._judge("stay_paused")
+        with caplog.at_level(logging.INFO, logger="voice_pipeline.radio"):
+            judge.decide("l", "그만하자", [])
+        (rec,) = [r for r in call_log.records if r.operation == "resume_judge"]
+        assert (rec.module, rec.model, rec.status) == ("radio", "gpt-5.4-mini", "ok")
+        assert json.loads(rec.metadata) == {"decision": "stay_paused", "reason": "이유"}
+        assert re.search(r"Radio resume judge: stay_paused \d+\.\d\ds \(이유\)", caplog.text)
+
+
 # ---------------------------------------------------------------------------
 # 라디오 상태
 # ---------------------------------------------------------------------------
@@ -621,6 +671,139 @@ class TestRadioInterruption:
         output, commands = radio.start(t + 3.0)
         assert json.loads(output) == {"status": "on"} and radio.script is not first
         assert commands == [UpdateBackend(), Think(RADIO_RESUMED_NOTE), _line(LINES[0])]
+
+
+def _auto_radio(*decisions: object, executor: object | None = None) -> Radio:
+    """멈추는 끼어들기 하나와 복귀 판정기가 있는 라디오. 판정은 ``decisions`` 를 차례로 (예외면 실패)."""
+    judge = MagicMock(spec=RadioJudge)
+    judge.classify.side_effect = ["paused"]
+    resume_judge = MagicMock(spec=RadioResumeJudge)
+    resume_judge.decide.side_effect = list(decisions)
+    picker = ScriptPicker(_scripts("a", "b"), ScriptLog(":memory:"), rng=random.Random(0))
+    return Radio(picker, judge, executor, resume_judge)  # type: ignore[arg-type]
+
+
+class TestRadioAutoResume:
+    QUIET = Radio.RESUME_QUIET_SEC
+    ASK = Radio.RESUME_QUIET_SEC - Radio.RESUME_JUDGE_LEAD_SEC
+
+    def _paused(self, *decisions: object, executor: object | None = None) -> tuple[Radio, float]:
+        """멈추고 레이가 대답한 라디오와 레이 말소리가 마지막으로 난 시각."""
+        radio = _auto_radio(*decisions, executor=executor)
+        radio.start(0.0)
+        t = _read(radio, "오늘은 책상 서랍 이야기예요.", 0.5)
+        _user(radio, "근데 서랍에 뭐 넣어 둬?", t)
+        radio.step(t + 0.7, 0.0)  # 끼어들기 판정
+        radio.step(t + 0.8, 0.0)  # paused
+        assert radio.status == "paused" and radio.auto_resume
+        t = _read(radio, "저는 메모지를 넣어 둘 것 같아요.", t + 1.0, segment="out-2")  # 레이의 대답
+        return radio, t - 0.3
+
+    def _decide(self, radio: Radio) -> MagicMock:
+        return radio._resume_judge.decide  # type: ignore[attr-defined,return-value]
+
+    def test_goes_back_on_its_own_with_the_opening_after_a_quiet(self) -> None:
+        radio, last = self._paused("go_back")
+        assert radio.step(last + self.ASK - 0.1, 0.0) == []
+        self._decide(radio).assert_not_called()
+        assert radio.step(last + self.ASK, 0.0) == []  # 판정을 미리 부른다
+        line, interruption, conversation = self._decide(radio).call_args.args
+        assert (line, interruption) == (LINES[0], "근데 서랍에 뭐 넣어 둬?")
+        assert conversation == [("assistant", "저는 메모지를 넣어 둘 것 같아요.")]
+        assert self._decide(radio).call_args.kwargs == {"second": False}
+        assert radio.step(last + self.QUIET - 0.1, 0.0) == []  # 결과는 잠잠함이 찼을 때 적용한다
+        opening = _line(f"{RADIO_AUTO_RESUME_OPENING} {LINES[0]}")  # 1번 대사가 안 끝났다
+        assert radio.step(last + self.QUIET, 0.0) == [UpdateBackend(), Think(RADIO_RESUMED_NOTE), opening]
+        assert radio.status == "on" and not radio.auto_resume
+
+    def test_new_speech_drops_the_judgment_and_the_next_quiet_asks_again(self) -> None:
+        radio, last = self._paused("stay_paused", "go_back")
+        radio.step(last + self.ASK, 0.0)
+        _user(radio, "아 그렇구나", last + self.QUIET - 0.5, segment="in-2")
+        assert radio.step(last + self.QUIET, 0.0) == []  # 판정 뒤 사용자가 말했다 — 버린다
+        assert radio.status == "paused" and radio.auto_resume
+        lull = last + self.QUIET - 0.5
+        radio.step(lull + self.ASK, 0.0)
+        assert self._decide(radio).call_count == 2
+        assert radio.step(lull + self.QUIET, 0.0)[-1] == _line(f"{RADIO_AUTO_RESUME_OPENING} {LINES[0]}")
+
+    def test_a_running_delegation_is_not_a_quiet(self) -> None:
+        radio, last = self._paused("go_back")
+        radio.step(last + 3.0, 0.0, backend_busy=True)  # 백엔드가 아직 답을 만드는 중
+        radio.step(last + self.ASK + 1.0, 0.0)
+        self._decide(radio).assert_not_called()
+        radio.step(last + 3.0 + self.ASK, 0.0)
+        self._decide(radio).assert_called_once()
+
+    def test_stay_paused_stops_asking(self) -> None:
+        radio, last = self._paused("stay_paused")
+        radio.step(last + self.ASK, 0.0)
+        assert radio.step(last + self.QUIET, 0.0) == []
+        assert radio.status == "paused" and not radio.auto_resume
+        _user(radio, "근데 있잖아", last + 20.0, segment="in-2")
+        radio.step(last + 40.0, 0.0)
+        self._decide(radio).assert_called_once()  # 이어 달라는 요청으로만 돌아간다
+        assert radio.resume(last + 41.0)[1][-1] == _line(LINES[0])  # 재개는 그대로 — 문구 없이
+
+    def test_waiting_for_an_answer_asks_once_more_later_without_that_option(self) -> None:
+        radio, last = self._paused("wait_for_answer", "go_back")
+        radio.step(last + self.ASK, 0.0)
+        assert radio.step(last + self.QUIET, 0.0) == []
+        later = Radio.RESUME_LATER_SEC - Radio.RESUME_JUDGE_LEAD_SEC
+        radio.step(last + later - 0.1, 0.0)
+        assert self._decide(radio).call_count == 1
+        radio.step(last + later, 0.0)
+        assert self._decide(radio).call_args.kwargs == {"second": True}
+        assert radio.step(last + Radio.RESUME_LATER_SEC, 0.0)[0] == UpdateBackend()
+        assert radio.status == "on"
+
+    def test_a_failed_judgment_is_asked_again_right_away_while_quiet(self) -> None:
+        radio, last = self._paused(RuntimeError("timeout"), "go_back")
+        radio.step(last + self.ASK, 0.0)
+        radio.step(last + self.ASK + 0.1, 0.0)  # 실패를 보고 바로 다시
+        assert self._decide(radio).call_count == 2
+        assert radio.step(last + self.QUIET, 0.0)[0] == UpdateBackend()
+
+    def test_repeated_failures_give_up_until_someone_speaks(self) -> None:
+        failures = [RuntimeError("timeout")] * Radio.RESUME_ATTEMPTS
+        radio, last = self._paused(*failures, "go_back")
+        for k in range(Radio.RESUME_ATTEMPTS + 2):
+            radio.step(last + self.ASK + 0.1 * k, 0.0)
+        assert self._decide(radio).call_count == Radio.RESUME_ATTEMPTS
+        assert radio.step(last + 30.0, 0.0) == [] and radio.status == "paused"
+        _user(radio, "음", last + 31.0, segment="in-2")
+        radio.step(last + 31.0 + self.ASK, 0.0)
+        assert radio.step(last + 31.0 + self.QUIET, 0.0)[0] == UpdateBackend()
+
+    def test_a_user_song_while_paused_turns_it_off(self) -> None:
+        radio, last = self._paused("go_back")
+        radio.on_user_song()
+        radio.step(last + 30.0, 0.0)
+        self._decide(radio).assert_not_called()
+        assert radio.status == "paused" and not radio.auto_resume
+
+    def test_a_resume_request_while_judging_drops_the_judgment(self) -> None:
+        pending: Future[str] = Future()
+        executor = MagicMock()
+        judged: Future[str] = Future()
+        judged.set_result("paused")
+        executor.submit.side_effect = [judged, pending]
+        radio, last = self._paused(executor=executor)
+        radio.step(last + self.ASK, 0.0)
+        assert radio._resume_check is not None
+        radio.resume(last + self.ASK + 0.5)
+        pending.set_result("go_back")
+        assert radio.step(last + self.QUIET, 0.0) == [] and radio._resume_check is None
+
+    def test_no_resume_judge_never_goes_back_on_its_own(self) -> None:
+        radio = _radio("paused")
+        radio.start(0.0)
+        t = _read(radio, "오늘은 책상 서랍 이야기예요.", 0.5)
+        _user(radio, "근데 서랍에 뭐 넣어 둬?", t)
+        radio.step(t + 0.7, 0.0)
+        radio.step(t + 0.8, 0.0)
+        assert radio.status == "paused" and not radio.auto_resume
+        assert radio.step(t + 60.0, 0.0) == [] and radio.status == "paused"
 
 
 class TestRadioSong:

@@ -286,6 +286,17 @@ class TestClientConfig:
         call_kwargs = client.responses.create.call_args[1]
         assert call_kwargs["reasoning"] == {"effort": "none"}
 
+    def test_temperature_left_out_when_reasoning_is_on(self) -> None:
+        """The API rejects temperature with reasoning on — "none" still sends it."""
+        client = create_mock_llm_client(make_stream_events(["ok"]))
+        llm = _build_llm(client, reasoning_effort="low")
+
+        list(llm.generate([_user_msg("hi")]))
+
+        call_kwargs = client.responses.create.call_args[1]
+        assert call_kwargs["reasoning"] == {"effort": "low"}
+        assert "temperature" not in call_kwargs
+
     def test_tools_omitted_when_empty(self) -> None:
         """Empty tools list should not send tools param."""
         client = create_mock_llm_client(make_stream_events(["ok"]))

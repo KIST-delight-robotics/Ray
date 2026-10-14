@@ -10,11 +10,14 @@
 ``thinking.append`` 하면 그대로 읽는다. 멈춤·재개·종료는 상태 문구(:data:`RADIO_PAUSED_NOTE` 등)를 thinking 으로
 알린다. 사용자가 말하기 시작한 뒤 대사가 들어갔으면 :data:`RADIO_LATE_LINE_NOTE` 로 대답을 먼저 하게 한다. 백엔드는
 ``## Radio talk`` 절의 상태로 ``start_radio`` / ``resume_radio`` 를 가린다. 끼어든 말의 판정은 별도
-LLM(:data:`RADIO_JUDGE_INSTRUCTIONS`)이 한다. 설계 배경은 docs/dj-mode-worknote.md.
+LLM(:data:`RADIO_JUDGE_INSTRUCTIONS`)이, 멈춘 대화가 잠잠해졌을 때 라디오로 돌아갈지는 또 다른
+LLM(:data:`RADIO_RESUME_JUDGE_INSTRUCTIONS`)이 한다. 스스로 돌아갈 때는 첫 대사 앞에
+:data:`RADIO_AUTO_RESUME_OPENING` 을 붙인다. 설계 배경은 docs/dj-mode-worknote.md.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -241,6 +244,85 @@ def build_radio_judge_prompt(
     if earlier:
         text += f"Earlier during this line:\n{dialog(earlier)}\n\n"
     return text + f"Since the user spoke:\n{dialog(exchange)}"
+
+
+# 멈춘 대화가 잠잠해졌을 때 레이가 라디오로 스스로 돌아갈지 정하는 판정기 (별도 LLM 호출, 추론 low, 구조화 출력).
+# 입력은 태그 셋으로 나누고 지시문은 태그 이름으로만 가리킨다 — 이름에 설명을 섞거나 예시 단어를 주면 판정기가 겉글자로
+# 맞춰 봤다(dj-mode-worknote.md 관찰 "복귀 판정 벤치"). 라디오 토크를 준비된 대사로만 정의해야 같은 주제의 대화를
+# 라디오로 보지 않는다.
+RADIO_RESUME_JUDGE_INSTRUCTIONS = """\
+Ray, a small desk robot, hosts a radio talk: it reads prepared lines aloud, one at a time. The radio talk is only \
+those lines. While Ray was reading a line, the user said something to Ray, so the reading paused and they had a \
+conversation. The conversation has now gone quiet. Decide whether Ray goes back to reading the radio talk on its own \
+now. The transcripts come from speech recognition and may contain errors.
+
+The input has three parts:
+- <radio_line>: the line Ray was reading.
+- <interruption>: what the user said while Ray was reading it. This paused the talk.
+- <conversation>: everything said after that, in order. Ray's turns here are replies in the conversation, not the \
+radio talk, even when they are about the same topic. Each of Ray's turns is cut to its last sentence.
+
+Decisions:
+- go_back: the default. Ray goes back to the radio talk, whatever the conversation was about, unless stay_paused \
+applies.
+- wait_for_answer: Ray's last turn in <conversation> asked the user something or offered something, and the user \
+has not answered yet.
+- stay_paused: only in one of these two cases. Ray then waits until the user asks to go on with the talk.
+  1. The user asked to end the radio talk and did not take it back later. <interruption> counts, because Ray was \
+reading the talk then. In <conversation>, only words that mention the radio talk or answer Ray's question about it \
+count; words that stop or close Ray's reply do not.
+  2. The last thing the user said to Ray asks Ray to wait until they are back or speak again, for example to get a \
+word in, step away or take a call. This holds however long it has been, and ends once the user says anything more \
+to Ray. Talking to someone else, such as on the phone, is not saying something to Ray.
+
+If <interruption> could be either a request to end the talk (case 1) or a request to stop so the user can talk \
+(case 2), look at <conversation>: if the user talked with Ray about what the talk was about, take it as case 2; \
+otherwise take it as case 1.
+"""
+# wait_for_answer 뒤 다시 판정할 때 지시문 끝에 붙인다
+RADIO_RESUME_JUDGE_SECOND = (
+    "\nRay has already waited for an answer, so wait_for_answer is not an option. If waiting for an answer was the "
+    "only reason not to go back, choose go_back."
+)
+_SENTENCE_BREAK_RE = re.compile(r"(?<=[.?!])\s*(?=[^.?!\s])")  # 전사는 문장 사이 공백이 없기도 하다 ("요.길가")
+
+
+def radio_resume_judge_format(*, second: bool = False) -> dict[str, Any]:
+    """복귀 판정기 출력 형식. ``second`` 면 wait_for_answer 가 없다."""
+    choices = ["go_back", "stay_paused"] if second else ["go_back", "wait_for_answer", "stay_paused"]
+    return {
+        "type": "json_schema",
+        "name": "radio_resume",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string", "description": "One short sentence."},
+                "decision": {"type": "string", "enum": choices},
+            },
+            "required": ["reason", "decision"],
+            "additionalProperties": False,
+        },
+    }
+
+
+def build_radio_resume_prompt(line: str, interruption: str, conversation: Sequence[tuple[str, str]]) -> str:
+    """복귀 판정기 사용자 메시지. ``conversation`` 은 멈춘 뒤의 (화자 user/assistant, 전사) 차례 — 레이 말은 끝
+    문장만 넣는다: 사용자가 끊거나 답한 건 대개 끝이고, 대화가 길어도 앞의 그만 요청이 묻히지 않게."""
+
+    def turn(who: str, text: str) -> str:
+        if who == "user":
+            return f"User: {text}"
+        return f"Ray: {[s for s in _SENTENCE_BREAK_RE.split(text.strip()) if s][-1]}"
+
+    rows = "\n".join(turn(who, text) for who, text in conversation if text.strip())
+    return f"<radio_line>{line}</radio_line>\n<interruption>{interruption}</interruption>\n" + (
+        f"<conversation>\n{rows}\n</conversation>" if rows else "<conversation></conversation>"
+    )
+
+
+# 자동 복귀 때 첫 대사 앞에 붙인다 — 모델에게 맡기면 방송 어휘("라디오 다시 켤게요")가 나왔다
+RADIO_AUTO_RESUME_OPENING = "그럼 하던 이야기로 돌아가 볼게요."
 
 
 # 종료 시퀀스에서 모델이 작별 인사 없이 조용하면 commentary 로 넣는다 (모델이 자기 말로 옮겨 말한다)

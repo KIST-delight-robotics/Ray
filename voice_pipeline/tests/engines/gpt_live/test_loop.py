@@ -16,6 +16,7 @@ from voice_pipeline.adapters.gpt_live import (
     GPTLiveSession,
     LiveAudio,
     LiveClosed,
+    LiveDelegationCreated,
     LiveFunctionCall,
     LiveResponseDone,
     LiveStarted,
@@ -945,7 +946,7 @@ class TestRadio:
     def test_frames_feed_the_radio_and_run_its_commands(self, monkeypatch: pytest.MonkeyPatch) -> None:
         radio = _radio(status="on")
         pending = [[Think("다음 대사")]]
-        radio.step.side_effect = lambda now, quiet: pending.pop() if pending else []
+        radio.step.side_effect = lambda now, quiet, backend_busy: pending.pop() if pending else []
         loop, m, _ = _make_loop(monkeypatch, radio=radio)
         _staged_live_events(
             m,
@@ -963,13 +964,41 @@ class TestRadio:
         seen = [c.args[1:] for c in radio.on_transcript.call_args_list]
         assert ("seg-0", "assistant", "오늘은") in seen and ("seg-2000", "user", "응") in seen
         assert radio.step.call_args_list and all(isinstance(c.args[1], float) for c in radio.step.call_args_list)
+        assert all(c.kwargs == {"backend_busy": False} for c in radio.step.call_args_list)
         m["live"].append_thinking.assert_called_once_with("다음 대사")
+
+    def test_a_delegation_is_busy_until_its_last_response_is_done(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop, _, _ = _make_loop(monkeypatch, radio=_radio(status="paused"))
+        now = time.monotonic()
+        assert not loop._backend_busy(now)
+        loop._handle_live_event(LiveDelegationCreated("d1"))
+        assert loop._backend_busy(now)
+        loop._handle_live_event(LiveFunctionCall("c1", "get_device_settings", "{}", "d1", "r1"))
+        loop._handle_live_event(LiveResponseDone("d1", "r1", "completed"))  # 툴 호출 — 이어가기 응답을 기다린다
+        assert loop._backend_busy(now)
+        loop._handle_live_event(LiveResponseDone("d1", "r2", "completed"))
+        assert not loop._backend_busy(now)
+
+    def test_an_unanswered_delegation_stops_counting_after_the_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loop, _, _ = _make_loop(monkeypatch, radio=_radio(status="paused"))
+        loop._handle_live_event(LiveDelegationCreated("d1"))
+        now = time.monotonic()
+        assert loop._backend_busy(now)
+        assert not loop._backend_busy(now + LiveSessionLoop._BACKEND_BUSY_MAX_SEC)
+
+    def test_a_song_the_user_asks_for_is_told_to_the_radio(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        radio = _radio(status="paused")
+        loop, _, _ = _make_loop(monkeypatch, song_catalog=SONGS, radio=radio)
+        loop._submit_tool(_call(PLAY_SONG_TOOL, {"song": "nope"}))
+        radio.on_user_song.assert_not_called()  # 틀 수 없는 곡
+        loop._submit_tool(_call(PLAY_SONG_TOOL, {"song": "IAM"}))
+        radio.on_user_song.assert_called_once()
 
     def _song_flow(self, monkeypatch: pytest.MonkeyPatch, *, stop: bool) -> tuple[LiveSessionLoop, dict, MagicMock]:
         radio = _radio(status="on")
         state = {"fired": False}
 
-        def step(now: float, quiet: float) -> list:
+        def step(now: float, quiet: float, backend_busy: bool) -> list:
             if state["fired"]:
                 return []
             state["fired"] = True

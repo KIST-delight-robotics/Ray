@@ -48,7 +48,14 @@ from voice_pipeline.engines.gpt_live.instructions import (
     build_live_instructions,
 )
 from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop
-from voice_pipeline.engines.gpt_live.radio import Radio, RadioJudge, ScriptLog, ScriptPicker, load_scripts
+from voice_pipeline.engines.gpt_live.radio import (
+    Radio,
+    RadioJudge,
+    RadioResumeJudge,
+    ScriptLog,
+    ScriptPicker,
+    load_scripts,
+)
 from voice_pipeline.engines.gpt_live.songs import Song, load_song_catalog
 from voice_pipeline.engines.gpt_live.tools import (
     DEFAULT_TOOLS,
@@ -141,6 +148,7 @@ class ProcessComponents:
     song_catalog: dict[str, Song] = field(default_factory=dict)  # 재생 가능한 노래 (live 툴). 비면 툴 미노출
     radio_picker: ScriptPicker | None = None  # 라디오 대본 선택 (live 툴). None 이면 라디오 툴 미노출
     radio_judge: RadioJudge | None = None  # 라디오 끼어들기 판정기. radio_picker 와 함께 있다
+    radio_resume_judge: RadioResumeJudge | None = None  # 멈춘 라디오의 복귀 판정기. None 이면 혼자 돌아가지 않는다
     _prev_threaded: list[ThreadedTurnGPT] = field(default_factory=list)
     _prev_summarizers: list[HistorySummarizer] = field(default_factory=list)
 
@@ -204,7 +212,7 @@ class ProcessComponents:
             if self.radio_picker is not None and self.radio_judge is not None:
                 tools += RADIO_TOOLS
                 self.radio_picker.new_session()
-                radio = Radio(self.radio_picker, self.radio_judge, self.executor)
+                radio = Radio(self.radio_picker, self.radio_judge, self.executor, self.radio_resume_judge)
             live = GPTLiveSession(
                 LiveSessionConfig(
                     instructions=instructions,
@@ -428,6 +436,12 @@ def build_components(
         if radio_picker is not None
         else None
     )
+    # 멈춘 대화가 잠잠할 때 미리 부르므로 지연보다 판단이 중요하다 — 추론 low (추론 토큰도 출력 한도에 든다)
+    radio_resume_judge = (
+        RadioResumeJudge(OpenAILLM(model="gpt-5.4-mini", reasoning_effort="low", max_tokens=2000, tools=[]))
+        if radio_picker is not None
+        else None
+    )
 
     return ProcessComponents(
         engine=engine,
@@ -458,6 +472,7 @@ def build_components(
         song_catalog=song_catalog,
         radio_picker=radio_picker,
         radio_judge=radio_judge,
+        radio_resume_judge=radio_resume_judge,
     )
 
 

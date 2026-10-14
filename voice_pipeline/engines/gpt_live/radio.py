@@ -17,8 +17,11 @@
 넣을 때가 되면 :attr:`Radio.DUE_WAIT_SEC` 더 기다린 뒤 on 으로 진행한다(늦게 온 paused 는 그 뒤에도 적용). on 뒤
 모델의 대답은 대본과 다시 일치할 때까지 진행에서 뺀다. 사용자 전사는 목소리보다 늦게 오므로, 보류 직전에 넣은 대사는
 사용자가 말하는 도중에 들어간 것이다 — 모델은 그 대사를 대답보다 먼저 읽으므로 대답을 먼저 하라는 문구를 넣는다.
-멈추면 혼자 다시 시작하지 않는다 — 사용자가 이어 달라고 하면 백엔드가 ``resume_radio`` 를 부르고, 아직 안 읽힌
-대사부터 다시 넣는다.
+
+멈춘 뒤(:class:`RadioResumeJudge`): 대화가 잠잠해지면(레이 말·사용자 전사·백엔드 위임 없이
+:attr:`Radio.RESUME_QUIET_SEC`) 복귀 판정기에 묻고, go_back 이면 재개 문구를 붙여 아직 안 읽힌 대사부터 다시 넣는다.
+stay_paused(라디오를 끝내 달라는 말, 레이에게 한 마지막 말이 기다려 달라는 말)거나 멈춘 동안 곡을 틀었으면 혼자
+돌아가지 않는다 — 사용자가 이어 달라고 하면 백엔드가 ``resume_radio`` 를 부른다.
 
 이 모듈은 세션 I/O 를 하지 않는다. 루프가 시각·전사·무음을 넣고, 돌려받은 할 일(:class:`Think`, :class:`UpdateBackend`,
 :class:`PlaySong`)을 실행한다.
@@ -42,14 +45,19 @@ from pathlib import Path
 
 from voice_pipeline.engines.gpt_live.instructions import (
     RADIO_AFTER_SONG_OPENING,
+    RADIO_AUTO_RESUME_OPENING,
     RADIO_ENDED_NOTE,
     RADIO_JUDGE_FORMAT,
     RADIO_JUDGE_INSTRUCTIONS,
     RADIO_LATE_LINE_NOTE,
     RADIO_LINE_TEMPLATE,
     RADIO_PAUSED_NOTE,
+    RADIO_RESUME_JUDGE_INSTRUCTIONS,
+    RADIO_RESUME_JUDGE_SECOND,
     RADIO_RESUMED_NOTE,
     build_radio_judge_prompt,
+    build_radio_resume_prompt,
+    radio_resume_judge_format,
 )
 from voice_pipeline.engines.gpt_live.songs import Song
 from voice_pipeline.settings import DEFAULT_DB_PATH, RADIO_SCRIPTS_DIR
@@ -549,19 +557,66 @@ class RadioJudge:
             if state not in ("on", "paused"):
                 raise RuntimeError(f"radio judge: unexpected state {state!r}")
         except Exception:
-            self._record(start, "error", state, reason)
+            _record_judge(self._llm, "judge", start, "error", {"state": state, "reason": reason})
             raise
-        elapsed = self._record(start, "ok", state, reason)
+        elapsed = _record_judge(self._llm, "judge", start, "ok", {"state": state, "reason": reason})
         logger.info("Radio judge: %s %.2fs (%s)", state, elapsed, reason)
         return state
 
-    def _record(self, start: float, status: str, state: str, reason: str) -> float:
-        """호출 기록 한 건. 걸린 시간(초)을 돌려준다."""
-        elapsed = time.monotonic() - start
-        model = getattr(self._llm, "model", "unknown")
-        metadata = json.dumps({"state": state, "reason": reason}, ensure_ascii=False)
-        record_call("radio", "judge", model, elapsed * 1000.0, status=status, metadata=metadata)
-        return elapsed
+
+class RadioResumeJudge:
+    """멈춘 대화가 잠잠해졌을 때 레이가 라디오로 스스로 돌아갈지 판정한다 (별도 LLM 호출, 구조화 출력).
+
+    go_back = 기본. wait_for_answer = 레이가 마지막에 묻거나 제안했는데 답이 없다. stay_paused = 사용자가 라디오를
+    끝내 달라고 했거나(낭독을 멈추게 한 말, 대화 중엔 라디오를 가리킨 말만), 레이에게 한 마지막 말이 기다려 달라는 말.
+    """
+
+    def __init__(self, llm: ILLM) -> None:
+        self._llm = llm
+
+    def decide(
+        self, line: str, interruption: str, conversation: Sequence[tuple[str, str]], *, second: bool = False
+    ) -> str:
+        """판정 하나. 실패하면 예외. 걸린 시간은 로그와 호출 기록에 남긴다.
+
+        Args:
+            line: 멈출 때 레이가 읽던 대사.
+            interruption: 낭독을 멈추게 한 사용자 말.
+            conversation: 멈춘 뒤의 (화자 user/assistant, 전사) 차례.
+            second: wait_for_answer 뒤 다시 묻는다 — go_back / stay_paused 만.
+        """
+        start = time.monotonic()
+        decision = reason = ""
+        system = RADIO_RESUME_JUDGE_INSTRUCTIONS + (RADIO_RESUME_JUDGE_SECOND if second else "")
+        try:
+            stream = self._llm.generate(
+                [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": build_radio_resume_prompt(line, interruption, conversation)},
+                ],
+                tools=[],
+                response_format=radio_resume_judge_format(second=second),
+            )
+            out = json.loads("".join(stream))
+            decision, reason = str(out.get("decision", "")), str(out.get("reason", ""))
+            allowed = ("go_back", "stay_paused") if second else ("go_back", "wait_for_answer", "stay_paused")
+            if decision not in allowed:
+                raise RuntimeError(f"radio resume judge: unexpected decision {decision!r}")
+        except Exception:
+            _record_judge(self._llm, "resume_judge", start, "error", {"decision": decision, "reason": reason})
+            raise
+        elapsed = _record_judge(self._llm, "resume_judge", start, "ok", {"decision": decision, "reason": reason})
+        logger.info("Radio resume judge: %s %.2fs (%s)", decision, elapsed, reason)
+        return decision
+
+
+def _record_judge(llm: ILLM, operation: str, start: float, status: str, fields: Mapping[str, str]) -> float:
+    """판정 호출 기록 한 건. 걸린 시간(초)을 돌려준다."""
+    elapsed = time.monotonic() - start
+    model = getattr(llm, "model", "unknown")
+    metadata = json.dumps(dict(fields), ensure_ascii=False)
+    record_call("radio", operation, model, elapsed * 1000.0, status=status, metadata=metadata)
+    return elapsed
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +668,16 @@ class _Hold:
 
 
 @dataclass
+class _ResumeCheck:
+    """멈춘 동안 라디오로 돌아갈지 묻는 판정 하나."""
+
+    future: Future[str]
+    lull: float  # 이 판정이 속한 잠잠함이 시작된 시각 — 그 뒤 누가 말하면 버린다
+    second: bool  # wait_for_answer 뒤 다시 묻는 것
+    attempt: int
+
+
+@dataclass
 class _Transcripts:
     """전사 스냅샷을 도착 시각이 붙은 조각으로 바꾼다."""
 
@@ -632,9 +697,9 @@ class _Transcripts:
 class Radio:
     """세션 하나의 라디오 — 시작·진행·끼어들기 판정·멈춤·재개.
 
-    상태: off → (start_radio) on → (판정 paused) paused → (resume_radio) on … / (사용자가 곡을 멈춤) off.
-    멈춘 동안 남은 대사가 책갈피다 — 재개하면 거기부터, 새로 시작하면 버린다. 곡은 루프가 틀고 끝나면
-    :meth:`on_song_end` 로 알린다.
+    상태: off → (start_radio) on → (판정 paused) paused → (resume_radio 또는 잠잠해져 복귀 판정 go_back) on … /
+    (사용자가 곡을 멈춤) off. 멈춘 동안 남은 대사가 책갈피다 — 재개하면 거기부터, 새로 시작하면 버린다. 곡은 루프가
+    틀고 끝나면 :meth:`on_song_end` 로 알린다.
     """
 
     USER_QUIET_SEC = 0.6  # 사용자 전사가 이만큼 멈추면 판정한다
@@ -646,11 +711,23 @@ class Radio:
     LATE_PUSH_SEC = 1.5  # 보류 직전 이 안에 넣은 대사는 사용자가 말하는 도중에 들어갔다 (전사 지연 + 여유)
     PRIOR_MAX = 2  # 판정 입력에 넣는 같은 대사 안 앞 끼어들기 수 (최근 것부터)
     PRIOR_MAX_SEC = 30.0  # 그중 시작한 지 이 안의 것만 — 대사가 비정상적으로 길어져도 한참 전 일은 넣지 않는다
+    RESUME_QUIET_SEC = 8.0  # 멈춘 대화가 이만큼 잠잠하면 복귀 판정을 적용한다 (실기에서 조절)
+    RESUME_JUDGE_LEAD_SEC = 1.5  # 복귀 판정은 그보다 이만큼 먼저 부른다 — 판정 시간(중앙 약 1.5 s)을 숨긴다
+    RESUME_LATER_SEC = 20.0  # wait_for_answer 면 잠잠함이 이만큼 됐을 때 다시 판정한다
+    RESUME_ATTEMPTS = 3  # 잠잠함 하나에서 복귀 판정 시도 수 — 실패하면 계속 조용할 때 바로 다시
 
-    def __init__(self, picker: ScriptPicker, judge: RadioJudge, executor: Executor | None = None) -> None:
+    def __init__(
+        self,
+        picker: ScriptPicker,
+        judge: RadioJudge,
+        executor: Executor | None = None,
+        resume_judge: RadioResumeJudge | None = None,
+    ) -> None:
+        """``resume_judge`` 가 없으면 멈춘 뒤 혼자 돌아가지 않는다(이어 달라는 요청으로만)."""
         self._picker = picker
         self._judge = judge
         self._executor = executor
+        self._resume_judge = resume_judge
         self.status = "off"
         self.script: RadioScript | None = None
         self.tracker: Tracker | None = None
@@ -661,6 +738,16 @@ class Radio:
         self._calls: list[_JudgeCall] = []
         self._last_hold_start: float | None = None  # 가장 최근 끼어들기 — 판정은 이것에 대한 것만 적용한다
         self._notes: list[Command] = []  # 다음 step 에 낼 문구
+        # 멈춘 동안 — 복귀 판정의 입력과 잠잠함
+        self.auto_resume = False  # 잠잠해지면 복귀 판정을 묻는가
+        self._paused_at = 0.0
+        self._pause_line = ""  # 멈출 때 읽던 대사
+        self._pause_hold = 0.0  # 멈추게 한 끼어들기가 시작된 시각
+        self._last_voice: float | None = None  # 마지막 모델 말소리
+        self._last_busy: float | None = None  # 백엔드 위임이 마지막으로 진행 중이던 시각
+        self._resume_check: _ResumeCheck | None = None
+        self._later_lull: float | None = None  # wait_for_answer 를 받은 잠잠함
+        self._given_up_lull: float | None = None  # 판정이 거듭 실패해 더 묻지 않는 잠잠함
 
     # -- 툴 ------------------------------------------------------------------
 
@@ -673,6 +760,7 @@ class Radio:
             return json.dumps({"error": "no radio scripts available"}), []
         was_paused = self.status == "paused"
         self._reset_reading()
+        self._clear_pause()
         self.status = "on"
         commands: list[Command] = [UpdateBackend()]
         if was_paused:
@@ -685,13 +773,22 @@ class Radio:
         """``resume_radio`` — 멈춘 곳(아직 안 읽힌 첫 대사)부터 다시 넣는다. (툴 결과, 할 일)."""
         if self.status != "paused" or self.tracker is None:
             return json.dumps({"error": "the radio talk is not paused"}), []
+        return json.dumps({"status": "on"}), self._resume_reading(now, auto=False)
+
+    def _resume_reading(self, now: float, *, auto: bool) -> list[Command]:
+        """멈춘 곳부터 다시 넣는다. ``auto`` 면 혼자 돌아가는 것 — 첫 대사 앞에 재개 문구를 붙인다."""
+        assert self.tracker is not None
         self.status = "on"
+        self._clear_pause()
         commands: list[Command] = [UpdateBackend(), Think(RADIO_RESUMED_NOTE)]
         index = self.tracker.resume(now)
         if index is not None:
-            commands += self._push(Push(index, self.tracker.lines[index], "resume"), now)
-        logger.info("Radio resumed at line %s", index + 1 if index is not None else "end")
-        return json.dumps({"status": "on"}), commands
+            line = self.tracker.lines[index]
+            text = f"{RADIO_AUTO_RESUME_OPENING} {line}" if auto else line
+            commands += self._push(Push(index, text, "auto" if auto else "resume"), now)
+        where = index + 1 if index is not None else "end"
+        logger.info("Radio resumed%s at line %s", " on its own" if auto else "", where)
+        return commands
 
     # -- 입력 ----------------------------------------------------------------
 
@@ -715,8 +812,15 @@ class Radio:
 
     def on_voice(self, now: float) -> None:
         """모델 말소리 조각이 왔다."""
+        self._last_voice = now
         if self.tracker is not None:
             self.tracker.add_voice(now)
+
+    def on_user_song(self) -> None:
+        """사용자가 곡을 틀었다(대본의 곡이 아니다). 멈춘 동안이면 혼자 돌아가지 않는다 — 이어 달라면 재개."""
+        if self.status == "paused" and self.auto_resume:
+            self._clear_pause()
+            logger.info("Radio: a song was played while paused — staying paused until the user asks")
 
     def on_song_end(self, now: float, *, completed: bool) -> list[Command]:
         """대본의 곡이 끝났다. 자연 종료면 다음 대본, 사용자가 멈췄으면 라디오를 끝낸다."""
@@ -741,18 +845,25 @@ class Radio:
         self._transcripts = _Transcripts()
         self.playing_song = False
         self._calls.clear()
+        self._clear_pause()
+        self._last_voice = self._last_busy = None
 
     # -- 진행 ----------------------------------------------------------------
 
-    def step(self, now: float, quiet: float) -> list[Command]:
+    def step(self, now: float, quiet: float, *, backend_busy: bool = False) -> list[Command]:
         """프레임마다. 노래 중이거나 세션이 끝나는 중이면 부르지 않는다.
 
         Args:
             now: 지금 시각.
             quiet: 마지막 모델 음성 뒤 받은 무음 조각 길이(초).
+            backend_busy: 백엔드 위임이 진행 중이다 — 결과를 기다리는 동안 멈춘 대화는 잠잠한 게 아니다.
         """
         commands, self._notes = self._notes, []
         commands += self._poll_judge(now)
+        if backend_busy:
+            self._last_busy = now
+        if self.status == "paused":
+            return commands + self._paused_step(now)
         if self.status != "on" or self.tracker is None or self.playing_song:
             return commands
         if self._hold is not None:
@@ -798,7 +909,87 @@ class Radio:
     def _end(self) -> list[Command]:
         self.status = "off"
         self._reset_reading()
+        self._clear_pause()
         return [UpdateBackend(), Think(RADIO_ENDED_NOTE)]
+
+    # -- 멈춘 뒤 복귀 ------------------------------------------------------------
+
+    def _paused_step(self, now: float) -> list[Command]:
+        """멈춘 대화가 잠잠해지면 복귀 판정을 묻고 적용한다.
+
+        잠잠함은 멈춘 뒤 마지막 사용자 전사·모델 말소리·백엔드 위임 중 늦은 것부터 센다. 판정은
+        :attr:`RESUME_QUIET_SEC` 보다 :attr:`RESUME_JUDGE_LEAD_SEC` 먼저 부르고 그 시점이 되면 적용한다 — 그 사이 누가
+        말하면 버리고 다음 잠잠함에 다시 묻는다. 판정이 실패하면 조용한 동안 바로 다시 묻는다(잠잠함마다
+        :attr:`RESUME_ATTEMPTS` 번까지).
+        """
+        if not self.auto_resume or self._resume_judge is None or self.tracker is None:
+            return []
+        marks = (self._paused_at, self._last_user_text, self._last_voice, self._last_busy)
+        lull = max(t for t in marks if t is not None)
+        check = self._resume_check
+        if check is not None and check.lull != lull:
+            self._resume_check = check = None
+            logger.info("Radio: new speech while asking whether to go back — judgment dropped")
+        if self._given_up_lull == lull:
+            return []
+        later = self._later_lull == lull
+        due = self.RESUME_LATER_SEC if later else self.RESUME_QUIET_SEC
+        if check is None:
+            if now - lull >= due - self.RESUME_JUDGE_LEAD_SEC:
+                self._ask_resume(now, lull, second=later, attempt=1)
+            return []
+        if not check.future.done():
+            return []
+        if check.future.exception() is not None:
+            self._resume_check = None
+            if check.attempt < self.RESUME_ATTEMPTS:
+                logger.warning("Radio resume judge failed — asking again", exc_info=check.future.exception())
+                self._ask_resume(now, lull, second=check.second, attempt=check.attempt + 1)
+            else:
+                logger.warning("Radio resume judge failed %d times — not going back on its own now", check.attempt)
+                self._given_up_lull = lull
+            return []
+        if now - lull < due:
+            return []
+        self._resume_check = None
+        decision = check.future.result()
+        if decision == "go_back":
+            return self._resume_reading(now, auto=True)
+        if decision == "wait_for_answer":
+            self._later_lull = lull
+            logger.info("Radio: Ray is waiting for an answer — asking again at %.0f s of quiet", self.RESUME_LATER_SEC)
+            return []
+        self._clear_pause()
+        logger.info("Radio: staying paused until the user asks")
+        return []
+
+    def _ask_resume(self, now: float, lull: float, *, second: bool, attempt: int) -> None:
+        assert self._resume_judge is not None
+        judge = self._resume_judge
+        line, interruption = self._pause_line, self._interruption()
+        conversation = self._exchange(self._paused_at)
+        rows = " | ".join(f"{'User' if who == 'user' else 'Ray'}: {text}" for who, text in conversation)
+        logger.info(
+            "Radio: quiet %.1f s while paused — asking whether to go back%s | reading «%s» | interruption «%s» | %s",
+            now - lull,
+            " (again)" if second else "",
+            line,
+            interruption,
+            rows or "-",
+        )
+        future = self._submit(lambda: judge.decide(line, interruption, conversation, second=second))
+        self._resume_check = _ResumeCheck(future, lull, second, attempt)
+
+    def _interruption(self) -> str:
+        """낭독을 멈추게 한 사용자 말 — 그 끼어들기의 사용자 전사(목소리 시작 무렵부터 멈출 때까지)."""
+        turns = self._exchange(self._pause_hold - self.TRANSCRIPT_LAG_SEC, self._paused_at)
+        return " ".join(text for who, text in turns if who == "user")
+
+    def _clear_pause(self) -> None:
+        """자동 복귀를 끄고 복귀 판정 상태를 지운다."""
+        self.auto_resume = False
+        self._resume_check = None
+        self._later_lull = self._given_up_lull = None
 
     # -- 끼어들기 판정 --------------------------------------------------------
 
@@ -963,6 +1154,11 @@ class Radio:
         logger.info("Radio: paused by the judge")
         self._hold = None
         if self.tracker is not None:
+            self._pause_line = self.tracker.lines[self.tracker.reading()[0]]
             self.tracker.release(now)
         self.status = "paused"
+        self._clear_pause()
+        self.auto_resume = self._resume_judge is not None
+        self._paused_at = now
+        self._pause_hold = self._last_hold_start if self._last_hold_start is not None else now
         return [UpdateBackend(), Think(RADIO_PAUSED_NOTE)]

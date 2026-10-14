@@ -21,10 +21,14 @@
   지 ``--quiet`` 초에 끼어든다 — 무음 폴백(``STALL_SEC``)의 넣기가 틈에 걸린다.
   ``--text``/``--label`` 로 ``UTTERANCES`` 밖의 문장을 넣을 수 있다. 리포트는 운영 라디오가 넣은 "대답 먼저" 문구
   (``RADIO_LATE_LINE_NOTE``)의 시각도 보인다.
+- ``autoresume``: ``interrupt`` 처럼 끼어들되 멈춘 뒤 아무 말도 하지 않는다 — 대화가 잠잠해지면 레이가 혼자 라디오로
+  돌아오는지(복귀 판정·재개 문구·첫 음성) 본다. 돌아오면 ``--watch`` 초 더 지켜보고, ``--auto-max`` 초 안에 안
+  돌아오면 끝낸다. ``--text``/``--label`` 도 쓸 수 있다.
 
     uv run python scripts/gpt_live/exp_radio_pipeline.py --scenario long --tag p1 --index 0
     uv run python scripts/gpt_live/exp_radio_pipeline.py --scenario interrupt --tag p2 --utterance content_key
     uv run python scripts/gpt_live/exp_radio_pipeline.py --scenario window --window stall --utterance what --tag w1
+    uv run python scripts/gpt_live/exp_radio_pipeline.py --scenario autoresume --utterance stop --tag a1
     uv run python scripts/gpt_live/exp_radio_pipeline.py --report p1
 
 결과: var/experiments/radio_pipeline/<번호>_<태그>/<시나리오>_<발화>_<회차>/ — run.json(이벤트·전사 조각·넣기·판정),
@@ -117,6 +121,9 @@ def install_radio_hooks() -> None:
         lambda rec, s, a, k, o: rec.mark("radio_start", output=o[0], script=s.script.key if s.script else None),
     )
     wrap(radio.Radio, "resume", lambda rec, s, a, k, o: rec.mark("radio_resume", output=o[0]))
+    wrap(radio.Radio, "_ask_resume", lambda rec, s, a, k, o: rec.mark("resume_ask", second=k.get("second")))
+    wrap(radio.RadioResumeJudge, "decide", lambda rec, s, a, k, o: rec.mark("resume_decision", decision=o))
+    wrap(radio.Radio, "_resume_reading", lambda rec, s, a, k, o: rec.mark("radio_resumed", auto=k.get("auto")))
 
 
 _block_push: int | None = None  # window stall: 이 번호(0부터) 대사는 앞서 넣지 않는다 — 무음 폴백으로만 들어간다
@@ -234,6 +241,17 @@ class Driver:
             elif now - self.since > 20.0:
                 self.finish("no_decision")
             return
+        if self.state == "paused" and self.args.scenario == "autoresume":
+            if r.status == "on":
+                self.rec.mark("radio_back_on")
+                self.state, self.since = "back", now
+            elif now - self.since > self.args.auto_max:
+                self.finish("stayed")
+            return
+        if self.state == "back":
+            if now - self.since >= self.args.watch or songs > 0:
+                self.finish("back")
+            return
         if self.state == "paused" and self.args.scenario == "chat":
             if r.status == "on":
                 self.rec.mark("radio_back_on")  # 재개 요청 없이 라디오가 돌아왔다
@@ -305,7 +323,7 @@ class Driver:
 def run(args: argparse.Namespace) -> None:
     global _block_push
     install_radio_hooks()
-    key = args.label or args.utterance if args.scenario in ("interrupt", "window") else "-"
+    key = args.label or args.utterance if args.scenario in ("interrupt", "window", "autoresume") else "-"
     scenario = f"{args.scenario}-{args.window}" if args.scenario == "window" else args.scenario
     comps, out_dir = h.setup("radio_pipeline", args.tag, subdir=f"{scenario}_{key}_{args.index}")
     if args.scenario == "window" and args.window == "stall":
@@ -330,6 +348,8 @@ def run(args: argparse.Namespace) -> None:
         asks = [RESUME_ASKS[args.index % len(RESUME_ASKS)]]
     elif args.scenario == "chat":
         plan, asks = [(args.at_line, CHAT_INTERRUPT)], []
+    elif args.scenario == "autoresume":
+        plan, asks = [(args.at_line, args.text or UTTERANCES[args.utterance][1])], []
     elif args.scenario == "multi":
         plan = list(zip(MULTI_LINES[: args.cycles], MULTI_QUESTIONS, strict=False))
         asks = [RESUME_ASKS[(args.index + i) % len(RESUME_ASKS)] for i in range(args.cycles)]
@@ -467,6 +487,9 @@ def report(tag: str) -> None:
     window = [d for d in entered if d["scenario"] == "window"]
     if window:
         _report_window(window)
+    auto = [d for d in entered if d["scenario"] == "autoresume"]
+    if auto:
+        _report_autoresume(auto)
     for d in entered:
         if d["scenario"] == "chat":
             _report_chat(d)
@@ -508,6 +531,41 @@ def _report_window(runs: list[dict[str, Any]]) -> None:
         )
         print(f"      넣은 대사: {line}")
         print(f"      레이: {said[:160]}")
+
+
+def _report_autoresume(runs: list[dict[str, Any]]) -> None:
+    """멈춘 뒤 혼자 돌아오는지 — 멈춤 기준 s: 레이 마지막 말소리, 복귀 판정(묻기·결과), 복귀, 복귀 뒤 첫 음성."""
+    print("  자동 복귀 (멈춤 기준 s)")
+    for d in runs:
+        ev = d["events"]
+        pause = next((e for e in ev if e["name"] == "radio_decision"), None)
+        if pause is None:
+            print(f"    {d['utterance']} #{d['index']}: 멈추지 않음 ({d['result']})")
+            continue
+        p0 = pause["t"]
+
+        def rel(t: float | None, p0: float = p0) -> str:
+            return f"{t - p0:+.1f}" if t is not None else "-"
+
+        back = next((e for e in ev if e["name"] == "radio_resumed" and e["t"] > p0), None)
+        t_end = back["t"] if back else max((t for t, _, v in d["audio"] if v), default=p0)
+        voiced = [t for t, _, v in d["audio"] if v and p0 < t <= t_end]
+        last_voice = max(voiced[:-1] if back else voiced, default=None)
+        asks = [f"{'2차 ' if e['second'] else ''}{rel(e['t'])}" for e in ev if e["name"] == "resume_ask"]
+        decisions = [f"{e['decision']} {rel(e['t'])}" for e in ev if e["name"] == "resume_decision"]
+        first = next((t for t, _, v in d["audio"] if v and back and t > back["t"]), None)
+        said = [(t, x) for t, w, x in _deltas(d["snapshots"]) if w == "assistant" and t > p0]
+        t_back = back["t"] if back else float("inf")
+        after = "".join(x for t, x in said if t > t_back)
+        reply = "".join(x for t, x in said if t <= t_back)
+        print(
+            f"    {d['utterance']} #{d['index']} {d['result']}: 레이 마지막 말소리 {rel(last_voice)} | 묻기 {asks} | "
+            f"판정 {decisions} | 복귀 {rel(back['t'] if back else None)} | 첫 음성 "
+            + (f"+{first - back['t']:.1f}" if first and back else "-")
+        )
+        print(f"      멈춘 뒤 레이: {reply.strip()[:140]}")
+        if back:
+            print(f"      복귀 뒤 레이: {after.strip()[:140]}")
 
 
 def _report_chat(d: dict[str, Any]) -> None:
@@ -597,12 +655,17 @@ def _report_interrupts(runs: list[dict[str, Any]]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--scenario", choices=("long", "interrupt", "multi", "chat", "window"), default="long")
+    parser.add_argument(
+        "--scenario", choices=("long", "interrupt", "multi", "chat", "window", "autoresume"), default="long"
+    )
     parser.add_argument("--window", choices=("text", "stall"), default="stall", help="window: 틈에 걸릴 넣기")
     parser.add_argument("--lead", type=int, default=4, help="window text: 넣기 지점까지 이만큼(자) 남았을 때 끼어든다")
     parser.add_argument("--quiet", type=float, default=0.6, help="window stall: 모델이 조용해진 지 이만큼 뒤 끼어든다")
-    parser.add_argument("--watch", type=float, default=15.0, help="window: 끼어든 뒤 이만큼 지켜보고 끝낸다")
-    parser.add_argument("--text", default=None, help="window: UTTERANCES 대신 이 문장으로 끼어든다")
+    parser.add_argument(
+        "--watch", type=float, default=15.0, help="window: 끼어든 뒤, autoresume: 돌아온 뒤 이만큼 지켜보고 끝낸다"
+    )
+    parser.add_argument("--auto-max", type=float, default=45.0, help="autoresume: 멈춘 뒤 이만큼 안 돌아오면 끝낸다")
+    parser.add_argument("--text", default=None, help="window·autoresume: UTTERANCES 대신 이 문장으로 끼어든다")
     parser.add_argument("--label", default=None, help="--text 를 쓸 때 결과 폴더·리포트에 쓸 이름")
     parser.add_argument("--utterance", choices=list(UTTERANCES), default="content_key")
     parser.add_argument("--first", default=None, help="첫 대본 키 (interrupt·multi 는 drawer 기본)")

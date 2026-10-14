@@ -78,9 +78,9 @@ class OpenAILLM(ILLM):
 
     Args:
         model: OpenAI 모델 이름 (예: "gpt-4o", "gpt-4o-mini", "gpt-5.4").
-        temperature: 샘플링 temperature (0.0~2.0).
+        temperature: 샘플링 temperature (0.0~2.0). 추론을 켜면(none 이 아닌 effort) 보내지 않는다.
         reasoning_effort: reasoning 모델용 effort 레벨 (gpt-5 계열). None=미적용
-        max_tokens: 응답 최대 토큰 수.
+        max_tokens: 응답 최대 토큰 수. 추론을 켜면 추론 토큰도 여기에 든다.
         tools: 활성화할 도구 이름 목록. None이면 기본 도구, ``[]``이면 명시적 비활성화.
     """
 
@@ -138,10 +138,11 @@ class OpenAILLM(ILLM):
             kwargs: dict[str, Any] = {
                 "model": self.model,
                 "input": input_messages,
-                "temperature": self.temperature,
                 "max_output_tokens": self.max_tokens,
                 "stream": True,
             }
+            if self.reasoning_effort in (None, "none"):
+                kwargs["temperature"] = self.temperature  # 추론을 켜면 API 가 temperature 를 거부한다
             if instructions is not None:
                 kwargs["instructions"] = instructions
             if self.reasoning_effort is not None:

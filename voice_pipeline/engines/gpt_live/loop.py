@@ -29,7 +29,8 @@
     프레임 :meth:`Radio.step` 이 돌려준 할 일 — 대사·상태 문구 ``thinking.append``, 라디오 상태로 백엔드 갱신, 대본의
     곡 재생 — 을 실행한다. ``start_radio`` / ``resume_radio`` 는 그 자리에서 첫 대사를 넣고 결과를 바로 돌려준다
     (이어가기에서 백엔드는 빈 응답). 대본의 곡은 노래 흐름을 툴 결과 없이 타고, 자연 종료면 다음 대본의 첫 대사를,
-    사용자가 멈췄으면 라디오 종료를 알린다. 노래 중에는 라디오를 돌리지 않는다.
+    사용자가 멈췄으면 라디오 종료를 알린다. 노래 중에는 라디오를 돌리지 않는다. 멈춘 라디오가 잠잠함을 셀 수 있게
+    백엔드 위임이 진행 중인지(위임 생성부터 마지막 응답 완료까지)도 넘기고, 사용자가 튼 곡은 라디오에 알린다.
 
 종료 시퀀스(실측 근거는 scripts/gpt_live/FINDINGS.md §4~5):
     입력 mute → 모델의 마지막 발화가 끝날 때까지(출력이 무음으로 N초) 대기, 상한 있음 →
@@ -58,6 +59,7 @@ from voice_pipeline.adapters.gpt_live import (
     GPTLiveSession,
     LiveAudio,
     LiveClosed,
+    LiveDelegationCreated,
     LiveError,
     LiveFunctionCall,
     LiveResponseDone,
@@ -139,6 +141,7 @@ class LiveSessionLoop:
     _STREAM_START_MAX_WAIT_SEC = 10.0  # 인사 WAV 의 playback_complete 가 안 와도 이 시간 뒤엔 stream_start
     _SONG_SILENCE_SEC = 1.0  # play_song 뒤 출력 무음이 이만큼 이어지면 스트림을 닫는다
     _SONG_MAX_WAIT_SEC = 30.0  # 무음이 감지되지 않을 때의 안전망. 정상 발화에서는 걸리지 않아야 한다
+    _BACKEND_BUSY_MAX_SEC = 20.0  # 응답 완료를 못 받은 위임은 이 시간 뒤 진행 중으로 치지 않는다 (라디오 복귀 대기)
     _LEAD_LOG_INTERVAL_SEC = 15.0  # 오디오 전송 상태(추정 밀림, 조각 도착 간격) DEBUG 로그 주기
     _GAP_EVENT_SEC = 0.3  # 조각 도착 간격이 이 이상이면 정지 이벤트로 INFO 로그 (C++ [split] 로그와 대조용)
     # 서버 출력은 실시간보다 1~3% 짧게 온다 — 주로 무음 프레임이 빠지고, 늦게라도 오지 않는다
@@ -227,6 +230,7 @@ class LiveSessionLoop:
         self._exit_reason = ""
         self._stream_open = False
         self._pending_calls: list[LiveFunctionCall] = []  # 응답 완료 전까지 모은 함수 호출
+        self._delegations: dict[str, float] = {}  # 진행 중인 위임 → 생긴 시각 (마지막 응답이 끝나면 지운다)
         self._inflight: list[tuple[LiveFunctionCall, Future[str]]] = []  # 실행 중인 핸들러
         self._last_frame_time = 0.0
         self._last_transcript_time = 0.0
@@ -409,7 +413,7 @@ class LiveSessionLoop:
         ):
             self._drain_for_song()
         if self._radio is not None and self._phase is Phase.ACTIVE and self._song_state is SongState.NONE:
-            self._run_radio(self._radio.step(now, self._quiet_audio_sec))
+            self._run_radio(self._radio.step(now, self._quiet_audio_sec, backend_busy=self._backend_busy(now)))
         if (
             self._song_state is SongState.STOPPING
             and self._song_playback_done
@@ -466,6 +470,8 @@ class LiveSessionLoop:
             self._on_audio(event.pcm)
         elif isinstance(event, LiveTranscript):
             self._on_transcript(event)
+        elif isinstance(event, LiveDelegationCreated):
+            self._delegations[event.delegation_id or ""] = time.monotonic()
         elif isinstance(event, LiveFunctionCall):
             self._pending_calls.append(event)
         elif isinstance(event, LiveResponseDone):
@@ -565,6 +571,8 @@ class LiveSessionLoop:
             if c.delegation_id == event.delegation_id and c.response_id == event.response_id
         ]
         self._pending_calls = [c for c in self._pending_calls if c not in calls]
+        if not calls or event.status in ("failed", "incomplete"):
+            self._delegations.pop(event.delegation_id or "", None)  # 툴 호출이 있으면 이어가기 응답이 끝날 때
         if event.status in ("failed", "incomplete"):
             if calls:
                 logger.warning("Discarding calls from %s backend response", event.status)
@@ -707,7 +715,10 @@ class LiveSessionLoop:
         song = self._song_catalog.get(key)
         if song is None:
             return _completed(json.dumps({"error": f"unknown song {key!r}"}))
-        return self._begin_song(song)
+        future = self._begin_song(song)
+        if self._radio is not None and self._song is song:
+            self._radio.on_user_song()
+        return future
 
     def _begin_song(self, song: Song) -> Future[str]:
         if self._song_state is not SongState.NONE:
@@ -843,6 +854,14 @@ class LiveSessionLoop:
         output, commands = self._radio.start(now) if name == START_RADIO_TOOL else self._radio.resume(now)
         self._run_radio(commands)
         return _completed(output)
+
+    def _backend_busy(self, now: float) -> bool:
+        """백엔드 위임이나 툴 실행이 진행 중인가 — 결과를 기다리는 동안 멈춘 라디오는 돌아가지 않는다."""
+        for key, since in list(self._delegations.items()):
+            if now - since >= self._BACKEND_BUSY_MAX_SEC:
+                del self._delegations[key]
+                logger.info("Delegation %s not finished in %.0f s — no longer waiting for it", key, now - since)
+        return bool(self._delegations or self._inflight)
 
     def _run_radio(self, commands: list[Command]) -> None:
         """라디오가 돌려준 할 일을 실행한다."""
