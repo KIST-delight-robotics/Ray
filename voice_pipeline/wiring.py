@@ -89,7 +89,7 @@ from voice_pipeline.types import ITTS, AudioFrame
 logger = logging.getLogger("voice_pipeline.wiring")
 
 _AUDIO_QUEUE_SIZE = 300
-_MIC_DUMP_DIR = f"{VAR_DIR}/log/mic"  # MIC_DUMP=1 일 때 마이크 전 채널 녹음 위치 (6ch 분당 ~11.5 MB)
+_MIC_DUMP_DIR = f"{VAR_DIR}/log/mic"  # MIC_DUMP=1 일 때 마이크 전 채널 녹음 위치 (6ch + ray.wav 분당 ~13.4 MB)
 _VAD_INFER_INTERVAL = 3  # 3프레임(90ms)마다 추론, 사이는 캐시 반환
 _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
 _LIVE_BACKEND_MODEL = "gpt-5.4-mini"  # GPT-Live responses 위임 백엔드

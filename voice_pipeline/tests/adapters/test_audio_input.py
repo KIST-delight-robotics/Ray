@@ -421,18 +421,30 @@ class TestMicDump:
         ai._thread.join(timeout=2.0)
 
     def test_writes_each_channel_to_own_file(self, monkeypatch, tmp_path) -> None:
-        ai, audio_queue = _make_audio_input(monkeypatch, capture_channels=6, dump_dir=str(tmp_path / "mic"))
+        ai, audio_queue = _make_audio_input(
+            monkeypatch, capture_channels=6, extract_channel=1, extract_gain_db=20.0, dump_dir=str(tmp_path / "mic")
+        )
         raw = TestExtractGain._six_channel_frame()
         self._run(ai, [raw, raw])
 
         (folder,) = (tmp_path / "mic").iterdir()
-        assert sorted(p.name for p in folder.iterdir()) == [f"ch{ch}.wav" for ch in range(6)]
+        assert sorted(p.name for p in folder.iterdir()) == [f"ch{ch}.wav" for ch in range(6)] + ["ray.wav"]
         for ch in range(6):
             with wave.open(str(folder / f"ch{ch}.wav")) as wf:
                 assert wf.getnchannels() == 1
                 assert wf.getnframes() == 2 * FRAME_SIZE_SAMPLES
                 assert set(array.array("h", wf.readframes(wf.getnframes()))) == {(ch + 1) * 100}  # 게인 없음
-        assert all(v == 100 for v in array.array("h", audio_queue.get_nowait()))  # 큐는 여전히 CH0 mono
+        with wave.open(str(folder / "ray.wav")) as wf:
+            assert wf.getnframes() == 2 * FRAME_SIZE_SAMPLES
+            assert set(array.array("h", wf.readframes(wf.getnframes()))) == {2000}  # 큐와 같은 CH1 (200) × 10
+        assert all(v == 2000 for v in array.array("h", audio_queue.get_nowait()))
+
+    def test_mono_capture_has_no_ray_track(self, monkeypatch, tmp_path) -> None:
+        ai, _ = _make_audio_input(monkeypatch, dump_dir=str(tmp_path / "mic"))
+        self._run(ai, [b"\x01" * 960])
+
+        (folder,) = (tmp_path / "mic").iterdir()
+        assert [p.name for p in folder.iterdir()] == ["ch0.wav"]  # 뽑지 않으면 ray.wav 는 ch0 와 같아 안 쓴다
 
     def test_open_failure_keeps_capturing(self, monkeypatch, tmp_path) -> None:
         blocker = tmp_path / "not_a_dir"

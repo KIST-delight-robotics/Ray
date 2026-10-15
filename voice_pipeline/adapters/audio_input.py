@@ -2,7 +2,8 @@
 
 reSpeaker 는 6채널로 열어 CH1(ASR 처리 출력)에 고정 게인을 곱해 mono 로 내보낸다. CH0(Conference)은 후처리가
 더블토크·음악 재생 중 근단까지 눌러 말이 잘리고, CH1 은 후처리를 거치지 않는다. ``dump_dir`` 를 주면 뽑기 전
-전 채널을 채널별 WAV 로 계속 남긴다 — 처리 출력과 원본 마이크를 한 시간축에서 비교하는 AEC 진단용.
+전 채널을 채널별 WAV 로 계속 남긴다 — 처리 출력과 원본 마이크를 한 시간축에서 비교하는 AEC 진단용. 채널 파일은
+측정용이라 게인 없이 쓰고, 파이프라인이 실제로 받은 mono(추출 채널 × 게인)는 ``ray.wav`` 로 따로 쓴다.
 """
 
 from __future__ import annotations
@@ -49,7 +50,8 @@ class AudioInput:
         Args:
             audio_queue: 캡처된 오디오 프레임을 push할 공유 큐.
             dump_dir: 있으면 장치에서 읽은 프레임을 게인 없이 채널별로 이 폴더의
-                ``<스트림 연 시각>/ch<N>.wav`` 에 계속 쓴다. None 이면 쓰지 않는다.
+                ``<스트림 연 시각>/ch<N>.wav`` 에 계속 쓰고, 채널을 뽑을 때는 큐에 넣는 mono 를
+                같은 폴더 ``ray.wav`` 에 쓴다. None 이면 쓰지 않는다.
         """
         self._queue = audio_queue
         self._dump_dir = dump_dir
@@ -148,27 +150,30 @@ class AudioInput:
                     raise RuntimeError(f"extract_channel ({ch_idx}) >= capture_channels ({capture_ch})")
                 logger.info("Capturing %dch, extracting CH%d (gain %+.0f dB) as mono", capture_ch, ch_idx, gain_db)
             if self._dump_dir is not None:
-                dump = self._open_dump(self._dump_dir, capture_ch)
+                dump = self._open_dump(self._dump_dir, capture_ch, extracted=need_extract)
 
             while not self._stop_event.is_set():
-                data = stream.read(FRAME_SIZE_SAMPLES, exception_on_overflow=False)
-                if dump is not None:
-                    try:
-                        channels = np.frombuffer(data, dtype=np.int16).reshape(-1, capture_ch)
-                        for ch, wf in enumerate(dump):
-                            wf.writeframes(channels[:, ch].tobytes())  # 매번 헤더를 고쳐 써서 프로세스가 죽어도 유효
-                    except Exception:
-                        logger.warning("Mic dump write failed — dump stopped", exc_info=True)
-                        self._close_dump(dump)
-                        dump = None
+                raw = data = stream.read(FRAME_SIZE_SAMPLES, exception_on_overflow=False)
                 if need_extract:
-                    samples = array.array("h", data)
+                    samples = array.array("h", raw)
                     mono = samples[ch_idx::capture_ch]
                     if gain_db:
                         scaled = np.frombuffer(mono.tobytes(), dtype=np.int16).astype(np.float32) * 10 ** (gain_db / 20)
                         data = np.clip(scaled, -32768, 32767).astype(np.int16).tobytes()
                     else:
                         data = mono.tobytes()
+                if dump is not None:
+                    try:
+                        channels = np.frombuffer(raw, dtype=np.int16).reshape(-1, capture_ch)
+                        tracks = [channels[:, ch].tobytes() for ch in range(capture_ch)]
+                        if need_extract:
+                            tracks.append(data)  # ray.wav
+                        for wf, pcm in zip(dump, tracks, strict=True):
+                            wf.writeframes(pcm)  # 매번 헤더를 고쳐 써서 프로세스가 죽어도 유효
+                    except Exception:
+                        logger.warning("Mic dump write failed — dump stopped", exc_info=True)
+                        self._close_dump(dump)
+                        dump = None
                 try:
                     self._queue.put_nowait(data)
                 except queue.Full:
@@ -193,14 +198,18 @@ class AudioInput:
                     logger.debug("Error terminating PyAudio", exc_info=True)
 
     @classmethod
-    def _open_dump(cls, dump_dir: str, channels: int) -> list[wave.Wave_write] | None:
-        """``dump_dir/<시각>/`` 에 채널별 mono WAV 를 연다. 실패하면 경고만 남기고 None — 캡처는 계속된다."""
+    def _open_dump(cls, dump_dir: str, channels: int, *, extracted: bool) -> list[wave.Wave_write] | None:
+        """``dump_dir/<시각>/`` 에 채널별 mono WAV 를, ``extracted`` 면 끝에 ``ray.wav`` 를 더 연다.
+
+        실패하면 경고만 남기고 None — 캡처는 계속된다.
+        """
         folder = Path(dump_dir) / f"{datetime.now():%Y%m%d_%H%M%S}"
+        names = [f"ch{ch}.wav" for ch in range(channels)] + (["ray.wav"] if extracted else [])
         dump: list[wave.Wave_write] = []
         try:
             folder.mkdir(parents=True, exist_ok=True)
-            for ch in range(channels):
-                wf = wave.open(str(folder / f"ch{ch}.wav"), "wb")
+            for name in names:
+                wf = wave.open(str(folder / name), "wb")
                 dump.append(wf)
                 wf.setnchannels(1)
                 wf.setsampwidth(SAMPLE_WIDTH)
@@ -209,7 +218,7 @@ class AudioInput:
             logger.warning("Mic dump disabled: cannot open %s", folder, exc_info=True)
             cls._close_dump(dump)
             return None
-        logger.info("Mic dump → %s/ch0..%d.wav (sample 0 ≈ this log time)", folder, channels - 1)
+        logger.info("Mic dump → %s/{%s} (sample 0 ≈ this log time)", folder, ", ".join(names))
         return dump
 
     @staticmethod
