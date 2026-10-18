@@ -90,7 +90,7 @@ def install_radio_hooks() -> None:
 
     wrap(radio.Radio, "on_transcript", snapshot)
     wrap(radio.Radio, "_push", lambda rec, s, a, k, o: rec.mark("radio_push", index=a[0].index, by=a[0].by))
-    wrap(radio.Radio, "_decide", lambda rec, s, a, k, o: rec.mark("radio_decision", state=a[0], applied=bool(o)))
+    wrap(radio.Radio, "_pause", lambda rec, s, a, k, o: rec.mark("radio_decision", state="paused", applied=bool(o)))
     wrap(radio.Radio, "_release", lambda rec, s, a, k, o: rec.mark("radio_release", why=a[1]))
     wrap(
         radio.Radio,
