@@ -9,8 +9,8 @@ from voice_pipeline.engines.gpt_live.instructions import (
     DEFAULT_LIVE_INSTRUCTIONS,
     RADIO_ENDED_NOTE,
     RADIO_LINE_TEMPLATE,
+    RADIO_ON_NOTE,
     RADIO_PAUSED_NOTE,
-    RADIO_RESUMED_NOTE,
     SONG_BACKEND_INSTRUCTIONS,
     build_backend_instructions,
     build_live_instructions,
@@ -123,8 +123,10 @@ class TestRadioInstructions:
     def test_status_notes(self) -> None:
         assert "Do not continue the talk yourself" in RADIO_PAUSED_NOTE
         assert "delegate to the backend to resume it" in RADIO_PAUSED_NOTE and "이야기 계속해 줘" in RADIO_PAUSED_NOTE
-        notes = (RADIO_PAUSED_NOTE, RADIO_RESUMED_NOTE, RADIO_ENDED_NOTE)
+        notes = (RADIO_ON_NOTE, RADIO_PAUSED_NOTE, RADIO_ENDED_NOTE)
         assert len(set(notes)) == 3 and all(n.startswith("Radio talk: ") for n in notes)
+        # 시작·재개 문구는 말투만 — 낭독 어휘가 말로 새어 나왔다
+        assert not any(w in RADIO_ON_NOTE.lower() for w in ("read", "line", "script", "application"))
         assert all(len(n) < 400 for n in notes)  # thinking.append 한도 500 토큰에 한참 못 미친다
 
     def test_judge_prompt_lists_the_exchange(self) -> None:

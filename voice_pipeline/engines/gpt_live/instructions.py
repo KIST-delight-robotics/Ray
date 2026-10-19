@@ -193,7 +193,8 @@ RADIO_PAUSED_NOTE = (
     "Do not continue the talk yourself: the rest of it is not with you. If the user asks to go on with it "
     "(for example 계속해, 이어서 해 줘, 이야기 계속해 줘), delegate to the backend to resume it."
 )
-RADIO_RESUMED_NOTE = "Radio talk: resumed. Read the application's lines as before."
+# 시작·재개 때 — 말투만 적는다. "대사·읽다" 같은 낭독 어휘는 말로 새어 나왔다(dj-mode-worknote.md 관찰)
+RADIO_ON_NOTE = "Radio talk: on. Speak slowly and softly, in a gentle, unhurried voice."
 RADIO_ENDED_NOTE = "Radio talk: ended. Talk with the user now."
 # 사용자 전사가 오기 직전(목소리는 이미 시작)에 넣은 대사 — 모델은 사용자 말 도중 받은 대사를 대답보다 먼저 읽는다
 RADIO_LATE_LINE_NOTE = (

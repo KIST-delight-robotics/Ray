@@ -19,10 +19,10 @@ from voice_pipeline.engines.gpt_live.instructions import (
     RADIO_JUDGE_FORMAT,
     RADIO_LATE_LINE_NOTE,
     RADIO_LINE_TEMPLATE,
+    RADIO_ON_NOTE,
     RADIO_PAUSED_NOTE,
     RADIO_RESUME_JUDGE_INSTRUCTIONS,
     RADIO_RESUME_JUDGE_SECOND,
-    RADIO_RESUMED_NOTE,
     radio_resume_judge_format,
 )
 from voice_pipeline.engines.gpt_live.radio import (
@@ -455,7 +455,7 @@ class TestRadioStart:
         radio = _radio()
         output, commands = radio.start(0.0)
         assert json.loads(output) == {"status": "on"} and radio.status == "on"
-        assert commands == [UpdateBackend(), _line(LINES[0])]
+        assert commands == [UpdateBackend(), Think(RADIO_ON_NOTE), _line(LINES[0])]
         assert json.loads(radio.start(0.1)[0]) == {"error": "the radio talk is already on"}
 
     def test_no_scripts(self) -> None:
@@ -588,7 +588,7 @@ class TestRadioInterruption:
         _read(radio, "서랍에는 볼펜 같은 걸 넣어 둬요.", t + 1.0)  # 멈춘 뒤 대화
         output, commands = radio.resume(t + 5.0)
         assert json.loads(output) == {"status": "on"}
-        assert commands == [UpdateBackend(), Think(RADIO_RESUMED_NOTE), _line(LINES[0])]  # 1번 대사가 안 끝났다
+        assert commands == [UpdateBackend(), Think(RADIO_ON_NOTE), _line(LINES[0])]  # 1번 대사가 안 끝났다
 
     def test_conversation_while_paused_does_not_move_the_resume_point(self) -> None:
         radio, t = self._interrupted("paused")
@@ -670,7 +670,7 @@ class TestRadioInterruption:
         first = radio.script
         output, commands = radio.start(t + 3.0)
         assert json.loads(output) == {"status": "on"} and radio.script is not first
-        assert commands == [UpdateBackend(), Think(RADIO_RESUMED_NOTE), _line(LINES[0])]
+        assert commands == [UpdateBackend(), Think(RADIO_ON_NOTE), _line(LINES[0])]
 
 
 def _auto_radio(*decisions: object, executor: object | None = None) -> Radio:
@@ -713,7 +713,7 @@ class TestRadioAutoResume:
         assert self._decide(radio).call_args.kwargs == {"second": False}
         assert radio.step(last + self.QUIET - 0.1, 0.0) == []  # 결과는 잠잠함이 찼을 때 적용한다
         opening = _line(f"{RADIO_AUTO_RESUME_OPENING} {LINES[0]}")  # 1번 대사가 안 끝났다
-        assert radio.step(last + self.QUIET, 0.0) == [UpdateBackend(), Think(RADIO_RESUMED_NOTE), opening]
+        assert radio.step(last + self.QUIET, 0.0) == [UpdateBackend(), Think(RADIO_ON_NOTE), opening]
         assert radio.status == "on" and not radio.auto_resume
 
     def test_new_speech_drops_the_judgment_and_the_next_quiet_asks_again(self) -> None:

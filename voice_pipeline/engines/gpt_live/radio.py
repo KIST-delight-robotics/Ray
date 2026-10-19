@@ -51,10 +51,10 @@ from voice_pipeline.engines.gpt_live.instructions import (
     RADIO_JUDGE_INSTRUCTIONS,
     RADIO_LATE_LINE_NOTE,
     RADIO_LINE_TEMPLATE,
+    RADIO_ON_NOTE,
     RADIO_PAUSED_NOTE,
     RADIO_RESUME_JUDGE_INSTRUCTIONS,
     RADIO_RESUME_JUDGE_SECOND,
-    RADIO_RESUMED_NOTE,
     build_radio_judge_prompt,
     build_radio_resume_prompt,
     radio_resume_judge_format,
@@ -758,13 +758,10 @@ class Radio:
         script = self._picker.pick()
         if script is None:
             return json.dumps({"error": "no radio scripts available"}), []
-        was_paused = self.status == "paused"
         self._reset_reading()
         self._clear_pause()
         self.status = "on"
-        commands: list[Command] = [UpdateBackend()]
-        if was_paused:
-            commands.append(Think(RADIO_RESUMED_NOTE))
+        commands: list[Command] = [UpdateBackend(), Think(RADIO_ON_NOTE)]
         commands += self._begin_script(script, now, after_song=False)
         logger.info("Radio started: %s (song %s)", script.key, script.song.key)
         return json.dumps({"status": "on"}), commands
@@ -780,7 +777,7 @@ class Radio:
         assert self.tracker is not None
         self.status = "on"
         self._clear_pause()
-        commands: list[Command] = [UpdateBackend(), Think(RADIO_RESUMED_NOTE)]
+        commands: list[Command] = [UpdateBackend(), Think(RADIO_ON_NOTE)]
         index = self.tracker.resume(now)
         if index is not None:
             line = self.tracker.lines[index]
