@@ -211,5 +211,362 @@
       "Wild Flower"
     ],
     "artist_aliases": []
+  },
+  "Over_the_Rainbow_IZ": {
+    "title": "Over the Rainbow",
+    "artist": "Israel Kamakawiwoʻole",
+    "aliases": [
+      "오버 더 레인보우",
+      "Somewhere Over the Rainbow",
+      "섬웨어 오버 더 레인보우"
+    ],
+    "artist_aliases": [
+      "이즈",
+      "IZ",
+      "이즈라엘 카마카비보올레"
+    ]
+  },
+  "Fields_Of_Gold_EvaCassidy": {
+    "title": "Fields of Gold",
+    "artist": "Eva Cassidy",
+    "aliases": [
+      "필즈 오브 골드"
+    ],
+    "artist_aliases": [
+      "에바 캐시디"
+    ]
+  },
+  "Mackerel_LucidFall": {
+    "title": "고등어",
+    "artist": "루시드폴",
+    "aliases": [
+      "Mackerel"
+    ],
+    "artist_aliases": [
+      "Lucid Fall"
+    ]
+  },
+  "Can_You_See_LucidFall": {
+    "title": "보이나요?",
+    "artist": "루시드폴",
+    "aliases": [
+      "보이나요",
+      "Do You See My Love"
+    ],
+    "artist_aliases": [
+      "Lucid Fall"
+    ]
+  },
+  "Train_To_Chuncheon_KimHyunChul": {
+    "title": "춘천 가는 기차",
+    "artist": "김현철",
+    "aliases": [
+      "춘천가는 기차",
+      "춘천가는기차"
+    ],
+    "artist_aliases": [
+      "Kim Hyun Chul"
+    ]
+  },
+  "In_My_Arms_YooJaeHa": {
+    "title": "그대 내 품에",
+    "artist": "유재하",
+    "aliases": [
+      "그대 내품에",
+      "Love in My Arms"
+    ],
+    "artist_aliases": [
+      "Yoo Jae Ha"
+    ]
+  },
+  "Violet_JoDongJin": {
+    "title": "제비꽃",
+    "artist": "조동진",
+    "aliases": [],
+    "artist_aliases": [
+      "Jo Dong Jin"
+    ]
+  },
+  "Hyehwadong_Dongmulwon": {
+    "title": "혜화동",
+    "artist": "동물원",
+    "aliases": [
+      "Hyehwadong"
+    ],
+    "artist_aliases": [
+      "Zoo",
+      "The Zoo"
+    ]
+  },
+  "Where_The_Wind_Blows_KimKwangSeok": {
+    "title": "바람이 불어오는 곳",
+    "artist": "김광석",
+    "aliases": [
+      "Where Wind Comes From"
+    ],
+    "artist_aliases": [
+      "Kim Kwang Seok"
+    ]
+  },
+  "Someday_Because_Of_You_FallVacation": {
+    "title": "언젠가 너로 인해",
+    "artist": "가을방학",
+    "aliases": [],
+    "artist_aliases": [
+      "Autumn Vacation"
+    ]
+  },
+  "Memory_Etude_Exhibition": {
+    "title": "기억의 습작",
+    "artist": "전람회",
+    "aliases": [
+      "Etude of Memoirs"
+    ],
+    "artist_aliases": [
+      "Exhibition",
+      "김동률"
+    ]
+  },
+  "Old_Love_LeeMoonSae": {
+    "title": "옛 사랑",
+    "artist": "이문세",
+    "aliases": [
+      "옛사랑"
+    ],
+    "artist_aliases": [
+      "Lee Moon Sae"
+    ]
+  },
+  "Still_Beautiful_Toy": {
+    "title": "여전히 아름다운지",
+    "artist": "토이",
+    "aliases": [
+      "Is It Still Beautiful"
+    ],
+    "artist_aliases": [
+      "Toy",
+      "유희열",
+      "김연우"
+    ]
+  },
+  "Departure_KimDongRyul": {
+    "title": "출발",
+    "artist": "김동률",
+    "aliases": [
+      "Departure"
+    ],
+    "artist_aliases": [
+      "Kim Dong Ryul"
+    ]
+  },
+  "Two_People_SungSiKyung": {
+    "title": "두 사람",
+    "artist": "성시경",
+    "aliases": [
+      "두사람"
+    ],
+    "artist_aliases": [
+      "Sung Si Kyung"
+    ]
+  },
+  "Through_The_Night_IU": {
+    "title": "밤편지",
+    "artist": "아이유",
+    "aliases": [
+      "Through the Night"
+    ],
+    "artist_aliases": [
+      "IU"
+    ]
+  },
+  "Lets_Go_See_The_Stars_Jukjae": {
+    "title": "별 보러 가자",
+    "artist": "적재",
+    "aliases": [
+      "별보러가자",
+      "별보러 가자"
+    ],
+    "artist_aliases": [
+      "JUKJAE"
+    ]
+  },
+  "Tree_KardenCarden": {
+    "title": "나무",
+    "artist": "카더가든",
+    "aliases": [
+      "Tree"
+    ],
+    "artist_aliases": [
+      "Car, the garden"
+    ]
+  },
+  "Graduation_Daldam": {
+    "title": "졸업",
+    "artist": "달담",
+    "aliases": [
+      "Graduation"
+    ],
+    "artist_aliases": [
+      "DALDAM"
+    ]
+  },
+  "For_Hesitating_Lovers_Jannabi": {
+    "title": "주저하는 연인들을 위해",
+    "artist": "잔나비",
+    "aliases": [
+      "For Lovers Who Hesitate"
+    ],
+    "artist_aliases": [
+      "JANNABI"
+    ]
+  },
+  "Hidden_Road_YooJaeHa": {
+    "title": "가리워진 길",
+    "artist": "유재하",
+    "aliases": [
+      "가리워진길"
+    ],
+    "artist_aliases": [
+      "Yoo Jae Ha"
+    ]
+  },
+  "The_Wind_Is_Blowing_LeeSora": {
+    "title": "바람이 분다",
+    "artist": "이소라",
+    "aliases": [
+      "바람이분다",
+      "The Wind is Blowing"
+    ],
+    "artist_aliases": [
+      "Lee Sora"
+    ]
+  },
+  "Autumn_Morning_IU": {
+    "title": "가을 아침",
+    "artist": "아이유",
+    "aliases": [
+      "가을아침",
+      "Autumn Morning"
+    ],
+    "artist_aliases": [
+      "IU"
+    ]
+  },
+  "What_a_Wonderful_World_LouisArmstrong": {
+    "title": "What a Wonderful World",
+    "artist": "Louis Armstrong",
+    "aliases": [
+      "왓 어 원더풀 월드",
+      "원더풀 월드"
+    ],
+    "artist_aliases": [
+      "루이 암스트롱"
+    ]
+  },
+  "Vienna_BillyJoel": {
+    "title": "Vienna",
+    "artist": "Billy Joel",
+    "aliases": [
+      "비엔나"
+    ],
+    "artist_aliases": [
+      "빌리 조엘"
+    ]
+  },
+  "Youve_Got_A_Friend_CaroleKing": {
+    "title": "You've Got a Friend",
+    "artist": "Carole King",
+    "aliases": [
+      "유브 갓 어 프렌드"
+    ],
+    "artist_aliases": [
+      "캐롤 킹",
+      "캐럴 킹"
+    ]
+  },
+  "Cant_Help_Falling_In_Love_Elvis": {
+    "title": "Can't Help Falling in Love",
+    "artist": "Elvis Presley",
+    "aliases": [
+      "캔트 헬프 폴링 인 러브",
+      "Can't Help Falling in Love with You"
+    ],
+    "artist_aliases": [
+      "엘비스 프레슬리",
+      "엘비스"
+    ]
+  },
+  "Close_To_You_Carpenters": {
+    "title": "(They Long to Be) Close to You",
+    "artist": "Carpenters",
+    "aliases": [
+      "Close to You",
+      "They Long to Be Close to You",
+      "클로즈 투 유"
+    ],
+    "artist_aliases": [
+      "카펜터스"
+    ]
+  },
+  "Dont_Know_Why_NorahJones": {
+    "title": "Don't Know Why",
+    "artist": "Norah Jones",
+    "aliases": [
+      "돈 노우 와이"
+    ],
+    "artist_aliases": [
+      "노라 존스"
+    ]
+  },
+  "Annies_Song_JohnDenver": {
+    "title": "Annie's Song",
+    "artist": "John Denver",
+    "aliases": [
+      "애니스 송"
+    ],
+    "artist_aliases": [
+      "존 덴버"
+    ]
+  },
+  "What_Was_I_Made_For_BillieEilish": {
+    "title": "What Was I Made For?",
+    "artist": "Billie Eilish",
+    "aliases": [
+      "What Was I Made For",
+      "왓 워즈 아이 메이드 포"
+    ],
+    "artist_aliases": [
+      "빌리 아일리시"
+    ]
+  },
+  "Valentine_Laufey": {
+    "title": "Valentine",
+    "artist": "Laufey",
+    "aliases": [
+      "발렌타인"
+    ],
+    "artist_aliases": [
+      "레이베이"
+    ]
+  },
+  "Rainbow_KaceyMusgraves": {
+    "title": "Rainbow",
+    "artist": "Kacey Musgraves",
+    "aliases": [
+      "레인보우"
+    ],
+    "artist_aliases": [
+      "케이시 머스그레이브스"
+    ]
+  },
+  "Stop_Thinking_ChoiYuRi": {
+    "title": "생각을 멈추다 보면",
+    "artist": "최유리",
+    "aliases": [
+      "When I Stop Thinking"
+    ],
+    "artist_aliases": [
+      "Choi Yu Ree"
+    ]
   }
 }
