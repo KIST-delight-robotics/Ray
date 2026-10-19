@@ -668,7 +668,7 @@ def main() -> None:
     parser.add_argument("--text", default=None, help="window·autoresume: UTTERANCES 대신 이 문장으로 끼어든다")
     parser.add_argument("--label", default=None, help="--text 를 쓸 때 결과 폴더·리포트에 쓸 이름")
     parser.add_argument("--utterance", choices=list(UTTERANCES), default="content_key")
-    parser.add_argument("--first", default=None, help="첫 대본 키 (interrupt·multi 는 drawer 기본)")
+    parser.add_argument("--first", default=None, help="첫 대본 키 (interrupt·multi 는 erased_applause 기본)")
     parser.add_argument("--at-line", type=int, default=4, help="interrupt: 이 대사(1부터)에서 끼어든다")
     parser.add_argument("--at", type=float, default=2.0, help="그 대사를 읽기 시작하고 이만큼 뒤")
     parser.add_argument("--cycles", type=int, default=3, help="multi: 끼어들기·재개 횟수")
@@ -683,7 +683,7 @@ def main() -> None:
         report(args.report)
         return
     if args.first is None and args.scenario != "long":
-        args.first = "drawer"
+        args.first = "erased_applause"
     if args.scenario != "long" and args.songs == 2:
         args.songs = 1
     run(args)

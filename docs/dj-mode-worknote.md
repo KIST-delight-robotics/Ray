@@ -18,7 +18,8 @@
   작성 규칙을 검사해 경고만 한다(`check_script`: 1~2문장, 마지막 문장 13자 초과(곡 소개 대사 빼고), 앞뒤 두 대사 안에 8자
   넘는 같은 구절 없음, 숫자·로마자 없음). 대본은 순서와 상관없이 쓰고 시간대를 단정하지 않는다 — 곡 뒤 대본이면 앱이 첫
   대사 앞에 "노래 잘 들으셨어요?" 를 붙인다. 첫 대사는 시작 한마디("~해 볼게요")와 겹치지 않게. 대본 쓰는 법(지시서·곡
-  목록·에이전트 지시 틀·GPT 생성 스크립트)은 `scripts/radio_scripts/`, 초안은 `var/radio_script_drafts/`.
+  목록·에이전트 지시 틀·GPT 생성 스크립트)은 `scripts/radio_scripts/`, 초안은 `var/radio_script_drafts/`. 지금 대본은
+  set10 열 편(출처 기록 `.sources.md` 는 초안 폴더에만).
 - **시작**: "라디오 해 줘"(백엔드 예: 라디오, 디제이, DJ, 혼자 진행) → 위임 → 백엔드 `start_radio` → 그 자리에서 대본을
   고르고 `thinking.append` 로 말투 문구("Radio talk: on. Speak slowly and softly, in a gentle, unhurried voice.")와 첫
   대사("You are now saying: «…»") → 결과 `{"status": "on"}` → 이어가기(백엔드는 빈 응답).
@@ -1024,11 +1025,10 @@ instructions.append "Radio talk: the song has ended. Go on with your talk.", 10�
 - **헛 사용자 전사로 보류**: 무음 입력에서 1회. 실기에선 에코·주변 말소리로 더 잦을 수 있다 — on 이면 넣기가 2~3 s 늦는다.
 - **시작·재개 한마디의 방송 어휘**("라디오 준비할게요", "이어서 라디오 계속할게요", 10-19 "지금 켜볼게요", "라디오
   틀어달라는 요청이시군요"): Radio 줄 정의로 줄었지만 남는다. 멈춘 뒤 대답 끝의 "잠시 라디오를 멈추고 얘기하고 있을게요"도.
-- **대본** (10-19): set10 열 편(`var/radio_script_drafts/set10/all.md`)을 읽고 고르는 중. `assets/radio_scripts/` 교체(기존
-  넷 지우고 Over the Rainbow·Fields of Gold v3 넣음)는 스테이징만 하고 커밋 안 함 — 어느 판을 넣을지 정한 뒤. 교체를
-  커밋하면 하네스 `exp_radio_pipeline.py` 의 끼어들기 시나리오 기본 대본(drawer)이 없어진다. 확인할 사실: Over the
-  Rainbow 녹음 연도·시각(1988 새벽 3시 / 1989 새벽 2시 10분으로 출처가 갈림), 춘천 가는 기차 강촌역 일화(전언). 대본이
-  바뀌어 추적 규칙이 다른 어휘에서 엉뚱한 자리와 일치할 위험은 새 대본으로 긴 대본 몇 회 돌려 본다.
+- **대본** (10-19): `assets/radio_scripts/` 는 set10 열 편. 확인할 사실: rainbow_without_land 의 녹음 연도·시각(1988
+  새벽 3시 / 1989 새벽 2시 10분으로 출처가 갈림), chuncheon_train_gangchon 의 강촌역 일화(전언). 대본이 바뀌어 추적
+  규칙이 다른 어휘에서 엉뚱한 자리와 일치할 위험은 새 대본으로 긴 대본 몇 회 돌려 본다. 하네스 끼어들기 기본 대본은
+  erased_applause 라 drawer 로 잰 관찰과 대본이 다르다.
 - **예고 멘트**: "이 '땅'이라는 말을 붙잡고 싶어요"처럼 이야기를 어떻게 풀지 말하는 대사(set10 1/10). 지시서에 막는 줄을
   넣을지.
 - **소재**: 모델에게 맡기면 유명한 소재로 쏠린다(마들렌, 지하철 노선도). 밖에서 소재 거리를 주고 아는 이야기를 붙이게
