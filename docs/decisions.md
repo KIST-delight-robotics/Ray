@@ -110,12 +110,12 @@
 - **Interrupt 시 `playback_complete` 전송**: C++가 interrupt cleanup 후에도 `playback_complete` 전송. Python의 STOP_PENDING 상태가 정상 해소됨.
 
 
-## LED / 음악 댄스
+## LED / 노래 재생
 
 - **LED 밝기 = RPi 하드웨어 PWM(sysfs), Dynamixel과 분리**: 밝기는 RP1 하드웨어 PWM(`/sys/class/pwm/pwmchip0/pwm1`, GPIO13)에 duty(ns)를 써서 구동, 부팅 systemd 서비스(`setup_led_hwpwm.sh`)가 캐리어를 세팅. 초기엔 WiringPi softPwm(핀 무제약, 추가 의존성 0)이었으나 ~100Hz 주파수 한계(플리커)로 하드웨어 PWM으로 교체. `led_pwm_pin < 0`이면 비활성 — 배선 전이나 다른 보드에서 임의 GPIO를 건드리지 않게 방어. ID6 Dynamixel LED 각도 모터 구동은 제거됨 — 메인 파이프라인은 밝기 1채널만.
 - **LED CSV 프레임 정렬**: LED CSV는 헤드/입 CSV와 행 수·시간축이 같다는 핸드오프 전제에 의존. `csv_control_motor`의 SKIP_FRAMES 보간 구간에서도 LED 행을 같은 박자로 소비해 정렬 유지(LED는 보간 없이 원본값). LED 파일이 없으면 graceful 비활성 — 모터 1~5는 정상 재생.
 - **시그널 핸들러 데드락 → 워처 스레드**: csv 재생 중 Ctrl+C가 안 듣던 버그 — `signal_handler`가 인터럽트당한 스레드 컨텍스트에서 `dxl_mutex_`를 잡으려다, 매 프레임 모터 write로 뮤텍스를 쥔 메인 스레드(=자기 자신)를 기다리는 데드락. SIGTERM도 동일, SIGKILL만 들었음. 해결: 핸들러는 원자 플래그(`g_shutdown_requested`)만 세우고 반환, 별도 `shutdown_watcher` 스레드가 정상 컨텍스트에서 LED 소등+토크 해제 후 `_Exit`. dxl_driver는 `delete` 안 함(use-after-free 경합 회피) — 토크만 끄고 OS 회수에 맡김. (교훈: 시그널 핸들러에서 mutex/`cout`/`new`·`delete`는 async-signal-safe가 아님.)
-- **음악 댄스 데모 = 한 프로세스·한 클럭**: `music_dance/`는 Python(librosa) 오프라인 분석 → `timeline.csv` → C++ 플레이어가 WAV 재생 위치(steady_clock)를 마스터 클럭으로 20ms마다 LED 밝기·모터 골을 샘플링 구동. 브릿지/IPC가 없어 지연·지터 없이 동기화가 자연 해결. (당초 구동부까지 순수 Python 계획이었으나 C++로 구현됨. 메인 로봇 모드 통합은 미래 작업 — 분석 코어 재사용 전제로 분리 유지.)
+- **노래 재생 = 한 프로세스·한 클럭**: 머리·입·LED 궤적은 오프라인으로 CSV를 만들어 두고, 재생은 C++ `csv_control_motor` 하나가 WAV 재생과 같은 시작 시각(steady_clock)에서 40ms 프레임으로 모터·LED를 함께 구동한다. Python은 `play_audio_csv`로 곡 이름만 넘긴다. 재생 중 위치를 프로세스 간에 주고받지 않으므로 IPC 지연·지터가 동기화에 끼어들지 않는다.
 - **LED 밝기 신호 = HPSS 블렌드**: 단색 LED 1채널이므로 밝기만 제어. `librosa.effects.hpss`로 하모닉(지속음 → 느린 attack/release 글로우 바닥)/퍼커시브(트랜지언트 → fast attack/slow release 펀치)를 분리 블렌드 — 멜로디와 드럼이 섞이지 않아 박은 선명, 무드는 매끄럽게. 처리 체인: dB 스케일 → 퍼센타일 정규화(곡별 다이내믹 레인지 활용, 이상치 강건) → 비대칭 스무딩 → 감마 ~2.2(지각-선형 밝기) → 바닥값 ~12%(스트로브 방지). 사람은 음량을 로그로, 밝기를 비선형으로 지각 → 두 보정이 "귀로 듣는 크기 ≈ 눈으로 보는 밝기" 정합을 만듦. HPSS는 lookahead 필요 → 오프라인 전제, 실시간(마이크) 입력 시 재설계 필요.
 
 
