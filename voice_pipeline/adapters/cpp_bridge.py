@@ -197,13 +197,20 @@ class CppBridge:
         self._guard_connected()
         self._send_json({"type": "play_file", "file_path": file_path})
 
-    def send_play_audio_csv(self, audio_name: str) -> None:
+    def send_play_audio_csv(self, audio_name: str, led_csv: str | None = None, motion: bool = True) -> None:
         """Request the C++ process to play a stored song (``audio_name`` = wav/motion CSV file stem).
 
+        ``led_csv`` 를 주면 C++ 은 ``assets/ledMotion`` 대신 그 LED 궤적을 읽는다 (C++ 작업 디렉터리 기준 경로).
+        ``motion=False`` 면 모터는 직전 자세로 멈춰 있고 소리·LED 만 나온다.
         열려 있는 스트림은 ``send_audio_end`` 로 먼저 닫아야 한다. 끝나면 ``playback_complete`` 가 온다.
         """
         self._guard_connected()
-        self._send_json({"type": "play_audio_csv", "audio_name": audio_name})
+        msg: dict[str, object] = {"type": "play_audio_csv", "audio_name": audio_name}
+        if led_csv is not None:
+            msg["led_csv"] = led_csv
+        if not motion:
+            msg["motion"] = False
+        self._send_json(msg)
 
     # ------------------------------------------------------------------
     # CppBridge poll

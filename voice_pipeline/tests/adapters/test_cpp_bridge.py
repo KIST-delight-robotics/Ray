@@ -250,6 +250,20 @@ class TestSendMethods:
         assert sent == {"type": "play_audio_csv", "audio_name": "IAM"}
         bridge.disconnect()
 
+    def test_send_play_audio_csv_with_led_path(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
+        bridge.send_play_audio_csv("IAM", led_csv="/tmp/led/IAM-led.csv")
+        sent = json.loads(mock_conn.send.call_args[0][0])
+        assert sent == {"type": "play_audio_csv", "audio_name": "IAM", "led_csv": "/tmp/led/IAM-led.csv"}
+        bridge.disconnect()
+
+    def test_send_play_audio_csv_without_motion(self, make_bridge, mock_conn: MagicMock) -> None:
+        bridge = _connect_with_mock(make_bridge(), mock_conn)
+        bridge.send_play_audio_csv("IAM", motion=False)
+        sent = json.loads(mock_conn.send.call_args[0][0])
+        assert sent == {"type": "play_audio_csv", "audio_name": "IAM", "motion": False}
+        bridge.disconnect()
+
     def test_send_audio_end(self, make_bridge, mock_conn: MagicMock) -> None:
         bridge = _connect_with_mock(make_bridge(), mock_conn)
         bridge.send_audio_end()

@@ -48,7 +48,7 @@ All messages are JSON text frames over WebSocket.
 | Audio end | `{"type": "audio_end"}` |
 | Stop | `{"type": "stop"}` |
 | Play file | `{"type": "play_file", "file_path": "path/to/file.wav"}` |
-| Play song (CSV) | `{"type": "play_audio_csv", "audio_name": "IAM"}` — `assets/audio/music/IAM.wav` 와 `assets/headMotion/IAM.csv`, `assets/mouthMotion/IAM-delta-big.csv`, `assets/ledMotion/IAM-led.csv` 를 묶어 재생 (`cpp/main.cpp` `csv_control_motor`). 끝나거나 `stop` 으로 끊기면 `playback_complete`. |
+| Play song (CSV) | `{"type": "play_audio_csv", "audio_name": "IAM"}` — `assets/audio/music/IAM.wav` 와 `assets/headMotion/IAM.csv`, `assets/mouthMotion/IAM-delta-big.csv`, `assets/ledMotion/IAM-led.csv` 를 묶어 재생 (`cpp/main.cpp` `csv_control_motor`). 선택 필드 `led_csv`(경로)를 주면 LED 궤적만 그 파일로 바꾼다 (궤적 시험용, `scripts/play_song.py --led`). `"motion": false` 면 모터는 직전 자세로 멈춰 있고 소리·LED 만 나온다 (`--no-motion`). 끝나거나 `stop` 으로 끊기면 `playback_complete`. |
 
 ### C++ → Python
 

@@ -5,6 +5,8 @@
 Usage:
     uv run python scripts/play_song.py              # 곡 목록 출력
     uv run python scripts/play_song.py Butter_BTS   # 재생 (Ctrl-C 로 중단)
+    uv run python scripts/play_song.py Butter_BTS --led var/led_test/Butter_BTS-led_A.csv   # LED 궤적만 이 파일로
+    uv run python scripts/play_song.py Butter_BTS --no-motion   # 모터는 멈춘 채 소리·LED 만
 """
 
 from __future__ import annotations
@@ -24,6 +26,8 @@ from voice_pipeline.engines.gpt_live.songs import load_song_catalog
 def main() -> int:
     parser = argparse.ArgumentParser(description="카탈로그 곡 하나를 C++ 프로세스로 재생")
     parser.add_argument("song", nargs="?", help="곡 키 (assets/songs.json). 생략하면 목록 출력")
+    parser.add_argument("--led", type=Path, help="assets 대신 쓸 LED 궤적 CSV")
+    parser.add_argument("--no-motion", action="store_true", help="모터는 직전 자세로 멈춰 두고 소리·LED 만 재생")
     args = parser.parse_args()
 
     catalog = load_song_catalog()
@@ -34,11 +38,20 @@ def main() -> int:
             print(song.describe())
         return 0 if args.song is None else 1
 
+    led_csv = None
+    if args.led is not None:
+        if not args.led.is_file():
+            print(f"LED 궤적 없음: {args.led}")
+            return 1
+        led_csv = str(args.led.resolve())
+
     bridge = CppBridge()
     bridge.connect()
     try:
-        bridge.send_play_audio_csv(args.song)
+        bridge.send_play_audio_csv(args.song, led_csv=led_csv, motion=not args.no_motion)
         print(f"재생: {catalog[args.song].describe()} (Ctrl-C 로 중단)")
+        if led_csv:
+            print(f"LED 궤적: {led_csv}")
         while (event := bridge.poll_event()) is None or event.event_type is not CppEventType.PLAYBACK_COMPLETE:
             time.sleep(0.1)
     except KeyboardInterrupt:

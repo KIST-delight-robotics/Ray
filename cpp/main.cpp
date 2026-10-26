@@ -2148,8 +2148,9 @@ void wait_control_motor(){
     std::cout << "wait mode finish " << std::endl;
 }
 
-// 모션 csv 파일 읽어서 재생하는 함수 (테스트용)
-void csv_control_motor(std::string audioName) {
+// 모션 csv 파일 읽어서 재생하는 함수. ledPath 가 비어 있지 않으면 assets 대신 그 LED 궤적을 쓴다 (궤적 시험용).
+// motion=false 면 모터에 목표값을 쓰지 않아 직전 자세(토크 유지)로 멈춰 있고, 소리·LED 만 나온다.
+void csv_control_motor(std::string audioName, const std::string& ledPath = "", bool motion = true) {
     while(!mouth_motion_queue.empty()) mouth_motion_queue.pop();
     while(!head_motion_queue.empty()) head_motion_queue.pop();
 
@@ -2168,7 +2169,7 @@ void csv_control_motor(std::string audioName) {
 
     std::string headMotionFilePath = ASSETS_DIR + "/headMotion/" + audioName + ".csv";
     std::string mouthMotionFilePath = ASSETS_DIR + "/mouthMotion/" + audioName + "-delta-big.csv";
-    std::string ledMotionFilePath = ASSETS_DIR + "/ledMotion/" + audioName + "-led.csv";
+    std::string ledMotionFilePath = ledPath.empty() ? ASSETS_DIR + "/ledMotion/" + audioName + "-led.csv" : ledPath;
     std::string audioFilePath = MUSIC_DIR + "/" + audioName + ".wav";
 
     if (!music.openFromFile(audioFilePath)) {
@@ -2294,7 +2295,10 @@ void csv_control_motor(std::string audioName) {
             dxl_driver->readAllState(current_state);
 
             // 모터 제어
-            if (cfg_dxl.operating_mode == 1) {
+            if (!motion) {
+                // 목표값을 쓰지 않는다. 헤드/입 CSV 는 LED 와 프레임 정렬을 위해 계속 읽는다.
+            }
+            else if (cfg_dxl.operating_mode == 1) {
                 // 속도제어 모드
                 for (int i = 0; i < DXL_NUM; i++) {
                     target_velocity[i] = calculateDXLGoalVelocity_timeBased_ds(current_state[i].position, target_position[i], current_state[i].velocity, cfg_dxl.profile_acceleration, 35);
@@ -2310,9 +2314,11 @@ void csv_control_motor(std::string audioName) {
             // LED 구동: 밝기(GPIO PWM)만 — 모터와 같은 40ms 프레임 (ID6 각도 모터 제거됨)
             set_led_brightness(led_bright);
 
-            // 과거 위치 업데이트
-            past_position = target_position;
-            updatePrevValues(roll_final , pitch_final, yaw_final, mouth_final);
+            // 과거 위치 업데이트 (모터가 움직였을 때만 — 다음 동작이 실제 자세에서 이어지게)
+            if (motion) {
+                past_position = target_position;
+                updatePrevValues(roll_final , pitch_final, yaw_final, mouth_final);
+            }
 
             // 로깅
             double DXL_goal_rpy[4] = {roll_final, pitch_final, yaw_final, mouth_final};
@@ -2842,6 +2848,8 @@ void robot_main_loop(std::future<void> server_ready_future) {
         bool is_file_based = false;
         bool is_csv_based = false;
         std::string csv_audio_name = "";
+        std::string csv_led_path = "";
+        bool csv_motion = true;
         std::string current_mode_label = "UNKNOWN";
 
         // --- 1. 다음 행동 결정 ---
@@ -2900,6 +2908,8 @@ void robot_main_loop(std::future<void> server_ready_future) {
             else if (type == "play_audio_csv") {
                 is_csv_based = true;
                 csv_audio_name = response.value("audio_name", "");
+                csv_led_path = response.value("led_csv", "");
+                csv_motion = response.value("motion", true);
             }
             else {
                 std::cerr << "Error: Unknown command type received: " << type << std::endl;
@@ -2919,7 +2929,7 @@ void robot_main_loop(std::future<void> server_ready_future) {
 			if (wait_mode_thread.joinable()) {
 				wait_mode_thread.join();
 			}
-            csv_control_motor(csv_audio_name);
+            csv_control_motor(csv_audio_name, csv_led_path, csv_motion);
         }
         else if (is_file_based) {
 			wait_mode_flag = false;
