@@ -25,12 +25,38 @@ from voice_pipeline.memory.prompts import (
     build_profile_merge_messages,
     format_profile_schema,
 )
-from voice_pipeline.memory.storage import SQLiteMemoryStorage
+from voice_pipeline.memory.storage import EVENT_ROLE, RADIO_PAUSED, RADIO_ROLE, RADIO_START, SQLiteMemoryStorage
 from voice_pipeline.memory.types import Episode, Profile
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.types import ILLM, IEmbedder, TokenCounter
 
 logger = logging.getLogger("voice_pipeline.memory")
+
+Utterance = tuple[str, str, str, int]  # (role, text, timestamp, token_count)
+
+
+def select_utterances(rows: list[Utterance]) -> list[Utterance]:
+    """추출 입력 — 사건 줄을 빼고, 사용자가 말을 걸지 않은(paused 없는) 대본의 낭독을 뺀다.
+
+    대본 하나는 ``radio_start`` 부터 다음 ``radio_start`` 까지다. 곡을 틀기로 한 사건(``radio_song``)은 끝으로 보지
+    않는다 — 낭독 세그먼트는 닫힐 때 저장되어 곡 사건보다 늦게 남기도 한다. 사용자 말은 어느 대본에서든 남긴다.
+    """
+    talked: set[int] = set()  # paused 가 있었던 대본 번호
+    script_of: list[int | None] = []
+    script: int | None = None
+    for role, text, _, _ in rows:
+        if role == EVENT_ROLE:
+            name = text.split(" ", 1)[0]
+            if name == RADIO_START:
+                script = len(script_of)
+            elif name == RADIO_PAUSED and script is not None:
+                talked.add(script)
+        script_of.append(script)
+    return [
+        row
+        for row, n in zip(rows, script_of, strict=True)
+        if row[0] != EVENT_ROLE and not (row[0] == RADIO_ROLE and n is not None and n not in talked)
+    ]
 
 
 class MemoryWriter:
@@ -96,7 +122,7 @@ class MemoryWriter:
     def _process(self, session_id: str, session_timestamp: str) -> list[Episode]:
         t0 = time.monotonic()
 
-        utterances = self._storage.get_utterances(session_id)
+        utterances = select_utterances(self._storage.get_utterances(session_id))
         if len(utterances) < self._MIN_UTTERANCES:
             logger.debug(
                 "Session %s too short (%d utterances), skipping",
@@ -128,8 +154,8 @@ class MemoryWriter:
             )
             return []
 
-        # 3. Profile extraction from episodes
-        facts = self._extract_profile_facts(stored)
+        # 3. Profile extraction from the transcript — 에피소드 요약에선 라디오 맥락 같은 출처가 사라진다
+        facts = self._extract_profile_facts(utterances)
 
         # 4. Profile merge
         if facts:
@@ -254,9 +280,9 @@ class MemoryWriter:
     # Profile extraction
     # ------------------------------------------------------------------
 
-    def _extract_profile_facts(self, episodes: list[Episode]) -> list[dict[str, str]]:
-        """Extract profile facts from episodes."""
-        messages = build_profile_extraction_messages(episodes, self._profile_schema_text)
+    def _extract_profile_facts(self, utterances: list[Utterance]) -> list[dict[str, str]]:
+        """Extract profile facts from the session transcript."""
+        messages = build_profile_extraction_messages(utterances, self._profile_schema_text)
 
         text = self._call_llm(messages, PROFILE_EXTRACTION_SCHEMA)
         if text is None:

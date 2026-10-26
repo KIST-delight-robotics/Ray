@@ -173,9 +173,8 @@ def _inject_seeds(seed_data, memory_storage, vector_index, embedder, token_count
     from voice_pipeline.memory.writer import MemoryWriter
 
     write_llm = _OpenAILLM(
-        model="gpt-4o-mini",
-        temperature=0.0,
-        reasoning_effort=None,
+        model="gpt-6-luna",
+        reasoning_effort="low",
         max_tokens=4096,
         tools=[],
     )
@@ -1608,7 +1607,7 @@ def main() -> None:
     pipeline_config: dict = {
         "llm_model": llm.model,
         "llm_temperature": llm.temperature,
-        "writer_llm_model": "gpt-4o-mini",
+        "writer_llm_model": "gpt-6-luna",
         "tts_model": components.raw_tts.model_name,
         "tts_voice": components.raw_tts.voice_id,
         "asr_model": components.asr._MODEL,

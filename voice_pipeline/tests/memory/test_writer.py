@@ -8,10 +8,18 @@ from typing import Any
 
 import numpy as np
 
-from voice_pipeline.memory.storage import SQLiteMemoryStorage
+from voice_pipeline.memory.storage import (
+    EVENT_ROLE,
+    RADIO_PAUSED,
+    RADIO_RESUME,
+    RADIO_ROLE,
+    RADIO_SONG,
+    RADIO_START,
+    SQLiteMemoryStorage,
+)
 from voice_pipeline.memory.types import Profile
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
-from voice_pipeline.memory.writer import MemoryWriter
+from voice_pipeline.memory.writer import MemoryWriter, select_utterances
 from voice_pipeline.types import ILLM, IEmbedder, LLMResult, LLMStream
 
 # ---------------------------------------------------------------------------
@@ -235,6 +243,84 @@ class TestEpisodeExtraction:
 
         assert _SESSION_ID not in storage.get_processed_session_ids([_SESSION_ID])
 
+    def test_event_rows_do_not_count_as_utterances(self) -> None:
+        writer, storage, _, llm = _make_writer(["should not be called"])
+        _add_utterances(storage, count=1)
+        storage.add_utterance(_SESSION_ID, EVENT_ROLE, f"{RADIO_START} drawer", "2026-04-01 10:00:01", 0)
+        storage.add_utterance(_SESSION_ID, EVENT_ROLE, RADIO_PAUSED, "2026-04-01 10:00:02", 0)
+
+        assert writer.process_session(_SESSION_ID, _TIMESTAMP) == []
+        assert llm.messages_log == []
+
+    def test_radio_talk_the_user_talked_into_is_marked_in_the_transcript(self) -> None:
+        writer, storage, _, llm = _make_writer([_episode_response()])
+        ts = "2026-04-01 10:00:0"
+        storage.add_utterance(_SESSION_ID, "user", "라디오 해줘", f"{ts}0", 3)
+        storage.add_utterance(_SESSION_ID, EVENT_ROLE, f"{RADIO_START} drawer", f"{ts}1", 0)
+        storage.add_utterance(_SESSION_ID, RADIO_ROLE, "오늘은 책상 서랍 이야기예요.", f"{ts}2", 5)
+        storage.add_utterance(_SESSION_ID, "user", "서랍에 뭐 넣어 둬?", f"{ts}3", 4)
+        storage.add_utterance(_SESSION_ID, EVENT_ROLE, RADIO_PAUSED, f"{ts}4", 0)
+
+        writer.process_session(_SESSION_ID, _TIMESTAMP)
+
+        transcript = llm.messages_log[0][-1]["content"]
+        assert RADIO_START not in transcript
+        assert "Assistant (radio talk): 오늘은 책상 서랍 이야기예요." in transcript
+
+    def test_a_session_of_only_listening_is_skipped(self) -> None:
+        writer, storage, _, llm = _make_writer(["should not be called"])
+        ts = "2026-04-01 10:00:0"
+        storage.add_utterance(_SESSION_ID, "user", "라디오 해줘", f"{ts}0", 3)
+        storage.add_utterance(_SESSION_ID, EVENT_ROLE, f"{RADIO_START} drawer", f"{ts}1", 0)
+        storage.add_utterance(_SESSION_ID, RADIO_ROLE, "오늘은 책상 서랍 이야기예요.", f"{ts}2", 5)
+        storage.add_utterance(_SESSION_ID, EVENT_ROLE, f"{RADIO_SONG} IAM", f"{ts}3", 0)
+
+        assert writer.process_session(_SESSION_ID, _TIMESTAMP) == []
+        assert llm.messages_log == []
+
+
+class TestSelectUtterances:
+    @staticmethod
+    def _rows(*rows: tuple[str, str]) -> list[tuple[str, str, str, int]]:
+        return [(role, text, f"2026-04-01 10:00:{i:02d}", 1) for i, (role, text) in enumerate(rows)]
+
+    def test_drops_the_talk_of_a_script_without_a_pause_and_keeps_user_speech(self) -> None:
+        rows = self._rows(
+            ("user", "라디오 해줘"),
+            (EVENT_ROLE, f"{RADIO_START} a"),
+            (RADIO_ROLE, "에이 낭독"),
+            ("user", "음"),  # on 인 채로 지나간 말
+            (EVENT_ROLE, f"{RADIO_SONG} s"),
+            (RADIO_ROLE, "에이 마지막 낭독"),  # 곡 사건보다 늦게 저장된 세그먼트도 그 대본이다
+        )
+        assert [r[1] for r in select_utterances(rows)] == ["라디오 해줘", "음"]
+
+    def test_keeps_the_whole_talk_of_a_script_with_a_pause(self) -> None:
+        rows = self._rows(
+            (EVENT_ROLE, f"{RADIO_START} a"),
+            (RADIO_ROLE, "에이 앞 낭독"),
+            ("user", "그건 왜 그래?"),
+            (EVENT_ROLE, RADIO_PAUSED),
+            ("assistant", "대답"),
+            (EVENT_ROLE, RADIO_RESUME),
+            (RADIO_ROLE, "에이 뒤 낭독"),
+            (EVENT_ROLE, f"{RADIO_SONG} s"),
+            (EVENT_ROLE, f"{RADIO_START} b"),
+            (RADIO_ROLE, "비 낭독"),
+        )
+        assert [r[1] for r in select_utterances(rows)] == ["에이 앞 낭독", "그건 왜 그래?", "대답", "에이 뒤 낭독"]
+
+    def test_a_new_script_started_while_paused_is_its_own_unit(self) -> None:
+        rows = self._rows(
+            (EVENT_ROLE, f"{RADIO_START} a"),
+            (RADIO_ROLE, "에이 낭독"),
+            (EVENT_ROLE, RADIO_PAUSED),
+            ("user", "다른 이야기 해 줘"),
+            (EVENT_ROLE, f"{RADIO_START} b"),
+            (RADIO_ROLE, "비 낭독"),
+        )
+        assert [r[1] for r in select_utterances(rows)] == ["에이 낭독", "다른 이야기 해 줘"]
+
     def test_episodes_have_embeddings(self) -> None:
         ep_json = _episode_response("The user loves sci-fi movies.")
         facts_json = _profile_facts_response()
@@ -267,6 +353,17 @@ class TestEpisodeExtraction:
 
 
 class TestProfileMerge:
+    def test_profile_facts_are_extracted_from_the_transcript(self) -> None:
+        ep_json = _episode_response("The user loves Interstellar.")
+        writer, storage, _, llm = _make_writer([ep_json, _profile_facts_response()])
+        _add_utterances(storage)
+
+        writer.process_session(_SESSION_ID, _TIMESTAMP)
+
+        profile_input = llm.messages_log[1][-1]["content"]
+        assert "User: I watched Interstellar last night and it was amazing." in profile_input
+        assert "The user loves Interstellar." not in profile_input
+
     def test_profile_append(self) -> None:
         ep_json = _episode_response("The user loves Interstellar.")
         facts_json = _profile_facts_response(

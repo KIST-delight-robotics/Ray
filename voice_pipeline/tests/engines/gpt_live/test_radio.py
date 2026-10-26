@@ -33,6 +33,7 @@ from voice_pipeline.engines.gpt_live.radio import (
     RadioJudge,
     RadioResumeJudge,
     RadioScript,
+    Record,
     Repush,
     ScriptLog,
     ScriptPicker,
@@ -44,6 +45,7 @@ from voice_pipeline.engines.gpt_live.radio import (
     load_scripts,
 )
 from voice_pipeline.engines.gpt_live.songs import Song
+from voice_pipeline.memory.storage import RADIO_PAUSED, RADIO_RESUME, RADIO_SONG, RADIO_START
 from voice_pipeline.types import ILLM
 
 SONGS = {"IAM": Song("IAM", "I AM", "IVE"), "snowman": Song("snowman", "눈사람", "정승환")}
@@ -435,6 +437,16 @@ def _line(text: str) -> Think:
     return Think(RADIO_LINE_TEMPLATE.format(text))
 
 
+PAUSED = [Record(RADIO_PAUSED), UpdateBackend(), Think(RADIO_PAUSED_NOTE)]
+RESUMED = [Record(RADIO_RESUME), UpdateBackend(), Think(RADIO_ON_NOTE)]
+SONG = [Record(f"{RADIO_SONG} IAM"), PlaySong(SONGS["IAM"])]
+
+
+def _script_start(radio: Radio) -> Record:
+    assert radio.script is not None
+    return Record(f"{RADIO_START} {radio.script.key}")
+
+
 def _read(radio: Radio, text: str, t: float, segment: str = "out-1") -> float:
     """모델이 ``text`` 를 말한다 — 어절마다 출력 전사 스냅샷과 음성. 끝난 시각."""
     said = ""
@@ -455,7 +467,7 @@ class TestRadioStart:
         radio = _radio()
         output, commands = radio.start(0.0)
         assert json.loads(output) == {"status": "on"} and radio.status == "on"
-        assert commands == [UpdateBackend(), Think(RADIO_ON_NOTE), _line(LINES[0])]
+        assert commands == [UpdateBackend(), Think(RADIO_ON_NOTE), _script_start(radio), _line(LINES[0])]
         assert json.loads(radio.start(0.1)[0]) == {"error": "the radio talk is already on"}
 
     def test_no_scripts(self) -> None:
@@ -583,12 +595,12 @@ class TestRadioInterruption:
     def test_paused_stops_the_talk_and_resume_continues_from_the_unread_line(self) -> None:
         radio, t = self._interrupted("paused")
         assert radio.step(t + 0.7, 0.0) == []  # 판정을 보낸다
-        assert radio.step(t + 0.8, 0.0) == [UpdateBackend(), Think(RADIO_PAUSED_NOTE)]
+        assert radio.step(t + 0.8, 0.0) == PAUSED
         assert radio.status == "paused"
         _read(radio, "서랍에는 볼펜 같은 걸 넣어 둬요.", t + 1.0)  # 멈춘 뒤 대화
         output, commands = radio.resume(t + 5.0)
         assert json.loads(output) == {"status": "on"}
-        assert commands == [UpdateBackend(), Think(RADIO_ON_NOTE), _line(LINES[0])]  # 1번 대사가 안 끝났다
+        assert commands == [*RESUMED, _line(LINES[0])]  # 1번 대사가 안 끝났다
 
     def test_conversation_while_paused_does_not_move_the_resume_point(self) -> None:
         radio, t = self._interrupted("paused")
@@ -603,7 +615,7 @@ class TestRadioInterruption:
         _user(radio, "근데 서랍에 뭐 넣어 둬? 진짜 궁금해", t + 0.75)  # 판정 결과를 받기 전에 더 말했다
         assert radio.step(t + 0.8, 0.0) == []  # on 이지만 낡았다 — 보류 유지
         assert radio.step(t + 1.5, 0.0) == []  # 다시 판정
-        assert radio.step(t + 1.6, 0.0) == [UpdateBackend(), Think(RADIO_PAUSED_NOTE)]
+        assert radio.step(t + 1.6, 0.0) == PAUSED
 
     def _slow(self, *futures: Future[str]) -> tuple[Radio, float]:
         executor = MagicMock()
@@ -620,7 +632,7 @@ class TestRadioInterruption:
         assert radio.step(t2 + Radio.DUE_WAIT_SEC - 0.1, 0.0) == []
         assert radio.step(t2 + Radio.DUE_WAIT_SEC, 0.0) == [_line(LINES[1])]  # 그래도 없으면 on 으로 보고 넣는다
         pending.set_result("paused")  # 늦게 온 paused 도 적용한다
-        assert radio.step(t2 + Radio.DUE_WAIT_SEC + 0.1, 0.0) == [UpdateBackend(), Think(RADIO_PAUSED_NOTE)]
+        assert radio.step(t2 + Radio.DUE_WAIT_SEC + 0.1, 0.0) == PAUSED
 
     def test_a_pause_while_waiting_stops_before_the_due_line(self) -> None:
         pending: Future[str] = Future()
@@ -628,7 +640,7 @@ class TestRadioInterruption:
         radio.step(t + 0.7, 2.0)  # 판정을 보낸다 — 레이가 조용해 무음 폴백을 할 때가 됐다
         assert radio.step(t + 2.0, 3.0) == []  # 판정을 기다린다
         pending.set_result("paused")
-        assert radio.step(t + 2.1, 3.0) == [UpdateBackend(), Think(RADIO_PAUSED_NOTE)]  # 다시 넣지 않고 멈춘다
+        assert radio.step(t + 2.1, 3.0) == PAUSED  # 다시 넣지 않고 멈춘다
 
     def test_the_wait_counts_from_the_judge_call_when_the_user_talks_long(self) -> None:
         pending: Future[str] = Future()
@@ -670,7 +682,7 @@ class TestRadioInterruption:
         first = radio.script
         output, commands = radio.start(t + 3.0)
         assert json.loads(output) == {"status": "on"} and radio.script is not first
-        assert commands == [UpdateBackend(), Think(RADIO_ON_NOTE), _line(LINES[0])]
+        assert commands == [UpdateBackend(), Think(RADIO_ON_NOTE), _script_start(radio), _line(LINES[0])]
 
 
 def _auto_radio(*decisions: object, executor: object | None = None) -> Radio:
@@ -713,7 +725,7 @@ class TestRadioAutoResume:
         assert self._decide(radio).call_args.kwargs == {"second": False}
         assert radio.step(last + self.QUIET - 0.1, 0.0) == []  # 결과는 잠잠함이 찼을 때 적용한다
         opening = _line(f"{RADIO_AUTO_RESUME_OPENING} {LINES[0]}")  # 1번 대사가 안 끝났다
-        assert radio.step(last + self.QUIET, 0.0) == [UpdateBackend(), Think(RADIO_ON_NOTE), opening]
+        assert radio.step(last + self.QUIET, 0.0) == [*RESUMED, opening]
         assert radio.status == "on" and not radio.auto_resume
 
     def test_new_speech_drops_the_judgment_and_the_next_quiet_asks_again(self) -> None:
@@ -754,7 +766,7 @@ class TestRadioAutoResume:
         assert self._decide(radio).call_count == 1
         radio.step(last + later, 0.0)
         assert self._decide(radio).call_args.kwargs == {"second": True}
-        assert radio.step(last + Radio.RESUME_LATER_SEC, 0.0)[0] == UpdateBackend()
+        assert radio.step(last + Radio.RESUME_LATER_SEC, 0.0)[0] == Record(RADIO_RESUME)
         assert radio.status == "on"
 
     def test_a_failed_judgment_is_asked_again_right_away_while_quiet(self) -> None:
@@ -762,7 +774,7 @@ class TestRadioAutoResume:
         radio.step(last + self.ASK, 0.0)
         radio.step(last + self.ASK + 0.1, 0.0)  # 실패를 보고 바로 다시
         assert self._decide(radio).call_count == 2
-        assert radio.step(last + self.QUIET, 0.0)[0] == UpdateBackend()
+        assert radio.step(last + self.QUIET, 0.0)[0] == Record(RADIO_RESUME)
 
     def test_repeated_failures_give_up_until_someone_speaks(self) -> None:
         failures = [RuntimeError("timeout")] * Radio.RESUME_ATTEMPTS
@@ -773,7 +785,7 @@ class TestRadioAutoResume:
         assert radio.step(last + 30.0, 0.0) == [] and radio.status == "paused"
         _user(radio, "음", last + 31.0, segment="in-2")
         radio.step(last + 31.0 + self.ASK, 0.0)
-        assert radio.step(last + 31.0 + self.QUIET, 0.0)[0] == UpdateBackend()
+        assert radio.step(last + 31.0 + self.QUIET, 0.0)[0] == Record(RADIO_RESUME)
 
     def test_a_user_song_while_paused_turns_it_off(self) -> None:
         radio, last = self._paused("go_back")
@@ -821,12 +833,12 @@ class TestRadioSong:
 
     def test_introduction_read_then_song_then_next_script_after_the_song(self) -> None:
         radio, t = self._at_song()
-        assert radio.step(t, Tracker.CLOSING_QUIET_SEC) == [PlaySong(SONGS["IAM"])]
+        assert radio.step(t, Tracker.CLOSING_QUIET_SEC) == SONG
         assert radio.playing_song
         _user(radio, "노래 좋다", t + 1.0)  # 곡 중 말은 보지 않는다
         assert radio.step(t + 2.0, 5.0) == []
         commands = radio.on_song_end(t + 10.0, completed=True)
-        assert commands == [_line(f"{RADIO_AFTER_SONG_OPENING} {LINES[0]}")]
+        assert commands == [_script_start(radio), _line(f"{RADIO_AFTER_SONG_OPENING} {LINES[0]}")]
         assert radio.status == "on" and not radio.playing_song
 
     def test_the_song_waits_for_a_slow_judgment_too(self) -> None:
@@ -845,7 +857,7 @@ class TestRadioSong:
         _user(radio, "잠깐만", t)  # 곡 소개를 다 읽은 직후 끼어들었다
         assert radio.step(t + 0.7, 1.0) == []  # 판정을 보낸다 — 곡을 틀 때가 됐지만 기다린다
         assert radio.step(t + 0.7 + Radio.DUE_WAIT_SEC - 0.1, 4.0) == []
-        assert radio.step(t + 0.7 + Radio.DUE_WAIT_SEC, 4.0) == [PlaySong(SONGS["IAM"])]  # 그래도 없으면 곡
+        assert radio.step(t + 0.7 + Radio.DUE_WAIT_SEC, 4.0) == SONG  # 그래도 없으면 곡
 
     def test_user_stopping_the_song_ends_the_radio(self) -> None:
         radio, t = self._at_song()

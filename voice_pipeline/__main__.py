@@ -211,7 +211,7 @@ def main() -> None:
 
     # --- Production-only pieces: wakeword, memory writer, greeting audio ---
     wakeword = WakewordDetector(vad_model=components.silero_vad_model)
-    write_llm = OpenAILLM(model="gpt-4o-mini", temperature=0.0, reasoning_effort=None, max_tokens=4096, tools=[])
+    write_llm = OpenAILLM(model="gpt-6-luna", reasoning_effort="low", max_tokens=4096, tools=[])
     memory_writer = MemoryWriter(
         components.memory_storage,
         components.vector_index,

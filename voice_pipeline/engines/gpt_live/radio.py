@@ -24,7 +24,7 @@ stay_paused(라디오를 끝내 달라는 말, 레이에게 한 마지막 말이
 돌아가지 않는다 — 사용자가 이어 달라고 하면 백엔드가 ``resume_radio`` 를 부른다.
 
 이 모듈은 세션 I/O 를 하지 않는다. 루프가 시각·전사·무음을 넣고, 돌려받은 할 일(:class:`Think`, :class:`UpdateBackend`,
-:class:`PlaySong`)을 실행한다.
+:class:`PlaySong`, :class:`Record`)을 실행한다.
 """
 
 from __future__ import annotations
@@ -60,6 +60,7 @@ from voice_pipeline.engines.gpt_live.instructions import (
     radio_resume_judge_format,
 )
 from voice_pipeline.engines.gpt_live.songs import Song
+from voice_pipeline.memory.storage import RADIO_PAUSED, RADIO_RESUME, RADIO_SONG, RADIO_START
 from voice_pipeline.settings import DEFAULT_DB_PATH, RADIO_SCRIPTS_DIR
 from voice_pipeline.trace import record_call
 from voice_pipeline.types import ILLM
@@ -643,7 +644,14 @@ class PlaySong:
     song: Song
 
 
-Command = Think | UpdateBackend | PlaySong
+@dataclass(frozen=True)
+class Record:
+    """사건 줄을 utterances 에 남긴다 — 상태가 바뀐 자리를 말 사이에 표시한다."""
+
+    event: str
+
+
+Command = Think | UpdateBackend | PlaySong | Record
 
 
 @dataclass
@@ -777,7 +785,7 @@ class Radio:
         assert self.tracker is not None
         self.status = "on"
         self._clear_pause()
-        commands: list[Command] = [UpdateBackend(), Think(RADIO_ON_NOTE)]
+        commands: list[Command] = [Record(RADIO_RESUME), UpdateBackend(), Think(RADIO_ON_NOTE)]
         index = self.tracker.resume(now)
         if index is not None:
             line = self.tracker.lines[index]
@@ -878,7 +886,7 @@ class Radio:
             assert self.script is not None
             self.playing_song = True
             logger.info("Radio: song introduced (%s) — playing %s", action.by, self.script.song.key)
-            commands.append(PlaySong(self.script.song))
+            commands += [Record(f"{RADIO_SONG} {self.script.song.key}"), PlaySong(self.script.song)]
         return commands
 
     def _begin_script(self, script: RadioScript, now: float, *, after_song: bool) -> list[Command]:
@@ -887,7 +895,7 @@ class Radio:
             lines[0] = f"{RADIO_AFTER_SONG_OPENING} {lines[0]}"
         self.script = script
         self.tracker = Tracker(lines)
-        return self._push(Push(0, lines[0], "start"), now)
+        return [Record(f"{RADIO_START} {script.key}"), *self._push(Push(0, lines[0], "start"), now)]
 
     def _push(self, push: Push, now: float) -> list[Command]:
         assert self.tracker is not None
@@ -1158,4 +1166,4 @@ class Radio:
         self.auto_resume = self._resume_judge is not None
         self._paused_at = now
         self._pause_hold = self._last_hold_start if self._last_hold_start is not None else now
-        return [UpdateBackend(), Think(RADIO_PAUSED_NOTE)]
+        return [Record(RADIO_PAUSED), UpdateBackend(), Think(RADIO_PAUSED_NOTE)]

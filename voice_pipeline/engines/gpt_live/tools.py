@@ -62,7 +62,7 @@ SEARCH_MEMORY_TOOL_DEF: dict[str, Any] = {
             "query": {
                 "type": "string",
                 "description": (
-                    "What to look for, in the user's language. "
+                    "What to look for, in English; keep names and titles in the original language. "
                     "Include names, topics and time hints from the conversation."
                 ),
             }

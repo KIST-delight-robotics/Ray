@@ -21,6 +21,16 @@ logger = logging.getLogger("voice_pipeline.memory")
 
 _DEFAULT_DIMENSION = 384  # 기본 embedding 차원 (all-MiniLM-L6-v2 기준)
 
+# utterances.role — user / assistant 외의 값
+RADIO_ROLE = "radio"  # 라디오가 on 일 때 저장된 모델 말 (낭독)
+EVENT_ROLE = "event"  # 말이 아닌 사건 줄. 텍스트는 사건 이름, 값이 있으면 공백 뒤에
+
+# 라디오 사건 — 낭독을 대본 단위로 가려낼 수 있게 상태가 바뀐 자리에 남긴다
+RADIO_START = "radio_start"  # 대본 시작 (값: 대본 키)
+RADIO_PAUSED = "radio_paused"  # 끼어들기 판정 paused 적용
+RADIO_RESUME = "radio_resume"  # 재개 (요청·자동 복귀)
+RADIO_SONG = "radio_song"  # 대본의 곡을 틀기로 함 (값: 곡 키)
+
 
 class SQLiteMemoryStorage:
     """SQLite-backed memory storage.

@@ -5,7 +5,7 @@
 
 1. 마이크 프레임을 브리지 레이트로 리샘플해 세션으로 보내고, 모델 출력 오디오를 C++로 그대로 보낸다.
    세션 전체가 ``stream_start`` 하나로 시작하는 스트림이며 무음 조각도 그대로 흘린다.
-2. 전사 세그먼트를 히스토리와 utterances(장기기억 입력)에 저장한다.
+2. 전사 세그먼트를 히스토리와 utterances(장기기억 입력)에 저장한다. 라디오가 on 일 때의 모델 말은 ``radio`` 로 저장한다.
 3. 백엔드의 함수 툴 호출을 실행한다 — 장기기억 검색 ``search_memory``, 볼륨·밝기 ``adjust_volume`` /
    ``set_brightness`` / ``get_device_settings``, 종료 ``end_conversation``. 핸들러는 executor 에서 돌리고
    프레임 루프는 완료를 폴링한다 — 임베딩·DB 조회가 마이크 전송과 출력 중계를 막지 않게.
@@ -27,10 +27,11 @@
 라디오 (진행 규칙은 :mod:`~voice_pipeline.engines.gpt_live.radio`, 설계 배경은 docs/dj-mode-worknote.md):
     루프는 :class:`~voice_pipeline.engines.gpt_live.radio.Radio` 에 전사 스냅샷·모델 음성·받은 무음 길이를 넣고, 매
     프레임 :meth:`Radio.step` 이 돌려준 할 일 — 대사·상태 문구 ``thinking.append``, 라디오 상태로 백엔드 갱신, 대본의
-    곡 재생 — 을 실행한다. ``start_radio`` / ``resume_radio`` 는 그 자리에서 첫 대사를 넣고 결과를 바로 돌려준다
-    (이어가기에서 백엔드는 빈 응답). 대본의 곡은 노래 흐름을 툴 결과 없이 타고, 자연 종료면 다음 대본의 첫 대사를,
-    사용자가 멈췄으면 라디오 종료를 알린다. 노래 중에는 라디오를 돌리지 않는다. 멈춘 라디오가 잠잠함을 셀 수 있게
-    백엔드 위임이 진행 중인지(위임 생성부터 마지막 응답 완료까지)도 넘기고, 사용자가 튼 곡은 라디오에 알린다.
+    곡 재생, utterances 에 사건 줄 — 을 실행한다. ``start_radio`` / ``resume_radio`` 는 그 자리에서 첫 대사를 넣고
+    결과를 바로 돌려준다 (이어가기에서 백엔드는 빈 응답). 대본의 곡은 노래 흐름을 툴 결과 없이 타고, 자연 종료면 다음
+    대본의 첫 대사를, 사용자가 멈췄으면 라디오 종료를 알린다. 노래 중에는 라디오를 돌리지 않는다. 멈춘 라디오가
+    잠잠함을 셀 수 있게 백엔드 위임이 진행 중인지(위임 생성부터 마지막 응답 완료까지)도 넘기고, 사용자가 튼 곡은
+    라디오에 알린다.
 
 종료 시퀀스(실측 근거는 scripts/gpt_live/FINDINGS.md §4~5):
     입력 mute → 모델의 마지막 발화가 끝날 때까지(출력이 무음으로 N초) 대기, 상한 있음 →
@@ -74,7 +75,7 @@ from voice_pipeline.engines.gpt_live.instructions import (
     SONG_PLAYING_INSTRUCTIONS,
     build_backend_instructions,
 )
-from voice_pipeline.engines.gpt_live.radio import Command, PlaySong, Radio, Think, UpdateBackend
+from voice_pipeline.engines.gpt_live.radio import Command, PlaySong, Radio, Record, Think, UpdateBackend
 from voice_pipeline.engines.gpt_live.songs import Song
 from voice_pipeline.engines.gpt_live.tools import (
     END_CONVERSATION_TOOL,
@@ -86,7 +87,7 @@ from voice_pipeline.engines.gpt_live.tools import (
     ToolHandler,
 )
 from voice_pipeline.history import ConversationHistory
-from voice_pipeline.memory.storage import SQLiteMemoryStorage
+from voice_pipeline.memory.storage import EVENT_ROLE, RADIO_ROLE, SQLiteMemoryStorage
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE, SAMPLE_RATE
 from voice_pipeline.types import AudioFrame, TokenCounter
 
@@ -561,7 +562,12 @@ class LiveSessionLoop:
             self._history.add_user_message(text)
         else:
             self._history.add_assistant_message(text)
-        self._save_utterance(seg.speaker, text)
+        role = seg.speaker
+        if role == "assistant" and self._radio is not None and self._radio.status == "on":
+            # 세그먼트는 대사 여러 줄·대답이 섞인 덩어리라 저장하는 순간의 상태로 가른다 — 멈추게 한 말에 대한 대답은
+            # 판정보다 먼저 시작하기도 해서 시작 때 상태로 가르면 낭독이 된다
+            role = RADIO_ROLE
+        self._save_utterance(role, text)
 
     def _on_response_done(self, event: LiveResponseDone) -> None:
         """백엔드 응답이 끝났다 — 그 응답의 함수 호출을 실행에 넘긴다. 결과 제출은 :meth:`_poll_tools`."""
@@ -877,6 +883,8 @@ class LiveSessionLoop:
                 self._begin_song(command.song)  # 툴 결과가 없으니 결과 Future 는 쓰지 않는다
                 if self._song_state is SongState.PENDING:
                     self._drain_for_song()  # 출력은 이미 조용하다 — 무음을 더 기다리지 않는다
+            elif isinstance(command, Record):
+                self._save_utterance(EVENT_ROLE, command.event)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -900,7 +908,7 @@ class LiveSessionLoop:
             return
         try:
             timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-            token_count = self._token_counter(text) if self._token_counter else 0
+            token_count = self._token_counter(text) if self._token_counter and role != EVENT_ROLE else 0
             self._memory_storage.add_utterance(self._session_id, role, text, timestamp, token_count)
         except Exception:
             logger.warning("Failed to save %s utterance", role, exc_info=True)

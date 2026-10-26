@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from voice_pipeline.memory.types import Episode, Profile
+from voice_pipeline.memory.storage import RADIO_ROLE
+from voice_pipeline.memory.types import Profile
 from voice_pipeline.types import TokenCounter
 
 # ---------------------------------------------------------------------------
@@ -139,12 +140,27 @@ a user and an assistant, extract memorable episodes as third-person narratives.
 ## Rules
 - Extract from USER utterances only. Do not extract facts from assistant responses.
 - Each episode should be 1-3 sentences in third-person narrative form.
+- Refer to the user as "the user"; do not guess their gender.
+- Write in English. Keep names, titles and Korean-specific terms in the \
+original language after the English, for example "plantain (질경이)".
 - Preserve emotional context and situational details.
 - Do NOT include dates or timestamps in the narrative text.
 - Be selective: only extract episodes worth remembering. Return an empty array \
 for trivial or meaningless conversations.
 - If the user mentions a past event ("I went to Paris last week"), record that \
-as a narrative about the user mentioning it, not as a direct fact."""
+as a narrative about the user mentioning it, not as a direct fact.
+
+## Radio talk
+Lines marked "Assistant (radio talk)" are a radio talk the assistant hosts: \
+prepared stories it reads aloud, chosen by the assistant, not by the user.
+- When the user asks about or comments on the radio talk, record one episode \
+that says so in context: the user was listening to the assistant's radio talk \
+about the subject, and what they asked or said. Do not retell the talk's content, \
+and do not describe the user's questions as a lasting interest.
+- Brief reactions or controls alone (for example 음, 그렇구나, 계속해 줘, 잠깐만) \
+are not worth an episode.
+- What the user says about themselves during the radio talk (their own \
+experiences, opinions, preferences) or about other topics is extracted as usual."""
 
 _EPISODE_USER_TEMPLATE = """\
 Session date: {session_date}
@@ -183,40 +199,47 @@ def build_episode_extraction_messages(
 
 
 _PROFILE_EXTRACTION_SYSTEM = """\
-You are a profile extraction system. Given a list of episode summaries from \
-a conversation, extract user profile facts that match the schema categories below.
+You are a profile extraction system. Given a conversation transcript between \
+a user and an assistant, extract user profile facts that match the schema categories below.
 
 ## Profile Schema
 {schema}
 
 ## Rules
-- Only extract facts about the USER, not the assistant.
+- Extract from USER utterances only. Do not extract facts from assistant responses.
 - Map each fact to a topic and sub_topic from the schema.
 - You may create new sub_topics within existing topics if the schema \
 does not cover the specific attribute.
 - Keep each fact concise (one sentence or phrase).
+- Write in English. Keep names, titles and Korean-specific terms in the \
+original language after the English, for example "plantain (질경이)".
 - Only extract when there is clear evidence, not speculation.
+- Lines marked "Assistant (radio talk)" are a radio talk the assistant hosts \
+on subjects it chooses. That the user asked about or reacted to a radio talk \
+subject is not by itself evidence of an interest; extract only what the user \
+said about themselves.
 - Return an empty array if no profile-relevant information is found."""
 
 _PROFILE_EXTRACTION_USER_TEMPLATE = """\
-## Episodes
-{episodes}"""
+## Conversation
+{transcript}"""
 
 
 def build_profile_extraction_messages(
-    episodes: list[Episode],
+    utterances: list[tuple[str, str, str, int]],
     profile_schema_text: str,
 ) -> list[dict[str, Any]]:
     """Build messages for profile fact extraction LLM call.
 
     Args:
-        episodes: Extracted episodes to analyze for profile facts.
+        utterances: Session transcript as (role, text, timestamp, token_count)
+            tuples — the same input as episode extraction.
         profile_schema_text: Formatted profile schema string.
 
     Returns:
         Messages list with system + user message.
     """
-    episode_text = "\n".join(f"- {ep.text}" for ep in episodes)
+    transcript = _format_transcript(utterances)
     return [
         {
             "role": "system",
@@ -224,7 +247,7 @@ def build_profile_extraction_messages(
         },
         {
             "role": "user",
-            "content": _PROFILE_EXTRACTION_USER_TEMPLATE.format(episodes=episode_text),
+            "content": _PROFILE_EXTRACTION_USER_TEMPLATE.format(transcript=transcript),
         },
     ]
 
@@ -382,6 +405,6 @@ def _format_transcript(utterances: list[tuple[str, str, str, int]]) -> str:
     """Format utterances into a readable conversation transcript."""
     lines: list[str] = []
     for role, text, timestamp, _token_count in utterances:
-        label = "User" if role == "user" else "Assistant"
+        label = "User" if role == "user" else "Assistant (radio talk)" if role == RADIO_ROLE else "Assistant"
         lines.append(f"[{timestamp}] {label}: {text}")
     return "\n".join(lines)

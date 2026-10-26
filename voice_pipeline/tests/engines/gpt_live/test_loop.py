@@ -31,7 +31,7 @@ from voice_pipeline.engines.gpt_live.instructions import (
     build_backend_instructions,
 )
 from voice_pipeline.engines.gpt_live.loop import LiveSessionLoop, Phase, SongState
-from voice_pipeline.engines.gpt_live.radio import PlaySong, Radio, Think, UpdateBackend
+from voice_pipeline.engines.gpt_live.radio import PlaySong, Radio, Record, Think, UpdateBackend
 from voice_pipeline.engines.gpt_live.songs import Song
 from voice_pipeline.engines.gpt_live.tools import (
     END_CONVERSATION_TOOL,
@@ -41,6 +41,7 @@ from voice_pipeline.engines.gpt_live.tools import (
     START_RADIO_TOOL,
     STOP_SONG_TOOL,
 )
+from voice_pipeline.memory.storage import RADIO_PAUSED
 from voice_pipeline.settings import BRIDGE_SAMPLE_RATE, SAMPLE_RATE
 
 SILENCE_100MS = bytes(BRIDGE_SAMPLE_RATE * 2 // 10)
@@ -966,6 +967,30 @@ class TestRadio:
         assert radio.step.call_args_list and all(isinstance(c.args[1], float) for c in radio.step.call_args_list)
         assert all(c.kwargs == {"backend_busy": False} for c in radio.step.call_args_list)
         m["live"].append_thinking.assert_called_once_with("다음 대사")
+
+    @pytest.mark.parametrize(("status", "role"), [("on", "radio"), ("paused", "assistant"), ("off", "assistant")])
+    def test_model_speech_is_stored_as_radio_while_the_radio_is_on(
+        self, monkeypatch: pytest.MonkeyPatch, status: str, role: str
+    ) -> None:
+        events = [
+            _seg("user", "근데 서랍에 뭐 넣어 둬?", closed=True),
+            _seg("assistant", "오늘은 책상 서랍 이야기예요.", closed=True, start_ms=2000),
+            LiveClosed("x"),
+        ]
+        loop, m, _ = _make_loop(monkeypatch, live_events=events, radio=_radio(status=status))
+        loop.run()
+        assert [c.args[1] for c in m["memory"].add_utterance.call_args_list] == ["user", role]
+        m["history"].add_assistant_message.assert_called_once_with("오늘은 책상 서랍 이야기예요.")
+
+    def test_a_radio_event_is_stored_as_an_event_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        radio = _radio(status="on")
+        pending = [[Record(RADIO_PAUSED)]]
+        radio.step.side_effect = lambda now, quiet, backend_busy: pending.pop() if pending else []
+        loop, m, _ = _make_loop(monkeypatch, radio=radio)
+        _staged_live_events(m, [(lambda: radio.step.call_count >= 2, LiveClosed("x"))])
+        loop.run()
+        session, role, text, _, tokens = m["memory"].add_utterance.call_args.args
+        assert (session, role, text, tokens) == ("sess-1", "event", RADIO_PAUSED, 0)
 
     def test_a_delegation_is_busy_until_its_last_response_is_done(self, monkeypatch: pytest.MonkeyPatch) -> None:
         loop, _, _ = _make_loop(monkeypatch, radio=_radio(status="paused"))
