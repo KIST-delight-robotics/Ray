@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import pytest
 
 from voice_pipeline.engines.gpt_live.instructions import (
@@ -25,21 +28,27 @@ _SONGS = {
     "Butter_BTS": Song("Butter_BTS", "Butter", "BTS"),
 }
 
+_NOW = datetime(2026, 9, 13, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+_MARKER = "[Current session — started 2026-09-13 (Sun) 09:00 KST]"
+
 
 class TestBuildLiveInstructions:
-    def test_build_live_instructions_without_context_is_base_only(self) -> None:
-        text = build_live_instructions()
+    def test_build_live_instructions_without_context_is_base_and_current_session(self) -> None:
+        text = build_live_instructions(now=_NOW)
         assert text.startswith("# Voice model (Ray) instructions\nYou are Ray")
         assert "already know about the user, from earlier sessions" not in text
+        assert text.rstrip().endswith(_MARKER)
 
     def test_build_live_instructions_appends_profile_and_recent_sessions(self) -> None:
         text = build_live_instructions(
             "[User Profile]\ninterest::movie: SF",
-            ["[2026-09-10 10:00 session]\n- User saw Dune 2.", "[2026-09-12 20:00 session]\n- User liked the OST."],
+            ["[Session — 2026-09-10 (Thu) 10:00]\n- User saw Dune 2.", "[Session — 2026-09-12 (Sat) 20:00]\n- OST."],
+            now=_NOW,
         )
         base_end = text.index("Do not guess the result while waiting.")
         assert text.index("already know about the user, from earlier sessions:") > base_end
-        assert text.index("[User Profile]") < text.index("[2026-09-10 10:00 session]") < text.index("[2026-09-12")
+        assert text.index("[User Profile]") < text.index("2026-09-10") < text.index("2026-09-12") < text.index(_MARKER)
+        assert text.rstrip().endswith(_MARKER)
 
     def test_policies_follow_the_template_order(self) -> None:
         text = DEFAULT_LIVE_INSTRUCTIONS

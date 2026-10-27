@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -19,6 +21,10 @@ from voice_pipeline.types import LLMMetrics
 
 # Per-message overhead shorthand
 _MO = PER_MESSAGE_OVERHEAD_TOKENS
+
+# Session start for tests that read time labels. Stored UTC 10:00 shows as 19:00 KST,
+# e.g. "2026-03-28 10:00:00" → "[Session — 2026-03-28 (Sat) 19:00, 2 days ago]" (8 words).
+_NOW = datetime(2026, 3, 30, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
 
 class StubHistory:
@@ -602,12 +608,17 @@ class TestCarryover:
             session_id="cur",
             history_backend=_carryover_backend(),
             summarizer=summarizer,
+            now=_NOW,
         )
         result = cb.build("now")
         contents = [m.get("content", "") for m in result]
 
-        header_idx = next(i for i, c in enumerate(contents) if c.startswith("[Previous session — 2026-03-28 21:30]"))
-        marker_idx = next(i for i, c in enumerate(contents) if c.startswith("[New session — "))
+        header_idx = next(
+            i for i, c in enumerate(contents) if c.startswith("[Previous session — 2026-03-29 (Sun) 06:30, yesterday]")
+        )
+        marker_idx = next(
+            i for i, c in enumerate(contents) if c == "[Current session — started 2026-03-30 (Mon) 09:00 KST]"
+        )
         assert result[header_idx]["role"] == "developer"
         assert result[marker_idx]["role"] == "developer"
         assert header_idx < contents.index("do you remember") < contents.index("yes I do") < marker_idx
@@ -640,8 +651,8 @@ class TestCarryover:
 
 
 class TestCarryoverEviction:
-    """Carryover total = header(8) + marker(8) + turns(6+6) = 28 tokens;
-    one live turn 'current turn here' adds 6 → demand 34."""
+    """Carryover total = header(7+3) + marker(8+3) + turns(6+6) = 33 tokens;
+    one live turn 'current turn here' adds 6 → demand 39."""
 
     def _build(
         self,
@@ -661,6 +672,7 @@ class TestCarryoverEviction:
             session_id="cur",
             history_backend=_carryover_backend(),
             summarizer=summarizer,
+            now=_NOW,
         )
         return cb, summarizer
 
@@ -669,12 +681,12 @@ class TestCarryoverEviction:
             episodes={"prev-1": [_make_episode("User asked about memory.", sid="prev-1")]},
             processed={"prev-1"},
         )
-        # trigger = int(40 * 0.75) = 30 ≤ demand 34 → evict
+        # trigger = int(40 * 0.75) = 30 ≤ demand 39 → evict
         cb, summarizer = self._build(monkeypatch, max_history=40, storage=storage)
         result = cb.build("now")
         contents = [m.get("content", "") for m in result]
 
-        block = next(c for c in contents if "[2026-03-28 21:30 session]" in c)
+        block = next(c for c in contents if c.startswith("[Session — 2026-03-29 (Sun) 06:30, yesterday]"))
         assert "- User asked about memory." in block
         assert not any(c.startswith("[Previous session") for c in contents)
         assert "do you remember" not in contents
@@ -683,9 +695,9 @@ class TestCarryoverEviction:
 
     def test_eviction_deferred_until_processed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         storage = StubMemoryStorage(processed=set())
-        # trigger = int(30 * 0.75) = 22 ≤ demand 34 → evict attempt, but deferred;
-        # render budget: 30 - live(6) - fixed(16) = 8 → only the newest carryover turn fits
-        cb, summarizer = self._build(monkeypatch, max_history=30, storage=storage)
+        # trigger = int(35 * 0.75) = 26 ≤ demand 39 → evict attempt, but deferred;
+        # render budget: 35 - live(6) - fixed(21) = 8 → only the newest carryover turn fits
+        cb, summarizer = self._build(monkeypatch, max_history=35, storage=storage)
         result = cb.build("now")
         contents = [m.get("content", "") for m in result]
 
@@ -702,7 +714,7 @@ class TestCarryoverEviction:
         contents = [m.get("content", "") for m in result]
 
         assert not any(c.startswith("[Previous session") for c in contents)
-        assert not any("[2026-03-28 21:30 session]" in c for c in contents)
+        assert not any(c.startswith("[Session —") for c in contents)
         assert len(summarizer.scheduled) == 1
 
     def test_carryover_dropped_without_memory_storage(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -727,11 +739,11 @@ class TestLoadSessionContext:
         storage = StubMemoryStorage(recent=recent, episodes=episodes)
 
         profiles, blocks, included = load_session_context(
-            storage, "cur", _word_counter, carryover_session_id="prev-1", max_tokens=15
+            storage, "cur", _word_counter, now=_NOW, carryover_session_id="prev-1", max_tokens=20
         )
 
         assert profiles == []
-        assert blocks == [format_session_summary_block("2026-03-28 10:00:00", episodes["s3"])]
+        assert blocks == [format_session_summary_block("2026-03-28 10:00:00", episodes["s3"], _NOW)]
         assert included == {"s3"}  # 캡에서 탈락한 s2, 이월된 prev-1 은 제외 → 검색으로 복귀 가능
 
     def test_without_carryover_walks_all_sessions_chronologically(self) -> None:
@@ -742,16 +754,19 @@ class TestLoadSessionContext:
         }
         storage = StubMemoryStorage(recent=recent, episodes=episodes)
 
-        _, blocks, included = load_session_context(storage, "cur", _word_counter)
+        _, blocks, included = load_session_context(storage, "cur", _word_counter, now=_NOW)
 
-        assert [b.splitlines()[0] for b in blocks] == ["[2026-03-27 10:00 session]", "[2026-03-28 10:00 session]"]
+        assert [b.splitlines()[0] for b in blocks] == [
+            "[Session — 2026-03-27 (Fri) 19:00, 3 days ago]",
+            "[Session — 2026-03-28 (Sat) 19:00, 2 days ago]",
+        ]
         assert included == {"s2", "s3"}
 
 
 class TestRecentSessionsFromStorage:
     def test_carryover_session_skipped_and_soft_cap_applied(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Each block costs 8 words + 3 overhead = 11; cap 15 fits only the newest.
-        _set_budgets(monkeypatch, max_recent=15)
+        # Each block costs 13 words + 3 overhead = 16; cap 20 fits only the newest.
+        _set_budgets(monkeypatch, max_recent=20)
         recent = [
             ("s3", "2026-03-28 10:00:00"),
             ("s2", "2026-03-27 10:00:00"),
@@ -769,37 +784,38 @@ class TestRecentSessionsFromStorage:
             memory_storage=storage,
             session_id="cur",
             history_backend=_carryover_backend(),
+            now=_NOW,
         )
 
         # Exclusion covers current + carryover + actually-included sessions only
         assert cb.exclude_session_ids == {"cur", "prev-1", "s3"}
         result = cb.build("now")
         contents = [m.get("content", "") for m in result]
-        assert any("[2026-03-28 10:00 session]" in c for c in contents)
+        assert any("[Session — 2026-03-28 (Sat) 19:00" in c for c in contents)
         assert not any("2026-03-27" in c for c in contents)  # dropped by cap → retrievable
-        assert not any("[2026-03-26 10:00 session]" in c for c in contents)  # carried, not in block
+        assert not any("2026-03-26" in c for c in contents)  # carried, not in block
 
     def test_newest_session_included_despite_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _set_budgets(monkeypatch, max_recent=5)
         recent = [("s3", "2026-03-28 10:00:00")]
         episodes = {"s3": [_make_episode("A very long episode text that exceeds the tiny cap easily.", sid="s3")]}
         storage = StubMemoryStorage(recent=recent, episodes=episodes, processed={"s3"})
-        cb = ContextBuilder(StubHistory(), "", _word_counter, memory_storage=storage, session_id="cur")
+        cb = ContextBuilder(StubHistory(), "", _word_counter, memory_storage=storage, session_id="cur", now=_NOW)
 
         assert cb.exclude_session_ids == {"cur", "s3"}
         result = cb.build("now")
-        assert any("[2026-03-28 10:00 session]" in str(m.get("content", "")) for m in result)
+        assert any("[Session — 2026-03-28 (Sat) 19:00" in str(m.get("content", "")) for m in result)
 
     def test_sessions_without_episodes_skipped(self) -> None:
         recent = [("s3", "2026-03-28 10:00:00"), ("s2", "2026-03-27 10:00:00")]
         episodes = {"s2": [_make_episode("Older session episode text.", sid="s2")]}
         storage = StubMemoryStorage(recent=recent, episodes=episodes, processed={"s2"})
-        cb = ContextBuilder(StubHistory(), "", _word_counter, memory_storage=storage, session_id="cur")
+        cb = ContextBuilder(StubHistory(), "", _word_counter, memory_storage=storage, session_id="cur", now=_NOW)
 
         assert cb.exclude_session_ids == {"cur", "s2"}
         result = cb.build("now")
         contents = [str(m.get("content", "")) for m in result]
-        assert any("[2026-03-27 10:00 session]" in c for c in contents)
+        assert any("[Session — 2026-03-27 (Fri) 19:00" in c for c in contents)
         assert not any("2026-03-28" in c for c in contents)
 
     def test_walk_continues_past_empty_sessions_across_pages(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -809,22 +825,22 @@ class TestRecentSessionsFromStorage:
         recent.append(("old-1", "2026-03-01 09:00:00"))
         episodes = {"old-1": [_make_episode("Old but meaningful episode.", sid="old-1")]}
         storage = StubMemoryStorage(recent=recent, episodes=episodes, processed={"old-1"})
-        cb = ContextBuilder(StubHistory(), "", _word_counter, memory_storage=storage, session_id="cur")
+        cb = ContextBuilder(StubHistory(), "", _word_counter, memory_storage=storage, session_id="cur", now=_NOW)
 
         assert cb.exclude_session_ids == {"cur", "old-1"}
         result = cb.build("now")
-        assert any("[2026-03-01 09:00 session]" in str(m.get("content", "")) for m in result)
+        assert any("[Session — 2026-03-01 (Sun) 18:00" in str(m.get("content", "")) for m in result)
 
     def test_paging_stops_once_cap_binds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """캡이 바인딩되면 이후 페이지의 에피소드는 로드하지 않는다 (lazy)."""
         monkeypatch.setattr(ContextBuilder, "_SESSION_PAGE_SIZE", 2)
-        _set_budgets(monkeypatch, max_recent=15)
+        _set_budgets(monkeypatch, max_recent=20)
         recent = [(f"s{i}", f"2026-03-{28 - i:02d} 10:00:00") for i in range(6)]
         episodes = {sid: [_make_episode(f"Episode text for session {sid}.", sid=sid)] for sid, _ in recent}
         storage = StubMemoryStorage(recent=recent, episodes=episodes, processed=set(episodes))
-        cb = ContextBuilder(StubHistory(), "", _word_counter, memory_storage=storage, session_id="cur")
+        cb = ContextBuilder(StubHistory(), "", _word_counter, memory_storage=storage, session_id="cur", now=_NOW)
 
-        # 블록당 비용 ~12토큰, 캡 15 → 첫 세션만 포함, 두 번째에서 중단.
+        # 블록당 비용 17토큰, 캡 20 → 첫 세션만 포함, 두 번째에서 중단.
         # 둘 다 첫 페이지(크기 2)에 있으므로 두 번째 페이지는 로드되지 않는다.
         assert cb.exclude_session_ids == {"cur", "s0"}
         assert len(storage.episode_calls) == 1
@@ -844,11 +860,12 @@ class TestRecentSessionsFromStorage:
             memory_storage=storage,
             session_id="cur",
             history_backend=_carryover_backend(),
+            now=_NOW,
         )
         result = cb.build("now")
         contents = [str(m.get("content", "")) for m in result]
 
-        s2_idx = next(i for i, c in enumerate(contents) if "2026-03-27 10:00 session]" in c)
-        s3_idx = next(i for i, c in enumerate(contents) if "2026-03-28 10:00 session]" in c)
+        s2_idx = next(i for i, c in enumerate(contents) if c.startswith("[Session — 2026-03-27 (Fri) 19:00"))
+        s3_idx = next(i for i, c in enumerate(contents) if c.startswith("[Session — 2026-03-28 (Sat) 19:00"))
         header_idx = next(i for i, c in enumerate(contents) if c.startswith("[Previous session"))
         assert s2_idx < s3_idx < header_idx  # oldest → newest → carryover

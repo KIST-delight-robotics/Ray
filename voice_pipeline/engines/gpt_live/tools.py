@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from typing import Any
 
 from voice_pipeline.device_settings import (
@@ -32,6 +33,7 @@ from voice_pipeline.device_settings import (
 )
 from voice_pipeline.engines.gpt_live.songs import Song
 from voice_pipeline.memory.retriever import MemoryRetriever
+from voice_pipeline.session_context import format_local_time
 
 ToolHandler = Callable[[str], str]  # arguments(JSON 문자열) → output(JSON 문자열)
 
@@ -190,7 +192,7 @@ def make_play_song_tool_def(catalog: Mapping[str, Song]) -> dict[str, Any] | Non
     }
 
 
-def make_memory_search_handler(retriever: MemoryRetriever, exclude_session_ids: set[str]) -> ToolHandler:
+def make_memory_search_handler(retriever: MemoryRetriever, exclude_session_ids: set[str], now: datetime) -> ToolHandler:
     """``search_memory`` 툴 핸들러. 검색 결과를 ``{"memories": [{"text", "date"}, …]}`` JSON 으로 돌려준다.
 
     백엔드가 결과를 읽고 현재 질문에 맞는 것만 골라 답을 만들므로 여기서는 선별하지 않는다(상한은
@@ -200,6 +202,7 @@ def make_memory_search_handler(retriever: MemoryRetriever, exclude_session_ids: 
     Args:
         retriever: 세션 단위 retriever. 핸들러는 executor 스레드에서 불리지만 한 번에 하나씩이다.
         exclude_session_ids: 검색에서 제외할 세션 — 현재 세션과 instructions 의 최근 세션 블록에 포함된 세션.
+        now: 세션 시작 시각 — ``date`` 를 instructions 의 세션 헤더와 같은 현지 시각·상대 시간으로 쓴다.
     """
 
     def handler(arguments: str) -> str:
@@ -208,7 +211,7 @@ def make_memory_search_handler(retriever: MemoryRetriever, exclude_session_ids: 
         if not query:
             return json.dumps({"memories": [], "error": "empty query"})
         result = retriever.retrieve(query, exclude_session_ids)
-        memories = [{"text": ep.text, "date": ep.timestamp[:10]} for ep in result.episodes]
+        memories = [{"text": ep.text, "date": format_local_time(ep.timestamp, now)} for ep in result.episodes]
         return json.dumps({"memories": memories}, ensure_ascii=False)
 
     return handler

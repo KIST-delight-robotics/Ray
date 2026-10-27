@@ -228,7 +228,7 @@ def _answer_one(
     citations: list[int] = []
     if answer_style == "production":
         result, profiles = results.get(conv.perspectives[0], (None, []))
-        messages = build_production_messages(qa.question, result, profiles)
+        messages = build_production_messages(qa.question, result, profiles, now_dt)
     else:
         blocks = {
             name: (format_memories(result.episodes), format_profile(profiles))

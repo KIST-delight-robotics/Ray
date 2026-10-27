@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal
 
 import torch
@@ -189,21 +190,22 @@ class ProcessComponents:
         if self.engine == "live":
             # 장기기억: 프로필·최근 세션은 시작 instructions 에(세션 중 재조립 불가), 에피소드 검색은
             # 백엔드 함수 툴로 — 트리거와 쿼리 생성을 백엔드 LLM 이 맡는다.
+            now = datetime.now().astimezone()  # 모델에게 보이는 시각의 기준 — 시간대는 기기 시스템 설정
             tool_handlers: dict[str, Any] = dict(session_loop_kwargs.pop("tool_handlers", None) or {})
             if self.device_settings is not None:
                 for name, handler in make_device_settings_handlers(self.device_settings).items():
                     tool_handlers.setdefault(name, handler)
             if memory_enabled:
                 profiles, recent_texts, included_ids = load_session_context(
-                    self.memory_storage, session_id, self.token_counter
+                    self.memory_storage, session_id, self.token_counter, now=now
                 )
                 retriever = MemoryRetriever(self.memory_storage, self.vector_index, self.embedder)
                 tool_handlers.setdefault(
-                    SEARCH_MEMORY_TOOL, make_memory_search_handler(retriever, {session_id} | included_ids)
+                    SEARCH_MEMORY_TOOL, make_memory_search_handler(retriever, {session_id} | included_ids, now)
                 )
-                instructions = build_live_instructions(format_profile_block(profiles), recent_texts)
+                instructions = build_live_instructions(format_profile_block(profiles), recent_texts, now=now)
             else:
-                instructions = build_live_instructions()
+                instructions = build_live_instructions(now=now)
             # 핸들러가 있는 툴만 백엔드에 노출한다 (end_conversation·노래 툴은 루프 내장)
             tools = tuple(t for t in DEFAULT_TOOLS if t["name"] in LOOP_TOOLS or t["name"] in tool_handlers)
             if (play_song := make_play_song_tool_def(self.song_catalog)) is not None:

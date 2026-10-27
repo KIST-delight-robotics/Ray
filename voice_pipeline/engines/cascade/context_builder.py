@@ -18,6 +18,7 @@ import logging
 import re
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from voice_pipeline.engines.cascade.summarizer import HistorySummarizer
@@ -27,13 +28,15 @@ from voice_pipeline.session_context import (
     PER_MESSAGE_OVERHEAD_TOKENS,
     RECENT_SESSIONS_MAX_TOKENS,
     SESSION_PAGE_SIZE,
+    format_current_session_marker,
+    format_local_time,
     format_profile_block,
     format_session_summary_block,
     load_session_context,
     select_recent_blocks,
 )
 from voice_pipeline.settings import HISTORY_TOKEN_BUDGET
-from voice_pipeline.types import TokenCounter, utc_now_str
+from voice_pipeline.types import TokenCounter
 
 if TYPE_CHECKING:
     from voice_pipeline.memory.types import MemoryReadResult, Profile
@@ -64,39 +67,27 @@ _MD_LINK_RE = re.compile(r"\[[^\]]*\]\([^)]*\)")
 # ---------------------------------------------------------------------------
 
 
-def format_carryover_block(started_at: str, summary_text: str | None = None) -> str:
+def format_carryover_block(started_at: str, now: datetime, summary_text: str | None = None) -> str:
     """Header opening the previous session's raw turns carried into context.
+
+    The turns end with :func:`~voice_pipeline.session_context.format_current_session_marker`.
 
     Args:
         started_at: Previous session start timestamp (UTC, '%Y-%m-%d %H:%M:%S').
+        now: Current session start — the header is shown in its timezone.
         summary_text: Persisted rolling summary covering the earlier part of
             that session, or None if it never summarized.
 
     Output example::
 
-        [Previous session — 2026-03-28 21:30]
+        [Previous session — 2026-03-29 (Sun) 06:30, yesterday]
         Earlier in that session: User asked about weekend plans; Ray suggested
         a movie night. ...
     """
-    display_time = started_at[:16] if len(started_at) >= 16 else started_at
-    header = f"[Previous session — {display_time}]"
+    header = f"[Previous session — {format_local_time(started_at, now)}]"
     if summary_text:
         return f"{header}\nEarlier in that session: {summary_text}"
     return header
-
-
-def format_session_boundary(started_at: str) -> str:
-    """Marker separating carried-over previous-session turns from the current session.
-
-    Args:
-        started_at: Current session start timestamp (UTC, '%Y-%m-%d %H:%M:%S').
-
-    Output example::
-
-        [New session — 2026-03-29 09:15]
-    """
-    display_time = started_at[:16] if len(started_at) >= 16 else started_at
-    return f"[New session — {display_time}]"
 
 
 # ---------------------------------------------------------------------------
@@ -104,21 +95,20 @@ def format_session_boundary(started_at: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def format_memory_block(memory_result: MemoryReadResult) -> str:
+def format_memory_block(memory_result: MemoryReadResult, now: datetime) -> str:
     """Format retrieved memories for LLM context injection (Block 4).
 
     Output example::
 
         [Retrieved Memories]
-        [M1] User cried watching Interstellar on a rainy day. (2026-03-15)
-        [M2] User said Dune 2 was better than the original. (2026-03-20)
+        [M1] User cried watching Interstellar on a rainy day. (2026-03-15 (Sun) 23:00, 12 days ago)
+        [M2] User said Dune 2 was better than the original. (2026-03-20 (Fri) 19:00, 7 days ago)
     """
     if not memory_result.episodes:
         return ""
     lines = ["[Retrieved Memories]"]
     for i, ep in enumerate(memory_result.episodes, 1):
-        date = ep.timestamp[:10] if len(ep.timestamp) >= 10 else ep.timestamp
-        lines.append(f"[M{i}] {ep.text} ({date})")
+        lines.append(f"[M{i}] {ep.text} ({format_local_time(ep.timestamp, now)})")
     return "\n".join(lines)
 
 
@@ -177,7 +167,7 @@ class _Carryover:
     started_at: str
     header_text: str  # "[Previous session — …]" (+ persisted rolling summary)
     header_tokens: int
-    marker_text: str  # "[New session — …]"
+    marker_text: str  # "[Current session — started …]"
     marker_tokens: int
     turn_units: tuple[tuple[tuple[dict[str, Any], ...], int], ...]
     total_tokens: int
@@ -226,6 +216,7 @@ class ContextBuilder:
         session_id: str | None = None,
         summarizer: HistorySummarizer | None = None,
         history_backend: SQLiteStorageBackend | None = None,
+        now: datetime | None = None,
     ) -> None:
         """Initialize the builder and load session-level context.
 
@@ -241,7 +232,10 @@ class ContextBuilder:
             summarizer: 세션 내 히스토리 롤링 요약기.
             history_backend: 직전 세션 이월(carryover) 로딩용 히스토리 백엔드.
                 ``None``이면 이월 없음.
+            now: 세션 시작 시각(시간대 있음). 모델에게 보이는 시각의 시간대와 상대 시간 기준.
+                ``None``이면 지금 현지 시각.
         """
+        self._now = now or datetime.now().astimezone()
         self._history = history
         self._system_prompt = system_prompt
         self._token_counter = token_counter
@@ -267,6 +261,7 @@ class ContextBuilder:
                 memory_storage,
                 session_id,
                 token_counter,
+                now=self._now,
                 carryover_session_id=carryover_sid,
                 max_tokens=self._MAX_RECENT_SESSIONS_TOKENS,
                 page_size=self._SESSION_PAGE_SIZE,
@@ -422,8 +417,8 @@ class ContextBuilder:
         if not turn_units and summary_text is None:
             return None
 
-        header_text = format_carryover_block(started_at, summary_text)
-        marker_text = format_session_boundary(utc_now_str())
+        header_text = format_carryover_block(started_at, self._now, summary_text)
+        marker_text = format_current_session_marker(self._now)
         header_tokens = self._token_counter(header_text) + PER_MESSAGE_OVERHEAD_TOKENS
         marker_tokens = self._token_counter(marker_text) + PER_MESSAGE_OVERHEAD_TOKENS
         total = header_tokens + marker_tokens + sum(cost for _, cost in turn_units)
@@ -469,7 +464,9 @@ class ContextBuilder:
             logger.warning("Carryover eviction failed — will retry on next build", exc_info=True)
             return
         if episodes:
-            self._recent_block_texts.append(format_session_summary_block(self._carryover.started_at, episodes))
+            self._recent_block_texts.append(
+                format_session_summary_block(self._carryover.started_at, episodes, self._now)
+            )
         self._carryover = None
         logger.info("Carryover evicted: session %s → %d episode(s) in recent block", sid, len(episodes))
 
@@ -506,7 +503,7 @@ class ContextBuilder:
         """Format the memory block, trimming lowest-salience episodes to fit the cap."""
         if not memory_result or not memory_result.episodes:
             return ""
-        memory_text = format_memory_block(memory_result)
+        memory_text = format_memory_block(memory_result, self._now)
         memory_cost = self._token_counter(memory_text) + PER_MESSAGE_OVERHEAD_TOKENS
         if memory_cost <= self._MAX_MEMORY_TOKENS:
             return memory_text
@@ -520,6 +517,6 @@ class ContextBuilder:
             eps.pop()
             scores.pop()
             idx_map.pop(len(eps) + 1, None)
-            memory_text = format_memory_block(_MemoryReadResult(eps, scores, idx_map))
+            memory_text = format_memory_block(_MemoryReadResult(eps, scores, idx_map), self._now)
             memory_cost = self._token_counter(memory_text) + PER_MESSAGE_OVERHEAD_TOKENS if memory_text else 0
         return memory_text

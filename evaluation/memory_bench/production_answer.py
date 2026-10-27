@@ -12,6 +12,7 @@ LongMemEval 전용 — LoCoMo는 레이가 대화 참여자가 아니라 성립�
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from voice_pipeline.engines.cascade.context_builder import (
@@ -29,15 +30,19 @@ def build_production_messages(
     question: str,
     memory_result: MemoryReadResult | None,
     profiles: list[Profile],
+    now: datetime,
 ) -> list[dict[str, Any]]:
-    """Assemble messages the way production ContextBuilder does (Blocks 1/2/4)."""
+    """Assemble messages the way production ContextBuilder does (Blocks 1/2/4).
+
+    ``now`` is the question time — memory dates are labeled relative to it.
+    """
     messages: list[dict[str, Any]] = [{"role": "system", "content": DEFAULT_SYSTEM_PROMPT}]
     profile_text = format_profile_block(profiles)
     if profile_text:
         messages.append({"role": "developer", "content": profile_text})
     messages.append({"role": "user", "content": question})
     if memory_result is not None:
-        memory_text = format_memory_block(memory_result)
+        memory_text = format_memory_block(memory_result, now)
         if memory_text:
             messages.append({"role": "developer", "content": memory_text})
     return messages

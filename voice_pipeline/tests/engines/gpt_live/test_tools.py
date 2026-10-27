@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, Mock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -98,16 +100,19 @@ class TestMemorySearchHandler:
         retriever = MagicMock(spec=MemoryRetriever)
         ep = Episode(7, "User cried watching Interstellar.", "2026-03-15 20:00:00", "s-1", 1.0, "2026-03-15 20:00:00")
         retriever.retrieve.return_value = MemoryReadResult(episodes=[ep], scores=[0.5], index_to_id={1: 7})
-        handler = make_memory_search_handler(retriever, {"cur", "s-recent"})
+        now = datetime(2026, 3, 17, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+        handler = make_memory_search_handler(retriever, {"cur", "s-recent"}, now)
 
         out = json.loads(handler(json.dumps({"query": "인터스텔라"})))
 
         retriever.retrieve.assert_called_once_with("인터스텔라", {"cur", "s-recent"})
-        assert out == {"memories": [{"text": "User cried watching Interstellar.", "date": "2026-03-15"}]}
+        # UTC 20:00 은 현지(KST) 다음 날 05:00 — 날짜까지 현지 기준으로 넘어간다
+        expected = {"text": "User cried watching Interstellar.", "date": "2026-03-16 (Mon) 05:00, yesterday"}
+        assert out == {"memories": [expected]}
 
     def test_search_handler_empty_query_does_not_search(self) -> None:
         retriever = MagicMock(spec=MemoryRetriever)
-        handler = make_memory_search_handler(retriever, set())
+        handler = make_memory_search_handler(retriever, set(), datetime.now().astimezone())
         out = json.loads(handler(json.dumps({"query": "  "})))
         assert out["memories"] == [] and "error" in out
         retriever.retrieve.assert_not_called()

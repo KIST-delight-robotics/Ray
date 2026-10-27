@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 from voice_pipeline.engines.gpt_live.songs import Song, format_song_list
+from voice_pipeline.session_context import format_current_session_marker
 
 # ---------------------------------------------------------------------------
 # Prompts — 라이브 지시문은 공식 템플릿 구조(페르소나 → Backchannel / Interruption / Delegation policy)를 줄인 것.
@@ -336,15 +338,17 @@ LIVE_GREETING_TEXT = "네, 부르셨어요?"  # 웨이크워드 뒤 세션 연�
 LIVE_GREETING_TTS_MODEL = "gpt-4o-mini-tts"  # Live 목소리(cedar)를 지원하는 OpenAI TTS 모델
 
 
-def build_live_instructions(profile_text: str = "", recent_session_texts: Sequence[str] = ()) -> str:
-    """세션 시작 instructions — 기본 지시문 뒤에 프로필(블록 2)과 최근 세션(블록 3)을 붙인다.
+def build_live_instructions(profile_text: str = "", recent_session_texts: Sequence[str] = (), *, now: datetime) -> str:
+    """세션 시작 instructions — 기본 지시문 뒤에 프로필(블록 2)과 최근 세션(블록 3)을 붙이고 현재 세션 표시로 끝낸다.
 
     instructions 는 세션 시작 후 바꿀 수 없으므로 세션 수준 컨텍스트는 여기에 한 번 들어간다.
-    한도 16,384 토큰에 대해 프로필 256 + 최근 세션 512 soft cap 이라 여유가 크다.
+    한도 16,384 토큰에 대해 프로필 256 + 최근 세션 512 soft cap 이라 여유가 크다. 대화 모델은 시계가 없어
+    끝의 현재 세션 표시가 "지금" 의 유일한 근거다 — 백엔드도 이 지시문을 같이 받는다(FINDINGS §4).
 
     Args:
         profile_text: :func:`~voice_pipeline.session_context.format_profile_block` 결과. 빈 문자열이면 생략.
         recent_session_texts: 최근 세션 블록 텍스트, 시간순. 비어 있으면 생략.
+        now: 세션 시작 시각(현지 시간대).
     """
     parts = [DEFAULT_LIVE_INSTRUCTIONS.rstrip()]
     if profile_text or recent_session_texts:
@@ -352,4 +356,5 @@ def build_live_instructions(profile_text: str = "", recent_session_texts: Sequen
     if profile_text:
         parts.append(profile_text.strip())
     parts.extend(text.strip() for text in recent_session_texts if text.strip())
+    parts.append(format_current_session_marker(now))
     return "\n\n".join(parts) + "\n"

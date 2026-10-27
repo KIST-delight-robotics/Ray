@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from voice_pipeline.engines.cascade.context_builder import (
     format_carryover_block,
     format_memory_block,
-    format_session_boundary,
     parse_citation_tag,
 )
 from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
 from voice_pipeline.session_context import format_profile_block, format_session_summary_block
+
+_NOW = datetime(2026, 3, 30, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))  # = 2026-03-30 00:00 UTC
 
 
 def _ep(
@@ -73,44 +77,30 @@ class TestFormatSessionSummaryBlock:
             _ep("User talked about Dune.", "2026-03-28 14:00:00"),
             _ep("User mentioned moving to a new apartment.", "2026-03-28 14:05:00"),
         ]
-        result = format_session_summary_block("2026-03-28 14:00:00", episodes)
-        assert "[2026-03-28 14:00 session]" in result
+        result = format_session_summary_block("2026-03-28 14:00:00", episodes, _NOW)
+        assert result.startswith("[Session — 2026-03-28 (Sat) 23:00, 2 days ago]\n")
         assert "- User talked about Dune." in result
         assert "- User mentioned moving" in result
 
     def test_no_episodes(self) -> None:
-        result = format_session_summary_block("2026-03-28 14:00:00", [])
+        result = format_session_summary_block("2026-03-28 14:00:00", [], _NOW)
         assert "(no summary available)" in result
 
 
 # ---------------------------------------------------------------------------
-# format_carryover_block / format_session_boundary
+# format_carryover_block
 # ---------------------------------------------------------------------------
 
 
 class TestFormatCarryoverBlock:
     def test_without_summary(self) -> None:
-        result = format_carryover_block("2026-03-28 21:30:00")
-        assert result == "[Previous session — 2026-03-28 21:30]"
+        result = format_carryover_block("2026-03-28 21:30:00", _NOW)
+        assert result == "[Previous session — 2026-03-29 (Sun) 06:30, yesterday]"
 
     def test_with_summary(self) -> None:
-        result = format_carryover_block("2026-03-28 21:30:00", "User planned a trip to Busan.")
-        assert result.startswith("[Previous session — 2026-03-28 21:30]\n")
+        result = format_carryover_block("2026-03-28 21:30:00", _NOW, "User planned a trip to Busan.")
+        assert result.startswith("[Previous session — 2026-03-29 (Sun) 06:30, yesterday]\n")
         assert "Earlier in that session: User planned a trip to Busan." in result
-
-    def test_short_timestamp_passthrough(self) -> None:
-        result = format_carryover_block("2026-03-28")
-        assert result == "[Previous session — 2026-03-28]"
-
-
-class TestFormatSessionBoundary:
-    def test_basic(self) -> None:
-        result = format_session_boundary("2026-03-29 09:15:00")
-        assert result == "[New session — 2026-03-29 09:15]"
-
-    def test_microsecond_timestamp_truncated(self) -> None:
-        result = format_session_boundary("2026-03-29 09:15:42.123456")
-        assert result == "[New session — 2026-03-29 09:15]"
 
 
 # ---------------------------------------------------------------------------
@@ -120,15 +110,15 @@ class TestFormatSessionBoundary:
 
 class TestFormatMemoryBlock:
     def test_empty(self) -> None:
-        result = format_memory_block(MemoryReadResult([], [], {}))
+        result = format_memory_block(MemoryReadResult([], [], {}), _NOW)
         assert result == ""
 
     def test_single_episode(self) -> None:
         ep = _ep("User cried watching Interstellar.", "2026-03-15 14:00:00", ep_id=42)
         mem = MemoryReadResult([ep], [0.9], {1: 42})
-        result = format_memory_block(mem)
+        result = format_memory_block(mem, _NOW)
         assert "[Retrieved Memories]" in result
-        assert "[M1] User cried watching Interstellar. (2026-03-15)" in result
+        assert "[M1] User cried watching Interstellar. (2026-03-15 (Sun) 23:00, 15 days ago)" in result
 
     def test_multiple_episodes(self) -> None:
         eps = [
@@ -136,11 +126,11 @@ class TestFormatMemoryBlock:
             _ep("Episode two.", "2026-03-20 10:00:00", ep_id=2),
         ]
         mem = MemoryReadResult(eps, [0.9, 0.8], {1: 1, 2: 2})
-        result = format_memory_block(mem)
+        result = format_memory_block(mem, _NOW)
         assert "[M1]" in result
         assert "[M2]" in result
-        assert "(2026-03-15)" in result
-        assert "(2026-03-20)" in result
+        assert "(2026-03-15 (Sun) 23:00, 15 days ago)" in result
+        assert "(2026-03-20 (Fri) 19:00, 10 days ago)" in result
 
 
 # ---------------------------------------------------------------------------
