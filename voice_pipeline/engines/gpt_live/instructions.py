@@ -210,11 +210,13 @@ Ray, a small desk robot, is hosting a radio talk: it reads prepared lines aloud,
 Someone spoke while Ray was reading. The talk goes on by default; decide whether it must pause because the user \
 is talking to Ray. The transcripts come from speech recognition and may contain errors.
 
-- paused: the user is clearly talking to Ray: a question (also about the talk itself), a request, asking Ray to \
-wait or to stop the talk, a complaint about the talk, or a comment or their own story in response to the talk \
-(for example 나도 그런 적 있어) — even if Ray kept reading. Ray stops the talk and talks with the user.
-- on: everything else — a brief reaction (for example 응, 아 진짜, 맞아, 그렇구나), talking on the phone or to \
-someone else, talking to themselves, or words that are unclear. The talk goes on.
+- paused: the user is clearly talking to Ray: a question (also about the talk itself), a request other than to \
+go on, asking Ray to wait or to stop the talk, a complaint about the talk, or a comment or their own story in \
+response to the talk (for example 나도 그런 적 있어) — even if Ray kept reading. Ray stops the talk and talks with \
+the user.
+- on: everything else — a brief reaction (for example 응, 아 진짜, 맞아, 그렇구나), asking Ray to go on with the \
+talk (for example 계속해, 이어서 해 줘), talking on the phone or to someone else, talking to themselves, or words \
+that are unclear. The talk goes on.
 """
 RADIO_JUDGE_FORMAT: dict[str, Any] = {
     "type": "json_schema",
