@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from voice_pipeline.device_settings import (
@@ -55,7 +55,7 @@ SEARCH_MEMORY_TOOL_DEF: dict[str, Any] = {
     "name": SEARCH_MEMORY_TOOL,
     "description": (
         "Search Ray's long-term memory of earlier conversations with the user. "
-        "Returns episodes (third-person notes with dates) that match the query. "
+        "Returns episodes (third-person notes, each with its date) that match the query, the date range, or both. "
         "Use it for anything the user told Ray in a past session."
     ),
     "parameters": {
@@ -64,12 +64,24 @@ SEARCH_MEMORY_TOOL_DEF: dict[str, Any] = {
             "query": {
                 "type": "string",
                 "description": (
-                    "What to look for, in English; keep names and titles in the original language. "
-                    "Include names, topics and time hints from the conversation."
+                    "The topic to look for, in English; keep names and titles in the original language. "
+                    'Leave it empty ("") when the user asks only about a period, such as "what did we talk about '
+                    'yesterday": the range alone finds it.'
                 ),
-            }
+            },
+            "since": {
+                "type": ["string", "null"],
+                "description": (
+                    "First local date of the range (YYYY-MM-DD). Set a range only when the user names a calendar "
+                    "time: today, yesterday, last week, a date. Null for vague times like 전에 or 저번에."
+                ),
+            },
+            "until": {
+                "type": ["string", "null"],
+                "description": "Last local date of the range, inclusive (YYYY-MM-DD). Null when it runs to today.",
+            },
         },
-        "required": ["query"],
+        "required": ["query", "since", "until"],
         "additionalProperties": False,
     },
     "strict": True,
@@ -196,25 +208,47 @@ def make_memory_search_handler(retriever: MemoryRetriever, exclude_session_ids: 
     """``search_memory`` 툴 핸들러. 검색 결과를 ``{"memories": [{"text", "date"}, …]}`` JSON 으로 돌려준다.
 
     백엔드가 결과를 읽고 현재 질문에 맞는 것만 골라 답을 만들므로 여기서는 선별하지 않는다(상한은
-    retriever 의 것). 인용 갱신은 하지 않는다 — 대화 모델 출력에 인용 태그가 없고, 턴 단위 retained
-    buffer 도 이 엔진에서는 의미가 없다.
+    retriever 의 것). ``since``/``until`` 이 있으면 기간 검색(:meth:`MemoryRetriever.retrieve_in_range`) —
+    주제가 있으면 범위 밖 상위 결과도 몇 개 딸려 오고, 어느 쪽인지는 ``date`` 로 백엔드가 가린다.
+    인용 갱신은 하지 않는다 — 대화 모델 출력에 인용 태그가 없고, 턴 단위 retained buffer 도 이 엔진에서는
+    의미가 없다.
 
     Args:
         retriever: 세션 단위 retriever. 핸들러는 executor 스레드에서 불리지만 한 번에 하나씩이다.
         exclude_session_ids: 검색에서 제외할 세션 — 현재 세션과 instructions 의 최근 세션 블록에 포함된 세션.
-        now: 세션 시작 시각 — ``date`` 를 instructions 의 세션 헤더와 같은 현지 시각·상대 시간으로 쓴다.
+        now: 세션 시작 시각 — ``date`` 를 instructions 의 세션 헤더와 같은 현지 시각·상대 시간으로 쓰고,
+            ``since``/``until`` 의 현지 날짜를 이 시간대로 읽는다.
     """
 
     def handler(arguments: str) -> str:
         args = json.loads(arguments or "{}")
-        query = str(args.get("query", "")).strip()
-        if not query:
+        query = str(args.get("query") or "").strip()
+        since, until = args.get("since"), args.get("until")
+        if since or until:
+            try:
+                start, end = _utc_bounds(since, until, now)
+            except ValueError:
+                return json.dumps({"memories": [], "error": "since/until must be YYYY-MM-DD"})
+            episodes = retriever.retrieve_in_range(query, start, end, exclude_session_ids)
+        elif query:
+            episodes = retriever.retrieve(query, exclude_session_ids).episodes
+        else:
             return json.dumps({"memories": [], "error": "empty query"})
-        result = retriever.retrieve(query, exclude_session_ids)
-        memories = [{"text": ep.text, "date": format_local_time(ep.timestamp, now)} for ep in result.episodes]
+        memories = [{"text": ep.text, "date": format_local_time(ep.timestamp, now)} for ep in episodes]
         return json.dumps({"memories": memories}, ensure_ascii=False)
 
     return handler
+
+
+def _utc_bounds(since: str | None, until: str | None, now: datetime) -> tuple[str, str]:
+    """현지 날짜 범위(양끝 포함)를 저장 시각(UTC 문자열)의 반열린 구간으로. 빠진 쪽은 열어 둔다."""
+
+    def day_start(day: date) -> str:
+        return datetime.combine(day, time.min, tzinfo=now.tzinfo).astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+    start = day_start(date.fromisoformat(since)) if since else ""
+    end = day_start(date.fromisoformat(until) + timedelta(days=1)) if until else "9999"
+    return start, end
 
 
 def make_device_settings_handlers(settings: DeviceSettings) -> dict[str, ToolHandler]:

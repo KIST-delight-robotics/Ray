@@ -275,6 +275,22 @@ class SQLiteMemoryStorage:
                 logger.warning("Failed to get episodes by session ids", exc_info=True)
                 return {}
 
+    def get_episodes_between(self, start: str, end: str) -> list[Episode]:
+        """Episodes with ``start <= timestamp < end`` (UTC strings), oldest first."""
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT id, text, timestamp, session_id, importance, "
+                    "last_cited_at, citation_count, embedding "
+                    "FROM episodes WHERE timestamp >= ? AND timestamp < ? "
+                    "ORDER BY timestamp, id",
+                    (start, end),
+                ).fetchall()
+                return [self._row_to_episode(row) for row in rows]
+            except sqlite3.Error:
+                logger.warning("Failed to get episodes between %s and %s", start, end, exc_info=True)
+                return []
+
     def update_episode_cited(self, episode_id: int, cited_at: str) -> None:
         """Update the last_cited_at timestamp for an episode."""
         with self._lock:

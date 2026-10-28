@@ -8,6 +8,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+import numpy as np
+
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.types import Episode, MemoryReadResult
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
@@ -47,6 +49,8 @@ class MemoryRetriever:
     _RRF_K = 60  # RRF 융합 상수 (원 논문 default 60)
     _RECENCY_HALF_LIFE_DAYS = 30.0  # 시간 감쇠 반감기 (일)
     _SALIENCE_THRESHOLD = 0.0  # salience 최소 기준 (0.0 = 비활성화)
+    _RANGE_MAX_MEMORIES = 20  # 주제 없는 기간 검색이 돌려줄 최대 에피소드 수 (최근 것부터)
+    _RANGE_OUTSIDE_EXTRA = 3  # 주제 있는 기간 검색에 덧붙이는 범위 밖 결과 수 — 날짜를 잘못 기억한 경우
 
     def __init__(
         self,
@@ -58,7 +62,7 @@ class MemoryRetriever:
     ) -> None:
         """
         Args:
-            storage: Episode/profile persistence backend.
+            storage: Episode storage.
             vector_index: Vector search index over episode embeddings.
             embedder: Query embedder.
             now_fn: Clock override for recency decay (중립 주입점 — 과거 시점
@@ -187,6 +191,31 @@ class MemoryRetriever:
 
             self._storage.update_episode_cited(eid, now_str)
 
+    def retrieve_in_range(self, query: str, start: str, end: str, exclude_session_ids: set[str]) -> list[Episode]:
+        """Episodes with ``start <= timestamp < end`` (UTC) — the time-bounded search.
+
+        Without a query: the range's episodes in time order, the newest ``_RANGE_MAX_MEMORIES``.
+        With a query: the range's episodes ranked by similarity — the range is filtered before
+        ranking, since :meth:`retrieve`'s global top-K can miss them — followed by up to
+        ``_RANGE_OUTSIDE_EXTRA`` unrestricted results from outside the range. Users misremember
+        dates; every result carries its date, so the caller can tell which is which.
+        """
+        in_range = [
+            ep for ep in self._storage.get_episodes_between(start, end) if ep.session_id not in exclude_session_ids
+        ]
+        if not query:
+            return in_range[-self._RANGE_MAX_MEMORIES :]
+        try:
+            query_vec = self._embedder.embed(query)
+        except Exception:
+            logger.warning("Failed to embed query, returning range episodes in time order", exc_info=True)
+            return in_range[-self._MAX_MEMORIES :]
+
+        ranked = sorted(in_range, key=lambda ep: _cosine(query_vec, ep.embedding), reverse=True)
+        in_range_ids = {ep.id for ep in in_range}
+        outside = [ep for ep in self.retrieve(query, exclude_session_ids).episodes if ep.id not in in_range_ids]
+        return ranked[: self._MAX_MEMORIES] + outside[: self._RANGE_OUTSIDE_EXTRA]
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -266,3 +295,10 @@ class MemoryRetriever:
 
         self._last_index_to_id = index_to_id
         return MemoryReadResult(episodes=episodes, scores=scores, index_to_id=index_to_id)
+
+
+def _cosine(query: np.ndarray, embedding: np.ndarray | None) -> float:
+    """Cosine similarity; an episode without an embedding ranks last."""
+    if embedding is None:
+        return -1.0
+    return float(np.dot(query, embedding) / (np.linalg.norm(query) * np.linalg.norm(embedding) + 1e-9))

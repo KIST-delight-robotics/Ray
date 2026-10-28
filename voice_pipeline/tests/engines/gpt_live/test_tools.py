@@ -29,6 +29,7 @@ from voice_pipeline.engines.gpt_live.tools import (
     RADIO_TOOLS,
     RESUME_RADIO_TOOL,
     SEARCH_MEMORY_TOOL,
+    SEARCH_MEMORY_TOOL_DEF,
     SET_BRIGHTNESS_TOOL,
     START_RADIO_TOOL,
     STOP_SONG_TOOL,
@@ -116,6 +117,54 @@ class TestMemorySearchHandler:
         out = json.loads(handler(json.dumps({"query": "  "})))
         assert out["memories"] == [] and "error" in out
         retriever.retrieve.assert_not_called()
+
+    def test_date_range_is_read_in_local_days(self) -> None:
+        retriever = MagicMock(spec=MemoryRetriever)
+        ep = Episode(7, "User planned a trip.", "2026-03-15 20:00:00", "s-1", 1.0, "2026-03-15 20:00:00")
+        retriever.retrieve_in_range.return_value = [ep]
+        now = datetime(2026, 3, 17, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+        handler = make_memory_search_handler(retriever, {"cur"}, now)
+
+        out = json.loads(handler(json.dumps({"query": "", "since": "2026-03-16", "until": "2026-03-16"})))
+
+        # 3/16 KST 하루 = UTC 3/15 15:00 ~ 3/16 15:00
+        retriever.retrieve_in_range.assert_called_once_with("", "2026-03-15 15:00:00", "2026-03-16 15:00:00", {"cur"})
+        retriever.retrieve.assert_not_called()
+        assert out == {"memories": [{"text": "User planned a trip.", "date": "2026-03-16 (Mon) 05:00, yesterday"}]}
+
+    @pytest.mark.parametrize(
+        ("since", "until", "bounds"),
+        [
+            ("2026-03-16", None, ("2026-03-15 15:00:00", "9999")),
+            (None, "2026-03-16", ("", "2026-03-16 15:00:00")),
+        ],
+    )
+    def test_missing_range_end_is_left_open(
+        self, since: str | None, until: str | None, bounds: tuple[str, str]
+    ) -> None:
+        retriever = MagicMock(spec=MemoryRetriever)
+        retriever.retrieve_in_range.return_value = []
+        handler = make_memory_search_handler(retriever, set(), datetime(2026, 3, 17, tzinfo=ZoneInfo("Asia/Seoul")))
+
+        handler(json.dumps({"query": "trip", "since": since, "until": until}))
+
+        retriever.retrieve_in_range.assert_called_once_with("trip", *bounds, set())
+
+    def test_malformed_date_is_an_error_not_a_search(self) -> None:
+        retriever = MagicMock(spec=MemoryRetriever)
+        handler = make_memory_search_handler(retriever, set(), datetime.now().astimezone())
+
+        out = json.loads(handler(json.dumps({"query": "trip", "since": "last week", "until": None})))
+
+        assert out["memories"] == [] and "error" in out
+        retriever.retrieve_in_range.assert_not_called()
+        retriever.retrieve.assert_not_called()
+
+    def test_schema_is_strict_with_nullable_range(self) -> None:
+        params = SEARCH_MEMORY_TOOL_DEF["parameters"]
+        assert set(params["required"]) == set(params["properties"])  # strict 모드는 모든 필드가 required
+        assert params["properties"]["since"]["type"] == ["string", "null"]
+        assert params["properties"]["until"]["type"] == ["string", "null"]
 
 
 class TestSongToolDefinitions:

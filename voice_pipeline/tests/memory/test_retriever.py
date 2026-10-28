@@ -974,3 +974,61 @@ class TestEdgeCases:
         retriever.update_citations([1])
 
         assert retriever._retained[eid].episode.last_cited_at != old_cited
+
+
+# ---------------------------------------------------------------------------
+# Date-range retrieval
+# ---------------------------------------------------------------------------
+
+_RANGE = ("2026-03-20 00:00:00", "2026-03-23 00:00:00")
+
+
+class TestRetrieveInRange:
+    def test_without_query_returns_newest_in_range_in_time_order(self, monkeypatch) -> None:
+        monkeypatch.setattr(MemoryRetriever, "_RANGE_MAX_MEMORIES", 2)
+        eps = [
+            _make_episode(text="before", timestamp="2026-03-19 12:00:00", embedding=_vec(1.0)),
+            _make_episode(text="day 1", timestamp="2026-03-20 12:00:00", embedding=_vec(1.0)),
+            _make_episode(text="day 2", timestamp="2026-03-21 12:00:00", embedding=_vec(1.0)),
+            _make_episode(text="current", timestamp="2026-03-21 13:00:00", session_id="s-cur", embedding=_vec(1.0)),
+            _make_episode(text="day 3", timestamp="2026-03-22 12:00:00", embedding=_vec(1.0)),
+            _make_episode(text="after", timestamp="2026-03-23 12:00:00", embedding=_vec(1.0)),
+        ]
+        retriever, _, _ = _setup(eps)
+
+        got = retriever.retrieve_in_range("", *_RANGE, {"s-cur"})
+
+        assert [ep.text for ep in got] == ["day 2", "day 3"]
+
+    def test_with_query_ranks_the_range_first_even_when_global_top_k_misses_it(self, monkeypatch) -> None:
+        _apply_retriever_overrides(monkeypatch, vector_top_k=1, bm25_top_k=1)
+        eps = [
+            _make_episode(text="outside best", timestamp="2026-03-10 12:00:00", embedding=_vec(1.0, 0.0)),
+            _make_episode(text="outside second", timestamp="2026-03-11 12:00:00", embedding=_vec(0.9, 0.1)),
+            _make_episode(text="in range far", timestamp="2026-03-21 12:00:00", embedding=_vec(0.0, 1.0)),
+            _make_episode(text="in range near", timestamp="2026-03-22 12:00:00", embedding=_vec(0.5, 0.5)),
+        ]
+        retriever, _, _ = _setup(eps, query_vec=_vec(1.0, 0.0))
+
+        with patch(_NOW_PATH) as mock_dt:
+            mock_dt.now.return_value = _fixed_now()
+            mock_dt.strptime = datetime.strptime
+            got = retriever.retrieve_in_range("zzz", *_RANGE, set())
+
+        # 범위 안은 유사도 순, 그 뒤에 범위 밖 상위 결과 (사용자가 날짜를 잘못 기억한 경우)
+        assert [ep.text for ep in got] == ["in range near", "in range far", "outside best"]
+
+    def test_outside_results_are_capped(self, monkeypatch) -> None:
+        monkeypatch.setattr(MemoryRetriever, "_RANGE_OUTSIDE_EXTRA", 1)
+        eps = [
+            _make_episode(text=f"outside {i}", timestamp=f"2026-03-1{i} 12:00:00", embedding=_vec(1.0))
+            for i in range(3)
+        ]
+        retriever, _, _ = _setup(eps)
+
+        with patch(_NOW_PATH) as mock_dt:
+            mock_dt.now.return_value = _fixed_now()
+            mock_dt.strptime = datetime.strptime
+            got = retriever.retrieve_in_range("zzz", *_RANGE, set())
+
+        assert len(got) == 1

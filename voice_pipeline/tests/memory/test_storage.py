@@ -200,6 +200,15 @@ class _StorageTests(ABC):
         s = self.make_storage()
         assert s.get_episodes_by_session_ids([]) == {}
 
+    def test_get_episodes_between_is_half_open_and_ordered(self) -> None:
+        s = self.make_storage()
+        for ts in ("2026-03-23 00:00:00", "2026-03-21 12:00:00", "2026-03-20 00:00:00", "2026-03-19 23:59:59"):
+            s.add_episode(_make_episode(text=ts, timestamp=ts))
+
+        got = s.get_episodes_between("2026-03-20 00:00:00", "2026-03-23 00:00:00")
+
+        assert [ep.text for ep in got] == ["2026-03-20 00:00:00", "2026-03-21 12:00:00"]
+
     # --- Episode embedding update ---
 
     def test_update_episode_embedding(self) -> None:
