@@ -40,16 +40,20 @@ class TestBuildLiveInstructions:
         assert "already know about the user, from earlier sessions" not in text
         assert text.rstrip().endswith(_MARKER)
 
-    def test_build_live_instructions_appends_profile_and_recent_sessions(self) -> None:
+    def test_build_live_instructions_appends_notes_and_recent_conversations(self) -> None:
         text = build_live_instructions(
-            "[User Profile]\ninterest::movie: SF",
-            ["[Session — 2026-09-10 (Thu) 10:00]\n- User saw Dune 2.", "[Session — 2026-09-12 (Sat) 20:00]\n- OST."],
+            "About the user\n- The user's name is 재헌.",
+            "Recent conversations:\n\n[Session — 2026-09-12 (Sat) 20:00, yesterday]\nUser: 듄 2 봤어",
             now=_NOW,
         )
         base_end = text.index("Do not guess the result while waiting.")
         assert text.index("already know about the user, from earlier sessions:") > base_end
-        assert text.index("[User Profile]") < text.index("2026-09-10") < text.index("2026-09-12") < text.index(_MARKER)
+        assert text.index("About the user") < text.index("Recent conversations:") < text.index(_MARKER)
         assert text.rstrip().endswith(_MARKER)
+
+    def test_backend_answers_from_shared_context_before_searching(self) -> None:
+        # 실측: 답이 최근 대화에 있을 때 바로 곡을 트는 비율 4/10 → 9/10 (decisions-wip)
+        assert "(the user notes and recent conversations) answers it" in DEFAULT_BACKEND_INSTRUCTIONS
 
     def test_tone_default_points_at_the_preferences_heading(self) -> None:
         # 해요체 기본값을 덮는 근거는 사용자 노트 블록의 선호 섹션이다 — 제목이 바뀌면 지시가 허공을 가리킨다

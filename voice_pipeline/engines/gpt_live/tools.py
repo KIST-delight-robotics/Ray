@@ -204,18 +204,20 @@ def make_play_song_tool_def(catalog: Mapping[str, Song]) -> dict[str, Any] | Non
     }
 
 
-def make_memory_search_handler(retriever: MemoryRetriever, exclude_session_ids: set[str], now: datetime) -> ToolHandler:
+def make_memory_search_handler(retriever: MemoryRetriever, now: datetime) -> ToolHandler:
     """``search_memory`` 툴 핸들러. 검색 결과를 ``{"memories": [{"text", "date"}, …]}`` JSON 으로 돌려준다.
 
     백엔드가 결과를 읽고 현재 질문에 맞는 것만 골라 답을 만들므로 여기서는 선별하지 않는다(상한은
     retriever 의 것). ``since``/``until`` 이 있으면 기간 검색(:meth:`MemoryRetriever.retrieve_in_range`) —
     주제가 있으면 범위 밖 상위 결과도 몇 개 딸려 오고, 어느 쪽인지는 ``date`` 로 백엔드가 가린다.
-    인용 갱신은 하지 않는다 — 대화 모델 출력에 인용 태그가 없고, 턴 단위 retained buffer 도 이 엔진에서는
-    의미가 없다.
+
+    instructions 의 최근 대화에 든 세션도 검색에서 빼지 않는다: 백엔드는 답이 지시문에 있어도 검색부터 하는
+    일이 많고, 빠져 있으면 빈 결과를 보고 "기억 안 난다" 가 된다. 결과는 백엔드 툴 출력으로만 가서 대화
+    모델 컨텍스트에 겹쳐 쌓이지 않는다. 현재 세션의 에피소드는 세션이 끝나야 생긴다. 인용 갱신은 하지
+    않는다 — 대화 모델 출력에 인용 태그가 없고, 턴 단위 retained buffer 도 이 엔진에서는 의미가 없다.
 
     Args:
         retriever: 세션 단위 retriever. 핸들러는 executor 스레드에서 불리지만 한 번에 하나씩이다.
-        exclude_session_ids: 검색에서 제외할 세션 — 현재 세션과 instructions 의 최근 세션 블록에 포함된 세션.
         now: 세션 시작 시각 — ``date`` 를 instructions 의 세션 헤더와 같은 현지 시각·상대 시간으로 쓰고,
             ``since``/``until`` 의 현지 날짜를 이 시간대로 읽는다.
     """
@@ -229,9 +231,9 @@ def make_memory_search_handler(retriever: MemoryRetriever, exclude_session_ids: 
                 start, end = _utc_bounds(since, until, now)
             except ValueError:
                 return json.dumps({"memories": [], "error": "since/until must be YYYY-MM-DD"})
-            episodes = retriever.retrieve_in_range(query, start, end, exclude_session_ids)
+            episodes = retriever.retrieve_in_range(query, start, end, set())
         elif query:
-            episodes = retriever.retrieve(query, exclude_session_ids).episodes
+            episodes = retriever.retrieve(query, set()).episodes
         else:
             return json.dumps({"memories": [], "error": "empty query"})
         memories = [{"text": ep.text, "date": format_local_time(ep.timestamp, now)} for ep in episodes]

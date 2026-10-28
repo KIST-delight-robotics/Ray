@@ -102,18 +102,19 @@ class TestMemorySearchHandler:
         ep = Episode(7, "User cried watching Interstellar.", "2026-03-15 20:00:00", "s-1", 1.0, "2026-03-15 20:00:00")
         retriever.retrieve.return_value = MemoryReadResult(episodes=[ep], scores=[0.5], index_to_id={1: 7})
         now = datetime(2026, 3, 17, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
-        handler = make_memory_search_handler(retriever, {"cur", "s-recent"}, now)
+        handler = make_memory_search_handler(retriever, now)
 
         out = json.loads(handler(json.dumps({"query": "인터스텔라"})))
 
-        retriever.retrieve.assert_called_once_with("인터스텔라", {"cur", "s-recent"})
+        # instructions 의 최근 대화에 든 세션도 빼지 않는다 — 빠져 있으면 백엔드가 "기억 안 난다" 로 답한다
+        retriever.retrieve.assert_called_once_with("인터스텔라", set())
         # UTC 20:00 은 현지(KST) 다음 날 05:00 — 날짜까지 현지 기준으로 넘어간다
         expected = {"text": "User cried watching Interstellar.", "date": "2026-03-16 (Mon) 05:00, yesterday"}
         assert out == {"memories": [expected]}
 
     def test_search_handler_empty_query_does_not_search(self) -> None:
         retriever = MagicMock(spec=MemoryRetriever)
-        handler = make_memory_search_handler(retriever, set(), datetime.now().astimezone())
+        handler = make_memory_search_handler(retriever, datetime.now().astimezone())
         out = json.loads(handler(json.dumps({"query": "  "})))
         assert out["memories"] == [] and "error" in out
         retriever.retrieve.assert_not_called()
@@ -123,12 +124,12 @@ class TestMemorySearchHandler:
         ep = Episode(7, "User planned a trip.", "2026-03-15 20:00:00", "s-1", 1.0, "2026-03-15 20:00:00")
         retriever.retrieve_in_range.return_value = [ep]
         now = datetime(2026, 3, 17, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))
-        handler = make_memory_search_handler(retriever, {"cur"}, now)
+        handler = make_memory_search_handler(retriever, now)
 
         out = json.loads(handler(json.dumps({"query": "", "since": "2026-03-16", "until": "2026-03-16"})))
 
         # 3/16 KST 하루 = UTC 3/15 15:00 ~ 3/16 15:00
-        retriever.retrieve_in_range.assert_called_once_with("", "2026-03-15 15:00:00", "2026-03-16 15:00:00", {"cur"})
+        retriever.retrieve_in_range.assert_called_once_with("", "2026-03-15 15:00:00", "2026-03-16 15:00:00", set())
         retriever.retrieve.assert_not_called()
         assert out == {"memories": [{"text": "User planned a trip.", "date": "2026-03-16 (Mon) 05:00, yesterday"}]}
 
@@ -144,7 +145,7 @@ class TestMemorySearchHandler:
     ) -> None:
         retriever = MagicMock(spec=MemoryRetriever)
         retriever.retrieve_in_range.return_value = []
-        handler = make_memory_search_handler(retriever, set(), datetime(2026, 3, 17, tzinfo=ZoneInfo("Asia/Seoul")))
+        handler = make_memory_search_handler(retriever, datetime(2026, 3, 17, tzinfo=ZoneInfo("Asia/Seoul")))
 
         handler(json.dumps({"query": "trip", "since": since, "until": until}))
 
@@ -152,7 +153,7 @@ class TestMemorySearchHandler:
 
     def test_malformed_date_is_an_error_not_a_search(self) -> None:
         retriever = MagicMock(spec=MemoryRetriever)
-        handler = make_memory_search_handler(retriever, set(), datetime.now().astimezone())
+        handler = make_memory_search_handler(retriever, datetime.now().astimezone())
 
         out = json.loads(handler(json.dumps({"query": "trip", "since": "last week", "until": None})))
 

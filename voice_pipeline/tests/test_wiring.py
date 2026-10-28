@@ -15,7 +15,7 @@ import pytest
 import voice_pipeline.wiring as wiring
 from voice_pipeline.engines.gpt_live.radio import Radio
 from voice_pipeline.engines.gpt_live.tools import SEARCH_MEMORY_TOOL
-from voice_pipeline.memory.types import Episode, UserNote
+from voice_pipeline.memory.types import UserNote
 from voice_pipeline.trace import record_call
 from voice_pipeline.wiring import ProcessComponents, SessionComponents
 
@@ -189,9 +189,10 @@ class TestCreateSessionLiveEngine:
             UserNote(2, "preference", "Speak formally.", "s-old", "2026-09-01 00:00:00"),
         ]
         comps.memory_storage.get_recent_sessions.return_value = [("s-old", "2026-09-10 10:00:00")]
-        comps.memory_storage.get_episodes_by_session_ids.return_value = {
-            "s-old": [Episode(None, "User saw Dune 2.", "2026-09-10 10:00:00", "s-old", 1.0, "2026-09-10 10:00:00")]
-        }
+        comps.memory_storage.get_utterances.return_value = [
+            ("user", "듄 2 봤어", "2026-09-10 10:00:01", 4),
+            ("assistant", "어땠어요?", "2026-09-10 10:00:03", 3),
+        ]
 
         result = comps.create_session(tool_handlers={"x": lambda a: a})
 
@@ -204,7 +205,8 @@ class TestCreateSessionLiveEngine:
         # 사용자 노트·최근 세션은 시작 instructions 에 들어간다
         assert "About the user\n- The user's name is 재헌." in config.instructions
         assert "How the user wants Ray to talk\n- Speak formally." in config.instructions
-        assert "User saw Dune 2." in config.instructions
+        assert "Recent conversations:" in config.instructions
+        assert "User: 듄 2 봤어\nRay: 어땠어요?" in config.instructions
         # 말투 선호는 백엔드에 따로 넣지 않는다 — 세션 지시문이 백엔드에도 공유된다 (FINDINGS §4)
         assert "Ray's voice" not in config.backend_instructions
         kwargs = loop_cls.call_args.kwargs

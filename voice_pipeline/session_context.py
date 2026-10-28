@@ -1,8 +1,9 @@
-"""세션 시작 컨텍스트 — 장기기억에서 사용자 노트 블록(프로필·선호)과 최근 세션 블록을 만든다.
+"""세션 시작 컨텍스트 — 장기기억에서 사용자 노트 블록(프로필·선호)과 지난 세션 블록을 만든다.
 
-두 엔진이 같은 재료를 쓴다: cascade 의 :class:`~voice_pipeline.engines.cascade.context_builder.ContextBuilder`
-는 턴마다 쌓는 입력의 블록 2·3 으로, gpt_live 는 세션 시작 instructions 뒤에 한 번 붙인다.
-여기서는 재료만 만들고 어디에 어떻게 넣는지는 각 엔진이 정한다.
+사용자 노트는 두 엔진이 같이 쓴다. 지난 세션은 엔진마다 다르다: cascade 의
+:class:`~voice_pipeline.engines.cascade.context_builder.ContextBuilder` 는 턴마다 쌓는 입력의 블록 3 으로 최근
+세션의 에피소드를(:func:`load_session_context`), gpt_live 는 세션 시작 instructions 에 최근 대화 원문을
+(:func:`load_recent_conversations`) 넣는다. 여기서는 재료만 만들고 어디에 어떻게 넣는지는 각 엔진이 정한다.
 
 모델에게 보이는 시각은 모두 :func:`format_local_time` 을 거친다 — 저장은 UTC, 표시는 현지 시각 + 상대 시간.
 """
@@ -13,7 +14,8 @@ from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from voice_pipeline.memory.storage import SQLiteMemoryStorage
+from voice_pipeline.memory.storage import RADIO_ROLE, SQLiteMemoryStorage
+from voice_pipeline.memory.writer import select_utterances
 from voice_pipeline.types import TokenCounter
 
 if TYPE_CHECKING:
@@ -153,13 +155,11 @@ def load_session_context(
     max_tokens: int = RECENT_SESSIONS_MAX_TOKENS,
     page_size: int = SESSION_PAGE_SIZE,
 ) -> tuple[list[UserNote], list[str], set[str]]:
-    """Load user notes and the recent-sessions block from memory storage.
+    """Load user notes and the recent-sessions block from memory storage (cascade).
 
-    Shared by the cascade ``ContextBuilder`` and the gpt_live engine's
-    session-start instructions. Sessions without episodes (extraction
-    pending, failed, or judged meaningless) are skipped — in cascade the
-    carryover covers the only session whose extraction can still be
-    legitimately in flight. The walk continues into older sessions until
+    Sessions without episodes (extraction pending, failed, or judged
+    meaningless) are skipped — the carryover covers the only session whose
+    extraction can still be legitimately in flight. The walk continues into older sessions until
     the soft cap binds or history is exhausted.
 
     Args:
@@ -230,3 +230,64 @@ def select_recent_blocks(
         spent += cost
     selected.reverse()
     return selected
+
+
+# ---------------------------------------------------------------------------
+# Recent conversations (gpt_live): raw transcript across session boundaries
+# ---------------------------------------------------------------------------
+
+RECENT_CONVERSATIONS_HEADING = "Recent conversations"
+RECENT_CONVERSATIONS_MAX_TOKENS = 1500  # 최근 대화 원문 예산 (줄 기준) — 최신 줄부터 거꾸로 채운다
+
+
+def load_recent_conversations(
+    memory_storage: SQLiteMemoryStorage,
+    session_id: str,
+    token_counter: TokenCounter,
+    *,
+    now: datetime,
+    max_tokens: int = RECENT_CONVERSATIONS_MAX_TOKENS,
+) -> str:
+    """지난 세션들의 원문을 최신 줄부터 거꾸로 예산만큼 채워 시간순으로 보여준다.
+
+    직전 1세션이 아니라 세션 경계를 넘어 채운다 — 책상 로봇 세션에는 한마디짜리가 많다. 원문은 턴 경계마다 이미
+    저장돼 있어, 직전 세션의 기억 추출이 끝나기 전에 다시 깨워도 빠지지 않는다. 라디오 낭독·사건 줄은 기억
+    추출과 같은 규칙(:func:`~voice_pipeline.memory.writer.select_utterances`)으로 뺀다. 예산에 걸린 세션은
+    앞부분을 잘라 뒤쪽 줄만 남기고 머리에 표시한다.
+
+    Args:
+        memory_storage: Utterance storage.
+        session_id: Current session (excluded).
+        token_counter: Token counter for the budget.
+        now: Session start time (local timezone) — basis for the session headers.
+        max_tokens: Budget over the transcript lines.
+
+    Returns:
+        ``"Recent conversations:\\n\\n[Session — …]\\nUser: …\\nRay: …"``. 지난 대화가 없으면 빈 문자열.
+    """
+    blocks: list[str] = []
+    spent = 0
+    for sid, started_at in memory_storage.get_recent_sessions(exclude_session_id=session_id):
+        rows = select_utterances(memory_storage.get_utterances(sid))
+        lines = [_transcript_line(role, text) for role, text, _, _ in rows]
+        kept: list[str] = []
+        for line in reversed(lines):
+            cost = token_counter(line)
+            if spent + cost > max_tokens:
+                break
+            kept.append(line)
+            spent += cost
+        cut = len(kept) < len(lines)
+        if kept:
+            header = f"[Session — {format_local_time(started_at, now)}{', last part only' if cut else ''}]"
+            blocks.append("\n".join([header, *reversed(kept)]))
+        if cut:
+            break
+    if not blocks:
+        return ""
+    return f"{RECENT_CONVERSATIONS_HEADING}:\n\n" + "\n\n".join(reversed(blocks))
+
+
+def _transcript_line(role: str, text: str) -> str:
+    speaker = "User" if role == "user" else "Ray (radio talk)" if role == RADIO_ROLE else "Ray"
+    return f"{speaker}: {text}"

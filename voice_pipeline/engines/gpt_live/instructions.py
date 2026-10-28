@@ -1,6 +1,6 @@
 """GPT-Live 세션 지시문 — 대화 모델 instructions, 백엔드 instructions, 라디오 문구·판정기, 목소리·인사 문구.
 
-세션 시작 후에는 바꿀 수 없으므로 프로필·최근 세션 블록(:mod:`voice_pipeline.session_context`)을
+세션 시작 후에는 바꿀 수 없으므로 사용자 노트·최근 대화 원문(:mod:`voice_pipeline.session_context`)을
 :func:`build_live_instructions` 로 시작 지시문 뒤에 한 번 붙인다. 노래 재생 중 지시(:data:`SONG_PLAYING_INSTRUCTIONS`)
 는 그때 ``instructions.append`` 로 얹고 끝나면 종료 지시로 전환한다. 백엔드 지시문은
 :func:`build_backend_instructions` 가 만든다.
@@ -83,8 +83,10 @@ Information
 - Current facts, weather, news, dates: web search.
 - Something the user told Ray in an earlier session: search_memory, with the query in English. \
 Use only the memories that match the question. If nothing matches, say Ray does not remember; do not web-search it. \
-Give since/until only when the user names a calendar time (today, yesterday, last week, a date), counted from \
-the current session date. A memory dated outside that range can still be the answer if the user misremembered the day.
+If what you already know from the shared session instructions (the user notes and recent conversations) answers it, \
+answer from that without searching. Give since/until only when the user names a calendar time \
+(today, yesterday, last week, a date), counted from the current session date. A memory dated outside that range \
+can still be the answer if the user misremembered the day.
 
 Device
 - Louder or quieter: adjust_volume, steps=1 normally, steps=2 for "a lot".
@@ -340,24 +342,26 @@ LIVE_GREETING_TEXT = "네, 부르셨어요?"  # 웨이크워드 뒤 세션 연�
 LIVE_GREETING_TTS_MODEL = "gpt-4o-mini-tts"  # Live 목소리(cedar)를 지원하는 OpenAI TTS 모델
 
 
-def build_live_instructions(notes_text: str = "", recent_session_texts: Sequence[str] = (), *, now: datetime) -> str:
-    """세션 시작 instructions — 기본 지시문 뒤에 사용자 노트(블록 2)·최근 세션(블록 3), 끝에 현재 세션 표시.
+def build_live_instructions(notes_text: str = "", recent_conversations: str = "", *, now: datetime) -> str:
+    """세션 시작 instructions — 기본 지시문 뒤에 사용자 노트·최근 대화 원문, 끝에 현재 세션 표시.
 
     instructions 는 세션 시작 후 바꿀 수 없으므로 세션 수준 컨텍스트는 여기에 한 번 들어간다.
-    한도 16,384 토큰에 대해 사용자 노트는 기준이 엄격해 짧고 최근 세션은 512 soft cap 이라 여유가 크다.
-    대화 모델은 시계가 없어 끝의 현재 세션 표시가 "지금" 의 유일한 근거다 — 백엔드도 이 지시문을 같이
-    받는다(FINDINGS §4).
+    한도 16,384 토큰에 대해 사용자 노트는 기준이 엄격해 짧고 최근 대화는 1.5k 예산이라 여유가 크다.
+    대화 모델은 시계가 없어 끝의 현재 세션 표시가 "지금" 의 유일한 근거다. 백엔드도 이 지시문을 같이
+    받는다(FINDINGS §4) — 지난 원문의 "잘 자"·"라디오 틀어줘" 를 지금 요청으로 읽지 않는 것을 실측했다.
 
     Args:
         notes_text: :func:`~voice_pipeline.session_context.format_user_notes_block` 결과. 빈 문자열이면 생략.
-        recent_session_texts: 최근 세션 블록 텍스트, 시간순. 비어 있으면 생략.
+        recent_conversations: :func:`~voice_pipeline.session_context.load_recent_conversations` 결과.
+            빈 문자열이면 생략.
         now: 세션 시작 시각(현지 시간대).
     """
     parts = [DEFAULT_LIVE_INSTRUCTIONS.rstrip()]
-    if notes_text or recent_session_texts:
+    if notes_text or recent_conversations:
         parts.append("What you already know about the user, from earlier sessions:")
     if notes_text:
         parts.append(notes_text.strip())
-    parts.extend(text.strip() for text in recent_session_texts if text.strip())
+    if recent_conversations:
+        parts.append(recent_conversations.strip())
     parts.append(format_current_session_marker(now))
     return "\n\n".join(parts) + "\n"
