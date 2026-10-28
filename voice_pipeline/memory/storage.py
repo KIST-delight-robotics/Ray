@@ -15,7 +15,7 @@ from typing import Any
 
 import numpy as np
 
-from voice_pipeline.memory.types import Episode, Profile
+from voice_pipeline.memory.types import Episode, UserNote
 
 logger = logging.getLogger("voice_pipeline.memory")
 
@@ -36,7 +36,7 @@ class SQLiteMemoryStorage:
     """SQLite-backed memory storage.
 
     Opens its own connection to the shared DB file (WAL mode allows
-    concurrent connections). Manages episodes, profiles, utterances,
+    concurrent connections). Manages episodes, user notes, utterances,
     and FTS5 index tables.
 
     Thread-safe: a lock serializes all connection access so that
@@ -115,11 +115,11 @@ class SQLiteMemoryStorage:
             CREATE INDEX IF NOT EXISTS idx_episodes_session
                 ON episodes(session_id);
 
-            CREATE TABLE IF NOT EXISTS profiles (
+            CREATE TABLE IF NOT EXISTS user_notes (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                topic      TEXT NOT NULL,
-                sub_topic  TEXT NOT NULL,
-                content    TEXT NOT NULL,
+                kind       TEXT NOT NULL,
+                text       TEXT NOT NULL,
+                session_id TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
 
@@ -317,63 +317,54 @@ class SQLiteMemoryStorage:
                 logger.warning("BM25 search failed", exc_info=True)
                 return []
 
-    # --- Profile ---
+    # --- User notes ---
 
-    def get_all_profiles(self) -> list[Profile]:
-        """Load all user profile slots."""
+    def get_user_notes(self) -> list[UserNote]:
+        """Load all user notes, oldest first."""
         with self._lock:
             try:
-                rows = self._conn.execute("SELECT id, topic, sub_topic, content, updated_at FROM profiles").fetchall()
-                return [
-                    Profile(
-                        id=row[0],
-                        topic=row[1],
-                        sub_topic=row[2],
-                        content=row[3],
-                        updated_at=row[4],
-                    )
-                    for row in rows
-                ]
+                rows = self._conn.execute(
+                    "SELECT id, kind, text, session_id, updated_at FROM user_notes ORDER BY id"
+                ).fetchall()
+                return [UserNote(*row) for row in rows]
             except sqlite3.Error:
-                logger.warning("Failed to load profiles", exc_info=True)
+                logger.warning("Failed to load user notes", exc_info=True)
                 return []
 
-    def upsert_profile(self, profile: Profile) -> int | None:
-        """Insert or update a profile slot."""
+    def add_user_note(self, note: UserNote) -> int | None:
+        """Persist a new user note."""
         with self._lock:
             try:
-                if profile.id is not None:
-                    self._conn.execute(
-                        "UPDATE profiles SET topic = ?, sub_topic = ?, content = ?, updated_at = ? WHERE id = ?",
-                        (
-                            profile.topic,
-                            profile.sub_topic,
-                            profile.content,
-                            profile.updated_at,
-                            profile.id,
-                        ),
-                    )
-                    self._conn.commit()
-                    return profile.id
-                else:
-                    cursor = self._conn.execute(
-                        "INSERT INTO profiles (topic, sub_topic, content, updated_at) VALUES (?, ?, ?, ?)",
-                        (profile.topic, profile.sub_topic, profile.content, profile.updated_at),
-                    )
-                    self._conn.commit()
-                    return cursor.lastrowid
+                cursor = self._conn.execute(
+                    "INSERT INTO user_notes (kind, text, session_id, updated_at) VALUES (?, ?, ?, ?)",
+                    (note.kind, note.text, note.session_id, note.updated_at),
+                )
+                self._conn.commit()
+                return cursor.lastrowid
             except sqlite3.Error:
-                logger.warning("Failed to upsert profile", exc_info=True)
+                logger.warning("Failed to add user note", exc_info=True)
                 return None
 
-    def delete_profile(self, profile_id: int) -> None:
-        """Delete a profile slot."""
+    def update_user_note(self, note_id: int, text: str, session_id: str, updated_at: str) -> None:
+        """Replace a user note's text."""
         with self._lock:
             try:
-                self._conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
+                self._conn.execute(
+                    "UPDATE user_notes SET text = ?, session_id = ?, updated_at = ? WHERE id = ?",
+                    (text, session_id, updated_at, note_id),
+                )
                 self._conn.commit()
             except sqlite3.Error:
-                logger.warning("Failed to delete profile %d", profile_id, exc_info=True)
+                logger.warning("Failed to update user note %d", note_id, exc_info=True)
+
+    def delete_user_note(self, note_id: int) -> None:
+        """Delete a user note."""
+        with self._lock:
+            try:
+                self._conn.execute("DELETE FROM user_notes WHERE id = ?", (note_id,))
+                self._conn.commit()
+            except sqlite3.Error:
+                logger.warning("Failed to delete user note %d", note_id, exc_info=True)
 
     # --- Utterance ---
 

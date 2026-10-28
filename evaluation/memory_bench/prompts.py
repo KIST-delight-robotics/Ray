@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from voice_pipeline.memory.types import Episode, Profile
+from voice_pipeline.memory.types import Episode, UserNote
 
 
 def format_memories(episodes: list[Episode]) -> str:
@@ -25,11 +25,11 @@ def format_memories(episodes: list[Episode]) -> str:
     return "\n".join(f"- [{ep.timestamp[:10]}] {ep.text}" for ep in ordered)
 
 
-def format_profile(profiles: list[Profile]) -> str:
-    """Render profile slots as ``topic/sub_topic: content`` lines."""
-    if not profiles:
+def format_profile(notes: list[UserNote]) -> str:
+    """Render user notes as ``kind: text`` lines."""
+    if not notes:
         return "(no profile facts)"
-    return "\n".join(f"- {p.topic}/{p.sub_topic}: {p.content}" for p in profiles)
+    return "\n".join(f"- {n.kind}: {n.text}" for n in notes)
 
 
 # ---------------------------------------------------------------------------

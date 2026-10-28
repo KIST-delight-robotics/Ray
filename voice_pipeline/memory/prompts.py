@@ -1,8 +1,7 @@
 """Prompt templates and JSON schemas for memory write operations.
 
 Contains:
-- Profile schema definition (data-driven topic/subtopic structure)
-- JSON schemas for structured output (episode extraction, profile extraction, merge)
+- JSON schemas for structured output (episode extraction, user-notes update, dedup)
 - Prompt builder functions for each LLM call in the write pipeline
 """
 
@@ -11,30 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from voice_pipeline.memory.storage import RADIO_ROLE
-from voice_pipeline.memory.types import Profile
-from voice_pipeline.types import TokenCounter
-
-# ---------------------------------------------------------------------------
-# Profile schema
-# ---------------------------------------------------------------------------
-
-PROFILE_SCHEMA: dict[str, list[str]] = {
-    "basic_info": ["name", "age", "location", "occupation", "language"],
-    "interest": ["movie", "music", "book", "game", "food", "sport", "hobby"],
-    "personality": ["traits", "values", "communication_style"],
-    "interaction_style": ["tone_preference", "topic_preference", "humor_style"],
-}
-
-
-def format_profile_schema() -> str:
-    """Format the profile schema as a human-readable block for prompt injection."""
-    lines: list[str] = []
-    for topic, subtopics in PROFILE_SCHEMA.items():
-        lines.append(f"- {topic}")
-        for sub in subtopics:
-            lines.append(f"  - {sub}")
-    return "\n".join(lines)
-
+from voice_pipeline.memory.types import NOTE_KINDS, NoteKind, UserNote
 
 # ---------------------------------------------------------------------------
 # JSON schemas for structured output
@@ -67,63 +43,39 @@ EPISODE_EXTRACTION_SCHEMA: dict[str, Any] = {
     },
 }
 
-PROFILE_EXTRACTION_SCHEMA: dict[str, Any] = {
+USER_NOTES_UPDATE_SCHEMA: dict[str, Any] = {
     "type": "json_schema",
-    "name": "profile_extraction",
+    "name": "user_notes_update",
     "strict": True,
     "schema": {
         "type": "object",
         "properties": {
-            "facts": {
+            "ops": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "topic": {"type": "string"},
-                        "sub_topic": {"type": "string"},
-                        "content": {"type": "string"},
-                    },
-                    "required": ["topic", "sub_topic", "content"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        "required": ["facts"],
-        "additionalProperties": False,
-    },
-}
-
-PROFILE_MERGE_SCHEMA: dict[str, Any] = {
-    "type": "json_schema",
-    "name": "profile_merge",
-    "strict": True,
-    "schema": {
-        "type": "object",
-        "properties": {
-            "actions": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
+                        "op": {"type": "string", "enum": ["add", "replace", "delete"]},
+                        "list": {
                             "type": "string",
-                            "enum": ["APPEND", "UPDATE", "ABORT"],
+                            "enum": list(NOTE_KINDS),
+                            "description": "List the item belongs to.",
                         },
-                        "fact_index": {
-                            "type": "integer",
-                            "description": "1-based index of the new fact (F1, F2, ...).",
-                        },
-                        "new_content": {
+                        "target": {
                             "type": ["string", "null"],
-                            "description": ("Merged content for UPDATE, or new content for APPEND. Null for ABORT."),
+                            "description": "Id of the existing item (P1, R2, ...) for replace/delete. Null for add.",
+                        },
+                        "text": {
+                            "type": ["string", "null"],
+                            "description": "The full item sentence for add/replace. Null for delete.",
                         },
                     },
-                    "required": ["action", "fact_index", "new_content"],
+                    "required": ["op", "list", "target", "text"],
                     "additionalProperties": False,
                 },
             },
         },
-        "required": ["actions"],
+        "required": ["ops"],
         "additionalProperties": False,
     },
 }
@@ -198,129 +150,91 @@ def build_episode_extraction_messages(
     ]
 
 
-_PROFILE_EXTRACTION_SYSTEM = """\
-You are a profile extraction system. Given a conversation transcript between \
-a user and an assistant, extract user profile facts that match the schema categories below.
+_USER_NOTES_SYSTEM = """\
+You maintain two short lists about the user of Ray, a desk robot that talks with \
+them. Ray sees both lists at the start of every conversation. Given the current \
+lists and one conversation transcript, return the changes the conversation calls for.
 
-## Profile Schema
-{schema}
+## Profile (P): who the user is
+Identity facts the user stated plainly about themselves: their name or what to call \
+them, job, workplace or school, major, where they live, family members, pets.
+- Not states or events, however clearly stated: being busy this week, an upcoming \
+exam, a cold, a trip.
+- Not passing mentions: "work was tough today" tells that they work, not where.
+- Not tastes, interests, opinions or personality.
+
+## Preferences (R): how the user wants Ray to talk
+Requests the user made to Ray about how Ray should speak or behave, marked as \
+lasting ("from now on", "always", "앞으로", "항상"). Write each as an instruction \
+to Ray, for example "Speak in 반말."
+- Not requests for the moment: "louder", "tell me more", "shorter this time".
+- Never inferred from the user's reactions, mood or laughter.
 
 ## Rules
-- Extract from USER utterances only. Do not extract facts from assistant responses.
-- Map each fact to a topic and sub_topic from the schema.
-- You may create new sub_topics within existing topics if the schema \
-does not cover the specific attribute.
-- Keep each fact concise (one sentence or phrase).
-- Write in English. Keep names, titles and Korean-specific terms in the \
-original language after the English, for example "plantain (질경이)".
-- Only extract when there is clear evidence, not speculation.
-- Lines marked "Assistant (radio talk)" are a radio talk the assistant hosts \
-on subjects it chooses. That the user asked about or reacted to a radio talk \
-subject is not by itself evidence of an interest; extract only what the user \
-said about themselves.
-- Return an empty array if no profile-relevant information is found."""
+- Use only what the user said about themselves or asked of Ray. Assistant lines, \
+including "Assistant (radio talk)", are context, never evidence.
+- One fact per item, as a full short sentence. Profile items start with "The user"; \
+do not guess their gender.
+- Write in English. Keep names and Korean terms in the original language after \
+the English, for example "The user lives near Wolgok Station (월곡역)."
+- add: new information. replace: the user corrected or changed an existing item; \
+give its id and the full new sentence. delete: the user said an item is wrong or \
+no longer true, or asked Ray to stop following a preference.
+- If an item already says it, change nothing. Most conversations change nothing: \
+return an empty list."""
 
-_PROFILE_EXTRACTION_USER_TEMPLATE = """\
+_USER_NOTES_USER_TEMPLATE = """\
+## Current lists
+Profile:
+{profile}
+
+Preferences:
+{preferences}
+
 ## Conversation
 {transcript}"""
 
+_NOTE_ID_PREFIX: dict[NoteKind, str] = {"profile": "P", "preference": "R"}
 
-def build_profile_extraction_messages(
+
+def label_user_notes(notes: list[UserNote]) -> dict[str, UserNote]:
+    """Number notes per list in stored order (P1, P2, … / R1, …) — the ids the update call refers to."""
+    labeled: dict[str, UserNote] = {}
+    counts = dict.fromkeys(NOTE_KINDS, 0)
+    for note in notes:
+        counts[note.kind] += 1
+        labeled[f"{_NOTE_ID_PREFIX[note.kind]}{counts[note.kind]}"] = note
+    return labeled
+
+
+def build_user_notes_messages(
+    labeled_notes: dict[str, UserNote],
     utterances: list[tuple[str, str, str, int]],
-    profile_schema_text: str,
 ) -> list[dict[str, Any]]:
-    """Build messages for profile fact extraction LLM call.
+    """Build messages for the user-notes update LLM call.
 
     Args:
+        labeled_notes: Current notes keyed by their prompt id (:func:`label_user_notes`).
         utterances: Session transcript as (role, text, timestamp, token_count)
             tuples — the same input as episode extraction.
-        profile_schema_text: Formatted profile schema string.
 
     Returns:
         Messages list with system + user message.
     """
-    transcript = _format_transcript(utterances)
-    return [
-        {
-            "role": "system",
-            "content": _PROFILE_EXTRACTION_SYSTEM.format(schema=profile_schema_text),
-        },
-        {
-            "role": "user",
-            "content": _PROFILE_EXTRACTION_USER_TEMPLATE.format(transcript=transcript),
-        },
-    ]
 
-
-_PROFILE_MERGE_SYSTEM = """\
-You are a profile merge system. Each fact below shows new information and the \
-current content of the matching profile slot (if any). For each fact, decide:
-
-- APPEND: No existing slot matches. The fact will be added as a new slot.
-- UPDATE: The fact updates or extends the existing slot. Provide the merged \
-content that combines old and new information.
-- ABORT: The fact is redundant (already captured) or too trivial to store.
-
-Return one action per fact."""
-
-_PROFILE_MERGE_USER_TEMPLATE = """\
-## Facts
-{facts}"""
-
-
-def build_profile_merge_messages(
-    existing_profiles: list[Profile],
-    new_facts: list[dict[str, str]],
-    max_content_tokens: int,
-    warn_ratio: float,
-    token_counter: TokenCounter | None = None,
-) -> list[dict[str, Any]]:
-    """Build messages for profile merge LLM call.
-
-    Each fact is presented with its matching existing slot content (by
-    topic::sub_topic key), so the LLM does not need a separate slot list.
-    Slots near the token limit get an inline warning.
-
-    Args:
-        existing_profiles: Current profile slots.
-        new_facts: Extracted facts to merge.
-        max_content_tokens: Max tokens per slot content.
-        warn_ratio: content 토큰이 예산의 몇 배를 넘으면 요약 경고 표시 (0.0–1.0).
-        token_counter: Optional token counter for measuring slot sizes.
-
-    Returns:
-        Messages list with system + user message.
-    """
-    # Build (topic, sub_topic) → Profile lookup
-    slot_map: dict[tuple[str, str], Profile] = {}
-    for p in existing_profiles:
-        slot_map[(p.topic, p.sub_topic)] = p
-
-    fact_lines: list[str] = []
-    for i, f in enumerate(new_facts, 1):
-        key = (f["topic"], f["sub_topic"])
-        existing = slot_map.get(key)
-
-        line = f"F{i}. {f['topic']}::{f['sub_topic']} — {f['content']}"
-        if existing is None:
-            line += "\n    Current: (none)"
-        else:
-            current_tokens = token_counter(existing.content) if token_counter else None
-            line += f"\n    Current: {existing.content}"
-            if current_tokens is not None and current_tokens > max_content_tokens * warn_ratio:
-                line += (
-                    f"\n    ⚠ Near token limit ({current_tokens}/{max_content_tokens})."
-                    " If updating, summarize to stay under limit."
-                )
-        fact_lines.append(line)
-
-    facts_text = "\n".join(fact_lines)
+    def section(kind: NoteKind) -> str:
+        lines = [f"{label}. {note.text}" for label, note in labeled_notes.items() if note.kind == kind]
+        return "\n".join(lines) or "(empty)"
 
     return [
-        {"role": "system", "content": _PROFILE_MERGE_SYSTEM},
+        {"role": "system", "content": _USER_NOTES_SYSTEM},
         {
             "role": "user",
-            "content": _PROFILE_MERGE_USER_TEMPLATE.format(facts=facts_text),
+            "content": _USER_NOTES_USER_TEMPLATE.format(
+                profile=section("profile"),
+                preferences=section("preference"),
+                transcript=_format_transcript(utterances),
+            ),
         },
     ]
 

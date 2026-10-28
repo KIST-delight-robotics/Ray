@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
-from voice_pipeline.memory.types import Episode, Profile
+from voice_pipeline.memory.types import Episode, UserNote
 
 
 def _make_episode(
@@ -32,19 +32,8 @@ def _make_episode(
     )
 
 
-def _make_profile(
-    topic: str = "interest",
-    sub_topic: str = "movie",
-    content: str = "Loves sci-fi movies",
-    updated_at: str = "2026-03-15 14:00:00",
-) -> Profile:
-    return Profile(
-        id=None,
-        topic=topic,
-        sub_topic=sub_topic,
-        content=content,
-        updated_at=updated_at,
-    )
+def _make_note(kind: str = "profile", text: str = "The user's name is 재헌.") -> UserNote:
+    return UserNote(id=None, kind=kind, text=text, session_id="s1", updated_at="2026-03-15 14:00:00")
 
 
 class _StorageTests(ABC):
@@ -226,48 +215,47 @@ class _StorageTests(ABC):
         assert loaded.embedding is not None
         np.testing.assert_array_almost_equal(loaded.embedding, emb, decimal=5)
 
-    # --- Profile CRUD ---
+    # --- User notes ---
 
-    def test_upsert_and_get_profile(self) -> None:
+    def test_add_and_get_user_notes_in_insertion_order(self) -> None:
         s = self.make_storage()
-        p = _make_profile()
-        pid = s.upsert_profile(p)
-        assert pid is not None and pid > 0
+        first = s.add_user_note(_make_note())
+        second = s.add_user_note(_make_note("preference", "Speak in 반말."))
+        assert first is not None and second is not None
 
-        profiles = s.get_all_profiles()
-        assert len(profiles) == 1
-        assert profiles[0].id == pid
-        assert profiles[0].topic == p.topic
-        assert profiles[0].sub_topic == p.sub_topic
-        assert profiles[0].content == p.content
+        notes = s.get_user_notes()
+        assert [(n.id, n.kind, n.text) for n in notes] == [
+            (first, "profile", "The user's name is 재헌."),
+            (second, "preference", "Speak in 반말."),
+        ]
+        assert notes[0].session_id == "s1"
 
-    def test_upsert_profile_update(self) -> None:
+    def test_update_user_note(self) -> None:
         s = self.make_storage()
-        pid = s.upsert_profile(_make_profile(content="Old content"))
+        nid = s.add_user_note(_make_note())
+        assert nid is not None
 
-        updated = Profile(
-            id=pid,
-            topic="interest",
-            sub_topic="movie",
-            content="New content",
-            updated_at="2026-03-20 10:00:00",
+        s.update_user_note(nid, "The user's name is 민지.", "s2", "2026-03-20 10:00:00")
+
+        (note,) = s.get_user_notes()
+        assert (note.id, note.kind, note.text, note.session_id, note.updated_at) == (
+            nid,
+            "profile",
+            "The user's name is 민지.",
+            "s2",
+            "2026-03-20 10:00:00",
         )
-        returned_id = s.upsert_profile(updated)
-        assert returned_id == pid
 
-        profiles = s.get_all_profiles()
-        assert len(profiles) == 1
-        assert profiles[0].content == "New content"
-
-    def test_delete_profile(self) -> None:
+    def test_delete_user_note(self) -> None:
         s = self.make_storage()
-        pid = s.upsert_profile(_make_profile())
-        s.delete_profile(pid)
-        assert s.get_all_profiles() == []
+        nid = s.add_user_note(_make_note())
+        assert nid is not None
+        s.delete_user_note(nid)
+        assert s.get_user_notes() == []
 
-    def test_delete_profile_nonexistent(self) -> None:
+    def test_delete_user_note_nonexistent(self) -> None:
         s = self.make_storage()
-        s.delete_profile(999)  # should not raise
+        s.delete_user_note(999)  # should not raise
 
     # --- Utterance ---
 
@@ -372,15 +360,13 @@ class TestSQLiteMemoryStoragePersistence:
         assert loaded.text == "Persistent episode"
         s2.close()
 
-    def test_profile_persists(self) -> None:
+    def test_user_note_persists(self) -> None:
         s1 = self._make_storage()
-        s1.upsert_profile(_make_profile(content="Persistent profile"))
+        s1.add_user_note(_make_note(text="Persistent note."))
         s1.close()
 
         s2 = self._make_storage()
-        profiles = s2.get_all_profiles()
-        assert len(profiles) == 1
-        assert profiles[0].content == "Persistent profile"
+        assert [n.text for n in s2.get_user_notes()] == ["Persistent note."]
         s2.close()
 
     def test_utterance_persists(self) -> None:

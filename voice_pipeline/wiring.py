@@ -71,7 +71,7 @@ from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DIMENSION, SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
-from voice_pipeline.session_context import format_profile_block, load_session_context
+from voice_pipeline.session_context import format_user_notes_block, load_session_context
 from voice_pipeline.settings import (
     BRIDGE_SAMPLE_RATE,
     DEFAULT_DB_PATH,
@@ -188,7 +188,7 @@ class ProcessComponents:
         memory_storage = self.memory_storage if memory_enabled else None
 
         if self.engine == "live":
-            # 장기기억: 프로필·최근 세션은 시작 instructions 에(세션 중 재조립 불가), 에피소드 검색은
+            # 장기기억: 사용자 노트·최근 세션은 시작 instructions 에(세션 중 재조립 불가), 에피소드 검색은
             # 백엔드 함수 툴로 — 트리거와 쿼리 생성을 백엔드 LLM 이 맡는다.
             now = datetime.now().astimezone()  # 모델에게 보이는 시각의 기준 — 시간대는 기기 시스템 설정
             tool_handlers: dict[str, Any] = dict(session_loop_kwargs.pop("tool_handlers", None) or {})
@@ -196,14 +196,14 @@ class ProcessComponents:
                 for name, handler in make_device_settings_handlers(self.device_settings).items():
                     tool_handlers.setdefault(name, handler)
             if memory_enabled:
-                profiles, recent_texts, included_ids = load_session_context(
+                notes, recent_texts, included_ids = load_session_context(
                     self.memory_storage, session_id, self.token_counter, now=now
                 )
                 retriever = MemoryRetriever(self.memory_storage, self.vector_index, self.embedder)
                 tool_handlers.setdefault(
                     SEARCH_MEMORY_TOOL, make_memory_search_handler(retriever, {session_id} | included_ids, now)
                 )
-                instructions = build_live_instructions(format_profile_block(profiles), recent_texts, now=now)
+                instructions = build_live_instructions(format_user_notes_block(notes), recent_texts, now=now)
             else:
                 instructions = build_live_instructions(now=now)
             # 핸들러가 있는 툴만 백엔드에 노출한다 (end_conversation·노래 툴은 루프 내장)

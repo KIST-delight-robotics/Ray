@@ -15,7 +15,7 @@ import pytest
 import voice_pipeline.wiring as wiring
 from voice_pipeline.engines.gpt_live.radio import Radio
 from voice_pipeline.engines.gpt_live.tools import SEARCH_MEMORY_TOOL
-from voice_pipeline.memory.types import Episode, Profile
+from voice_pipeline.memory.types import Episode, UserNote
 from voice_pipeline.trace import record_call
 from voice_pipeline.wiring import ProcessComponents, SessionComponents
 
@@ -184,15 +184,9 @@ class TestCreateSessionLiveEngine:
         comps.vap = None
         comps.turngpt = None
         comps.asr = None
-        comps.memory_storage.get_all_profiles.return_value = [
-            Profile(id=1, topic="interest", sub_topic="movie", content="SF", updated_at="2026-09-01 00:00:00"),
-            Profile(
-                id=2,
-                topic="interaction_style",
-                sub_topic="tone_preference",
-                content="prefers formal tone",
-                updated_at="2026-09-01 00:00:00",
-            ),
+        comps.memory_storage.get_user_notes.return_value = [
+            UserNote(1, "profile", "The user's name is 재헌.", "s-old", "2026-09-01 00:00:00"),
+            UserNote(2, "preference", "Speak formally.", "s-old", "2026-09-01 00:00:00"),
         ]
         comps.memory_storage.get_recent_sessions.return_value = [("s-old", "2026-09-10 10:00:00")]
         comps.memory_storage.get_episodes_by_session_ids.return_value = {
@@ -207,8 +201,9 @@ class TestCreateSessionLiveEngine:
         assert config.backend_model == wiring._LIVE_BACKEND_MODEL
         assert config.sample_rate == 24000
         assert {t["name"] for t in config.tools} == {"end_conversation", SEARCH_MEMORY_TOOL}
-        # 프로필·최근 세션은 시작 instructions 에 들어간다
-        assert "interest::movie: SF" in config.instructions
+        # 사용자 노트·최근 세션은 시작 instructions 에 들어간다
+        assert "About the user\n- The user's name is 재헌." in config.instructions
+        assert "How the user wants Ray to talk\n- Speak formally." in config.instructions
         assert "User saw Dune 2." in config.instructions
         # 말투 선호는 백엔드에 따로 넣지 않는다 — 세션 지시문이 백엔드에도 공유된다 (FINDINGS §4)
         assert "Ray's voice" not in config.backend_instructions
@@ -232,8 +227,8 @@ class TestCreateSessionLiveEngine:
         assert SEARCH_MEMORY_TOOL not in loop_cls.call_args.kwargs["tool_handlers"]
         config = live_cls.call_args.args[0]
         assert [t["name"] for t in config.tools] == ["end_conversation"]
-        assert "[User Profile]" not in config.instructions
-        comps.memory_storage.get_all_profiles.assert_not_called()
+        assert "About the user" not in config.instructions
+        comps.memory_storage.get_user_notes.assert_not_called()
 
     def test_device_settings_handlers_and_tools_are_wired(self, monkeypatch):
         live_cls = MagicMock(name="GPTLiveSession")

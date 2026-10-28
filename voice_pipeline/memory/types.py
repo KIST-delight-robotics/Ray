@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
+
+NoteKind = Literal["profile", "preference"]
+NOTE_KINDS: tuple[NoteKind, ...] = ("profile", "preference")
 
 
 @dataclass
@@ -35,22 +39,22 @@ class Episode:
 
 
 @dataclass
-class Profile:
-    """A user profile slot (topic::sub_topic → content).
+class UserNote:
+    """One line of what Ray always knows about the user (Block 2).
 
     Attributes:
-        id: Database primary key. None for profiles not yet persisted.
-        topic: Top-level category (basic_info, interest, personality,
-            interaction_style).
-        sub_topic: Sub-category within the topic.
-        content: Slot content text.
+        id: Database primary key. None for notes not yet persisted.
+        kind: ``"profile"`` — who the user is; ``"preference"`` — how the
+            user wants Ray to talk, written as an instruction to Ray.
+        text: One short sentence.
+        session_id: Session whose update last wrote this note.
         updated_at: Last update timestamp (UTC, '%Y-%m-%d %H:%M:%S').
     """
 
     id: int | None
-    topic: str
-    sub_topic: str
-    content: str
+    kind: NoteKind
+    text: str
+    session_id: str
     updated_at: str
 
 

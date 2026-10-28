@@ -20,6 +20,7 @@ import argparse
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -280,7 +281,7 @@ def main() -> None:
     songs._SONG_FILES = tuple(f for f in songs._SONG_FILES if f[0] != "audio/music")  # 음원 없이 목록만
     catalog = songs.load_song_catalog()
     tools = backend_tools(catalog)
-    live = args.live.read_text() if args.live else build_live_instructions()
+    live = args.live.read_text() if args.live else build_live_instructions(now=datetime.now().astimezone())
     client = OpenAI()
 
     def one(name: str, chain: list[Step], status: str) -> str:

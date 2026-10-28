@@ -10,8 +10,8 @@ from voice_pipeline.engines.cascade.context_builder import (
     format_memory_block,
     parse_citation_tag,
 )
-from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
-from voice_pipeline.session_context import format_profile_block, format_session_summary_block
+from voice_pipeline.memory.types import Episode, MemoryReadResult, UserNote
+from voice_pipeline.session_context import format_session_summary_block, format_user_notes_block
 
 _NOW = datetime(2026, 3, 30, 9, 0, tzinfo=ZoneInfo("Asia/Seoul"))  # = 2026-03-30 00:00 UTC
 
@@ -31,39 +31,38 @@ def _ep(
     )
 
 
-def _prof(topic: str, sub_topic: str, content: str) -> Profile:
-    return Profile(id=1, topic=topic, sub_topic=sub_topic, content=content, updated_at="2026-03-15 14:00:00")
+def _note(kind: str, text: str) -> UserNote:
+    return UserNote(id=None, kind=kind, text=text, session_id="s1", updated_at="2026-03-15 14:00:00")
 
 
 # ---------------------------------------------------------------------------
-# format_profile_block
+# format_user_notes_block
 # ---------------------------------------------------------------------------
 
 
-class TestFormatProfileBlock:
+class TestFormatUserNotesBlock:
     def test_empty(self) -> None:
-        assert format_profile_block([]) == ""
+        assert format_user_notes_block([]) == ""
 
-    def test_single_profile(self) -> None:
-        result = format_profile_block([_prof("basic_info", "name", "Alice")])
-        assert "[User Profile]" in result
-        assert "basic_info::name: Alice" in result
-
-    def test_sorted_by_topic_and_subtopic(self) -> None:
-        profiles = [
-            _prof("interest", "music", "Jazz"),
-            _prof("basic_info", "name", "Alice"),
-            _prof("interest", "movie", "SF"),
+    def test_sections_in_fixed_order_with_stored_order_inside(self) -> None:
+        notes = [
+            _note("preference", "Speak in 반말."),
+            _note("profile", "The user's name is 재헌."),
+            _note("profile", "The user lives in Seoul."),
         ]
-        result = format_profile_block(profiles)
-        lines = result.strip().split("\n")
-        # Header + 3 profiles
-        assert len(lines) == 4
-        # basic_info comes before interest
-        assert "basic_info" in lines[1]
-        # movie before music within interest
-        assert "movie" in lines[2]
-        assert "music" in lines[3]
+        assert format_user_notes_block(notes) == (
+            "About the user\n"
+            "- The user's name is 재헌.\n"
+            "- The user lives in Seoul.\n"
+            "\n"
+            "How the user wants Ray to talk\n"
+            "- Speak in 반말."
+        )
+
+    def test_empty_section_left_out(self) -> None:
+        assert format_user_notes_block([_note("preference", "Speak in 반말.")]) == (
+            "How the user wants Ray to talk\n- Speak in 반말."
+        )
 
 
 # ---------------------------------------------------------------------------

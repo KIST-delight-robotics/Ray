@@ -11,7 +11,7 @@ import pytest
 from voice_pipeline.engines.cascade.context_builder import ContextBuilder
 from voice_pipeline.engines.cascade.summarizer import HistorySummarySnapshot
 from voice_pipeline.history import HistoryTurn
-from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
+from voice_pipeline.memory.types import Episode, MemoryReadResult, UserNote
 from voice_pipeline.session_context import (
     PER_MESSAGE_OVERHEAD_TOKENS,
     format_session_summary_block,
@@ -359,8 +359,8 @@ class TestContextBuilderWithSummary:
 # ---------------------------------------------------------------------------
 
 
-def _make_profile(topic: str, sub: str, content: str) -> Profile:
-    return Profile(id=1, topic=topic, sub_topic=sub, content=content, updated_at="2026-03-15")
+def _make_note(text: str) -> UserNote:
+    return UserNote(id=1, kind="profile", text=text, session_id="s0", updated_at="2026-03-15 14:00:00")
 
 
 def _make_episode(text: str, ts: str = "2026-03-15 14:00:00", eid: int = 1, sid: str = "s1") -> Episode:
@@ -378,14 +378,14 @@ class TestContextBuilderWithMemory:
     """Tests for profile, memory, and session summary injection."""
 
     def test_profile_injected_as_developer_msg(self) -> None:
-        profiles = [_make_profile("basic_info", "name", "Alice")]
+        notes = [_make_note("The user's name is Alice.")]
         history = StubHistory()
-        cb = ContextBuilder(history, "sys", _word_counter, profiles=profiles)
+        cb = ContextBuilder(history, "sys", _word_counter, user_notes=notes)
         result = cb.build("hi")
         # system, profile(developer), user
         assert len(result) == 3
         assert result[1]["role"] == "developer"
-        assert "basic_info::name: Alice" in result[1]["content"]
+        assert "- The user's name is Alice." in result[1]["content"]
 
     def test_memory_injected_last(self) -> None:
         history = StubHistory()
@@ -416,7 +416,7 @@ class TestContextBuilderWithMemory:
 
     def test_block_ordering(self) -> None:
         """Verify: system → profile → summary → history → user → memory."""
-        profiles = [_make_profile("basic_info", "name", "Alice")]
+        notes = [_make_note("The user's name is Alice.")]
         summary = "[2026-03-28 14:00 session]\n- Summary ep."
         history = StubHistory()
         history.add_user_message("old")
@@ -424,7 +424,7 @@ class TestContextBuilderWithMemory:
             history,
             "sys",
             _word_counter,
-            profiles=profiles,
+            user_notes=notes,
             session_summaries=[summary],
         )
 
@@ -484,10 +484,10 @@ class TestContextBuilderWithMemory:
     def test_profile_exceeding_cap_is_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Profile larger than max_profile_tokens is not injected."""
         # Create a profile with long content
-        profiles = [_make_profile("basic_info", "bio", "a " * 200)]
+        notes = [_make_note("a " * 200)]
         history = StubHistory()
         _set_budgets(monkeypatch, max_profile=10)  # very tight cap
-        cb = ContextBuilder(history, "", _word_counter, profiles=profiles)
+        cb = ContextBuilder(history, "", _word_counter, user_notes=notes)
         result = cb.build("hi")
         # No developer message (profile too large)
         assert all(m.get("role") != "developer" for m in result)
@@ -573,7 +573,7 @@ class StubMemoryStorage:
         self.processed = processed or set()
         self.episode_calls: list[list[str]] = []  # get_episodes_by_session_ids 호출 기록
 
-    def get_all_profiles(self) -> list[Profile]:
+    def get_user_notes(self) -> list[UserNote]:
         return []
 
     def get_recent_sessions(

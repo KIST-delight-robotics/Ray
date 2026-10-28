@@ -9,9 +9,8 @@ import pytest
 
 from voice_pipeline.adapters.embedder import SentenceTransformerEmbedder
 from voice_pipeline.adapters.llm_openai import OpenAILLM
-from voice_pipeline.memory.prompts import PROFILE_SCHEMA
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
-from voice_pipeline.memory.types import Profile
+from voice_pipeline.memory.types import UserNote
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.writer import MemoryWriter
 from voice_pipeline.tests.memory.conftest import (
@@ -20,7 +19,7 @@ from voice_pipeline.tests.memory.conftest import (
     CONVERSATION_TRIVIAL,
     populate_utterances,
 )
-from voice_pipeline.types import ILLM, TokenCounter
+from voice_pipeline.types import ILLM
 
 pytestmark = pytest.mark.requires_api
 
@@ -29,17 +28,14 @@ pytestmark = pytest.mark.requires_api
 # Helpers
 # ---------------------------------------------------------------------------
 
-_VALID_TOPICS = set(PROFILE_SCHEMA.keys())
-
 
 def _make_writer(
     storage: SQLiteMemoryStorage,
     index: NumpyVectorIndex,
     embedder: SentenceTransformerEmbedder,
     llm: ILLM,
-    token_counter: TokenCounter,
 ) -> MemoryWriter:
-    return MemoryWriter(storage, index, embedder, llm, token_counter)
+    return MemoryWriter(storage, index, embedder, llm)
 
 
 # ---------------------------------------------------------------------------
@@ -56,11 +52,10 @@ class TestEpisodeExtraction:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        token_counter: TokenCounter,
     ) -> None:
         """A meaningful Korean conversation yields at least one episode."""
         populate_utterances(memory_db, "s1", CONVERSATION_MOVIE)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, token_counter)
+        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm)
 
         episodes = writer.process_session("s1", "2026-04-01 10:00:00")
 
@@ -78,11 +73,10 @@ class TestEpisodeExtraction:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        token_counter: TokenCounter,
     ) -> None:
         """Episode text should not contain raw timestamps or role labels."""
         populate_utterances(memory_db, "s1", CONVERSATION_PERSONAL)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, token_counter)
+        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm)
 
         episodes = writer.process_session("s1", "2026-04-01 11:00:00")
         assert len(episodes) >= 1
@@ -100,11 +94,10 @@ class TestEpisodeExtraction:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        token_counter: TokenCounter,
     ) -> None:
         """A trivial greeting exchange yields zero episodes."""
         populate_utterances(memory_db, "s1", CONVERSATION_TRIVIAL)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, token_counter)
+        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm)
 
         episodes = writer.process_session("s1", "2026-04-01 13:00:00")
         # Trivial conversation: too few utterances (MemoryWriter._MIN_UTTERANCES = 2)
@@ -117,11 +110,10 @@ class TestEpisodeExtraction:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        token_counter: TokenCounter,
     ) -> None:
         """Extracted episodes have embeddings stored."""
         populate_utterances(memory_db, "s1", CONVERSATION_MOVIE)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, token_counter)
+        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm)
 
         episodes = writer.process_session("s1", "2026-04-01 10:00:00")
         assert len(episodes) >= 1
@@ -134,68 +126,46 @@ class TestEpisodeExtraction:
 
 
 # ---------------------------------------------------------------------------
-# Profile extraction
+# User notes
 # ---------------------------------------------------------------------------
 
 
-class TestProfileExtraction:
-    """Profile extraction and merge with real LLM."""
+class TestUserNotes:
+    """User-notes update with real LLM."""
 
-    def test_extracts_valid_profile_topics(
+    def test_identity_facts_become_profile_notes_but_tastes_do_not(
         self,
         memory_db: SQLiteMemoryStorage,
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        token_counter: TokenCounter,
     ) -> None:
-        """Extracted profiles have valid topics from PROFILE_SCHEMA."""
-        # CONVERSATION_PERSONAL: jazz (interest), Seoul/programmer (basic_info)
+        """Seoul/programmer are identity facts; liking jazz is a taste and stays out."""
         populate_utterances(memory_db, "s1", CONVERSATION_PERSONAL)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, token_counter)
+        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm)
 
         writer.process_session("s1", "2026-04-01 11:00:00")
 
-        profiles = memory_db.get_all_profiles()
-        # LLM should extract at least some profile facts
-        if profiles:
-            for p in profiles:
-                assert p.topic in _VALID_TOPICS, f"Unknown topic: {p.topic}"
-                assert len(p.sub_topic) > 0
-                assert len(p.content) > 0
+        notes = memory_db.get_user_notes()
+        assert any(n.kind == "profile" for n in notes)
+        assert not any(n.kind == "preference" for n in notes)
+        assert not any("jazz" in n.text.lower() or "Evans" in n.text for n in notes)
 
-    def test_profile_merge_preserves_existing(
+    def test_unrelated_existing_note_is_kept(
         self,
         memory_db: SQLiteMemoryStorage,
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        token_counter: TokenCounter,
     ) -> None:
-        """Merging new facts does not delete existing profiles."""
-        # Pre-populate an existing profile
-        memory_db.upsert_profile(
-            Profile(
-                id=None,
-                topic="interest",
-                sub_topic="movie",
-                content="인터스텔라를 좋아함",
-                updated_at="2026-03-01 10:00:00",
-            )
-        )
-        profiles_before = memory_db.get_all_profiles()
+        """A conversation that does not touch an existing note leaves it as is."""
+        memory_db.add_user_note(UserNote(None, "preference", "Speak in 반말.", "s0", "2026-03-01 10:00:00"))
 
-        # Process a conversation that mentions music (new topic)
         populate_utterances(memory_db, "s1", CONVERSATION_PERSONAL)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, token_counter)
+        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm)
         writer.process_session("s1", "2026-04-01 11:00:00")
 
-        profiles_after = memory_db.get_all_profiles()
-        # The existing movie profile should still be present
-        movie_profiles = [p for p in profiles_after if p.sub_topic == "movie"]
-        assert len(movie_profiles) >= 1, "Existing movie profile should not be deleted"
-        # Total profiles should not decrease
-        assert len(profiles_after) >= len(profiles_before)
+        assert "Speak in 반말." in [n.text for n in memory_db.get_user_notes()]
 
 
 # ---------------------------------------------------------------------------
@@ -212,11 +182,10 @@ class TestSessionProcessing:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        token_counter: TokenCounter,
     ) -> None:
         """Session is marked as processed after write completes."""
         populate_utterances(memory_db, "s1", CONVERSATION_MOVIE)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, token_counter)
+        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm)
 
         writer.process_session("s1", "2026-04-01 10:00:00")
 
@@ -229,7 +198,6 @@ class TestSessionProcessing:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        token_counter: TokenCounter,
     ) -> None:
         """After processing, the session ID is detectable via get_processed_session_ids.
 
@@ -237,7 +205,7 @@ class TestSessionProcessing:
         check get_processed_session_ids() before calling process_session().
         """
         populate_utterances(memory_db, "s1", CONVERSATION_MOVIE)
-        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm, token_counter)
+        writer = _make_writer(memory_db, vector_index, shared_embedder, write_llm)
 
         # Not processed yet
         assert "s1" not in memory_db.get_processed_session_ids(["s1"])

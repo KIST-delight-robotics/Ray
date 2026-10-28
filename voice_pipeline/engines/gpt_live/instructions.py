@@ -38,7 +38,7 @@ DEFAULT_LIVE_INSTRUCTIONS = """\
 # Voice model (Ray) instructions
 You are Ray, a small, friendly desk robot.
 Speak Korean unless the user asks to switch. Speak warmly and naturally, at an unhurried pace.
-Default to polite Korean (해요체). If the user profile below states a tone preference, follow that instead.
+Default to polite Korean (해요체). If "How the user wants Ray to talk" below says otherwise, follow that instead.
 If the user is frustrated, acknowledge it briefly and focus on the next helpful step.
 
 Backchannel policy: Use moderate backchannels. Acknowledge naturally without competing with the main response.
@@ -338,23 +338,24 @@ LIVE_GREETING_TEXT = "네, 부르셨어요?"  # 웨이크워드 뒤 세션 연�
 LIVE_GREETING_TTS_MODEL = "gpt-4o-mini-tts"  # Live 목소리(cedar)를 지원하는 OpenAI TTS 모델
 
 
-def build_live_instructions(profile_text: str = "", recent_session_texts: Sequence[str] = (), *, now: datetime) -> str:
-    """세션 시작 instructions — 기본 지시문 뒤에 프로필(블록 2)과 최근 세션(블록 3)을 붙이고 현재 세션 표시로 끝낸다.
+def build_live_instructions(notes_text: str = "", recent_session_texts: Sequence[str] = (), *, now: datetime) -> str:
+    """세션 시작 instructions — 기본 지시문 뒤에 사용자 노트(블록 2)·최근 세션(블록 3), 끝에 현재 세션 표시.
 
     instructions 는 세션 시작 후 바꿀 수 없으므로 세션 수준 컨텍스트는 여기에 한 번 들어간다.
-    한도 16,384 토큰에 대해 프로필 256 + 최근 세션 512 soft cap 이라 여유가 크다. 대화 모델은 시계가 없어
-    끝의 현재 세션 표시가 "지금" 의 유일한 근거다 — 백엔드도 이 지시문을 같이 받는다(FINDINGS §4).
+    한도 16,384 토큰에 대해 사용자 노트는 기준이 엄격해 짧고 최근 세션은 512 soft cap 이라 여유가 크다.
+    대화 모델은 시계가 없어 끝의 현재 세션 표시가 "지금" 의 유일한 근거다 — 백엔드도 이 지시문을 같이
+    받는다(FINDINGS §4).
 
     Args:
-        profile_text: :func:`~voice_pipeline.session_context.format_profile_block` 결과. 빈 문자열이면 생략.
+        notes_text: :func:`~voice_pipeline.session_context.format_user_notes_block` 결과. 빈 문자열이면 생략.
         recent_session_texts: 최근 세션 블록 텍스트, 시간순. 비어 있으면 생략.
         now: 세션 시작 시각(현지 시간대).
     """
     parts = [DEFAULT_LIVE_INSTRUCTIONS.rstrip()]
-    if profile_text or recent_session_texts:
+    if notes_text or recent_session_texts:
         parts.append("What you already know about the user, from earlier sessions:")
-    if profile_text:
-        parts.append(profile_text.strip())
+    if notes_text:
+        parts.append(notes_text.strip())
     parts.extend(text.strip() for text in recent_session_texts if text.strip())
     parts.append(format_current_session_marker(now))
     return "\n\n".join(parts) + "\n"

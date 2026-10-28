@@ -44,7 +44,7 @@ from voice_pipeline.adapters.llm_openai import OpenAILLM
 from voice_pipeline.engines.cascade.context_builder import DEFAULT_SYSTEM_PROMPT
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import _DEFAULT_DIMENSION, SQLiteMemoryStorage
-from voice_pipeline.memory.types import MemoryReadResult, Profile
+from voice_pipeline.memory.types import MemoryReadResult, UserNote
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.types import ILLM, IEmbedder
 
@@ -54,7 +54,7 @@ ANSWER_STYLES = ("bench", "production")
 
 
 class _Perspective:
-    """Open storage + vector index + profiles for one perspective's DB."""
+    """Open storage + vector index + user notes for one perspective's DB."""
 
     def __init__(self, run_dir: Path, sample_id: str, perspective: str) -> None:
         self.perspective = perspective
@@ -63,7 +63,7 @@ class _Perspective:
         ids, vectors = self.storage.load_all_embeddings()
         if ids:
             self.vector_index.load(ids, vectors)
-        self.profiles = self.storage.get_all_profiles()
+        self.user_notes = self.storage.get_user_notes()
 
     def close(self) -> None:
         self.storage.close()
@@ -209,11 +209,11 @@ def _answer_one(
         now_dt = fallback_now
 
     retrieved: dict[str, list[dict[str, object]]] = {}
-    results: dict[str, tuple[MemoryReadResult, list[Profile]]] = {}
+    results: dict[str, tuple[MemoryReadResult, list[UserNote]]] = {}
     for p in perspectives:
         retriever = MemoryRetriever(p.storage, p.vector_index, embedder, now_fn=lambda now_dt=now_dt: now_dt)
         result = retriever.retrieve(qa.question, set())
-        results[p.perspective] = (result, p.profiles)
+        results[p.perspective] = (result, p.user_notes)
         retrieved[p.perspective] = [
             {
                 "episode_id": ep.id,

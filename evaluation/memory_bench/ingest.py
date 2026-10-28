@@ -53,7 +53,6 @@ _WRITER_CONSTANT_NAMES = (
     "_WRITE_MAX_INPUT_TOKENS",
     "_WRITE_WINDOW_OVERLAP_RATIO",
     "_WRITE_DEDUP_THRESHOLD",
-    "_PROFILE_MAX_CONTENT_TOKENS",
 )
 
 
@@ -158,7 +157,7 @@ def _ingest_unit(
         if ids:
             vector_index.load(ids, vectors)
 
-        writer = MemoryWriter(storage, vector_index, embedder, llm, token_counter, episode_system_prompt=episode_prompt)
+        writer = MemoryWriter(storage, vector_index, embedder, llm, episode_system_prompt=episode_prompt)
 
         session_ids = [session_db_id(conv.sample_id, s.index) for s in conv.sessions]
         processed = storage.get_processed_session_ids(session_ids)

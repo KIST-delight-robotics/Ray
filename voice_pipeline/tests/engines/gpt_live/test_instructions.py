@@ -22,6 +22,7 @@ from voice_pipeline.engines.gpt_live.instructions import (
     build_songs_section,
 )
 from voice_pipeline.engines.gpt_live.songs import Song
+from voice_pipeline.session_context import PREFERENCES_HEADING
 
 _SONGS = {
     "IAM": Song("IAM", "I AM", "IVE", artist_aliases=("아이브",)),
@@ -49,6 +50,10 @@ class TestBuildLiveInstructions:
         assert text.index("already know about the user, from earlier sessions:") > base_end
         assert text.index("[User Profile]") < text.index("2026-09-10") < text.index("2026-09-12") < text.index(_MARKER)
         assert text.rstrip().endswith(_MARKER)
+
+    def test_tone_default_points_at_the_preferences_heading(self) -> None:
+        # 해요체 기본값을 덮는 근거는 사용자 노트 블록의 선호 섹션이다 — 제목이 바뀌면 지시가 허공을 가리킨다
+        assert f'If "{PREFERENCES_HEADING}" below says otherwise' in DEFAULT_LIVE_INSTRUCTIONS
 
     def test_policies_follow_the_template_order(self) -> None:
         text = DEFAULT_LIVE_INSTRUCTIONS

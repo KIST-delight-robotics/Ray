@@ -17,7 +17,7 @@ from voice_pipeline.memory.storage import (
     RADIO_START,
     SQLiteMemoryStorage,
 )
-from voice_pipeline.memory.types import Profile
+from voice_pipeline.memory.types import UserNote
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
 from voice_pipeline.memory.writer import MemoryWriter, select_utterances
 from voice_pipeline.types import ILLM, IEmbedder, LLMResult, LLMStream
@@ -97,7 +97,6 @@ _WRITER_CLASS_VAR_MAP = {
     "write_max_input_tokens": "_WRITE_MAX_INPUT_TOKENS",
     "write_window_overlap_ratio": "_WRITE_WINDOW_OVERLAP_RATIO",
     "write_dedup_threshold": "_WRITE_DEDUP_THRESHOLD",
-    "profile_max_content_tokens": "_PROFILE_MAX_CONTENT_TOKENS",
 }
 
 
@@ -116,8 +115,7 @@ def _make_writer(
     vi = NumpyVectorIndex()
     emb = embedder or FakeEmbedder()
     llm = FakeLLM(llm_responses)
-    counter = lambda text: len(text.split())  # noqa: E731
-    writer = MemoryWriter(st, vi, emb, llm, counter)
+    writer = MemoryWriter(st, vi, emb, llm)
     return writer, st, vi, llm
 
 
@@ -143,25 +141,13 @@ def _episode_response(*texts: str) -> str:
     return json.dumps({"episodes": [{"text": t} for t in texts]})
 
 
-def _profile_facts_response(*facts: tuple[str, str, str]) -> str:
-    """Build a JSON response for profile extraction."""
-    return json.dumps({"facts": [{"topic": t, "sub_topic": s, "content": c} for t, s, c in facts]})
+def _notes_response(*ops: tuple[str, str, str | None, str | None]) -> str:
+    """Build a JSON response for the user-notes update: (op, list, target, text) per op."""
+    return json.dumps({"ops": [{"op": o, "list": k, "target": t, "text": x} for o, k, t, x in ops]})
 
 
-def _merge_response(*actions: tuple[str, int, str | None]) -> str:
-    """Build a JSON response for profile merge."""
-    return json.dumps(
-        {
-            "actions": [
-                {
-                    "action": a,
-                    "fact_index": fi,
-                    "new_content": nc,
-                }
-                for a, fi, nc in actions
-            ]
-        }
-    )
+def _note(kind: str, text: str) -> UserNote:
+    return UserNote(None, kind, text, "s-old", "2026-03-01 10:00:00")
 
 
 def _dedup_response(action: str, merged: str | None = None) -> str:
@@ -180,8 +166,8 @@ class TestEpisodeExtraction:
             "The user watched Interstellar and was deeply moved by it.",
             "The user cried at the ending of the movie.",
         )
-        facts_json = _profile_facts_response()
-        writer, storage, vi, _ = _make_writer([ep_json, facts_json])
+        notes_json = _notes_response()
+        writer, storage, vi, _ = _make_writer([ep_json, notes_json])
         _add_utterances(storage)
 
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
@@ -216,8 +202,8 @@ class TestEpisodeExtraction:
 
     def test_session_marked_processed_after_extraction(self) -> None:
         ep_json = _episode_response("An episode.")
-        facts_json = _profile_facts_response()
-        writer, storage, _, _ = _make_writer([ep_json, facts_json])
+        notes_json = _notes_response()
+        writer, storage, _, _ = _make_writer([ep_json, notes_json])
         _add_utterances(storage)
 
         writer.process_session(_SESSION_ID, _TIMESTAMP)
@@ -323,8 +309,8 @@ class TestSelectUtterances:
 
     def test_episodes_have_embeddings(self) -> None:
         ep_json = _episode_response("The user loves sci-fi movies.")
-        facts_json = _profile_facts_response()
-        writer, storage, vi, _ = _make_writer([ep_json, facts_json])
+        notes_json = _notes_response()
+        writer, storage, vi, _ = _make_writer([ep_json, notes_json])
         _add_utterances(storage)
 
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
@@ -336,8 +322,8 @@ class TestSelectUtterances:
 
     def test_episodes_stored_in_storage(self) -> None:
         ep_json = _episode_response("A memorable episode.")
-        facts_json = _profile_facts_response()
-        writer, storage, _, _ = _make_writer([ep_json, facts_json])
+        notes_json = _notes_response()
+        writer, storage, _, _ = _make_writer([ep_json, notes_json])
         _add_utterances(storage)
 
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
@@ -348,147 +334,92 @@ class TestSelectUtterances:
 
 
 # ---------------------------------------------------------------------------
-# Profile extraction and merge tests
+# User notes
 # ---------------------------------------------------------------------------
 
 
-class TestProfileMerge:
-    def test_profile_facts_are_extracted_from_the_transcript(self) -> None:
-        ep_json = _episode_response("The user loves Interstellar.")
-        writer, storage, _, llm = _make_writer([ep_json, _profile_facts_response()])
+class TestUserNotes:
+    def test_update_sees_current_lists_and_the_transcript(self) -> None:
+        writer, storage, _, llm = _make_writer([_episode_response("The user loves Interstellar."), _notes_response()])
+        storage.add_user_note(_note("profile", "The user's name is 재헌."))
         _add_utterances(storage)
 
         writer.process_session(_SESSION_ID, _TIMESTAMP)
 
-        profile_input = llm.messages_log[1][-1]["content"]
-        assert "User: I watched Interstellar last night and it was amazing." in profile_input
-        assert "The user loves Interstellar." not in profile_input
+        update_input = llm.messages_log[1][-1]["content"]
+        assert "Profile:\nP1. The user's name is 재헌.\n\nPreferences:\n(empty)" in update_input
+        assert "User: I watched Interstellar last night and it was amazing." in update_input
+        assert "The user loves Interstellar." not in update_input  # 에피소드가 아니라 원문을 본다
 
-    def test_profile_append(self) -> None:
-        ep_json = _episode_response("The user loves Interstellar.")
-        facts_json = _profile_facts_response(
-            ("interest", "movie", "Loves Interstellar"),
+    def test_add_stores_notes_with_their_session(self) -> None:
+        notes_json = _notes_response(
+            ("add", "profile", None, "The user is a graduate student."),
+            ("add", "preference", None, "Speak in 반말."),
         )
-        merge_json = _merge_response(
-            ("APPEND", 1, "Loves Interstellar"),
-        )
-        writer, storage, _, _ = _make_writer([ep_json, facts_json, merge_json])
+        writer, storage, _, _ = _make_writer([_episode_response("Episode."), notes_json])
         _add_utterances(storage)
 
         writer.process_session(_SESSION_ID, _TIMESTAMP)
 
-        profiles = storage.get_all_profiles()
-        assert len(profiles) == 1
-        assert profiles[0].topic == "interest"
-        assert profiles[0].sub_topic == "movie"
-        assert profiles[0].content == "Loves Interstellar"
+        notes = storage.get_user_notes()
+        assert [(n.kind, n.text) for n in notes] == [
+            ("profile", "The user is a graduate student."),
+            ("preference", "Speak in 반말."),
+        ]
+        assert all(n.session_id == _SESSION_ID and n.updated_at == _TIMESTAMP for n in notes)
 
-    def test_profile_update(self) -> None:
-        ep_json = _episode_response("The user mentioned Tenet.")
-        facts_json = _profile_facts_response(
-            ("interest", "movie", "Also likes Tenet"),
+    def test_replace_and_delete_address_ids_numbered_per_list(self) -> None:
+        notes_json = _notes_response(
+            ("replace", "profile", "P2", "The user works at KIST."),
+            ("delete", "preference", "R1", None),
         )
-        merge_json = _merge_response(
-            ("UPDATE", 1, "Loves Interstellar, Tenet"),
-        )
-        writer, storage, _, _ = _make_writer([ep_json, facts_json, merge_json])
-        _add_utterances(storage)
-
-        # Pre-populate existing profile
-        storage.upsert_profile(
-            Profile(
-                id=None,
-                topic="interest",
-                sub_topic="movie",
-                content="Loves Interstellar",
-                updated_at="2026-03-01 10:00:00",
-            )
-        )
-
-        writer.process_session(_SESSION_ID, _TIMESTAMP)
-
-        profiles = storage.get_all_profiles()
-        assert len(profiles) == 1
-        assert profiles[0].content == "Loves Interstellar, Tenet"
-
-    def test_profile_abort(self) -> None:
-        ep_json = _episode_response("The user mentioned movies.")
-        facts_json = _profile_facts_response(
-            ("interest", "movie", "Likes movies"),
-        )
-        merge_json = _merge_response(
-            ("ABORT", 1, None),
-        )
-        writer, storage, _, _ = _make_writer([ep_json, facts_json, merge_json])
+        writer, storage, _, _ = _make_writer([_episode_response("Episode."), notes_json])
+        storage.add_user_note(_note("profile", "The user's name is 재헌."))  # P1
+        storage.add_user_note(_note("preference", "Speak in 반말."))  # R1
+        storage.add_user_note(_note("profile", "The user is a student."))  # P2
         _add_utterances(storage)
 
         writer.process_session(_SESSION_ID, _TIMESTAMP)
 
-        profiles = storage.get_all_profiles()
-        assert len(profiles) == 0
+        notes = storage.get_user_notes()
+        assert [(n.kind, n.text) for n in notes] == [
+            ("profile", "The user's name is 재헌."),
+            ("profile", "The user works at KIST."),
+        ]
+        assert notes[0].session_id == "s-old"  # 손대지 않은 줄은 그대로
+        assert notes[1].session_id == _SESSION_ID
 
-    def test_mixed_merge_actions(self) -> None:
-        ep_json = _episode_response("User talked about movies and music.")
-        facts_json = _profile_facts_response(
-            ("interest", "movie", "Likes sci-fi"),
-            ("interest", "music", "Enjoys jazz"),
-            ("interest", "book", "Trivial mention"),
+    def test_invalid_ops_are_skipped(self) -> None:
+        notes_json = _notes_response(
+            ("replace", "profile", "P9", "No such item."),
+            ("replace", "profile", "P1", None),
+            ("add", "profile", None, "  "),
+            ("add", "hobby", None, "Not a list."),
+            ("add", "profile", None, "The user lives in Seoul."),
         )
-        merge_json = _merge_response(
-            ("UPDATE", 1, "Sci-fi and action movies"),
-            ("APPEND", 2, "Enjoys jazz"),
-            ("ABORT", 3, None),
-        )
-        writer, storage, _, _ = _make_writer([ep_json, facts_json, merge_json])
-        _add_utterances(storage)
-
-        # Pre-populate
-        storage.upsert_profile(
-            Profile(
-                id=None,
-                topic="interest",
-                sub_topic="movie",
-                content="Action movies",
-                updated_at="2026-03-01 10:00:00",
-            )
-        )
-
-        writer.process_session(_SESSION_ID, _TIMESTAMP)
-
-        profiles = storage.get_all_profiles()
-        assert len(profiles) == 2
-        topics = {(p.topic, p.sub_topic): p.content for p in profiles}
-        assert topics[("interest", "movie")] == "Sci-fi and action movies"
-        assert topics[("interest", "music")] == "Enjoys jazz"
-
-    def test_unknown_topic_dropped(self) -> None:
-        ep_json = _episode_response("The user said something.")
-        facts_json = _profile_facts_response(
-            ("unknown_topic", "sub", "content"),
-            ("interest", "movie", "Valid fact"),
-        )
-        merge_json = _merge_response(
-            ("APPEND", 1, "Valid fact"),
-        )
-        writer, storage, _, _ = _make_writer([ep_json, facts_json, merge_json])
+        writer, storage, _, _ = _make_writer([_episode_response("Episode."), notes_json])
+        storage.add_user_note(_note("profile", "The user's name is 재헌."))
         _add_utterances(storage)
 
         writer.process_session(_SESSION_ID, _TIMESTAMP)
 
-        profiles = storage.get_all_profiles()
-        assert len(profiles) == 1
-        assert profiles[0].content == "Valid fact"
+        assert [n.text for n in storage.get_user_notes()] == [
+            "The user's name is 재헌.",
+            "The user lives in Seoul.",
+        ]
 
-    def test_no_episodes_skips_profile(self) -> None:
-        """If no episodes extracted, profile extraction should not happen."""
-        ep_json = _episode_response()  # empty
-        writer, _, _, llm = _make_writer([ep_json])
-        _add_utterances(writer._storage)
+    def test_update_runs_even_without_episodes(self) -> None:
+        """사소하다고 에피소드가 0개인 세션에도 "앞으로 반말해" 같은 선호가 있을 수 있다."""
+        notes_json = _notes_response(("add", "preference", None, "Speak in 반말."))
+        writer, storage, _, llm = _make_writer([_episode_response(), notes_json])
+        _add_utterances(storage)
 
-        writer.process_session(_SESSION_ID, _TIMESTAMP)
+        episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
 
-        # Only episode extraction call, no profile calls
-        assert llm._call_count == 1
+        assert episodes == []
+        assert llm._call_count == 2
+        assert [n.text for n in storage.get_user_notes()] == ["Speak in 반말."]
+        assert _SESSION_ID in storage.get_processed_session_ids([_SESSION_ID])
 
 
 # ---------------------------------------------------------------------------
@@ -499,8 +430,8 @@ class TestProfileMerge:
 class TestWindowing:
     def test_short_session_single_window(self) -> None:
         ep_json = _episode_response("Short session episode.")
-        facts_json = _profile_facts_response()
-        writer, storage, _, llm = _make_writer([ep_json, facts_json])
+        notes_json = _notes_response()
+        writer, storage, _, llm = _make_writer([ep_json, notes_json])
         _add_utterances(storage)
 
         writer.process_session(_SESSION_ID, _TIMESTAMP)
@@ -513,7 +444,7 @@ class TestWindowing:
         ep_json_1 = _episode_response("Episode from window 1.")
         ep_json_2 = _episode_response("Episode from window 2.")
         dedup_json = _dedup_response("KEEP_BOTH")
-        facts_json = _profile_facts_response()
+        notes_json = _notes_response()
         _apply_writer_overrides(
             monkeypatch,
             write_max_input_tokens=25,
@@ -521,7 +452,7 @@ class TestWindowing:
             write_dedup_threshold=0.8,
         )
         writer, storage, _, llm = _make_writer(
-            [ep_json_1, ep_json_2, dedup_json, facts_json],
+            [ep_json_1, ep_json_2, dedup_json, notes_json],
             embedder=ConstantEmbedder(),
         )
         _add_utterances(storage)
@@ -542,7 +473,7 @@ class TestWindowing:
         # Sequential: candidate 1 → MERGE, candidate 2 → KEEP_BOTH
         merge_json = _dedup_response("MERGE", "The user watched Interstellar and was deeply moved to tears.")
         keep_json = _dedup_response("KEEP_BOTH")
-        facts_json = _profile_facts_response()
+        notes_json = _notes_response()
         _apply_writer_overrides(
             monkeypatch,
             write_max_input_tokens=25,
@@ -550,7 +481,7 @@ class TestWindowing:
             write_dedup_threshold=0.8,
         )
         writer, storage, _, _ = _make_writer(
-            [ep_json_1, ep_json_2, merge_json, keep_json, facts_json],
+            [ep_json_1, ep_json_2, merge_json, keep_json, notes_json],
             embedder=ConstantEmbedder(),
         )
         _add_utterances(storage)
@@ -567,7 +498,7 @@ class TestWindowing:
         ep_json_1 = _episode_response("The user likes sci-fi.")
         ep_json_2 = _episode_response("The user loves sci-fi movies, especially Nolan films.")
         dedup_json = _dedup_response("DISCARD_FIRST")
-        facts_json = _profile_facts_response()
+        notes_json = _notes_response()
         _apply_writer_overrides(
             monkeypatch,
             write_max_input_tokens=25,
@@ -575,7 +506,7 @@ class TestWindowing:
             write_dedup_threshold=0.8,
         )
         writer, storage, _, _ = _make_writer(
-            [ep_json_1, ep_json_2, dedup_json, facts_json],
+            [ep_json_1, ep_json_2, dedup_json, notes_json],
             embedder=ConstantEmbedder(),
         )
         _add_utterances(storage)
@@ -590,7 +521,7 @@ class TestWindowing:
         ep_json_1 = _episode_response("The user loves sci-fi movies, especially Nolan films.")
         ep_json_2 = _episode_response("The user likes sci-fi.")
         dedup_json = _dedup_response("DISCARD_SECOND")
-        facts_json = _profile_facts_response()
+        notes_json = _notes_response()
         _apply_writer_overrides(
             monkeypatch,
             write_max_input_tokens=25,
@@ -598,7 +529,7 @@ class TestWindowing:
             write_dedup_threshold=0.8,
         )
         writer, storage, _, _ = _make_writer(
-            [ep_json_1, ep_json_2, dedup_json, facts_json],
+            [ep_json_1, ep_json_2, dedup_json, notes_json],
             embedder=ConstantEmbedder(),
         )
         _add_utterances(storage)
@@ -612,7 +543,7 @@ class TestWindowing:
         """When dedup LLM fails, keep the longer episode."""
         ep_json_1 = _episode_response("Short.")
         ep_json_2 = _episode_response("This is a longer and more detailed episode.")
-        facts_json = _profile_facts_response()
+        notes_json = _notes_response()
         _apply_writer_overrides(
             monkeypatch,
             write_max_input_tokens=25,
@@ -621,7 +552,7 @@ class TestWindowing:
         )
         # 2 extraction calls succeed, dedup call returns bad JSON, profile call
         writer, storage, _, _ = _make_writer(
-            [ep_json_1, ep_json_2, "bad json", facts_json],
+            [ep_json_1, ep_json_2, "bad json", notes_json],
             embedder=ConstantEmbedder(),
         )
         _add_utterances(storage)
@@ -635,7 +566,7 @@ class TestWindowing:
         """When no embeddings exceed threshold, no dedup LLM call is made."""
         ep_json_1 = _episode_response("Episode about movies.")
         ep_json_2 = _episode_response("Episode about cooking.")
-        facts_json = _profile_facts_response()
+        notes_json = _notes_response()
         # Random embeddings have near-zero cosine similarity, threshold=0.99 skips all
         _apply_writer_overrides(
             monkeypatch,
@@ -643,7 +574,7 @@ class TestWindowing:
             write_window_overlap_ratio=0.0,
             write_dedup_threshold=0.99,
         )
-        writer, storage, _, llm = _make_writer([ep_json_1, ep_json_2, facts_json])
+        writer, storage, _, llm = _make_writer([ep_json_1, ep_json_2, notes_json])
         _add_utterances(storage)
 
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
@@ -664,14 +595,14 @@ class TestWindowing:
         ep_json_1 = _episode_response("Window 1 episode.")
         ep_json_2 = _episode_response("Window 2 episode.")
         ep_json_3 = _episode_response("Window 3 episode.")
-        facts_json = _profile_facts_response()
+        notes_json = _notes_response()
         _apply_writer_overrides(
             monkeypatch,
             write_max_input_tokens=25,
             write_window_overlap_ratio=0.4,
             write_dedup_threshold=0.99,
         )
-        writer, storage, _, llm = _make_writer([ep_json_1, ep_json_2, ep_json_3, facts_json])
+        writer, storage, _, llm = _make_writer([ep_json_1, ep_json_2, ep_json_3, notes_json])
         _add_utterances(storage)
 
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
@@ -697,8 +628,7 @@ class TestErrorHandling:
         storage = SQLiteMemoryStorage(":memory:", dimension=_DIM)
         vi = NumpyVectorIndex()
         emb = FakeEmbedder()
-        counter = lambda text: len(text.split())  # noqa: E731
-        writer = MemoryWriter(storage, vi, emb, FailingLLM(), counter)
+        writer = MemoryWriter(storage, vi, emb, FailingLLM())
         _add_utterances(storage)
 
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
@@ -712,10 +642,10 @@ class TestErrorHandling:
         episodes = writer.process_session(_SESSION_ID, _TIMESTAMP)
         assert episodes == []
 
-    def test_profile_extraction_failure_episodes_still_stored(self) -> None:
-        """Profile failure should not affect already-stored episodes."""
+    def test_user_notes_failure_episodes_still_stored(self) -> None:
+        """A failed user-notes update should not affect already-stored episodes."""
         ep_json = _episode_response("A good episode.")
-        # Profile extraction returns bad JSON
+        # User-notes update returns bad JSON
         writer, storage, _, _ = _make_writer([ep_json, "bad json"])
         _add_utterances(storage)
 
@@ -736,7 +666,6 @@ class TestEpisodePromptOverride:
             NumpyVectorIndex(),
             FakeEmbedder(),
             llm,
-            lambda text: len(text.split()),
             episode_system_prompt="CUSTOM EXTRACTION PROMPT",
         )
         _add_utterances(st)

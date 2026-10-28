@@ -1,7 +1,7 @@
 """Production-style answerer — 벤치 답변자를 실제 레이 프롬프트·컨텍스트로 구성.
 
 프로덕션 조립을 프로덕션 코드로 재현한다: ``DEFAULT_SYSTEM_PROMPT``(Block 1) +
-``format_profile_block``(Block 2) + 질문(user) + ``format_memory_block``(Block 4,
+``format_user_notes_block``(Block 2) + 질문(user) + ``format_memory_block``(Block 4,
 [M1] 번호·인용 태그 계약 포함). 히스토리/이전 세션 요약(Block 3)은 벤치에 없으므로
 생략 — 나머지는 ContextBuilder.build()와 동일한 순서·role이다.
 
@@ -20,8 +20,8 @@ from voice_pipeline.engines.cascade.context_builder import (
     format_memory_block,
     parse_citation_tag,
 )
-from voice_pipeline.memory.types import MemoryReadResult, Profile
-from voice_pipeline.session_context import format_profile_block
+from voice_pipeline.memory.types import MemoryReadResult, UserNote
+from voice_pipeline.session_context import format_user_notes_block
 
 PRODUCTION_MAX_TOKENS = 256  # 프로덕션 OpenAILLM 설정과 동일 (wiring.py)
 
@@ -29,7 +29,7 @@ PRODUCTION_MAX_TOKENS = 256  # 프로덕션 OpenAILLM 설정과 동일 (wiring.p
 def build_production_messages(
     question: str,
     memory_result: MemoryReadResult | None,
-    profiles: list[Profile],
+    user_notes: list[UserNote],
     now: datetime,
 ) -> list[dict[str, Any]]:
     """Assemble messages the way production ContextBuilder does (Blocks 1/2/4).
@@ -37,7 +37,7 @@ def build_production_messages(
     ``now`` is the question time — memory dates are labeled relative to it.
     """
     messages: list[dict[str, Any]] = [{"role": "system", "content": DEFAULT_SYSTEM_PROMPT}]
-    profile_text = format_profile_block(profiles)
+    profile_text = format_user_notes_block(user_notes)
     if profile_text:
         messages.append({"role": "developer", "content": profile_text})
     messages.append({"role": "user", "content": question})

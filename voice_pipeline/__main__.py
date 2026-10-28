@@ -217,7 +217,6 @@ def main() -> None:
         components.vector_index,
         components.embedder,
         write_llm,
-        components.token_counter,
     )
     write_executor = ThreadPoolExecutor(max_workers=1)
     if components.engine == "live":

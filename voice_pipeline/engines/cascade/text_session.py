@@ -104,12 +104,12 @@ class TextSession:
                 history_backend=history_backend,
             )
         else:
-            profiles = memory_storage.get_all_profiles() if memory_storage else []
+            user_notes = memory_storage.get_user_notes() if memory_storage else []
             self._context_builder = ContextBuilder(
                 history,
                 system_prompt,
                 token_counter,
-                profiles=profiles,
+                user_notes=user_notes,
             )
         self._exclude_session_ids = self._context_builder.exclude_session_ids | {self._session_id}
 

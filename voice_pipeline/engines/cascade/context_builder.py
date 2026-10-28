@@ -30,8 +30,8 @@ from voice_pipeline.session_context import (
     SESSION_PAGE_SIZE,
     format_current_session_marker,
     format_local_time,
-    format_profile_block,
     format_session_summary_block,
+    format_user_notes_block,
     load_session_context,
     select_recent_blocks,
 )
@@ -39,7 +39,7 @@ from voice_pipeline.settings import HISTORY_TOKEN_BUDGET
 from voice_pipeline.types import TokenCounter
 
 if TYPE_CHECKING:
-    from voice_pipeline.memory.types import MemoryReadResult, Profile
+    from voice_pipeline.memory.types import MemoryReadResult, UserNote
 
 logger = logging.getLogger("voice_pipeline.prompt")
 
@@ -176,13 +176,13 @@ class _Carryover:
 class ContextBuilder:
     """Assembles LLM context with fixed per-block token budgets.
 
-    Session-level data (profiles, recent-session episodes, previous-session
+    Session-level data (user notes, recent-session episodes, previous-session
     carryover) is loaded at construction.  Per-turn memory results are passed
     to ``build()``.
 
     Per-block budgets (independent — no shared global budget):
       - System prompt / current user message: always included, uncapped.
-      - Profile: capped at ``_MAX_PROFILE_TOKENS`` (skip if over).
+      - User notes: capped at ``_MAX_PROFILE_TOKENS`` (skip if over).
       - Recent sessions: soft-capped at ``_MAX_RECENT_SESSIONS_TOKENS`` —
         whole sessions newest-first, the newest always included.
       - Memory: capped at ``_MAX_MEMORY_TOKENS`` (lowest-salience dropped).
@@ -209,7 +209,7 @@ class ContextBuilder:
         history: ConversationHistory,
         system_prompt: str,
         token_counter: TokenCounter,
-        profiles: list[Profile] | None = None,
+        user_notes: list[UserNote] | None = None,
         session_summaries: list[str] | None = None,
         *,
         memory_storage: SQLiteMemoryStorage | None = None,
@@ -224,7 +224,7 @@ class ContextBuilder:
             history: 현재 세션 대화 이력.
             system_prompt: LLM 시스템 프롬프트.
             token_counter: 토큰 카운터 콜러블.
-            profiles: 직접 주입할 프로필 (memory_storage 미사용 시).
+            user_notes: 직접 주입할 사용자 노트 (memory_storage 미사용 시).
             session_summaries: 직접 주입할 최근 세션 블록 텍스트, 시간순
                 (오래된 것 먼저). soft cap이 동일하게 적용된다.
             memory_storage: 프로필·최근 세션 로딩 및 이월 퇴거용 스토리지.
@@ -257,7 +257,7 @@ class ContextBuilder:
         self.exclude_session_ids: set[str] = set()
         if memory_storage is not None and session_id is not None:
             carryover_sid = self._carryover.session_id if self._carryover is not None else None
-            profiles, self._recent_block_texts, included_ids = load_session_context(
+            user_notes, self._recent_block_texts, included_ids = load_session_context(
                 memory_storage,
                 session_id,
                 token_counter,
@@ -278,7 +278,7 @@ class ContextBuilder:
             self._recent_block_texts = [text for _, text in selected]
 
         # Pre-format and pre-count session-level blocks (immutable)
-        self._profile_text = format_profile_block(profiles or [])
+        self._profile_text = format_user_notes_block(user_notes or [])
         self._profile_tokens = (
             self._token_counter(self._profile_text) + PER_MESSAGE_OVERHEAD_TOKENS if self._profile_text else 0
         )

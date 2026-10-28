@@ -1,4 +1,4 @@
-"""Memory write pipeline: extract episodes and profiles from session utterances.
+"""Memory write pipeline: extract episodes and update user notes from session utterances.
 
 Pure processing module — receives session data, performs LLM-based extraction,
 and stores results. Does not manage triggers or scheduling (Phase 4).
@@ -16,19 +16,16 @@ import numpy as np
 from voice_pipeline.memory.prompts import (
     EPISODE_DEDUP_SCHEMA,
     EPISODE_EXTRACTION_SCHEMA,
-    PROFILE_EXTRACTION_SCHEMA,
-    PROFILE_MERGE_SCHEMA,
-    PROFILE_SCHEMA,
+    USER_NOTES_UPDATE_SCHEMA,
     build_episode_dedup_messages,
     build_episode_extraction_messages,
-    build_profile_extraction_messages,
-    build_profile_merge_messages,
-    format_profile_schema,
+    build_user_notes_messages,
+    label_user_notes,
 )
 from voice_pipeline.memory.storage import EVENT_ROLE, RADIO_PAUSED, RADIO_ROLE, RADIO_START, SQLiteMemoryStorage
-from voice_pipeline.memory.types import Episode, Profile
+from voice_pipeline.memory.types import NOTE_KINDS, Episode, UserNote
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
-from voice_pipeline.types import ILLM, IEmbedder, TokenCounter
+from voice_pipeline.types import ILLM, IEmbedder
 
 logger = logging.getLogger("voice_pipeline.memory")
 
@@ -60,17 +57,15 @@ def select_utterances(rows: list[Utterance]) -> list[Utterance]:
 
 
 class MemoryWriter:
-    """Extracts episodes and profiles from session utterances.
+    """Extracts episodes and updates user notes from session utterances.
 
     Thread safety: designed to be called from a single thread.
     """
 
-    _MIN_UTTERANCES = 2  # 에피소드 추출 시도에 필요한 최소 utterance 수
+    _MIN_UTTERANCES = 2  # 추출 시도에 필요한 최소 utterance 수
     _WRITE_MAX_INPUT_TOKENS = 8000  # 에피소드 추출 윈도우 최대 토큰 수 (초과 시 분할)
     _WRITE_WINDOW_OVERLAP_RATIO = 0.25  # 인접 윈도우 overlap 비율 (0.0–1.0)
     _WRITE_DEDUP_THRESHOLD = 0.8  # 중복 판정 코사인 유사도 임계값
-    _PROFILE_MAX_CONTENT_TOKENS = 128  # 프로필 슬롯 content 최대 토큰 수
-    _PROFILE_CONTENT_WARN_RATIO = 0.7  # content 토큰이 예산의 몇 배를 넘으면 요약 경고 표시
 
     def __init__(
         self,
@@ -78,17 +73,15 @@ class MemoryWriter:
         vector_index: NumpyVectorIndex,
         embedder: IEmbedder,
         llm: ILLM,
-        token_counter: TokenCounter,
         *,
         episode_system_prompt: str | None = None,
     ) -> None:
         """
         Args:
-            storage: Episode/profile persistence backend.
+            storage: Episode/user-note persistence backend.
             vector_index: Vector index updated with new episode embeddings.
             embedder: Episode embedder.
             llm: Extraction LLM.
-            token_counter: Token counter for windowing and profile budgets.
             episode_system_prompt: 에피소드 추출 시스템 프롬프트 오버라이드
                 (중립 주입점 — 평가에서 프롬프트 변형 실험용). ``None``이면
                 기본 프롬프트.
@@ -97,12 +90,10 @@ class MemoryWriter:
         self._vector_index = vector_index
         self._embedder = embedder
         self._llm = llm
-        self._token_counter = token_counter
         self._episode_system_prompt = episode_system_prompt
-        self._profile_schema_text = format_profile_schema()
 
     def process_session(self, session_id: str, session_timestamp: str) -> list[Episode]:
-        """Process a completed session: extract episodes and profiles.
+        """Process a completed session: extract episodes and update user notes.
 
         Args:
             session_id: Session to process.
@@ -131,35 +122,15 @@ class MemoryWriter:
             )
             return []
 
-        # 1. Episode extraction
+        # 1. Episode extraction + storage (embeddings, vector index)
         episodes = self._extract_episodes(utterances, session_id, session_timestamp)
         if not episodes:
             logger.info("No episodes extracted from session %s", session_id)
-            duration_ms = (time.monotonic() - t0) * 1000
-            self._storage.mark_session_processed(
-                session_id,
-                duration_ms=duration_ms,
-                episode_count=0,
-            )
-            return []
-
-        # 2. Store episodes + embeddings
         stored = self._store_episodes(episodes)
-        if not stored:
-            duration_ms = (time.monotonic() - t0) * 1000
-            self._storage.mark_session_processed(
-                session_id,
-                duration_ms=duration_ms,
-                episode_count=0,
-            )
-            return []
 
-        # 3. Profile extraction from the transcript — 에피소드 요약에선 라디오 맥락 같은 출처가 사라진다
-        facts = self._extract_profile_facts(utterances)
-
-        # 4. Profile merge
-        if facts:
-            self._merge_profiles(facts, session_timestamp)
+        # 2. User notes from the transcript — 에피소드가 없어도 돈다: "앞으로 반말해" 한마디 세션은
+        #    사소하다고 에피소드가 0개이기 쉽다. 에피소드 요약에선 라디오 맥락 같은 출처도 사라진다
+        self._update_user_notes(utterances, session_id, session_timestamp)
 
         duration_ms = (time.monotonic() - t0) * 1000
         self._storage.mark_session_processed(
@@ -277,147 +248,60 @@ class MemoryWriter:
         return stored
 
     # ------------------------------------------------------------------
-    # Profile extraction
+    # User notes
     # ------------------------------------------------------------------
 
-    def _extract_profile_facts(self, utterances: list[Utterance]) -> list[dict[str, str]]:
-        """Extract profile facts from the session transcript."""
-        messages = build_profile_extraction_messages(utterances, self._profile_schema_text)
-
-        text = self._call_llm(messages, PROFILE_EXTRACTION_SCHEMA)
-        if text is None:
-            return []
-
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            logger.warning("Failed to parse profile extraction JSON")
-            return []
-
-        valid_topics = set(PROFILE_SCHEMA.keys())
-        facts: list[dict[str, str]] = []
-        for item in data.get("facts", []):
-            topic = item.get("topic", "")
-            if topic not in valid_topics:
-                logger.debug("Dropping fact with unknown topic: %s", topic)
-                continue
-            sub_topic = item.get("sub_topic", "").strip()
-            content = item.get("content", "").strip()
-            if sub_topic and content:
-                facts.append({"topic": topic, "sub_topic": sub_topic, "content": content})
-
-        return facts
-
-    # ------------------------------------------------------------------
-    # Profile merge
-    # ------------------------------------------------------------------
-
-    def _merge_profiles(self, new_facts: list[dict[str, str]], timestamp: str) -> None:
-        """Merge extracted facts into existing profile slots."""
-        existing = self._storage.get_all_profiles()
-        messages = build_profile_merge_messages(
-            existing,
-            new_facts,
-            self._PROFILE_MAX_CONTENT_TOKENS,
-            self._PROFILE_CONTENT_WARN_RATIO,
-            token_counter=self._token_counter,
-        )
-
-        text = self._call_llm(messages, PROFILE_MERGE_SCHEMA)
+    def _update_user_notes(self, utterances: list[Utterance], session_id: str, timestamp: str) -> None:
+        """Apply the add/replace/delete ops one LLM call returns for the current notes and the transcript."""
+        labeled = label_user_notes(self._storage.get_user_notes())
+        text = self._call_llm(build_user_notes_messages(labeled, utterances), USER_NOTES_UPDATE_SCHEMA)
         if text is None:
             return
 
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
-            logger.warning("Failed to parse profile merge JSON")
+            logger.warning("Failed to parse user notes update JSON")
             return
 
-        # Build (topic, sub_topic) → Profile lookup
-        slot_map: dict[tuple[str, str], Profile] = {}
-        for p in existing:
-            slot_map[(p.topic, p.sub_topic)] = p
-
-        for action_item in data.get("actions", []):
+        for op in data.get("ops", []):
             try:
-                self._execute_merge_action(action_item, slot_map, new_facts, timestamp)
+                self._apply_user_note_op(op, labeled, session_id, timestamp)
             except Exception:
-                logger.warning(
-                    "Failed to execute merge action: %s",
-                    action_item,
-                    exc_info=True,
-                )
+                logger.warning("Failed to apply user note op: %s", op, exc_info=True)
 
-    def _execute_merge_action(
+    def _apply_user_note_op(
         self,
-        action_item: dict[str, Any],
-        slot_map: dict[tuple[str, str], Profile],
-        new_facts: list[dict[str, str]],
+        op: dict[str, Any],
+        labeled: dict[str, UserNote],
+        session_id: str,
         timestamp: str,
     ) -> None:
-        """Execute a single merge action (APPEND/UPDATE/ABORT)."""
-        action = action_item.get("action")
-        fact_idx = action_item.get("fact_index", 0)
-        new_content = action_item.get("new_content")
+        """Apply one op. Ops naming an unknown item or missing their text are logged and skipped."""
+        action = op.get("op")
+        text = (op.get("text") or "").strip()
 
-        if action == "ABORT":
+        if action == "add":
+            kind = op.get("list")
+            if kind not in NOTE_KINDS or not text:
+                logger.warning("Skipping invalid user note add: %s", op)
+                return
+            self._storage.add_user_note(UserNote(None, kind, text, session_id, timestamp))
+            logger.info("User note added (%s): %s", kind, text)
             return
 
-        # Validate fact index
-        if not (1 <= fact_idx <= len(new_facts)):
-            logger.warning("Invalid fact_index %d", fact_idx)
+        note = labeled.get(op.get("target") or "")
+        if note is None or note.id is None:
+            logger.warning("Skipping user note op on unknown item: %s", op)
             return
-
-        fact = new_facts[fact_idx - 1]
-        key = (fact["topic"], fact["sub_topic"])
-
-        if action == "APPEND":
-            content = new_content or fact["content"]
-            self._storage.upsert_profile(
-                Profile(
-                    id=None,
-                    topic=fact["topic"],
-                    sub_topic=fact["sub_topic"],
-                    content=content,
-                    updated_at=timestamp,
-                )
-            )
-
-        elif action == "UPDATE":
-            existing_profile = slot_map.get(key)
-            if existing_profile is None:
-                logger.warning(
-                    "UPDATE for non-existent slot %s::%s, treating as APPEND",
-                    fact["topic"],
-                    fact["sub_topic"],
-                )
-                content = new_content or fact["content"]
-                self._storage.upsert_profile(
-                    Profile(
-                        id=None,
-                        topic=fact["topic"],
-                        sub_topic=fact["sub_topic"],
-                        content=content,
-                        updated_at=timestamp,
-                    )
-                )
-                return
-            if not new_content:
-                logger.warning(
-                    "UPDATE without new_content for %s::%s",
-                    fact["topic"],
-                    fact["sub_topic"],
-                )
-                return
-            self._storage.upsert_profile(
-                Profile(
-                    id=existing_profile.id,
-                    topic=existing_profile.topic,
-                    sub_topic=existing_profile.sub_topic,
-                    content=new_content,
-                    updated_at=timestamp,
-                )
-            )
+        if action == "replace" and text:
+            self._storage.update_user_note(note.id, text, session_id, timestamp)
+            logger.info("User note replaced (%s): %s -> %s", note.kind, note.text, text)
+        elif action == "delete":
+            self._storage.delete_user_note(note.id)
+            logger.info("User note deleted (%s): %s", note.kind, note.text)
+        else:
+            logger.warning("Skipping invalid user note op: %s", op)
 
     # ------------------------------------------------------------------
     # Windowing

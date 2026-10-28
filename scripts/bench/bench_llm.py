@@ -45,7 +45,7 @@ from voice_pipeline.adapters.llm_openai import OpenAILLM
 from voice_pipeline.adapters.token_counter import create_token_counter
 from voice_pipeline.engines.cascade.context_builder import DEFAULT_SYSTEM_PROMPT, ContextBuilder
 from voice_pipeline.history import ConversationHistory, SQLiteStorageBackend
-from voice_pipeline.memory.types import Episode, MemoryReadResult, Profile
+from voice_pipeline.memory.types import Episode, MemoryReadResult, UserNote
 from voice_pipeline.types import LLMMetrics
 
 # ---------------------------------------------------------------------------
@@ -91,12 +91,10 @@ INPUT_VARIANTS: list[InputVariant] = [
 # Realistic test data
 # ---------------------------------------------------------------------------
 
-_PROFILES = [
-    Profile(None, "basic_info", "name", "재헌", "2026-04-01 10:00:00"),
-    Profile(None, "basic_info", "age", "25", "2026-04-01 10:00:00"),
-    Profile(None, "interest", "movie", "SF, 특히 놀란 감독 작품들", "2026-04-10 15:00:00"),
-    Profile(None, "interest", "music", "재즈, Lo-fi", "2026-04-05 12:00:00"),
-    Profile(None, "personality", "humor", "약간 드라이한 유머 좋아함", "2026-04-08 18:00:00"),
+_USER_NOTES = [
+    UserNote(None, "profile", "The user's name is 재헌.", "bench", "2026-04-01 10:00:00"),
+    UserNote(None, "profile", "The user is 25 years old.", "bench", "2026-04-01 10:00:00"),
+    UserNote(None, "preference", "Speak in 반말.", "bench", "2026-04-08 18:00:00"),
 ]
 
 _EPISODES = [
@@ -236,7 +234,7 @@ def _build_context(variant: InputVariant) -> tuple[ContextBuilder, MemoryReadRes
         history,
         DEFAULT_SYSTEM_PROMPT,
         token_counter,
-        profiles=_PROFILES,
+        user_notes=_USER_NOTES,
         session_summaries=_SESSION_SUMMARIES,
     )
 

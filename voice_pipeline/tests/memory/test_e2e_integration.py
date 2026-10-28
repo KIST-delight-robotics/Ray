@@ -6,6 +6,8 @@ Requires OPENAI_API_KEY.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from voice_pipeline.adapters.embedder import SentenceTransformerEmbedder
@@ -20,7 +22,6 @@ from voice_pipeline.tests.memory.conftest import (
     CONVERSATION_MOVIE,
     populate_utterances,
 )
-from voice_pipeline.types import TokenCounter
 
 pytestmark = pytest.mark.requires_api
 
@@ -35,13 +36,12 @@ def _write_session(
     index: NumpyVectorIndex,
     embedder: SentenceTransformerEmbedder,
     llm: OpenAILLM,
-    token_counter: TokenCounter,
     session_id: str,
     timestamp: str,
     conversation: list[tuple[str, str, str, int]],
 ):
     populate_utterances(storage, session_id, conversation)
-    writer = MemoryWriter(storage, index, embedder, llm, token_counter)
+    writer = MemoryWriter(storage, index, embedder, llm)
     return writer.process_session(session_id, timestamp)
 
 
@@ -59,7 +59,6 @@ class TestWriteThenRetrieve:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        token_counter: TokenCounter,
     ) -> None:
         """Written episodes are retrievable by a relevant query."""
         episodes = _write_session(
@@ -67,7 +66,6 @@ class TestWriteThenRetrieve:
             vector_index,
             shared_embedder,
             write_llm,
-            token_counter,
             "s-movie",
             "2026-04-01 10:00:00",
             CONVERSATION_MOVIE,
@@ -91,7 +89,6 @@ class TestWriteThenRetrieve:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        token_counter: TokenCounter,
     ) -> None:
         """Movie query ranks movie-session episodes above cooking-session episodes."""
         movie_eps = _write_session(
@@ -99,7 +96,6 @@ class TestWriteThenRetrieve:
             vector_index,
             shared_embedder,
             write_llm,
-            token_counter,
             "s-movie",
             "2026-04-01 10:00:00",
             CONVERSATION_MOVIE,
@@ -109,7 +105,6 @@ class TestWriteThenRetrieve:
             vector_index,
             shared_embedder,
             write_llm,
-            token_counter,
             "s-cook",
             "2026-04-01 12:00:00",
             CONVERSATION_COOKING,
@@ -142,7 +137,6 @@ class TestContextIntegration:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        token_counter: TokenCounter,
     ) -> None:
         """format_memory_block produces [M1] tags from real retrieval results."""
         _write_session(
@@ -150,7 +144,6 @@ class TestContextIntegration:
             vector_index,
             shared_embedder,
             write_llm,
-            token_counter,
             "s1",
             "2026-04-01 10:00:00",
             CONVERSATION_MOVIE,
@@ -160,7 +153,7 @@ class TestContextIntegration:
         result = retriever.retrieve("영화", set())
         assert len(result.episodes) >= 1
 
-        formatted = format_memory_block(result)
+        formatted = format_memory_block(result, datetime.now().astimezone())
         assert "[Retrieved Memories]" in formatted
         assert "[M1]" in formatted
         assert "(2026-04-01)" in formatted
@@ -171,7 +164,6 @@ class TestContextIntegration:
         vector_index: NumpyVectorIndex,
         shared_embedder: SentenceTransformerEmbedder,
         write_llm: OpenAILLM,
-        token_counter: TokenCounter,
     ) -> None:
         """Full citation roundtrip: format → simulated LLM response → parse → update."""
         _write_session(
@@ -179,7 +171,6 @@ class TestContextIntegration:
             vector_index,
             shared_embedder,
             write_llm,
-            token_counter,
             "s1",
             "2026-04-01 10:00:00",
             CONVERSATION_MOVIE,

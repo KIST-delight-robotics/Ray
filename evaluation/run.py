@@ -178,7 +178,7 @@ def _inject_seeds(seed_data, memory_storage, vector_index, embedder, token_count
         max_tokens=4096,
         tools=[],
     )
-    writer = MemoryWriter(memory_storage, vector_index, embedder, write_llm, token_counter)
+    writer = MemoryWriter(memory_storage, vector_index, embedder, write_llm)
 
     session_map: dict[int, str] = {}
     for idx, session in enumerate(seed_data["sessions"]):

@@ -1,4 +1,4 @@
-"""세션 시작 컨텍스트 — 장기기억에서 사용자 프로필 블록과 최근 세션 블록을 만든다.
+"""세션 시작 컨텍스트 — 장기기억에서 사용자 노트 블록(프로필·선호)과 최근 세션 블록을 만든다.
 
 두 엔진이 같은 재료를 쓴다: cascade 의 :class:`~voice_pipeline.engines.cascade.context_builder.ContextBuilder`
 는 턴마다 쌓는 입력의 블록 2·3 으로, gpt_live 는 세션 시작 instructions 뒤에 한 번 붙인다.
@@ -17,7 +17,7 @@ from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.types import TokenCounter
 
 if TYPE_CHECKING:
-    from voice_pipeline.memory.types import Episode, Profile
+    from voice_pipeline.memory.types import Episode, UserNote
 
 # Per-message API framing overhead (role markers, separators — empirically
 # measured for the OpenAI Responses API). 엔진 조립기(ContextBuilder)도 같은 값을 쓴다.
@@ -77,27 +77,30 @@ def _relative_label(local: datetime, now: datetime) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Block 2: Profile
+# Block 2: User notes (profile + preferences)
 # ---------------------------------------------------------------------------
 
+PREFERENCES_HEADING = "How the user wants Ray to talk"  # 라이브 지시문이 이 제목으로 가리킨다
 
-def format_profile_block(profiles: list[Profile]) -> str:
-    """Format user profiles for LLM context injection (Block 2).
+
+def format_user_notes_block(notes: list[UserNote]) -> str:
+    """Format user notes for LLM context injection (Block 2). Empty sections are left out.
 
     Output example::
 
-        [User Profile]
-        basic_info::name: Alice
-        interest::movie: SF, especially Nolan
+        About the user
+        - The user's name is 재헌.
+        - The user is a graduate student majoring in robotics.
+
+        How the user wants Ray to talk
+        - Speak in 반말.
     """
-    if not profiles:
-        return ""
-    # Sort by (topic, sub_topic) for stable ordering
-    sorted_profiles = sorted(profiles, key=lambda p: (p.topic, p.sub_topic))
-    lines = ["[User Profile]"]
-    for p in sorted_profiles:
-        lines.append(f"{p.topic}::{p.sub_topic}: {p.content}")
-    return "\n".join(lines)
+    sections: list[str] = []
+    for heading, kind in (("About the user", "profile"), (PREFERENCES_HEADING, "preference")):
+        lines = [f"- {n.text}" for n in notes if n.kind == kind]
+        if lines:
+            sections.append("\n".join([heading, *lines]))
+    return "\n\n".join(sections)
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +136,7 @@ def format_session_summary_block(
 
 
 # ---------------------------------------------------------------------------
-# Session-level context: profiles (Block 2) + recent sessions (Block 3)
+# Session-level context: user notes (Block 2) + recent sessions (Block 3)
 # ---------------------------------------------------------------------------
 
 RECENT_SESSIONS_MAX_TOKENS = 512  # 최근 세션 블록 soft cap — 최신 세션 1개는 캡 무관 보장
@@ -149,8 +152,8 @@ def load_session_context(
     carryover_session_id: str | None = None,
     max_tokens: int = RECENT_SESSIONS_MAX_TOKENS,
     page_size: int = SESSION_PAGE_SIZE,
-) -> tuple[list[Profile], list[str], set[str]]:
-    """Load profiles and the recent-sessions block from memory storage.
+) -> tuple[list[UserNote], list[str], set[str]]:
+    """Load user notes and the recent-sessions block from memory storage.
 
     Shared by the cascade ``ContextBuilder`` and the gpt_live engine's
     session-start instructions. Sessions without episodes (extraction
@@ -160,7 +163,7 @@ def load_session_context(
     the soft cap binds or history is exhausted.
 
     Args:
-        memory_storage: Episode/profile storage.
+        memory_storage: Episode/user-note storage.
         session_id: Current session (always excluded).
         token_counter: Token counter for the soft cap.
         now: Session start time (local timezone) — basis for the session headers.
@@ -170,15 +173,15 @@ def load_session_context(
         page_size: Episode loading batch size (pure query batching).
 
     Returns:
-        (profiles, block texts in chronological order,
+        (user notes, block texts in chronological order,
         session IDs actually included in the block).
     """
-    profiles = memory_storage.get_all_profiles()
+    notes = memory_storage.get_user_notes()
     candidates = _iter_session_blocks(memory_storage, session_id, carryover_session_id, page_size, now)
     selected = select_recent_blocks(candidates, token_counter, max_tokens=max_tokens)
     block_texts = [text for _, text in selected]
     included_ids = {sid for sid, _ in selected if sid is not None}
-    return profiles, block_texts, included_ids
+    return notes, block_texts, included_ids
 
 
 def _iter_session_blocks(
