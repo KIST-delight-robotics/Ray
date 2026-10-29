@@ -207,7 +207,7 @@ class TestCreateSessionLiveEngine:
         assert "How the user wants Ray to talk\n- Speak formally." in config.instructions
         assert "Recent conversations:" in config.instructions
         assert "User: 듄 2 봤어\nRay: 어땠어요?" in config.instructions
-        # 말투 선호는 백엔드에 따로 넣지 않는다 — 세션 지시문이 백엔드에도 공유된다 (FINDINGS §4)
+        # 말투 선호는 백엔드에 따로 넣지 않는다 — 세션 지시문이 백엔드에도 공유된다
         assert "Ray's voice" not in config.backend_instructions
         kwargs = loop_cls.call_args.kwargs
         assert kwargs["live"] is live_cls.return_value

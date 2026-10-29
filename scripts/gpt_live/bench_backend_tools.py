@@ -1,6 +1,6 @@
 """responses 위임 백엔드의 툴 선택 벤치 — 실제 백엔드 요청을 흉내 낸 Responses 호출 (실시간 세션 없음).
 
-GPT-Live 서버가 백엔드에 보내는 요청(10-14 실기 응답의 ``input_items`` 로 확인, FINDINGS §4)과 같은 모양으로 만든다.
+GPT-Live 서버가 백엔드에 보내는 요청(10-14 실기 응답의 ``input_items`` 로 확인)과 같은 모양으로 만든다.
 지시문은 서버 머리말 + ``<shared_session_instructions>``(라이브 지시문) + ``<backend_delegation_instructions>``(백엔드
 지시문) 한 문자열. 입력은 위임마다 지난 위임 뒤의 전사 조각을 SRT user 메시지로 쌓고, 첫 조각 뒤에 ``<backend_task>``
 developer 메시지, 사이사이에 앞 위임의 툴 호출·결과·답과 앱이 넣은 instructions(developer 메시지)를 둔다. 앱이

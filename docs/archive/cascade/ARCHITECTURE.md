@@ -1,5 +1,7 @@
 # Voice Conversation Robot — Python Pipeline Architecture
 
+> 사용하지 않는 cascade 엔진의 초기 설계 기록 (2026-02 ~ 2026-09). 고정 — 이후 변경은 반영하지 않는다.
+
 
 ## 1. System Modes
 
@@ -445,7 +447,7 @@ voice_pipeline.adapters.vap / .adapters.turngpt
 
 - ~~ConversationHistory StorageBackend selection~~ → SQLite write-through (resolved)
 - ~~ContextBuilder tool definition integration~~ → Tool token costs in `adapters/llm_openai.py`, deducted from budget (resolved)
-- RAG / long-term memory design (see `docs/ray-memory-design.md`)
+- RAG / long-term memory design (see `../memory-v1-design/`)
 - LED behavior definition (which state → which color/animation)
 - LED control location (Python direct vs C++ relay)
 - Client-side tool execution loop in SpeechGenerator (structure ready, implementation deferred)

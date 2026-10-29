@@ -1,7 +1,7 @@
 # GPT-Live 실험 기록
 
 GPT-Live 도입 실험과 레이 적용 후의 실측 기록. 설계 선택 이유는
-[decisions-wip.md](../../docs/decisions-wip.md), 실행·로그 확인법은
+[작업 기록](../../docs/history/gpt-live.md), 실행·로그 확인법은
 [브리지 문서](../../docs/modules/bridge.md#live-실행과-싱크-진단)에 둔다.
 실험 도구는 `mic_live.py`(마이크 또는 TTS 스크립트 입력 → GPT-Live → 스피커, 전 이벤트 로그).
 실행 로그는 `logs/`, 공식 문서 원문은 `ref/`, 재현용 스크립트는 `script_*.txt`.
@@ -46,7 +46,7 @@ GPT-Live 도입 실험과 레이 적용 후의 실측 기록. 설계 선택 이�
 
 아래 수치는 당시 실기 기록이다. 파이썬 무음 보정과 C++ 프리버퍼·공유 덩이 채우기·되돌리기는
 2026-10-02 코드에도 적용되어 있다. 이후 물리 오프셋·DAC 드리프트 측정은
-[설계 기록의 싱크 실측 절](../../docs/decisions-wip.md#gpt-live-오디오모션-싱크-실측--가짜-live-클라이언트로-물리-오프셋드리프트-측정)을 참고한다.
+[설계 기록의 싱크 실측 절](../../docs/history/gpt-live.md#오디오모션-싱크-실측)을 참고한다.
 
 - **시작 시 여유 부족**: 첫 360 ms 덩이가 차자마자 모션 시계를 시작하면 매 사이클 데이터가 막 도착해
   모터 틱이 4 ms 간격으로 몰아쳤다(16:30 로그). 두 덩이(720 ms)를 모은 뒤 시작하자 초반 끊김이 사라졌다.
@@ -207,7 +207,7 @@ GPT-Live 도입 실험과 레이 적용 후의 실측 기록. 설계 선택 이�
   지시문은 인사만 하고 위임 없음), 볼륨 5/8 대 8/8("볼륨 올려볼게요" 뒤 위임 없음), 곡 이름 없는 "노래 틀어줘" 5/8 대 8/8
   (위임 없이 직접 되물음). 서버 error 이벤트 0 이고 실패가 한 조건에 몰려, 서버 유실이 아니라 모델이 위임하지 않은 것으로
   본다(모델의 위임 판단을 직접 볼 API 는 없다 — 저장 세션도 녹음과 포크만 준다). 기억이 빈 상태에서 지역 없는 날씨·시각
-  질문엔 백엔드가 지역부터 되묻는다. 세부는 [DJ 작업노트](../../docs/dj-mode-worknote.md) 관찰.
+  질문엔 백엔드가 지역부터 되묻는다. 세부는 [DJ 작업노트](../../docs/history/radio/dj-mode-worknote.md) 관찰.
 - **백엔드의 빈 응답 지시는 지켜진다** (2026-10-12, `exp_radio_ahead.py`). 백엔드 지시에 "After start_radio or
   resume_radio, end with an empty response." 한 줄을 두고, 툴 호출 → 앱이 thinking 으로 대사를 넣음 → 함수 결과 반환 +
   이어가기 순서로 하면 두 번째 응답이 거의 매번 빈 응답이었다(시작·재개 200여 회 중 예외 1 — 시작 뒤 "라디오를
@@ -258,7 +258,7 @@ GPT-Live 도입 실험과 레이 적용 후의 실측 기록. 설계 선택 이�
 - 첫 commentary 전에 instructions.append 로 낭독 틀을 주면("lines to read aloud … Read each line as written, slowly and
   calmly, then stop. …") 덧붙임이 거의 사라진다(누적 6/105). 낭독 어휘를 빼거나 문장을 더한 변형은 모두 약했다. 안내에
   대꾸한 적은 없다(0/94 회차). 끼어들림에 대답할 때 안내의 어휘가 새어 나오기도 한다("지금 읽는 건 멈출게요" 2/35).
-  변형별 수치는 [DJ 작업노트](../../docs/dj-mode-worknote.md) 관찰.
+  변형별 수치는 [DJ 작업노트](../../docs/history/radio/dj-mode-worknote.md) 관찰.
 
 ### thinking.append 로 말하게 하기 (2026-10-12, `exp_dj_commentary_chunks.py --channel thinking`, `exp_radio_tts.py`, `exp_radio_ahead.py`)
 
@@ -293,7 +293,7 @@ GPT-Live 도입 실험과 레이 적용 후의 실측 기록. 설계 선택 이�
   0/6, 맞장구엔 그대로 이어 읽음 2/2. "If they are talking to you, …; otherwise go on" 단서를 붙인 문구는 1/2 먼저 읽음.
 - 읽다가 조용해진 모델에게 그 줄의 남은 문장을 같은 문구로 다시 넣으면 대개 이어 읽는다(6 초 안 13/15). 대신 다음 줄을
   넣으면 남은 문장을 버리고 새 줄로 넘어간다.
-- 변형별 수치는 [DJ 작업노트](../../docs/dj-mode-worknote.md) 관찰.
+- 변형별 수치는 [DJ 작업노트](../../docs/history/radio/dj-mode-worknote.md) 관찰.
 
 ## 6. 대화 동작 관찰
 

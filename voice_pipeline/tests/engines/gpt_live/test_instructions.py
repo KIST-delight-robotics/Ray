@@ -52,7 +52,7 @@ class TestBuildLiveInstructions:
         assert text.rstrip().endswith(_MARKER)
 
     def test_backend_answers_from_shared_context_before_searching(self) -> None:
-        # 실측: 답이 최근 대화에 있을 때 바로 곡을 트는 비율 4/10 → 9/10 (decisions-wip)
+        # 실측: 답이 최근 대화에 있을 때 바로 곡을 트는 비율 4/10 → 9/10
         assert "(the user notes and recent conversations) answers it" in DEFAULT_BACKEND_INSTRUCTIONS
 
     def test_tone_default_points_at_the_preferences_heading(self) -> None:
@@ -109,7 +109,7 @@ class TestBackendInstructions:
         assert "이야기 계속해 줘" in block and "Do not call start_radio or resume_radio in any other case" in block
 
     def test_backend_builder_has_no_voice_section(self) -> None:
-        # 말투는 백엔드가 함께 받는 대화 모델 세션 지시문에 있다 (FINDINGS §4) — 중복 절을 두지 않는다
+        # 말투는 백엔드가 함께 받는 대화 모델 세션 지시문에 있다 — 중복 절을 두지 않는다
         text = build_backend_instructions()
         assert text.startswith(DEFAULT_BACKEND_INSTRUCTIONS) and "Ray's voice" not in text
         assert "## Songs on Ray" not in text and "## Radio talk" not in text
@@ -134,7 +134,7 @@ class TestRadioInstructions:
             build_radio_section("maybe")
 
     def test_line_template_says_only_what_ray_is_saying(self) -> None:
-        # "radio"·"next line" 을 넣으면 모델이 틀을 말로 옮겼다 (dj-mode-worknote.md)
+        # "radio"·"next line" 을 넣으면 모델이 틀을 말로 옮겼다
         assert RADIO_LINE_TEMPLATE.format("대사") == "You are now saying: «대사»"
         assert "radio" not in RADIO_LINE_TEMPLATE.lower() and "next" not in RADIO_LINE_TEMPLATE.lower()
 

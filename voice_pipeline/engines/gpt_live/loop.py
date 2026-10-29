@@ -24,7 +24,7 @@
     노래 상태 동안 백엔드는 ``stop_song`` 하나만 가진 재생용 설정으로 교체된다(``session.update``, 끝나면 복원).
     다른 툴 호출은 오류로 답하고 ``end_conversation`` 도 종료로 치지 않는다. 모델 음성은 버리고 전사는 저장하지 않는다.
 
-라디오 (진행 규칙은 :mod:`~voice_pipeline.engines.gpt_live.radio`, 설계 배경은 docs/dj-mode-worknote.md):
+라디오 (진행 규칙은 :mod:`~voice_pipeline.engines.gpt_live.radio`):
     루프는 :class:`~voice_pipeline.engines.gpt_live.radio.Radio` 에 전사 스냅샷·모델 음성·받은 무음 길이를 넣고, 매
     프레임 :meth:`Radio.step` 이 돌려준 할 일 — 대사·상태 문구 ``thinking.append``, 라디오 상태로 백엔드 갱신, 대본의
     곡 재생, utterances 에 사건 줄 — 을 실행한다. ``start_radio`` / ``resume_radio`` 는 그 자리에서 첫 대사를 넣고
@@ -33,7 +33,7 @@
     잠잠함을 셀 수 있게 백엔드 위임이 진행 중인지(위임 생성부터 마지막 응답 완료까지)도 넘기고, 사용자가 튼 곡은
     라디오에 알린다.
 
-종료 시퀀스(실측 근거는 scripts/gpt_live/FINDINGS.md §4~5):
+종료 시퀀스:
     입력 mute → 모델의 마지막 발화가 끝날 때까지(출력이 무음으로 N초) 대기, 상한 있음 →
     ``session.close``(closed 이벤트는 기다리지 않음) → 브리지 ``audio_end``.
     이후 ``playback_complete`` 대기는 엔트리포인트 FAREWELL 이 맡는다.
@@ -457,7 +457,7 @@ class LiveSessionLoop:
             except queue.Empty:
                 break
         self._last_frame_time = time.monotonic()
-        # 종료 시퀀스 중에도 계속 보낸다 — 입력이 끊기면 서버 타임라인이 멈춘다(FINDINGS §1 서드파티 보고)
+        # 종료 시퀀스 중에도 계속 보낸다 — 입력이 끊기면 서버 타임라인이 멈춘다(서드파티 보고)
         self._live.send_audio(self._resample(b"".join(frames)))
         return True
 
@@ -632,7 +632,7 @@ class LiveSessionLoop:
             ending |= call.name == END_CONVERSATION_TOOL and self._song_state is SongState.NONE
             stopped |= call.name == STOP_SONG_TOOL and '"stopped"' in output
         if ending:
-            # 이어가면 백엔드가 작별 인사를 또 만들고 모델이 두 번 말할 수 있다(FINDINGS §4). 위임은 미완으로 둔다.
+            # 이어가면 백엔드가 작별 인사를 또 만들고 모델이 두 번 말할 수 있다. 위임은 미완으로 둔다.
             self._begin_ending("end_conversation_tool")
         else:
             self._live.continue_response()
@@ -665,7 +665,7 @@ class LiveSessionLoop:
     def _maybe_nudge_farewell(self, now: float) -> None:
         """종료가 결정됐는데 모델이 작별 인사 없이 조용하면 한 번 유도한다.
 
-        설계는 "위임과 동시에 인사" 지만(FINDINGS §4) 실기에서 인사 없이 위임만 하는 경우가 있었다 (2026-09-28).
+        설계는 "위임과 동시에 인사" 지만 실기에서 인사 없이 위임만 하는 경우가 있었다 (2026-09-28).
         입력은 이미 mute 라 사용자 말과 겹치지 않고, 인사 중이면(음성 있음) 보내지 않아 두 번 인사하지 않는다.
         """
         if self._end_nudged or now - self._end_started_time < self._END_NUDGE_AFTER_SEC:

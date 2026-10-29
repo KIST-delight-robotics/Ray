@@ -1,5 +1,7 @@
 # TurnGPT 종합 벤치마크 (speaker_ids 반영)
 
+> 사용하지 않는 cascade 엔진의 턴테이킹 모델 벤치마크 기록. 고정 — 이후 변경은 반영하지 않는다.
+
 > 측정일: 2026-03-09
 > 환경: Raspberry Pi 5 (ARM Cortex-A76 4-core, 8GB RAM, CPU only)
 > 모델: TurnGPT (GPT-2 124M 기반, SODA fine-tuned)

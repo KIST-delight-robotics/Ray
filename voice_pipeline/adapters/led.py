@@ -4,8 +4,6 @@
   (``rpi5_ws2812``)가 없거나 초기화에 실패하면 no-op으로 동작한다.
 - ``StaticAnimation`` / ``BreathingAnimation``: 상태별 애니메이션 구현.
 - ``OSLedArbiterClient``: OS LED arbiter 유닉스 소켓으로 제어권을 요청/반납.
-
-하드웨어 셋업: docs/modules/led.md
 """
 
 from __future__ import annotations

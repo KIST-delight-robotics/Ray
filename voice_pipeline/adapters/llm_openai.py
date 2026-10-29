@@ -3,7 +3,7 @@
 도구(web_search 등) 정의와 토큰 비용도 여기(``_TOOL_REGISTRY``)에서 관리한다. 새 도구 추가 시
 항목을 등록하고, ``token_cost`` 는 도구 유무에 따른 API ``input_tokens`` 차이로 측정한다.
 
-환경변수 ``OPENAI_API_KEY`` 필요. API 제약: docs/modules/openai_responses_api_constraints.md
+환경변수 ``OPENAI_API_KEY`` 필요.
 """
 
 from __future__ import annotations

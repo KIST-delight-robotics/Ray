@@ -9,7 +9,7 @@ Threading model:
     ``recv()`` 를 돌려 이벤트를 큐에 넣는다. 전사 조각은 SDK ``TranscriptGrouper`` 로 화자별
     세그먼트로 묶는데, 이 그루퍼는 비활성 타이머를 별도 스레드에서 돌리므로 콜백은 큐에 넣는 것만 한다.
 
-API 사실 (scripts/gpt_live/FINDINGS.md 에 실측 근거):
+API 사실:
     - 오디오 포맷·목소리·instructions·위임 모드는 세션 시작 후 바꿀 수 없다. 추가는 append 3종만.
     - 서버는 말하지 않을 때도 값이 0인 조각을 실시간 속도로 계속 보낸다.
     - 위임 이벤트에는 요청 텍스트가 없다. responses 위임이면 백엔드가 대화 이력 전체를 받는다.
@@ -151,7 +151,7 @@ class LiveSessionConfig:
         backend_model: responses 위임 백엔드 모델. None 이면 client 위임(백엔드 없음).
         backend_instructions: 백엔드 모델 지시문 (툴 사용 규칙, 답 형식).
         tools: 백엔드에 주는 function 툴 정의(Responses API function 형식). web_search 는 항상 포함.
-        backend_reasoning: 백엔드 추론 노력(reasoning.effort). 운영은 wiring 이 low 를 넘긴다 (FINDINGS §4).
+        backend_reasoning: 백엔드 추론 노력(reasoning.effort). 운영은 wiring 이 low 를 넘긴다.
         voice: 목소리 이름. 기본 marin.
         sample_rate: 입출력 공유 PCM 레이트. 16000 또는 24000.
     """

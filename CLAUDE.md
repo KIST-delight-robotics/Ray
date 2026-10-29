@@ -78,16 +78,23 @@ WebSocket (port 9200).
 
 ## Documentation
 
+Docs are either **living** (kept in sync with the code) or **records** (frozen at the time of the work).
+
+Living — update them when your change affects them:
 - **docs/SETUP.md**: Raspberry Pi 5 initial setup guide.
-- **docs/decisions.md**: Finalized decision log for completed work.
-- **docs/decisions-wip.md**: Decision log for work in progress. Merged into `decisions.md` after cleanup when the work is complete.
-- **docs/ARCHITECTURE.md**: System architecture details.
-- **docs/eval-system.md**: Evaluation system design.
-- **docs/ray-memory/**: Long-term memory system design (overview, session, read, write, storage).
-- **docs/troubleshooting/**: Hardware issue investigations (DAC I2S/DMA, ReSpeaker USB, ReSpeaker AEC).
-- **docs/benchmarks/**: Model benchmark reports (TurnGPT, VAP).
+- **docs/motor-calibration.md**: How the C++ motor calibration works.
 - **docs/modules/**: Setup guides for adapters with external repos/hardware/API constraints
   (asr, tts, turn_taking, wakeword, led, bridge protocol). Parameter tables belong in code, not here.
+- **docs/troubleshooting/**: Hardware issue investigations, one file per issue — add to it if the issue recurs.
+- **scripts/gpt_live/FINDINGS.md**: Observed GPT-Live API behavior.
+- **docs/decisions-wip.md**: Decision log for work in progress (see **Decision Log**).
+
+Records — never edit them, except to fix a path broken by a move:
+- **docs/history/**: One record per completed work (`<work>.md`, or a `<work>/` folder when it has notes) —
+  its decisions, reasoning and trial-and-error. Read it when touching the same area, to learn why things are
+  the way they are.
+- **docs/archive/**: Records of removed or superseded designs (cascade engine, eval, story mode, initial
+  memory design). Excluded from search via `.ignore`; open by path only when explicitly needed.
 
 
 ## External Model Dependencies
@@ -127,6 +134,9 @@ Some modules (VAP, TurnGPT, Wakeword etc.) wrap externally cloned model reposito
 - **Type hints** required. **Docstrings** required on interface methods.
 - **Comments and docstrings** describe current behavior and why — never change history ("removed X",
   "no longer Y", "since the experiment…"). Keep them short; history belongs in commits and the decision log.
+  Don't point them at docs (`see docs/…`, `FINDINGS §N`) — docs may point to code, not the other way around.
+  If the reason doesn't fit in a line or two, it belongs in the decision log, not the comment. Exception:
+  operator-facing log messages may name a setup doc.
 - **Configuration**: vendor/module-specific knobs are class variables and constructor parameters.
   Values shared by several modules (audio format, DB path, token budgets) live in `settings.py`.
   Never reach into another module's private class variable.
@@ -203,7 +213,16 @@ Do **not** add pytest test files to reproduce or verify bugs. Reproduce through 
 
 ## Decision Log
 
-Record non-obvious design decisions and lessons learned in `docs/decisions.md` (finalized) or `docs/decisions-wip.md` (in progress). Entries in `decisions-wip.md` are ordered chronologically (oldest on top, newest at the bottom).
+Record non-obvious design decisions and lessons learned in `docs/decisions-wip.md` while the work is in
+progress — in detail, as it happens, ordered chronologically (oldest on top, newest at the bottom). Open
+follow-ups go under "차후 고려" at its end.
+
+When the user decides a work is complete, move its entries into a new record in `docs/history/` and remove
+them from `decisions-wip.md`. Clean them up on the way: drop plain work logs (which file got what — git has
+that), split crammed paragraphs, group field-test notes, and mark conclusions that were later overturned
+instead of deleting them. Keep design intent, reasoning, trial-and-error and measurements; an overview may be
+added, but only from what the entries and git history show. Later work on an area that already has a record
+gets a new record (e.g. `memory-v2.md`) — never edit an existing record to reflect later changes.
 
 Each entry should focus on **why this choice was made** — not what was built. Include:
 - Trade-offs where alternatives existed

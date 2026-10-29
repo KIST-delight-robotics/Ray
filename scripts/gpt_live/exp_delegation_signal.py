@@ -1,7 +1,7 @@
 """사용자 발화 없이 앱 신호(instructions.append)만으로 위임이 생기는지 확인.
 
 일반 대화 모드에서 사용자가 "안녕" → 모델 대답 → 출력 무음 3 s 뒤 신호 하나를 보내고, 8 s 동안 위임 이벤트와 모델
-발화를 센다. 대화가 시작되기 전에 보낸 append 에는 모델이 반응하지 않으므로(FINDINGS: 먼저 말하지 않음)
+발화를 센다. 대화가 시작되기 전에 보낸 append 에는 모델이 반응하지 않으므로
 대화 중에 보낸다.
 
     uv run python scripts/gpt_live/exp_delegation_signal.py --rounds 4

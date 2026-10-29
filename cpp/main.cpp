@@ -165,7 +165,6 @@ std::atomic<bool> server_ready_fired{false};
 // 스트리밍 데이터 처리를 위한 전역 변수
 std::atomic<bool> is_responses_streaming(false);
 // GPT-Live 스트림 여부 (stream_start 의 "live": true). live 면 헤드모션 생성을 끄고 프리버퍼를 더 모은다.
-// 아래 상수들의 근거·실측은 scripts/gpt_live/FINDINGS.md §2.1 참고.
 std::atomic<bool> stream_live(false);
 static constexpr int kLivePrebufferCycles = 2;  // live 시작 전 모을 덩이 수 (×INTERVAL_MS)
 static constexpr int kSplitGraceMs = 450;       // stream_and_split: 기한 뒤 덩이가 차길 기다리는 상한. 넘기면 0 으로 채운다

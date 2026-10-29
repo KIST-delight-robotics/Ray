@@ -1,11 +1,12 @@
 # 라디오 × GPT-Live 트리거·Decisions 실험노트
 
-GPT-Live 의 Decisions 통합(10-15)과 Decisions API(10-06)를 라디오의 끼어들기 판정기·진행 추적에 쓸 수 있는지 본
-실험 기록. 진행 중. 정리가 끝나면 API 동작 사실은 `scripts/gpt_live/FINDINGS.md`, 결정은 `decisions-wip.md` 로 옮긴다.
-라디오 자체의 설계·이력은 [dj-mode-worknote.md](dj-mode-worknote.md).
+> 2026-10 라디오 작업의 기록. 완료 후 고정 — 이후 변경은 반영하지 않는다.
 
-쓰는 법은 dj-mode-worknote 와 같다 — **관찰**은 조건·횟수·결과·스크립트만, **가설**은 근거와 반증 조건을 붙여, **열린
-질문**은 사용자가 정한다.
+GPT-Live 의 Decisions 통합(10-15)과 Decisions API(10-06)를 라디오의 끼어들기 판정기·진행 추적에 쓸 수 있는지 본
+실험 기록. 라디오 자체의 설계·이력은 [dj-mode-worknote.md](dj-mode-worknote.md).
+
+읽는 법은 dj-mode-worknote 와 같다 — **관찰**은 조건·횟수·결과·스크립트만, **가설**은 근거와 반증 조건을 붙였고, **열린
+질문**은 기록 당시 사용자 결정을 기다리던 항목이다.
 
 ## 확인한 API 사실 (2026-10-19, 문서 + SDK 3.35.1 타입)
 

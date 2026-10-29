@@ -1,8 +1,10 @@
 # Memory Module
 
+> 장기기억 1차 작업의 초기 설계 기록 (2026-03 ~ 2026-07). 고정 — 이후 변경은 반영하지 않는다. 결정 기록은 [history/memory-v1.md](../../history/memory-v1.md).
+
 Long-term episodic memory and user profile management. Extracts memories from conversations, stores them in SQLite with vector/BM25 search, and retrieves relevant episodes for LLM context injection.
 
-Design rationale: `docs/ray-memory/01-05`.
+Design rationale: `01-overview.md` – `05-storage.md` (same folder).
 
 
 ## Data Flow

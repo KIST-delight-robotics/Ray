@@ -94,7 +94,7 @@ _MIC_DUMP_DIR = f"{VAR_DIR}/log/mic"  # MIC_DUMP=1 일 때 마이크 전 채널 
 _VAD_INFER_INTERVAL = 3  # 3프레임(90ms)마다 추론, 사이는 캐시 반환
 _SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
 _LIVE_BACKEND_MODEL = "gpt-5.4-mini"  # GPT-Live responses 위임 백엔드
-# none 은 짧은 첫 턴에서 툴 선택이 미끄러진다(end_conversation 오발). low 는 지연 차이 없이 25/25 (FINDINGS §4)
+# none 은 짧은 첫 턴에서 툴 선택이 미끄러진다(end_conversation 오발). low 는 지연 차이 없이 25/25
 _LIVE_BACKEND_REASONING = "low"
 
 Engine = Literal["cascade", "live"]
@@ -415,7 +415,7 @@ def build_components(
     logging.getLogger("openai._base_client").addHandler(retry_handler)
     tts = TrackedTTS(raw_tts)
     # local_files_only: 부팅 시 HF 허브 왕복 생략(−3.4s) + 네트워크 미준비 상태에서도 기동.
-    # 새 기기 첫 실행은 캐시가 없어 실패한다 — docs/SETUP.md의 모델 캐시 부트스트랩 참고.
+    # 새 기기 첫 실행은 캐시가 없어 실패한다.
     embedder = TrackedEmbedder(create_embedder(expected_dimension=_DEFAULT_DIMENSION, local_files_only=True))
 
     vector_index = NumpyVectorIndex()

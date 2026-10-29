@@ -2,7 +2,7 @@
 
 대본 자동 생성은 운영과 같은 OpenAI 를 써야 해서 만든 비교용 도구. 지시서와 곡 목록을 넘기고, 답에서 대본과 근거를 꺼내
 `var/radio_script_drafts/<키>_<suffix>.md` 로 저장한다. 형식 검사에 걸리면 고치게 한다. 응답 id, 추론·검색(검색어)·답의
-순서는 `logs/<이름>.json` 에 남는다. 기록은 dj-mode-worknote.md 관찰 "대본 쓰기 — 모델과 지시서".
+순서는 `logs/<이름>.json` 에 남는다.
 
     uv run python scripts/radio_scripts/write_script_gpt.py --effort high --suffix gpt61
     uv run python scripts/radio_scripts/write_script_gpt.py --minimal --brief brief_minimal_scene.md --effort high
