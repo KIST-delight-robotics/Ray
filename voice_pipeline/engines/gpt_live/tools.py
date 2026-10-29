@@ -1,19 +1,14 @@
 """GPT-Live 백엔드 함수 툴 — 정의(Responses API function 스키마)와 핸들러.
 
 대화 모델(gpt-live-1)은 툴을 직접 갖지 못하고 responses 위임 백엔드만 함수를 부른다. 백엔드가 호출하면
-:class:`~voice_pipeline.engines.gpt_live.loop.LiveSessionLoop` 가 여기 핸들러를 executor 에서 돌려 결과를
-제출한다. 스키마와 그것을 읽는 핸들러를 한 파일에 둬 인자 이름이 어긋나지 않게 한다.
+:class:`~voice_pipeline.engines.gpt_live.loop.LiveSessionLoop` 가 핸들러를 executor 에서 돌려 결과를 제출한다.
+스키마와 그것을 읽는 핸들러를 한 파일에 둬 인자 이름이 어긋나지 않게 한다.
 
-툴:
-- ``end_conversation``: 종료. 핸들러는 루프 내장(종료 시퀀스와 얽힘).
-- ``search_memory``: 장기기억 에피소드 검색 → :func:`make_memory_search_handler`.
-- ``adjust_volume`` / ``set_brightness`` / ``get_device_settings``: 볼륨·밝기
-  → :func:`make_device_settings_handlers` (상태·저장은 :mod:`voice_pipeline.device_settings`).
-- ``play_song``: 노래 재생 → :func:`make_play_song_tool_def`. ``stop_song`` 은 재생 중에만 백엔드에 주어지는 툴
-  (:data:`STOP_SONG_TOOL_DEF`, 루프가 백엔드를 교체할 때 사용). 둘 다 핸들러는 루프 내장.
-- ``start_radio`` / ``resume_radio``: 라디오 시작·멈춘 곳부터 재개 (:data:`RADIO_TOOLS`). 인자 없음 — 대본과 진행은
-  루프의 :class:`~voice_pipeline.engines.gpt_live.radio.Radio` 가 안다. 멈춤·종료는 앱의 판정기가 하므로 툴이 없다.
-  핸들러는 루프 내장. 대본이 없으면 wiring 이 노출하지 않는다.
+- 핸들러가 여기 있는 툴: ``search_memory``, 볼륨·밝기(``adjust_volume`` / ``set_brightness`` / ``get_device_settings``).
+- 루프가 직접 처리하는 툴(:data:`LOOP_TOOLS`): 종료(종료 시퀀스와 얽힘), 노래 재생·정지, 라디오 시작·재개.
+  ``stop_song`` 은 노래 재생 중에만 백엔드에 주어진다.
+- 라디오 툴은 인자가 없다 — 대본과 진행은 루프의 :class:`~voice_pipeline.engines.gpt_live.radio.Radio` 가 안다.
+  멈춤·종료는 앱의 판정기가 하므로 툴이 없다.
 
 설명은 함수가 무엇을 하는지와 인자·결과 형식만 적는다. 언제 부를지·부르지 말지는 백엔드 지시문
 (:data:`~voice_pipeline.engines.gpt_live.instructions.DEFAULT_BACKEND_INSTRUCTIONS`)에만 둔다.
@@ -211,10 +206,12 @@ def make_memory_search_handler(retriever: MemoryRetriever, now: datetime) -> Too
     retriever 의 것). ``since``/``until`` 이 있으면 기간 검색(:meth:`MemoryRetriever.retrieve_in_range`) —
     주제가 있으면 범위 밖 상위 결과도 몇 개 딸려 오고, 어느 쪽인지는 ``date`` 로 백엔드가 가린다.
 
-    instructions 의 최근 대화에 든 세션도 검색에서 빼지 않는다: 백엔드는 답이 지시문에 있어도 검색부터 하는
-    일이 많고, 빠져 있으면 빈 결과를 보고 "기억 안 난다" 가 된다. 결과는 백엔드 툴 출력으로만 가서 대화
-    모델 컨텍스트에 겹쳐 쌓이지 않는다. 현재 세션의 에피소드는 세션이 끝나야 생긴다. 인용 갱신은 하지
-    않는다 — 대화 모델 출력에 인용 태그가 없고, 턴 단위 retained buffer 도 이 엔진에서는 의미가 없다.
+    - instructions 의 최근 대화에 든 세션도 검색에서 빼지 않는다. 백엔드는 답이 지시문에 있어도 검색부터 하는
+      일이 많아, 빠져 있으면 빈 결과를 보고 "기억 안 난다" 가 된다. 결과는 백엔드 툴 출력으로만 가서 대화 모델
+      컨텍스트에 겹쳐 쌓이지 않는다.
+    - 현재 세션의 에피소드는 세션이 끝나야 생긴다.
+    - 인용 갱신은 하지 않는다 — 대화 모델 출력에 인용 태그가 없고, 턴 단위 retained buffer 도 이 엔진에서는
+      의미가 없다.
 
     Args:
         retriever: 세션 단위 retriever. 핸들러는 executor 스레드에서 불리지만 한 번에 하나씩이다.

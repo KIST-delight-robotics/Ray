@@ -88,10 +88,10 @@ Living — update them when your change affects them:
 - **scripts/gpt_live/FINDINGS.md**: Observed GPT-Live API behavior.
 - **docs/decisions-wip.md**: Decision log for work in progress (see **Decision Log**).
 
-Records — never edit them, except to fix a path broken by a move:
-- **docs/history/**: One record per completed work (`<work>.md`, or a `<work>/` folder when it has notes) —
-  its decisions, reasoning and trial-and-error. Read it when touching the same area, to learn why things are
-  the way they are.
+Records — never rewrite them to reflect later changes (see **Decision Log** for what may be added):
+- **docs/history/**: One record per completed work worth revisiting, named after the work — `YYYY-MM-<work>.md`
+  (month the work started), or a folder when it has notes. Its decisions, reasoning and trial-and-error. Read it
+  when touching the same area, to learn why things are the way they are.
 - **docs/archive/**: Records of removed or superseded designs (cascade engine, eval, story mode, initial
   memory design). Excluded from search via `.ignore`; open by path only when explicitly needed.
 
@@ -208,12 +208,16 @@ Record non-obvious design decisions and lessons learned in `docs/decisions-wip.m
 progress — in detail, as it happens, ordered chronologically (oldest on top, newest at the bottom). Open
 follow-ups go under "차후 고려" at its end.
 
-When the user decides a work is complete, move its entries into a new record in `docs/history/` and remove
-them from `decisions-wip.md`. Clean them up on the way: drop plain work logs (which file got what — git has
-that), split crammed paragraphs, group field-test notes, and mark conclusions that were later overturned
-instead of deleting them. Keep design intent, reasoning, trial-and-error and measurements; an overview may be
-added, but only from what the entries and git history show. Later work on an area that already has a record
-gets a new record (e.g. `memory-v2.md`) — never edit an existing record to reflect later changes.
+When the user decides a work is complete, move its entries into a record in `docs/history/` and remove them
+from `decisions-wip.md`. Clean them up on the way: drop plain work logs (which file got what — git has that),
+split crammed paragraphs, group field-test notes, and mark conclusions that were later overturned instead of
+deleting them. Keep design intent, reasoning, trial-and-error and measurements; an overview may be added, but
+only from what the entries and git history show.
+
+A record is curated, not a commit log: write one only for work with design decisions or trial-and-error worth
+revisiting — small changes need no record. Name it after the work, not the module (`2026-09-motor-calibration.md`,
+not `motor.md`). A follow-up of the same work, or a fact missing from it, is appended to that record; a different
+work — even in the same area — gets a new file. Never edit an existing record to reflect later changes.
 
 Each entry should focus on **why this choice was made** — not what was built. Include:
 - Trade-offs where alternatives existed

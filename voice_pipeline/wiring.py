@@ -76,7 +76,7 @@ _AUDIO_QUEUE_SIZE = 300
 _MIC_DUMP_DIR = f"{VAR_DIR}/log/mic"  # MIC_DUMP=1 일 때 마이크 전 채널 녹음 위치 (6ch + ray.wav 분당 ~13.4 MB)
 _EXECUTOR_WORKERS = 2  # 툴 핸들러·라디오 판정기를 돌리는 스레드 풀 크기
 _LIVE_BACKEND_MODEL = "gpt-5.4-mini"  # GPT-Live responses 위임 백엔드
-# none 은 짧은 첫 턴에서 툴 선택이 미끄러진다(end_conversation 오발). low 는 지연 차이 없이 25/25
+# none 은 짧은 첫 턴에서 툴 선택이 미끄러진다(end_conversation 오발). low 는 지연 차이 없이 툴 선택이 맞는다
 _LIVE_BACKEND_REASONING = "low"
 
 
@@ -229,7 +229,7 @@ def build_components(
     trace.install(SQLiteCallStore(db_path))
     retry_handler = OpenAIRetryHandler()
     logging.getLogger("openai._base_client").addHandler(retry_handler)
-    # local_files_only: 부팅 시 HF 허브 왕복 생략(−3.4s) + 네트워크 미준비 상태에서도 기동.
+    # local_files_only: 부팅 시 HF 허브 왕복 생략 + 네트워크 미준비 상태에서도 기동.
     # 새 기기 첫 실행은 캐시가 없어 실패한다.
     embedder = TrackedEmbedder(create_embedder(expected_dimension=_DEFAULT_DIMENSION, local_files_only=True))
 

@@ -1,6 +1,6 @@
 # 메모리 Read
 
-> 장기기억 1차 작업의 초기 설계 기록 (2026-03 ~ 2026-07). 고정 — 이후 변경은 반영하지 않는다. 결정 기록은 [history/memory-v1.md](../../history/memory-v1.md).
+> 장기기억 1차 작업의 초기 설계 기록 (2026-03 ~ 2026-07). 고정 — 이후 변경은 반영하지 않는다. 결정 기록은 [history/2026-03-long-term-memory.md](../../history/2026-03-long-term-memory.md).
 
 ---
 

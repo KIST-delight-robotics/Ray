@@ -42,7 +42,7 @@ TokenCounter = Callable[[str], int]
 # ---------------------------------------------------------------------------
 
 AudioFrame = bytes
-"""Raw PCM audio bytes for one capture frame. Size determined by audio.constants."""
+"""Raw PCM audio bytes for one capture frame. Size given by ``settings.FRAME_SIZE_BYTES``."""
 
 
 # ---------------------------------------------------------------------------

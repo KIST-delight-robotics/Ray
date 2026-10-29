@@ -6,7 +6,7 @@
 
 GPT-Live 엔진에서 저장된 노래마다 어울리는 이야기를 3~5분 들려준 뒤 노래를 트는 콘텐츠. 2026-09-28 에 넣고, 이튿날
 대본을 대화 모델에 직접 넣는 방식으로 바꿨다가, 레이의 방향성과 맞지 않아 2026-10-01 코드·대본·툴을 전부 제거했다
-(DJ → 라디오 모드로 대체, [history/radio/](../history/radio/)). 제거 전 코드는 커밋 9acab27 까지의
+(DJ → 라디오 모드로 대체, [history/2026-10-radio/](../history/2026-10-radio/)). 제거 전 코드는 커밋 9acab27 까지의
 `engines/gpt_live/stories.py` · `story_append.py` 에 있다.
 
 기능 설명이 아니라 교훈으로 남긴다 — `instructions.append` 는 발화를 끊으니 출력 무음 뒤에만, `session.update` 는 다음

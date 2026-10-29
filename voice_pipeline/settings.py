@@ -30,10 +30,9 @@ VAR_DIR = "var"  # 프로그램이 실행 중에 쓰는 파일의 루트 (DB, �
 DEFAULT_DB_PATH = f"{VAR_DIR}/ray.db"  # history / memory / trace / call 스토어가 공유하는 SQLite 파일
 DEVICE_SETTINGS_PATH = f"{VAR_DIR}/device_settings.json"  # 사용자가 말로 바꾼 볼륨·밝기 단계 (device_settings.py)
 
-# 재생 파일 출력 레벨 정규화 (audio_level.py). 기준은 GPT-Live 말소리 — 대화 시간 대부분을 차지하므로
-# 고정 오디오가 그보다 크면 시끄럽게 들린다. 값은 유성 40ms 프레임 피크(0~1)이고 cpp MouthLevelNormalizer
-# 와 같은 척도라 [mouth] gain 로그로 실기 검증이 된다. 실측: GPT-Live 중앙값 0.12 / p90 0.27.
-SPEECH_TARGET_PEAK = 0.12  # 말소리 파일(인사·작별)의 목표 중앙값 = GPT-Live 실측값
+# 재생 파일 출력 레벨 정규화 (audio_level.py, 기준은 GPT-Live 말소리). 값은 유성 40ms 프레임 피크(0~1)이고
+# cpp MouthLevelNormalizer 와 같은 척도라 [mouth] gain 로그로 확인할 수 있다.
+SPEECH_TARGET_PEAK = 0.12  # 말소리 파일(인사)의 목표 중앙값 = GPT-Live 실측값
 CHIME_TARGET_PEAK = 0.11  # 알림음의 목표 p90. 말소리 p90 보다 ~8 dB 아래 — 알림음은 의미가 없어 같으면 시끄럽다
 MUSIC_TARGET_PEAK = 0.18  # 노래의 목표 중앙값. 말소리보다 3.5 dB 위 — 재생 중엔 노래가 주인공이다.
 # 노래는 런타임이 아니라 scripts/normalize_song_audio.py 가 WAV 자체에 적용한다 (모션 CSV 생성 뒤에).

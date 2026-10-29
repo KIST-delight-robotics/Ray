@@ -350,7 +350,6 @@ class LEDController:
         self._init_lock = threading.Lock()
         self._strip_init_done = False
 
-        # Start animation thread
         self._thread = threading.Thread(
             target=self._animation_loop,
             name="led-animation",
@@ -400,10 +399,9 @@ class LEDController:
             self._driver = driver
             self._strip = driver.get_strip()
             self._strip.set_brightness(self._brightness)
-            # 인수 직후 SLEEPING 첫 프레임을 즉시 그린다: SPI 오픈 시 라인 글리치로
-            # 스트립이 임의 색(흰 반짝 등)을 래치해도 바로 덮어써지고, 애니메이션
-            # 스레드가 돌기 전까지 공백이 없다. OS_LED 데몬도 같은 프레임으로 페이드해
-            # 파킹하므로(handoff_frame) 부팅 호흡 → RAY 호흡이 끊김 없이 이어진다.
+            # 인수 직후 SLEEPING 첫 프레임을 바로 그린다 — 애니메이션 스레드가 돌기 전에도 빈 틈이 없게.
+            # - SPI 오픈 때 라인 글리치로 스트립이 임의 색(흰 반짝 등)을 래치해도 바로 덮어쓴다.
+            # - OS_LED 데몬이 같은 프레임으로 페이드해 파킹하므로(handoff_frame) 부팅 호흡 → RAY 호흡이 이어진다.
             self._apply_frame(BreathingAnimation().render(0, self._BAR_COUNT, self._RING_COUNT))
             # 하부 LED 미러 활성화 — period를 캐시하면 이후 _apply_frame마다 duty만 쓴다.
             # 로딩 중에는 스트립 인수 전이라 하부도 꺼져 있다.
@@ -473,10 +471,10 @@ class LEDController:
         self._thread.join(timeout=self._CLOSE_JOIN_TIMEOUT_SEC)
         if self._thread.is_alive():
             logger.warning("LED animation thread did not exit within timeout")
-        # 즉시 소등하면 종료가 "툭 꺼짐"으로 보인다 — 마지막 프레임에서 페이드.
-        # 시스템 종료 중이면 검정 대신 호흡 최저(0.15) 노랑으로 파킹하고 물러난다:
-        # ATtiny 종료 호흡이 dim에서 시작하도록 설계되어 있어(펌웨어 pulse_for_ms 주석)
-        # 그 밝기 그대로 이어받는다. 수동 stop(개발)은 기존대로 소등.
+        # 즉시 소등하면 종료가 "툭 꺼짐"으로 보여 마지막 프레임에서 페이드한다.
+        # - 시스템 종료 중: 검정 대신 호흡 최저(0.15) 노랑으로 파킹하고 물러난다. ATtiny 종료 호흡이
+        #   그 밝기에서 시작하도록 설계돼 있다(펌웨어 pulse_for_ms 주석).
+        # - 수동 stop(개발): 소등.
         parked_lit = False
         if self._strip is not None and self._last_frame is not None:
             if _system_stopping():

@@ -2,8 +2,7 @@
 
 - ``reset()``: 벤더 제어 전송으로 XVF3800 펌웨어를 재시작한다. 보드 RST 버튼(하드웨어 리셋)과는 같지 않다 —
   버튼으로만 풀리는 AEC 이상 상태가 있다.
-  장치는 USB 버스에서 잠시 사라졌다가 재열거되며(실측: 사라짐 0.17 s, ALSA/PyAudio 재인식 ~1.1 s),
-  모든 XVF3800 파라미터가 기본값으로 돌아간다.
+  장치는 USB 버스에서 잠시 사라졌다가 재열거되며, 모든 XVF3800 파라미터가 기본값으로 돌아간다.
 - ``wait_present()``: 장치가 USB 버스에 보일 때까지 대기. 리셋 뒤 마이크를 열기 전 가드용.
 
 프로토콜은 Seeed 의 ``xvf_host.py``(reSpeaker_Flex 저장소) 에서 REBOOT 명령 하나만 옮겨 왔다:
@@ -25,7 +24,7 @@ _VENDOR_ID = 0x2886  # Seeed Technology — PID 는 펌웨어 변형(6ch/2ch 등
 _REBOOT_RESID = 48  # wIndex
 _REBOOT_CMDID = 7  # wValue
 _CTRL_TIMEOUT_MS = 1000
-_DISAPPEAR_TIMEOUT_SEC = 1.0  # REBOOT 후 버스에서 사라질 때까지 (실측 0.17 s)
+_DISAPPEAR_TIMEOUT_SEC = 1.0  # REBOOT 후 버스에서 사라질 때까지
 _POLL_INTERVAL_SEC = 0.05
 
 

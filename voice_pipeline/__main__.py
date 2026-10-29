@@ -71,7 +71,7 @@ _CONSOLE_NARRATIVE = {
     "voice_pipeline.wakeword",
 }
 
-_RESPEAKER_PRESENT_TIMEOUT_SEC = 3.0  # 리셋 후 USB 재열거 대기 상한 (실측 ~1.1 s)
+_RESPEAKER_PRESENT_TIMEOUT_SEC = 3.0  # 리셋 후 USB 재열거 대기 상한
 _FAREWELL_TIMEOUT_SEC = 10.0
 _FRAME_TIMEOUT_SEC = 0.1
 _POLL_INTERVAL_SEC = 0.05
@@ -155,7 +155,7 @@ READY_CHIME_PATH = "boot/sounds/ready.oga"  # 준비 완료 차임 (파일 없�
 
 # 기동 시 C++ 연결 대기 상한. 부팅 캘리브레이션(이완·수평·장력)이 끝나야 cpp 서버가
 # 열리는데 소요 시간이 와이어 상태에 따라 크게 변한다 — 짧게 포기하고 죽으면 systemd
-# 재시작으로 모델 로딩(~40s)을 통째로 다시 하므로, 여기서 참을성 있게 기다린다.
+# 재시작으로 모델 로딩을 통째로 다시 하므로, 여기서 참을성 있게 기다린다.
 _STARTUP_CONNECT_TIMEOUT_SEC = 90.0
 _STARTUP_CONNECT_RETRY_DELAY_SEC = 3.0
 
@@ -191,8 +191,8 @@ def main() -> None:
     """Launch the voice pipeline."""
     _setup_logging()
 
-    # ReSpeaker(XVF3800) 리셋 — RST 버튼과 같은 효과. 재열거 ~1 s 는 아래 모델 로딩(~20 s)에
-    # 완전히 가려지므로 대기를 두지 않는다. 실패해도 시작은 막지 않는다(fail-open).
+    # ReSpeaker(XVF3800) 리셋. 재열거는 아래 모델 로딩에 가려지므로 대기를 두지 않는다.
+    # 실패해도 시작은 막지 않는다(fail-open).
     respeaker.reset()
 
     # --- Shared component graph (production defaults: var/ray.db, LED via env) ---

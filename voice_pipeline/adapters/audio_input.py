@@ -1,9 +1,12 @@
 """AudioInput: microphone capture on a daemon thread.
 
 reSpeaker 는 6채널로 열어 CH1(ASR 처리 출력)에 고정 게인을 곱해 mono 로 내보낸다. CH0(Conference)은 후처리가
-더블토크·음악 재생 중 근단까지 눌러 말이 잘리고, CH1 은 후처리를 거치지 않는다. ``dump_dir`` 를 주면 뽑기 전
-전 채널을 채널별 WAV 로 계속 남긴다 — 처리 출력과 원본 마이크를 한 시간축에서 비교하는 AEC 진단용. 채널 파일은
-측정용이라 게인 없이 쓰고, 파이프라인이 실제로 받은 mono(추출 채널 × 게인)는 ``ray.wav`` 로 따로 쓴다.
+더블토크·음악 재생 중 근단까지 눌러 말이 잘리고, CH1 은 후처리를 거치지 않는다.
+
+``dump_dir`` 를 주면 AEC 진단용 녹음을 계속 남긴다.
+
+- 채널별 WAV: 뽑기 전 전 채널, 게인 없이 — 처리 출력과 원본 마이크를 한 시간축에서 비교한다.
+- ``ray.wav``: 파이프라인이 실제로 받은 mono(추출 채널 × 게인).
 """
 
 from __future__ import annotations

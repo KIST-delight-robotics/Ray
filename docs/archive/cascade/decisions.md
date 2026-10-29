@@ -11,8 +11,8 @@ LLM 응답을 문장 단위로 TTS 에 흘려 C++ 로 재생했다. 2026-02 부�
 - 설계 초안: [ARCHITECTURE.md](ARCHITECTURE.md)
 - RPi 5 모델 벤치마크 원문: [benchmarks/](benchmarks/)
 - 두 엔진이 같이 쓰던 결정(C++ 프로토콜, 세션 수명, Silero VAD 상태 오염, 대화 기록, 임베더):
-  [history/initial-build.md](../../history/initial-build.md)
-- 장기기억 1차(블록 주입·retained buffer 포함): [history/memory-v1.md](../../history/memory-v1.md)
+  [history/2026-02-initial-pipeline.md](../../history/2026-02-initial-pipeline.md)
+- 장기기억 1차(블록 주입·retained buffer 포함): [history/2026-03-long-term-memory.md](../../history/2026-03-long-term-memory.md)
 - 평가 시스템: [archive/eval/decisions.md](../eval/decisions.md)
 
 
@@ -169,7 +169,7 @@ LLM 응답을 문장 단위로 TTS 에 흘려 C++ 로 재생했다. 2026-02 부�
 ## Silero VAD — 세션 내부 오염
 
 LSTM 상태가 세션 간 오염되는 실측과 세션 시작·SLEEP 진입 리셋은
-[history/initial-build.md](../../history/initial-build.md#silero-vad) 에 있다.
+[history/2026-02-initial-pipeline.md](../../history/2026-02-initial-pipeline.md#silero-vad) 에 있다.
 
 - **세션 내부 오염은 commit() 시점 리셋으로**: 멀티턴 세션에서 시작 1회 리셋만으론 턴2부터 감지율 5~12배
   붕괴(67.9%→5.7%) — 오염원은 로봇 응답(마이크에 거의 안 잡힘)이 아니라 **사용자 자신의 직전 발화**.

@@ -44,8 +44,8 @@ class SentenceTransformerEmbedder(IEmbedder):
             model_kwargs: ``SentenceTransformer`` 생성자에 전달할 추가 인자.
                 예: ``{"file_name": "onnx/model_qint8_arm64.onnx"}``.
             local_files_only: ``True``면 HF 허브에 접속하지 않고 로컬 캐시만 사용.
-                부팅 시 네트워크 의존을 없애고 로드가 ~3.4s 빨라진다(허브 메타데이터
-                왕복 생략). 캐시가 없는 새 기기에서는 실패하므로 첫 1회는 ``False``로
+                부팅 시 네트워크 의존을 없애고 허브 메타데이터 왕복을 생략한다.
+                캐시가 없는 새 기기에서는 실패하므로 첫 1회는 ``False``로
                 로드해 캐시를 만들어야 한다. 환경변수 ``HF_HUB_OFFLINE=1``은 대안이
                 아니다 — sentence-transformers가 ``file_name``을 명시해도 허브 트리
                 조회를 시도해 예외로 죽는다.

@@ -44,7 +44,7 @@ cascade 엔진을 E2E 로 재던 평가 파이프라인. 질문 WAV 를 외부 �
   vap/turngpt/tts 등 *모든* 모듈 호출을 턴별로 귀속해야 해서 게이트에만 있는 metadata로는 부족.
   - `ICallStore`에 공유 턴 카운터(`set_turn_index`/`current_turn_index`)를 두고 TurnDetector(턴 권위)가 전환마다 갱신 —
     백그라운드 스레드의 vap/turngpt까지 같은 인덱스를 스탬프. (→ 이후 트레이싱 모듈 API의 `trace.set_turn()`으로 대체 —
-    [history/repo-structure.md](../../history/repo-structure.md))
+    [history/2026-08-repo-restructure.md](../../history/2026-08-repo-restructure.md))
   - 생성(LLM/TTS)은 `commit()`으로 끝난 *직전* 교환에 귀속, 카운터는 `commit()`에서만 증가 — cancel rewind는 같은 턴의
     연속이라 reset/cancel에서 올리면 안 됨.
   - 타임스탬프는 µs 정밀도(`utc_now_str`)로 올려 cross-stage 기록 정렬 가능. report.py는 구 DB의 컬럼 부재를 감지해

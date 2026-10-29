@@ -1,18 +1,10 @@
-"""GPT-Live 세션 지시문 — 대화 모델 instructions, 백엔드 instructions, 라디오 문구·판정기, 목소리·인사 문구.
+"""GPT-Live 세션 지시문 — 대화 모델·백엔드 지시문, 노래 재생 중 지시, 라디오 문구·판정기, 목소리·인사 문구.
 
-세션 시작 후에는 바꿀 수 없으므로 사용자 노트·최근 대화 원문(:mod:`voice_pipeline.session_context`)을
-:func:`build_live_instructions` 로 시작 지시문 뒤에 한 번 붙인다. 노래 재생 중 지시(:data:`SONG_PLAYING_INSTRUCTIONS`)
-는 그때 ``instructions.append`` 로 얹고 끝나면 종료 지시로 전환한다. 백엔드 지시문은
-:func:`build_backend_instructions` 가 만든다.
+대화 모델 instructions 는 세션 시작 후 바꿀 수 없어 사용자 노트·최근 대화 원문은 :func:`build_live_instructions` 가
+시작 때 한 번 붙인다. 세션 중에는 append(노래·라디오 문구)와 백엔드 지시문(:func:`build_backend_instructions`)만 바꾼다.
 
-라디오(:mod:`~voice_pipeline.engines.gpt_live.radio`): 대화 모델은 라디오 진행 규칙을 모른다 — 라이브 지시문에는
-위임 목록과 Backend tools 의 Radio 한 줄씩만 있고, 앱이 대사를 :data:`RADIO_LINE_TEMPLATE` 로 하나씩 앞서
-``thinking.append`` 하면 그대로 읽는다. 멈춤·재개·종료는 상태 문구(:data:`RADIO_PAUSED_NOTE` 등)를 thinking 으로
-알린다. 사용자가 말하기 시작한 뒤 대사가 들어갔으면 :data:`RADIO_LATE_LINE_NOTE` 로 대답을 먼저 하게 한다. 백엔드는
-``## Radio talk`` 절의 상태로 ``start_radio`` / ``resume_radio`` 를 가린다. 끼어든 말의 판정은 별도
-LLM(:data:`RADIO_JUDGE_INSTRUCTIONS`)이, 멈춘 대화가 잠잠해졌을 때 라디오로 돌아갈지는 또 다른
-LLM(:data:`RADIO_RESUME_JUDGE_INSTRUCTIONS`)이 한다. 스스로 돌아갈 때는 첫 대사 앞에
-:data:`RADIO_AUTO_RESUME_OPENING` 을 붙인다.
+라디오 진행 규칙은 대화 모델이 모른다 — 앱이 대사와 상태 문구를 thinking 으로 넣고
+(:mod:`~voice_pipeline.engines.gpt_live.radio`), 끼어든 말과 복귀 여부는 별도 판정기 LLM 이 정한다.
 """
 
 from __future__ import annotations
@@ -26,12 +18,10 @@ from voice_pipeline.engines.gpt_live.songs import Song, format_song_list
 from voice_pipeline.session_context import format_current_session_marker
 
 # ---------------------------------------------------------------------------
-# Prompts — 라이브 지시문은 공식 템플릿 구조(페르소나 → Backchannel / Interruption / Delegation policy)를 줄인 것.
-# 위임 정책은 한 벌이고 Backend tools 목록과 위임 목록이 짝을 이룬다 — 목록에서 툴 줄을 빼면 백엔드 툴 선택이
-# 흔들렸다. 라디오는 그 두 목록에 한 줄씩만 둔다. Radio 줄은 라디오가 레이 자신이
-# 진행하는 것이라고 정의한다 — 없으면 시작 한마디가 "라디오 틀어볼게요"처럼 기기를 켜는 말이 됐다.
-# 라이브·백엔드 지시문은 각각 1단계 제목 하나 아래에 둔다 — 백엔드는 둘을 이어 붙여 받으므로
-# 같은 급의 블록으로 보이게.
+# Prompts — 라이브 지시문은 공식 템플릿(페르소나 → Backchannel / Interruption / Delegation policy)을 줄인 구조.
+# - Backend tools 목록과 위임 목록은 짝이다. 한쪽에서 툴 줄을 빼면 백엔드의 툴 선택이 흔들린다.
+# - Radio 줄은 레이가 직접 진행한다고 정의한다. 없으면 시작 말이 "라디오 틀어볼게요" 같은 기기 켜는 말이 된다.
+# - 라이브·백엔드 지시문은 각각 1단계 제목 하나 아래에 둔다 — 백엔드는 둘을 이어 붙여 받는다.
 # ---------------------------------------------------------------------------
 
 DEFAULT_LIVE_INSTRUCTIONS = """\
@@ -174,7 +164,7 @@ def build_radio_section(status: str) -> str:
 def build_backend_instructions(catalog: Mapping[str, Song] | None = None, radio_status: str | None = None) -> str:
     """백엔드 지시문 — 기본 지시문 뒤에 곡 목록 절, (라디오를 쓸 수 있으면) 라디오 상태 절을 붙인다.
 
-    레이 말투·사용자 말투 선호는 따로 넣지 않는다 — 백엔드는 대화 모델의 세션 지시문(프로필 블록 포함)을 함께 받는다.
+    레이 말투·사용자 말투 선호는 따로 넣지 않는다 — 백엔드는 대화 모델의 세션 지시문(사용자 노트 포함)을 함께 받는다.
 
     Args:
         catalog: 재생 가능한 곡. 비면 곡 목록 절 생략.
@@ -187,9 +177,9 @@ def build_backend_instructions(catalog: Mapping[str, Song] | None = None, radio_
 
 
 # ---------------------------------------------------------------------------
-# 라디오 — 대화 모델에 넣는 thinking 문구. 문구에 민감하다:
-# 대사 틀에 "radio"·"next line" 을 넣으면 모델이 틀을 말로 옮겨("지금 라디오에서는…", "이어서 한마디 더 할게요")
-# 지금 하는 말로만 적는다. 상태 문구는 재개를 모델 혼자 할 수 없는 일로 적는다 — 위임은 그런 일에서만 걸렸다.
+# 라디오 — 대화 모델에 넣는 thinking 문구. 모델이 문구를 말로 옮기기 쉬워 단어 하나에도 민감하다.
+# - 대사 틀은 지금 하는 말로만 적는다. "radio"·"next line" 이 있으면 "지금 라디오에서는…" 처럼 틀까지 말한다.
+# - 상태 문구는 재개를 모델 혼자 할 수 없는 일로 적는다. 그래야 재개 요청을 위임한다.
 # ---------------------------------------------------------------------------
 
 RADIO_LINE_TEMPLATE = "You are now saying: «{}»"
@@ -198,10 +188,10 @@ RADIO_PAUSED_NOTE = (
     "Do not continue the talk yourself: the rest of it is not with you. If the user asks to go on with it "
     "(for example 계속해, 이어서 해 줘, 이야기 계속해 줘), delegate to the backend to resume it."
 )
-# 시작·재개 때 — 말투만 적는다. "대사·읽다" 같은 낭독 어휘는 말로 새어 나왔다
+# 시작·재개 때 — 말투만 적는다. "대사·읽다" 같은 낭독 어휘는 말로 새어 나온다
 RADIO_ON_NOTE = "Radio talk: on. Speak slowly and softly, in a gentle, unhurried voice."
 RADIO_ENDED_NOTE = "Radio talk: ended. Talk with the user now."
-# 사용자 전사가 오기 직전(목소리는 이미 시작)에 넣은 대사 — 모델은 사용자 말 도중 받은 대사를 대답보다 먼저 읽는다
+# 사용자가 말하기 시작한 뒤(전사 도착 전) 대사가 들어갔을 때 — 없으면 모델이 대답보다 대사를 먼저 읽는다
 RADIO_LATE_LINE_NOTE = (
     "The user started talking to you. Respond to the user first; do not say the line you were just given yet."
 )
@@ -254,10 +244,9 @@ def build_radio_judge_prompt(
     return text + f"Since the user spoke:\n{dialog(exchange)}"
 
 
-# 멈춘 대화가 잠잠해졌을 때 레이가 라디오로 스스로 돌아갈지 정하는 판정기 (별도 LLM 호출, 추론 low, 구조화 출력).
-# 입력은 태그 셋으로 나누고 지시문은 태그 이름으로만 가리킨다 — 이름에 설명을 섞거나 예시 단어를 주면 판정기가 겉글자로
-# 맞춰 봤다. 라디오 토크를 준비된 대사로만 정의해야 같은 주제의 대화를
-# 라디오로 보지 않는다.
+# 멈춘 대화가 잠잠해졌을 때 레이가 라디오로 스스로 돌아갈지 정하는 판정기 (별도 LLM 호출, 구조화 출력).
+# - 지시문은 입력 태그를 이름으로만 가리킨다. 태그 이름에 설명이나 예시 단어를 섞으면 판정기가 겉글자로 맞춘다.
+# - 라디오 토크를 준비된 대사로만 정의한다. 그래야 같은 주제의 대화를 라디오로 보지 않는다.
 RADIO_RESUME_JUDGE_INSTRUCTIONS = """\
 Ray, a small desk robot, hosts a radio talk: it reads prepared lines aloud, one at a time. The radio talk is only \
 those lines. While Ray was reading a line, the user said something to Ray, so the reading paused and they had a \
@@ -329,7 +318,7 @@ def build_radio_resume_prompt(line: str, interruption: str, conversation: Sequen
     )
 
 
-# 자동 복귀 때 첫 대사 앞에 붙인다 — 모델에게 맡기면 방송 어휘("라디오 다시 켤게요")가 나왔다
+# 자동 복귀 때 첫 대사 앞에 붙인다 — 모델에게 맡기면 "라디오 다시 켤게요" 같은 방송 어휘가 나온다
 RADIO_AUTO_RESUME_OPENING = "그럼 하던 이야기로 돌아가 볼게요."
 
 
@@ -337,17 +326,15 @@ RADIO_AUTO_RESUME_OPENING = "그럼 하던 이야기로 돌아가 볼게요."
 FAREWELL_COMMENTARY = "Say goodbye to the user now, in one short sentence: 다음에 또 불러주세요."
 
 LIVE_VOICE = "cedar"  # 세션 목소리. 인사 WAV 도 같은 목소리로 합성해 이질감을 없앤다
-LIVE_GREETING_TEXT = "네, 부르셨어요?"  # 웨이크워드 뒤 세션 연결 지연(1.5~3.5초)을 가리는 인사
+LIVE_GREETING_TEXT = "네, 부르셨어요?"  # 웨이크워드 뒤 세션 연결 지연을 가리는 인사
 LIVE_GREETING_TTS_MODEL = "gpt-4o-mini-tts"  # Live 목소리(cedar)를 지원하는 OpenAI TTS 모델
 
 
 def build_live_instructions(notes_text: str = "", recent_conversations: str = "", *, now: datetime) -> str:
     """세션 시작 instructions — 기본 지시문 뒤에 사용자 노트·최근 대화 원문, 끝에 현재 세션 표시.
 
-    instructions 는 세션 시작 후 바꿀 수 없으므로 세션 수준 컨텍스트는 여기에 한 번 들어간다.
-    한도 16,384 토큰에 대해 사용자 노트는 기준이 엄격해 짧고 최근 대화는 1.5k 예산이라 여유가 크다.
-    대화 모델은 시계가 없어 끝의 현재 세션 표시가 "지금" 의 유일한 근거다. 백엔드도 이 지시문을 같이
-    받는다 — 지난 원문의 "잘 자"·"라디오 틀어줘" 를 지금 요청으로 읽지 않는 것을 실측했다.
+    instructions 는 세션 시작 후 바꿀 수 없어 세션 수준 컨텍스트는 여기서 한 번 들어간다 (한도 16,384 토큰).
+    대화 모델은 시계가 없어 끝의 현재 세션 표시가 "지금" 의 유일한 근거다. 백엔드도 이 지시문을 같이 받는다.
 
     Args:
         notes_text: :func:`~voice_pipeline.session_context.format_user_notes_block` 결과. 빈 문자열이면 생략.

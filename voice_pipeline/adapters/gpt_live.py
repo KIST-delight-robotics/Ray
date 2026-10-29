@@ -43,7 +43,7 @@ logger = logging.getLogger("voice_pipeline.gpt_live")
 
 @dataclass(frozen=True)
 class LiveStarted:
-    """세션이 열렸다. ``expires_at`` 은 epoch 초 (실측 120분 뒤)."""
+    """세션이 열렸다. ``expires_at`` 은 epoch 초 (시작 120분 뒤)."""
 
     session_id: str
     expires_at: float
@@ -151,8 +151,8 @@ class LiveSessionConfig:
         backend_model: responses 위임 백엔드 모델. None 이면 client 위임(백엔드 없음).
         backend_instructions: 백엔드 모델 지시문 (툴 사용 규칙, 답 형식).
         tools: 백엔드에 주는 function 툴 정의(Responses API function 형식). web_search 는 항상 포함.
-        backend_reasoning: 백엔드 추론 노력(reasoning.effort). 운영은 wiring 이 low 를 넘긴다.
-        voice: 목소리 이름. 기본 marin.
+        backend_reasoning: 백엔드 추론 노력(reasoning.effort).
+        voice: 목소리 이름.
         sample_rate: 입출력 공유 PCM 레이트. 16000 또는 24000.
     """
 
@@ -204,7 +204,7 @@ class GPTLiveSession:
             ``response.*``, ``close``)을 가진 객체를 돌려주는 호출자. None 이면 ``openai.OpenAI().live.connect()``.
     """
 
-    _START_TIMEOUT_SEC = 15.0  # session.started 대기 상한. 실측 1.5~3.5초
+    _START_TIMEOUT_SEC = 15.0  # session.started 대기 상한
     _START_ATTEMPTS = 3  # 연결·session.started 실패 시 재시도 횟수
     _START_RETRY_DELAY_SEC = 1.0
     _RECV_JOIN_TIMEOUT_SEC = 3.0  # close 시 수신 스레드 종료 대기
@@ -298,7 +298,7 @@ class GPTLiveSession:
         """세션을 닫는다.
 
         graceful 이면 ``session.close`` 를 보내고 소켓을 닫는다. ``session.closed`` 는 기다리지 않는다 —
-        위임이 미완이면 서버가 약 9초 뒤에 보내는데(실측), 과금은 요청 시점에 멈추므로 기다릴 이유가 없다.
+        위임이 미완이면 서버가 늦게 보내는데, 과금은 요청 시점에 멈추므로 기다릴 이유가 없다.
         """
         if self._conn is None:
             return

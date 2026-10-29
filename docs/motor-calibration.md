@@ -2,7 +2,7 @@
 
 RAY의 머리는 와이어 세 줄(pitch, roll_r, roll_l)로 움직인다. C++ 프로세스(`build/Ray`)는 기동할 때마다
 이 세 줄을 다시 맞추는 캘리브레이션을 돌린다. 이 문서는 그 과정이 **무엇을 보고, 어떻게 움직이고, 언제
-멈추는지**를 설명한다. 설정 절차는 `docs/SETUP.md`, 결정 배경은 `docs/history/motor.md`에 있다.
+멈추는지**를 설명한다. 설정 절차는 `docs/SETUP.md`, 결정 배경은 `docs/history/2026-09-motor-calibration.md`에 있다.
 
 ## 1. 목표
 

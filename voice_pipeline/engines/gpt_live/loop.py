@@ -5,32 +5,28 @@
 1. 마이크 프레임을 브리지 레이트로 리샘플해 세션으로 보내고, 모델 출력 오디오를 C++로 그대로 보낸다.
    세션 전체가 ``stream_start`` 하나로 시작하는 스트림이며 무음 조각도 그대로 흘린다.
 2. 전사 세그먼트를 히스토리와 utterances(장기기억 입력)에 저장한다. 라디오가 on 일 때의 모델 말은 ``radio`` 로 저장한다.
-3. 백엔드의 함수 툴 호출을 실행한다 — 장기기억 검색 ``search_memory``, 볼륨·밝기 ``adjust_volume`` /
-   ``set_brightness`` / ``get_device_settings``, 종료 ``end_conversation``. 핸들러는 executor 에서 돌리고
-   프레임 루프는 완료를 폴링한다 — 임베딩·DB 조회가 마이크 전송과 출력 중계를 막지 않게.
+3. 백엔드의 함수 툴 호출을 실행한다. 핸들러는 executor 에서 돌리고 프레임 루프는 완료를 폴링한다 —
+   임베딩·DB 조회가 마이크 전송과 출력 중계를 막지 않게.
 4. 노래를 재생한다 (``play_song`` / ``stop_song``, 아래 "노래 재생").
 5. 라디오를 돈다 (``start_radio`` / ``resume_radio``, 아래 "라디오").
 6. 세션 종료를 판정하고 닫는다 — 종료 키워드, 유휴 타임아웃, 백엔드의 ``end_conversation`` 툴,
    세션 만료/연결 끊김, 브리지 오류, 오디오 기아, 외부 stop.
 
 노래 재생 (C++ 는 재생 하나를 끝까지 처리하므로 라이브 스트림과 교대한다):
-    ``play_song`` 호출은 결과를 보류한 채(PENDING) 모델 출력이 무음이 되길 기다림 → ``audio_end`` + 재생 지시
-    append 뒤 ``playback_complete`` 대기(DRAINING) → ``play_audio_csv``(PLAYING) →
-    보류한 툴 결과 제출 → ``playback_complete``(끝) → 지시 복원, ``stream_start`` 로 재개.
-    ``stop_song`` 도 결과를 보류한다(STOPPING): ``stop`` 은 즉시 보내되, 위임 시 모델의 한마디("끌게")가 스트림이
-    닫힌 채 끝나길 기다린 뒤 스트림을 열고 결과를 제출한다 — 그래야 "끌게" 는 버려지고 결과 뒤의 "껐어" 만 들린다.
-    결과를 노래 시작 뒤에 제출하므로 위임 시 모델의 한마디는 잘리지 않고, 결과 뒤의 말은 스트림이 없어 버려진다.
-    노래 상태 동안 백엔드는 ``stop_song`` 하나만 가진 재생용 설정으로 교체된다(``session.update``, 끝나면 복원).
-    다른 툴 호출은 오류로 답하고 ``end_conversation`` 도 종료로 치지 않는다. 모델 음성은 버리고 전사는 저장하지 않는다.
+    ``play_song``: 결과 보류(PENDING) → 출력 무음 → ``audio_end`` + 재생 지시 append, ``playback_complete`` 대기
+    (DRAINING) → ``play_audio_csv``(PLAYING), 보류한 결과 제출 → ``playback_complete`` → 지시 복원, ``stream_start``.
+    결과를 노래 시작 뒤에 제출하므로 위임 때 모델의 한마디는 잘리지 않고, 결과 뒤의 말은 스트림이 없어 버려진다.
+    ``stop_song`` 도 결과를 보류한다(STOPPING): ``stop`` 은 즉시 보내고, 모델의 한마디("끌게")가 닫힌 스트림에서
+    끝난 뒤 스트림을 열고 결과를 제출한다 — "끌게" 는 버려지고 결과 뒤의 "껐어" 만 들린다.
+    노래 중 백엔드는 ``stop_song`` 하나만 가진 설정으로 바뀐다(끝나면 복원). 다른 툴은 오류로 답하고
+    ``end_conversation`` 도 종료로 치지 않는다. 모델 음성은 버리고 전사는 저장하지 않는다.
 
 라디오 (진행 규칙은 :mod:`~voice_pipeline.engines.gpt_live.radio`):
-    루프는 :class:`~voice_pipeline.engines.gpt_live.radio.Radio` 에 전사 스냅샷·모델 음성·받은 무음 길이를 넣고, 매
-    프레임 :meth:`Radio.step` 이 돌려준 할 일 — 대사·상태 문구 ``thinking.append``, 라디오 상태로 백엔드 갱신, 대본의
-    곡 재생, utterances 에 사건 줄 — 을 실행한다. ``start_radio`` / ``resume_radio`` 는 그 자리에서 첫 대사를 넣고
-    결과를 바로 돌려준다 (이어가기에서 백엔드는 빈 응답). 대본의 곡은 노래 흐름을 툴 결과 없이 타고, 자연 종료면 다음
-    대본의 첫 대사를, 사용자가 멈췄으면 라디오 종료를 알린다. 노래 중에는 라디오를 돌리지 않는다. 멈춘 라디오가
-    잠잠함을 셀 수 있게 백엔드 위임이 진행 중인지(위임 생성부터 마지막 응답 완료까지)도 넘기고, 사용자가 튼 곡은
-    라디오에 알린다.
+    루프는 :class:`~voice_pipeline.engines.gpt_live.radio.Radio` 에 전사 스냅샷·모델 음성·받은 무음 길이·백엔드 위임
+    진행 여부(위임 생성부터 마지막 응답 완료까지)를 넣고, 매 프레임 :meth:`Radio.step` 이 돌려준 할 일 — 대사·상태
+    문구 ``thinking.append``, 백엔드 갱신, 대본의 곡 재생, utterances 사건 줄 — 을 실행한다.
+    ``start_radio`` / ``resume_radio`` 는 그 자리에서 첫 대사를 넣고 결과를 바로 돌려준다. 대본의 곡은 노래 흐름을
+    툴 결과 없이 타고, 끝나면 라디오가 다음을 정한다. 노래 중에는 라디오를 돌리지 않는다.
 
 종료 시퀀스:
     입력 mute → 모델의 마지막 발화가 끝날 때까지(출력이 무음으로 N초) 대기, 상한 있음 →
@@ -144,16 +140,15 @@ class LiveSessionLoop:
     _BACKEND_BUSY_MAX_SEC = 20.0  # 응답 완료를 못 받은 위임은 이 시간 뒤 진행 중으로 치지 않는다 (라디오 복귀 대기)
     _LEAD_LOG_INTERVAL_SEC = 15.0  # 오디오 전송 상태(추정 밀림, 조각 도착 간격) DEBUG 로그 주기
     _GAP_EVENT_SEC = 0.3  # 조각 도착 간격이 이 이상이면 정지 이벤트로 INFO 로그 (C++ [split] 로그와 대조용)
-    # 서버 출력은 실시간보다 1~3% 짧게 온다 — 주로 무음 프레임이 빠지고, 늦게라도 오지 않는다
-    # (2026-09-16 store 녹음 대조로 확인. 서버 제어 가이드 "Reflected output ranges can have gaps for dropped frames").
-    # Wi-Fi 정지가 있으면 더 커진다.
-    # C++ 모션 루프는 덩이가 시각보다 먼저 와 있어야 끊기지 않으므로, 보낸 오디오 길이(lead)가 경과 시간보다
-    # 이 밴드 이상 뒤지면 무음 조각을 채우고, 네트워크 정지 뒤 몰려와 앞서면 무음 조각을 버려 실시간에 맞춘다.
-    # 둘 다 무음 조각(값 전부 0) 뒤에서만 하므로 말소리는 건드리지 않고, 소리와 모션은 같은 스트림을 쓰니 동기 유지.
+    # lead 보정 — 서버 출력은 실시간보다 짧게 온다(주로 무음 프레임이 빠지고 늦게라도 오지 않는다. Wi-Fi 정지가
+    # 있으면 더 커진다). C++ 모션 루프는 덩이가 시각보다 먼저 와 있어야 끊기지 않는다.
+    # - 보낸 오디오 길이(lead)가 경과 시간보다 밴드 이상 뒤지면 무음 조각을 채운다.
+    # - 네트워크 정지 뒤 몰려와 앞서면 무음 조각을 버려 실시간에 맞춘다.
+    # - 둘 다 무음 조각(값 전부 0) 뒤에서만 한다 — 말소리는 그대로이고, 소리와 모션이 같은 스트림이라 동기가 유지된다.
     _LEAD_PAD_BELOW_SEC = -0.1  # lead 가 이 아래면 무음(정확히 0) 조각 뒤에 채워 _LEAD_PAD_TARGET_SEC 까지 올린다
     _LEAD_PAD_TARGET_SEC = 0.0
     _LEAD_DROP_ABOVE_SEC = 0.3  # lead 가 이 위면 무음(정확히 0) 조각을 버린다
-    # 긴 발화 중에는 정확히 0인 조각이 오지 않아 채울 기회가 없다(60초 발화에 여유 500 ms 깎임, 2026-09-15).
+    # 긴 발화 중에는 정확히 0인 조각이 오지 않아 채울 기회가 없다.
     # 어절 사이 쉼(rms 30 미만, 100~300 ms)에서도 채우되, 급할 때만·한 조각만 넣어 쉼이 티 나게 길어지지 않게 한다.
     _QUIET_RMS = 30  # 이 미만이면 말 사이 쉼으로 본다 (16-bit 기준 약 -61 dBFS, 말소리 최약 구간 30~100 보다 아래)
     _LEAD_PAD_IN_SPEECH_BELOW_SEC = -0.3
@@ -309,8 +304,8 @@ class LiveSessionLoop:
         self._bridge.send_stream_start(live=True)
         self._stream_open = True
         self._stream_start_pending = False
-        # lead 회계는 스트림에 실제로 보낸 첫 조각부터 — 보낸 양도 함께 0 으로. 노래 뒤 재개 때 이전 누적이 남아
-        # lead 가 수 분으로 계산돼 무음 조각을 전부 버리고 C++ 가 그만큼 무음을 채우던 문제 (2026-09-28 실기)
+        # lead 회계는 스트림에 실제로 보낸 첫 조각부터 — 보낸 양도 함께 0 으로. 노래 뒤 재개 때 이전 누적이 남으면
+        # lead 가 수 분으로 계산돼 무음 조각을 전부 버린다.
         self._first_audio_time = None
         self._last_audio_time = None
         self._audio_sent_sec = 0.0
@@ -664,7 +659,7 @@ class LiveSessionLoop:
     def _maybe_nudge_farewell(self, now: float) -> None:
         """종료가 결정됐는데 모델이 작별 인사 없이 조용하면 한 번 유도한다.
 
-        설계는 "위임과 동시에 인사" 지만 실기에서 인사 없이 위임만 하는 경우가 있었다 (2026-09-28).
+        설계는 "위임과 동시에 인사" 지만 인사 없이 위임만 하는 경우가 있다.
         입력은 이미 mute 라 사용자 말과 겹치지 않고, 인사 중이면(음성 있음) 보내지 않아 두 번 인사하지 않는다.
         """
         if self._end_nudged or now - self._end_started_time < self._END_NUDGE_AFTER_SEC:

@@ -1,6 +1,6 @@
 # 초기 파이프라인 구축
 
-> 2026-02 ~ 2026-07 초기 파이프라인 구축 작업의 기록. 완료 후 고정 — 이후 변경은 반영하지 않는다.
+> 2026-02 ~ 2026-07 초기 파이프라인 구축 작업의 기록. 같은 작업의 후속만 덧붙이고, 이후 다른 작업의 변경은 반영하지 않는다.
 
 ## 개요
 
@@ -9,7 +9,7 @@ cascade 엔진(ASR → 턴 감지 → LLM → TTS)으로 첫 파이프라인을 
 어댑터. 글 속의 `Phase`, `SessionLoop`, `TurnDetector`, `ContextBuilder`, VAP 등은 당시 cascade 엔진의 구성 요소다.
 
 cascade 전용 결정은 [archive/cascade/decisions.md](../archive/cascade/decisions.md), 장기기억은
-[memory-v1.md](memory-v1.md) 에 있다.
+[memory-v1.md](2026-03-long-term-memory.md) 에 있다.
 
 
 ## C++ ↔ Python 프로토콜

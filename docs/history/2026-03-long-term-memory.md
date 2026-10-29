@@ -1,6 +1,6 @@
 # 장기기억 1차
 
-> 2026-03 ~ 2026-04 장기기억 1차 작업의 기록. 완료 후 고정 — 이후 변경은 반영하지 않는다.
+> 2026-03 ~ 2026-04 장기기억 1차 작업의 기록. 같은 작업의 후속만 덧붙이고, 이후 다른 작업의 변경은 반영하지 않는다.
 
 ## 개요
 
@@ -16,7 +16,7 @@
 
 - **단일 DB**: 기존 conversation history와 같은 `data/ray.db` 사용. 별도 `sqlite3.Connection`으로 접속 (WAL 모드에서
   안전). DB 분리는 세션 참조 cross-join 불가, 관리 이중화 문제로 불리. (경로는 이후 저장소 폴더 정리로 `var/ray.db` —
-  [repo-structure.md](repo-structure.md))
+  [repo-structure.md](2026-08-repo-restructure.md))
 - **utterances 별도 테이블**: 기존 `messages`(Responses API JSON 형식)와 별도로 `utterances`(role, text, timestamp
   평문)를 둠. messages는 LLM 컨텍스트 재구성용, utterances는 메모리 Write 시 에피소드 추출용. messages에서 파생
   가능하지만, tool_call 등 비텍스트 항목 필터링이 필요하고 용도가 다르므로 분리.
@@ -25,7 +25,7 @@
   모드로 대응.
 - **IEmbedder를 공유 모듈로 분리**: similarity와 memory가 동일 모델을 독립 로드하고 있어, `IEmbedder`를 공유
   인터페이스로 승격하고 구현체를 별도 모듈로 추출. `IVectorIndex`는 memory 내부 전용이므로 그대로 유지. (위치는 이후
-  구조 정리로 `types.py` · `adapters/embedder.py` — [repo-structure.md](repo-structure.md))
+  구조 정리로 `types.py` · `adapters/embedder.py` — [repo-structure.md](2026-08-repo-restructure.md))
 - **실패 시 `None` 반환**: `add_episode`/`upsert_profile`이 DB 에러 시 `-1` 대신 `None`을 반환. `-1`은 다운스트림에서
   유효한 ID로 오인될 위험 있음.
 

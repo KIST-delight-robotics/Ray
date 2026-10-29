@@ -167,8 +167,8 @@ class CppBridge:
         """Signal that audio streaming is about to begin.
 
         Args:
-            live: GPT-Live 스트림 표시. C++ 는 두 덩이(720 ms)가 찰 때까지 시계를 시작하지 않는다.
-                False 면 기존 TTS 스트림 동작.
+            live: GPT-Live 스트림 표시. C++ 는 두 덩이가 찰 때까지 시계를 시작하지 않는다.
+                False 면 일반 스트림.
         """
         self._guard_connected()
         msg: dict = {"type": "stream_start"}

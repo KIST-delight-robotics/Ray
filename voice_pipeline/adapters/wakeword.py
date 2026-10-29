@@ -33,8 +33,7 @@ class WakewordDetector:
     """Wakeword detection via Silero VAD speech segmentation + Google STT keyword match.
 
     Architecture:
-        1. Pipeline audio frames (480 samples / 30ms) are rechunked to 512 samples
-           for Silero VAD.
+        1. Pipeline audio frames are rechunked to 512 samples for Silero VAD.
         2. VAD produces a speech probability per chunk. A state machine tracks
            IDLE → SPEECH → TRAILING → IDLE transitions.
         3. When speech ends (trailing silence exceeds ``_SPEECH_PAD_MS``), accumulated
@@ -84,10 +83,7 @@ class WakewordDetector:
             self._vad_model = vad_model
         else:
             if torch is None or load_silero_vad is None:
-                raise RuntimeError(
-                    "torch and silero-vad are required for wakeword detection. "
-                    "Install with: uv sync --extra models-pytorch"
-                )
+                raise RuntimeError("torch and silero-vad are required for wakeword detection. Install with: uv sync")
             try:
                 self._vad_model = load_silero_vad(onnx=True)
             except Exception as exc:

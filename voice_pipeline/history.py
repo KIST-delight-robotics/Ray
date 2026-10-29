@@ -396,7 +396,7 @@ class ConversationHistory:
                 )
 
     def get_turns(self) -> list[HistoryTurn]:
-        """Retrieve messages grouped by turn for context budgeting."""
+        """Retrieve messages grouped by turn."""
         with self._lock:
             session_id = self._require_session()
             rows = self._backend.load_session(session_id)
