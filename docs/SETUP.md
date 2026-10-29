@@ -28,19 +28,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 
-## 3. 외부 모델 저장소 클론
-
-`pyproject.toml`의 `[tool.uv.sources]`가 이 경로를 참조하므로, `uv sync` 전에 반드시 클론해야 한다.
-
-```bash
-mkdir -p external
-git clone https://github.com/ErikEkstedt/TurnGPT.git external/TurnGPT
-git clone https://github.com/ErikEkstedt/VoiceActivityProjection.git external/VoiceActivityProjection
-git clone https://github.com/MaAI-Kyoto/MaAI.git external/MaAI
-```
-
-
-## 4. Python 의존성 설치
+## 3. Python 의존성 설치
 
 ```bash
 uv sync
@@ -55,7 +43,7 @@ uv run pytest
 ```
 
 
-## 5. Third-party 라이브러리 (모터 사용 시)
+## 4. Third-party 라이브러리 (모터 사용 시)
 
 모터 없이 테스트만 하려면 이 단계를 건너뛰고 cmake에 `-DMOTOR_ENABLED=OFF`를 전달한다.
 
@@ -78,7 +66,7 @@ cmake 빌드 시 `ExternalProject`로 자동 클론 및 빌드된다. 별도 설
 > RPi 5 (aarch64)에서는 `linux_sbc` 디렉토리가 사용된다. CMakeLists.txt에서 아키텍처별로 자동 분기된다.
 
 
-## 6. C++ 빌드
+## 5. C++ 빌드
 
 ```bash
 mkdir -p build && cd build
@@ -96,18 +84,7 @@ cmake -DMOTOR_ENABLED=OFF ..
 ```
 
 
-## 7. 모델 체크포인트
-
-체크포인트 파일은 git에 포함되지 않으므로 별도로 다운로드하여 `models/`에 배치한다.
-
-```bash
-wget -O models.zip "https://kist.gov-dooray.com/share/drive-files/m1olidaukdr7.5LnEpNTcR1OgoDBYEyMAQA"
-unzip models.zip
-rm models.zip
-```
-
-
-### 모델 캐시 부트스트랩 (첫 실행 1회, 온라인 필요)
+## 6. 모델 캐시 부트스트랩 (첫 실행 1회, 온라인 필요)
 
 production wiring은 부팅 시 네트워크 의존을 없애기 위해 **로컬 캐시만** 쓴다
 (`create_embedder(local_files_only=True)`, `TIKTOKEN_CACHE_DIR`). 새 기기에서는 캐시가
@@ -123,7 +100,7 @@ TIKTOKEN_CACHE_DIR=$PWD/var/cache/tiktoken uv run python -c "import tiktoken; ti
 
 `HF_HUB_OFFLINE=1`은 쓰지 말 것 — sentence-transformers가 허브 트리 조회를 시도해 예외로 죽는다.
 
-## 8. API 인증 (`config/ray.env`)
+## 7. API 인증 (`config/ray.env`)
 
 키와 기기별 경로는 **`config/ray.env` 한 곳**에 둔다 — systemd 자동실행(`boot/systemd/*.service`)이
 `EnvironmentFile`로 이 파일을 읽는다. bashrc에만 넣으면 자동실행이 키를 못 받으므로,
@@ -142,7 +119,7 @@ source ~/.bashrc
 ```
 
 
-## 9. USB 전류 한도 해제 (GPIO/비PD 전원 공급 시)
+## 8. USB 전류 한도 해제 (GPIO/비PD 전원 공급 시)
 
 공식 27W USB-C PD 어댑터가 아닌 경로(GPIO 등)로 전원을 공급하면, RPi 5 펌웨어는 PD 협상이 없으므로 USB 전체 전류 한도를 600mA로 강제 제한한다. USB 마이크 + 다른 주변기기를 함께 쓰면 쉽게 over-current가 발생한다.
 
@@ -165,7 +142,7 @@ journalctl -k --no-pager | grep -i over-current
 ```
 
 
-## 10. FTDI USB-Serial latency 단축 (모터 통신 응답성)
+## 9. FTDI USB-Serial latency 단축 (모터 통신 응답성)
 
 Dynamixel U2D2는 FTDI 기반 USB-Serial 어댑터를 사용하는데, Linux의 FTDI 드라이버는 기본적으로 수신 바이트를 **16ms 동안 버퍼링한 뒤** 유저스페이스로 전달한다. 이 때문에 status 응답을 기다리는 모든 SDK 호출(`readAllState`, `write*TxRx` 등)이 호출당 최대 16ms씩 늘어난다.
 
@@ -192,7 +169,7 @@ cat /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
 ```
 
 
-## 11. ReSpeaker USB 제어 권한 (udev)
+## 10. ReSpeaker USB 제어 권한 (udev)
 
 파이프라인은 시작 시 ReSpeaker Flex(XVF3800)에 USB 벤더 명령(REBOOT)을 보내 마이크를 소프트웨어로
 리셋한다(`voice_pipeline/adapters/respeaker.py`). 기본 권한(`root:root 664`)으로는 control transfer
@@ -218,7 +195,7 @@ ls -l /dev/bus/usb/002/004
 건너뛴다(시작은 막지 않음).
 
 
-## 12. WiFi 절전 모드 해제 (권장)
+## 11. WiFi 절전 모드 해제 (권장)
 
 RPi 5의 WiFi는 기본적으로 Power Management가 켜져 있어, 유휴 시 속도가 크게 떨어진다.
 
@@ -247,7 +224,7 @@ sudo systemctl restart NetworkManager
 > `iw` 명령이 없으면 `sudo apt install iw`로 설치하거나, 설정 파일 생성 후 NetworkManager 재시작으로 대체 가능.
 
 
-## 13. 기기별 로봇 값 (`config/robot.toml`)
+## 12. 기기별 로봇 값 (`config/robot.toml`)
 
 공유 파라미터는 `cpp/config.toml`, 이 기기의 값은 `config/robot.toml`(gitignore)에 둔다. 없으면 즉시 실패한다.
 
@@ -265,7 +242,7 @@ $EDITOR config/robot.toml    # 첫 기동은 대략값으로, 캘리브레이션
   캘리브레이션 후에도 한쪽으로 일정하게 기울면 이 값이 원인이다.
 
 
-## 14. 다음 단계 — 부팅 자동실행·LED
+## 13. 다음 단계 — 부팅 자동실행·LED
 
 여기까지가 기본 환경이다. 부팅 시퀀스 일체(LED 하드웨어 PWM, OS_LED 데몬, systemd 자동실행,
 기기별 캘리브레이션 값)는 [boot/README.md](../boot/README.md)의 "새 기기 설치 절차"를 따른다.

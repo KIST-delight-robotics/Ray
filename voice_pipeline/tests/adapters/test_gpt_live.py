@@ -307,18 +307,6 @@ class TestSend:
         assert restored["tools"] == [{"type": "web_search"}, {"type": "function", "name": "play_song"}]
         session.close()
 
-    def test_request_backend_queues_message_then_creates_response(self) -> None:
-        session, conn = _session([])
-        session.start()
-        order = MagicMock()
-        order.attach_mock(conn.response, "response")
-        session.request_backend("CHECK: ...", event_id="ray_app_check_1")
-        assert [c[0] for c in order.mock_calls] == ["response.item.create", "response.create"]
-        item = conn.response.item.create.call_args.kwargs["item"]
-        assert item == {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "CHECK: ..."}]}
-        conn.response.create.assert_called_once_with(event_id="ray_app_check_1")  # 위임 생성 이벤트로 알아본다
-        session.close()
-
     def test_send_before_start_raises(self) -> None:
         session = GPTLiveSession(LiveSessionConfig(instructions="x"), connection_factory=lambda: None)
         with pytest.raises(RuntimeError, match="not started"):

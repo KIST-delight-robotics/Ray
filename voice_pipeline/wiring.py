@@ -1,10 +1,10 @@
-"""컴포넌트 조립 — 프로덕션(``__main__``)과 eval(``evaluation.run``)이 같은 그래프를 쓴다.
+"""컴포넌트 조립 — 프로덕션(``__main__``)과 실험 하네스(``scripts/``)가 같은 그래프를 쓴다.
 
 프로세스 수준(모델·클라이언트·스토어, ``build_components``)과 세션 수준(``create_session``)을
-한 곳에 모은다. TTS 벤더 선택(``create_tts``)도 여기.
+한 곳에 모은다.
 
-규율: 이 모듈과 파이프라인 모듈에는 **중립적 주입점**(경로·토글·콜백)만 둔다. eval 전용 동작은
-evaluation 패키지에 있어야 하며, 의존 방향은 ``evaluation → voice_pipeline`` 단방향.
+규율: 이 모듈과 파이프라인 모듈에는 **중립적 주입점**(경로·토글·콜백)만 둔다. 실험 전용 동작은
+하네스 쪽에 있어야 하며, 의존 방향은 ``scripts → voice_pipeline`` 단방향.
 """
 
 from __future__ import annotations
@@ -14,17 +14,14 @@ import os
 import queue
 import threading
 import uuid
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
-import torch
 from silero_vad import load_silero_vad
 
 from voice_pipeline import trace
-from voice_pipeline.adapters.asr_google import GoogleCloudASR
 from voice_pipeline.adapters.audio_input import AudioInput
 from voice_pipeline.adapters.cpp_bridge import CppBridge
 from voice_pipeline.adapters.embedder import create_embedder
@@ -32,17 +29,7 @@ from voice_pipeline.adapters.gpt_live import GPTLiveSession, LiveSessionConfig
 from voice_pipeline.adapters.led import LEDController
 from voice_pipeline.adapters.llm_openai import OpenAILLM
 from voice_pipeline.adapters.token_counter import TokenCounter, create_token_counter
-from voice_pipeline.adapters.tts_elevenlabs import ElevenLabsTTS
-from voice_pipeline.adapters.tts_openai import OpenAITTS
-from voice_pipeline.adapters.turngpt import ThreadedTurnGPT, TurnGPTWrapper
-from voice_pipeline.adapters.vap import MaAIVAPModel, ThreadedVAP
 from voice_pipeline.device_settings import DeviceSettings
-from voice_pipeline.engines.cascade.context_builder import DEFAULT_SYSTEM_PROMPT
-from voice_pipeline.engines.cascade.generator import SpeechGenerator
-from voice_pipeline.engines.cascade.loop import SessionLoop
-from voice_pipeline.engines.cascade.summarizer import HistorySummarizer
-from voice_pipeline.engines.cascade.text_session import TextSession
-from voice_pipeline.engines.cascade.turn_detector import TurnDetector
 from voice_pipeline.engines.gpt_live.instructions import (
     LIVE_VOICE,
     build_backend_instructions,
@@ -76,39 +63,28 @@ from voice_pipeline.settings import (
     BRIDGE_SAMPLE_RATE,
     DEFAULT_DB_PATH,
     DEVICE_SETTINGS_PATH,
-    ENGINE,
-    HISTORY_TOKEN_BUDGET,
     RADIO_SCRIPTS_DIR,
-    SAMPLE_RATE,
     SONG_CATALOG_PATH,
-    SUMMARY_MAX_TOKENS,
     VAR_DIR,
 )
-from voice_pipeline.trace import OpenAIRetryHandler, SQLiteCallStore, SQLiteTraceStore, TrackedEmbedder, TrackedTTS
-from voice_pipeline.types import ITTS, AudioFrame
+from voice_pipeline.trace import OpenAIRetryHandler, SQLiteCallStore, TrackedEmbedder
+from voice_pipeline.types import AudioFrame
 
 logger = logging.getLogger("voice_pipeline.wiring")
 
 _AUDIO_QUEUE_SIZE = 300
 _MIC_DUMP_DIR = f"{VAR_DIR}/log/mic"  # MIC_DUMP=1 일 때 마이크 전 채널 녹음 위치 (6ch + ray.wav 분당 ~13.4 MB)
-_VAD_INFER_INTERVAL = 3  # 3프레임(90ms)마다 추론, 사이는 캐시 반환
-_SILERO_CHUNK_BYTES = 512 * 2  # 512 samples × 16-bit
+_EXECUTOR_WORKERS = 2  # 툴 핸들러·라디오 판정기를 돌리는 스레드 풀 크기
 _LIVE_BACKEND_MODEL = "gpt-5.4-mini"  # GPT-Live responses 위임 백엔드
 # none 은 짧은 첫 턴에서 툴 선택이 미끄러진다(end_conversation 오발). low 는 지연 차이 없이 25/25
 _LIVE_BACKEND_REASONING = "low"
 
-Engine = Literal["cascade", "live"]
-
 
 @dataclass
 class SessionComponents:
-    """Per-session objects created by :meth:`ProcessComponents.create_session`.
+    """Per-session objects created by :meth:`ProcessComponents.create_session`."""
 
-    ``session_loop`` 은 엔진에 따라 :class:`~voice_pipeline.engines.cascade.loop.SessionLoop` 또는
-    :class:`~voice_pipeline.engines.gpt_live.loop.LiveSessionLoop`. 둘 다 ``run()``/``request_stop()`` 을 가진다.
-    """
-
-    session_loop: SessionLoop | LiveSessionLoop
+    session_loop: LiveSessionLoop
     history: ConversationHistory
     session_id: str
 
@@ -121,18 +97,7 @@ class ProcessComponents:
     수명 관리(start/stop/close)는 엔트리포인트 책임 — 이 클래스는 조립만 담당한다.
     """
 
-    engine: Engine
-    language_code: str
-    asr: GoogleCloudASR | None  # live 엔진에서는 None (ASR 은 모델에 내장)
-    llm: OpenAILLM
-    summary_llm: OpenAILLM
-    raw_tts: ITTS
-    tts: TrackedTTS
-    vap: ThreadedVAP | None  # live 엔진에서는 None (턴 감지 모델 미로드)
-    turngpt: TurnGPTWrapper | None
-    silero_vad_model: Any  # 웨이크워드가 쓰므로 두 엔진 모두 로드
-    vad_fn: Callable[[AudioFrame], float]
-    reset_vad: Callable[[], None]
+    silero_vad_model: Any  # 웨이크워드가 쓴다
     bridge: CppBridge
     led: LEDController
     storage: SQLiteStorageBackend
@@ -150,181 +115,77 @@ class ProcessComponents:
     radio_picker: ScriptPicker | None = None  # 라디오 대본 선택 (live 툴). None 이면 라디오 툴 미노출
     radio_judge: RadioJudge | None = None  # 라디오 끼어들기 판정기. radio_picker 와 함께 있다
     radio_resume_judge: RadioResumeJudge | None = None  # 멈춘 라디오의 복귀 판정기. None 이면 혼자 돌아가지 않는다
-    _prev_threaded: list[ThreadedTurnGPT] = field(default_factory=list)
-    _prev_summarizers: list[HistorySummarizer] = field(default_factory=list)
-
-    def stop_threaded(self) -> None:
-        """Stop the previous session's threaded TurnGPT wrapper and summarizer.
-
-        VAP 스레드는 프로세스 수명이라 여기서 멈추지 않는다 — 프로세스 종료 시
-        엔트리포인트가 ``vap.stop()``을 직접 호출한다.
-        """
-        for wrapper in self._prev_threaded:
-            wrapper.stop()
-        self._prev_threaded.clear()
-        for summarizer in self._prev_summarizers:
-            summarizer.close()
-        self._prev_summarizers.clear()
 
     def create_session(self, *, memory_enabled: bool = True, **session_loop_kwargs: Any) -> SessionComponents:
         """Assemble a fresh per-session component graph.
 
-        ``engine`` 에 따라 :class:`SessionLoop`(cascade) 또는 :class:`LiveSessionLoop`(live) 를 만든다.
-
         Args:
             memory_enabled: False면 memory storage/retriever 없이 조립.
             **session_loop_kwargs: 세션 루프 생성자로 그대로 전달되는 선택 인자
-                (cascade: ``on_turn_shift`` 등 콜백, ``disable_exit_keywords``, ``skip_generation``,
-                ``record_path`` 등 / live: ``tool_handlers``, ``wait_for_playback_complete``).
+                (``tool_handlers``, ``wait_for_playback_complete`` 등).
 
         Returns:
             세션 루프와 세션 단위 컴포넌트를 담은 :class:`SessionComponents`.
         """
-        self.stop_threaded()
-
         session_id = str(uuid.uuid4())
         trace.set_session(session_id)  # 이후 호출/턴 기록에 이 세션 ID가 찍힌다
         history = ConversationHistory(self.storage, self.token_counter)
         memory_storage = self.memory_storage if memory_enabled else None
 
-        if self.engine == "live":
-            # 장기기억: 사용자 노트·최근 대화 원문은 시작 instructions 에(세션 중 재조립 불가), 에피소드 검색은
-            # 백엔드 함수 툴로 — 트리거와 쿼리 생성을 백엔드 LLM 이 맡는다.
-            now = datetime.now().astimezone()  # 모델에게 보이는 시각의 기준 — 시간대는 기기 시스템 설정
-            tool_handlers: dict[str, Any] = dict(session_loop_kwargs.pop("tool_handlers", None) or {})
-            if self.device_settings is not None:
-                for name, handler in make_device_settings_handlers(self.device_settings).items():
-                    tool_handlers.setdefault(name, handler)
-            if memory_enabled:
-                notes = self.memory_storage.get_user_notes()
-                recent = load_recent_conversations(self.memory_storage, session_id, self.token_counter, now=now)
-                retriever = MemoryRetriever(self.memory_storage, self.vector_index, self.embedder)
-                tool_handlers.setdefault(SEARCH_MEMORY_TOOL, make_memory_search_handler(retriever, now))
-                instructions = build_live_instructions(format_user_notes_block(notes), recent, now=now)
-            else:
-                instructions = build_live_instructions(now=now)
-            # 핸들러가 있는 툴만 백엔드에 노출한다 (end_conversation·노래 툴은 루프 내장)
-            tools = tuple(t for t in DEFAULT_TOOLS if t["name"] in LOOP_TOOLS or t["name"] in tool_handlers)
-            if (play_song := make_play_song_tool_def(self.song_catalog)) is not None:
-                tools += (play_song,)
-            radio = None
-            if self.radio_picker is not None and self.radio_judge is not None:
-                tools += RADIO_TOOLS
-                self.radio_picker.new_session()
-                radio = Radio(self.radio_picker, self.radio_judge, self.executor, self.radio_resume_judge)
-            live = GPTLiveSession(
-                LiveSessionConfig(
-                    instructions=instructions,
-                    backend_model=_LIVE_BACKEND_MODEL,
-                    backend_reasoning=_LIVE_BACKEND_REASONING,
-                    backend_instructions=build_backend_instructions(
-                        self.song_catalog, radio.status if radio is not None else None
-                    ),
-                    tools=tools,
-                    voice=LIVE_VOICE,
-                    sample_rate=BRIDGE_SAMPLE_RATE,
-                )
+        # 장기기억: 사용자 노트·최근 대화 원문은 시작 instructions 에(세션 중 재조립 불가), 에피소드 검색은
+        # 백엔드 함수 툴로 — 트리거와 쿼리 생성을 백엔드 LLM 이 맡는다.
+        now = datetime.now().astimezone()  # 모델에게 보이는 시각의 기준 — 시간대는 기기 시스템 설정
+        tool_handlers: dict[str, Any] = dict(session_loop_kwargs.pop("tool_handlers", None) or {})
+        if self.device_settings is not None:
+            for name, handler in make_device_settings_handlers(self.device_settings).items():
+                tool_handlers.setdefault(name, handler)
+        if memory_enabled:
+            notes = self.memory_storage.get_user_notes()
+            recent = load_recent_conversations(self.memory_storage, session_id, self.token_counter, now=now)
+            retriever = MemoryRetriever(self.memory_storage, self.vector_index, self.embedder)
+            tool_handlers.setdefault(SEARCH_MEMORY_TOOL, make_memory_search_handler(retriever, now))
+            instructions = build_live_instructions(format_user_notes_block(notes), recent, now=now)
+        else:
+            instructions = build_live_instructions(now=now)
+        # 핸들러가 있는 툴만 백엔드에 노출한다 (end_conversation·노래 툴은 루프 내장)
+        tools = tuple(t for t in DEFAULT_TOOLS if t["name"] in LOOP_TOOLS or t["name"] in tool_handlers)
+        if (play_song := make_play_song_tool_def(self.song_catalog)) is not None:
+            tools += (play_song,)
+        radio = None
+        if self.radio_picker is not None and self.radio_judge is not None:
+            tools += RADIO_TOOLS
+            self.radio_picker.new_session()
+            radio = Radio(self.radio_picker, self.radio_judge, self.executor, self.radio_resume_judge)
+        live = GPTLiveSession(
+            LiveSessionConfig(
+                instructions=instructions,
+                backend_model=_LIVE_BACKEND_MODEL,
+                backend_reasoning=_LIVE_BACKEND_REASONING,
+                backend_instructions=build_backend_instructions(
+                    self.song_catalog, radio.status if radio is not None else None
+                ),
+                tools=tools,
+                voice=LIVE_VOICE,
+                sample_rate=BRIDGE_SAMPLE_RATE,
             )
-            live_loop = LiveSessionLoop(
-                live=live,
-                cpp_bridge=self.bridge,
-                history=history,
-                led=self.led,
-                audio_queue=self.audio_queue,
-                memory_storage=memory_storage,
-                session_id=session_id,
-                token_counter=self.token_counter,
-                shutdown_event=self.shutdown_event,
-                tool_handlers=tool_handlers,
-                executor=self.executor,
-                song_catalog=self.song_catalog,
-                radio=radio,
-                **session_loop_kwargs,
-            )
-            return SessionComponents(session_loop=live_loop, history=history, session_id=session_id)
-
-        assert self.asr is not None and self.vap is not None and self.turngpt is not None
-        # VAP 스레드는 프로세스 수명 — 세션마다 재생성 대신 reset().
-        self.vap.reset()
-        self.turngpt.reset()
-        self.reset_vad()
-
-        threaded_turngpt = ThreadedTurnGPT(self.turngpt)
-        self._prev_threaded.append(threaded_turngpt)
-
-        retriever = MemoryRetriever(self.memory_storage, self.vector_index, self.embedder) if memory_enabled else None
-        turn_detector = TurnDetector(
-            self.vap,
-            threaded_turngpt,
-            self.embedder,
-            vad_fn=self.vad_fn,
-            vad_reset_fn=self.reset_vad,
         )
-        summarizer = HistorySummarizer(
-            self.summary_llm,
-            self.token_counter,
-            HISTORY_TOKEN_BUDGET,
-            session_id=session_id,
-            summary_backend=self.storage,
-        )
-        self._prev_summarizers.append(summarizer)
-
-        generator = SpeechGenerator(
-            self.llm,
-            self.tts,
-            history,
-            self.token_counter,
-            DEFAULT_SYSTEM_PROMPT,
-            self.executor,
-            memory_storage=memory_storage,
-            retriever=retriever,
-            session_id=session_id,
-            summarizer=summarizer,
-            history_backend=self.storage,
-        )
-        session_loop = SessionLoop(
-            asr=self.asr,
-            turn_detector=turn_detector,
-            speech_generator=generator,
+        live_loop = LiveSessionLoop(
+            live=live,
             cpp_bridge=self.bridge,
             history=history,
             led=self.led,
             audio_queue=self.audio_queue,
-            tts_sample_rate=self.tts.output_sample_rate,
             memory_storage=memory_storage,
             session_id=session_id,
             token_counter=self.token_counter,
             shutdown_event=self.shutdown_event,
+            tool_handlers=tool_handlers,
+            executor=self.executor,
+            song_catalog=self.song_catalog,
+            radio=radio,
             **session_loop_kwargs,
         )
-        return SessionComponents(session_loop=session_loop, history=history, session_id=session_id)
-
-    def create_text_session(self, *, memory_enabled: bool = True, load_session_context: bool = True) -> TextSession:
-        """Assemble a text-only conversation session (no audio/TTS/turn-taking).
-
-        Args:
-            memory_enabled: False면 memory storage/retriever 없이 조립.
-            load_session_context: ContextBuilder의 이전 세션 요약 로드 여부.
-                메모리 평가처럼 시드만으로 맥락을 구성할 때 False.
-
-        Returns:
-            독립 대화 세션을 나타내는 :class:`TextSession`.
-        """
-        history = ConversationHistory(self.storage, self.token_counter)
-        memory_storage = self.memory_storage if memory_enabled else None
-        retriever = MemoryRetriever(self.memory_storage, self.vector_index, self.embedder) if memory_enabled else None
-        session = TextSession(
-            llm=self.llm,
-            history=history,
-            token_counter=self.token_counter,
-            system_prompt=DEFAULT_SYSTEM_PROMPT,
-            memory_storage=memory_storage,
-            retriever=retriever,
-            load_session_context=load_session_context,
-            history_backend=self.storage,
-        )
-        trace.set_session(session.session_id)  # 텍스트 모드의 호출 기록에도 세션 ID를 찍는다
-        return session
+        return SessionComponents(session_loop=live_loop, history=history, session_id=session_id)
 
 
 def build_components(
@@ -332,8 +193,6 @@ def build_components(
     db_path: str = DEFAULT_DB_PATH,
     device_settings_path: str = DEVICE_SETTINGS_PATH,
     led_enabled: bool | None = None,
-    language_code: str = "en-US",
-    engine: Engine = ENGINE,
     song_catalog_path: str = SONG_CATALOG_PATH,
     radio_scripts_dir: str = RADIO_SCRIPTS_DIR,
 ) -> ProcessComponents:
@@ -341,12 +200,10 @@ def build_components(
 
     Args:
         db_path: history/memory/trace/call 스토어가 공유하는 SQLite 경로.
-            eval은 런별 격리 DB 경로를 전달한다.
+            실험 하네스는 런별 격리 DB 경로를 전달한다.
         device_settings_path: 볼륨·밝기 단계를 저장하는 JSON 경로. 시작 시 읽어 하드웨어에 적용한다.
         led_enabled: LED 하드웨어 구동 여부. ``None``이면 ``LED_ENABLED`` env로
-            결정 (프로덕션 기본). eval은 ``False``를 전달한다.
-        language_code: ASR 언어 코드 (cascade 엔진과 웨이크워드).
-        engine: 대화 엔진. ``live`` 면 ASR·VAP·TurnGPT 를 만들지 않는다 (settings.ENGINE 기본).
+            결정 (프로덕션 기본). 실험 하네스는 ``False``를 전달한다.
         song_catalog_path: 노래 카탈로그(``songs.json``) 경로. 없거나 비면 노래 툴을 노출하지 않는다.
         radio_scripts_dir: 라디오 대본 폴더. 없거나 비면(또는 곡이 하나도 재생 불가면) 라디오 툴을 노출하지 않는다.
 
@@ -354,46 +211,8 @@ def build_components(
         조립된 :class:`ProcessComponents`. ``audio_input.start()``/``bridge.connect()``
         등 수명 시작은 호출자가 수행한다.
     """
-    asr = GoogleCloudASR(language_code=language_code) if engine == "cascade" else None
-    llm = OpenAILLM(
-        model="gpt-5.4-mini", temperature=0.7, reasoning_effort="none", max_tokens=256, tools=["web_search"]
-    )
-    # 히스토리 롤링 요약 전용 LLM — 도구 없음, 하드 캡은 summarizer 상수와 동기화.
-    summary_llm = OpenAILLM(
-        model="gpt-5.4-mini",
-        temperature=0.3,
-        reasoning_effort="none",
-        max_tokens=SUMMARY_MAX_TOKENS,
-        tools=[],
-    )
-    raw_tts = create_tts()
-    turngpt = TurnGPTWrapper() if engine == "cascade" else None
     bridge = CppBridge()
-
     silero_vad_model = load_silero_vad(onnx=True)
-    _vad_buf = bytearray()
-    _vad_last_score = [0.0]
-    _vad_call_count = [0]
-
-    def vad_fn(frame: AudioFrame) -> float:
-        _vad_buf.extend(frame)
-        _vad_call_count[0] += 1
-        if _vad_call_count[0] % _VAD_INFER_INTERVAL != 0:
-            return _vad_last_score[0]
-        while len(_vad_buf) >= _SILERO_CHUNK_BYTES:
-            chunk = bytes(_vad_buf[:_SILERO_CHUNK_BYTES])
-            del _vad_buf[:_SILERO_CHUNK_BYTES]
-            samples = torch.frombuffer(bytearray(chunk), dtype=torch.int16).float() / 32768.0
-            _vad_last_score[0] = silero_vad_model(samples, SAMPLE_RATE).item()
-        return _vad_last_score[0]
-
-    def reset_vad() -> None:
-        # Silero LSTM 상태는 이전 오디오 이력을 유지하며 자연 회복되지 않음 —
-        # 큰 발화 이력이 남으면 조용한 음성을 통째로 놓침. 세션 시작마다 초기화.
-        silero_vad_model.reset_states()
-        _vad_buf.clear()
-        _vad_last_score[0] = 0.0
-        _vad_call_count[0] = 0
 
     if led_enabled is None:
         # cpp/config.toml is C++-only, so the Python side reads LED_ENABLED directly.
@@ -403,17 +222,13 @@ def build_components(
     device_settings.apply()  # 저장된 볼륨·밝기 복원. 볼륨 실패(PipeWire 미기동 등)는 경고만
 
     storage = SQLiteStorageBackend(db_path)
-    executor = ThreadPoolExecutor(max_workers=SpeechGenerator.MAX_WORKERS)
-    token_counter = create_token_counter(llm.model)
+    executor = ThreadPoolExecutor(max_workers=_EXECUTOR_WORKERS)
+    token_counter = create_token_counter(_LIVE_BACKEND_MODEL)
 
     memory_storage = SQLiteMemoryStorage(db_path)
-    trace.install(SQLiteCallStore(db_path), SQLiteTraceStore(db_path))
-    # VAP runs its own inference thread for the process lifetime; sessions
-    # rebind it via reset() rather than recreating it (model load + warmup is expensive).
-    vap = ThreadedVAP(MaAIVAPModel(raw_tts.output_sample_rate)) if engine == "cascade" else None
+    trace.install(SQLiteCallStore(db_path))
     retry_handler = OpenAIRetryHandler()
     logging.getLogger("openai._base_client").addHandler(retry_handler)
-    tts = TrackedTTS(raw_tts)
     # local_files_only: 부팅 시 HF 허브 왕복 생략(−3.4s) + 네트워크 미준비 상태에서도 기동.
     # 새 기기 첫 실행은 캐시가 없어 실패한다.
     embedder = TrackedEmbedder(create_embedder(expected_dimension=_DEFAULT_DIMENSION, local_files_only=True))
@@ -426,7 +241,7 @@ def build_components(
     audio_queue: queue.Queue[AudioFrame] = queue.Queue(maxsize=_AUDIO_QUEUE_SIZE)
     mic_dump = os.environ.get("MIC_DUMP", "0").strip().lower() in ("1", "true", "yes", "on")
     audio_input = AudioInput(audio_queue, dump_dir=_MIC_DUMP_DIR if mic_dump else None)
-    song_catalog = load_song_catalog(song_catalog_path) if engine == "live" else {}
+    song_catalog = load_song_catalog(song_catalog_path)
     scripts = load_scripts(radio_scripts_dir, song_catalog) if song_catalog else {}
     radio_picker = ScriptPicker(scripts, ScriptLog(db_path)) if scripts else None
     # 끼어든 말 판정 — 응답 지연이 판정 시점을 정하므로 추론 없이, 구조화 출력으로 짧게
@@ -443,18 +258,7 @@ def build_components(
     )
 
     return ProcessComponents(
-        engine=engine,
-        language_code=language_code,
-        asr=asr,
-        llm=llm,
-        summary_llm=summary_llm,
-        raw_tts=raw_tts,
-        tts=tts,
-        vap=vap,
-        turngpt=turngpt,
         silero_vad_model=silero_vad_model,
-        vad_fn=vad_fn,
-        reset_vad=reset_vad,
         bridge=bridge,
         led=led,
         storage=storage,
@@ -473,26 +277,3 @@ def build_components(
         radio_judge=radio_judge,
         radio_resume_judge=radio_resume_judge,
     )
-
-
-_DEFAULT_VENDOR: Literal["openai", "elevenlabs"] = "elevenlabs"  # 기본 TTS vendor
-
-
-def create_tts(vendor: Literal["openai", "elevenlabs"] = _DEFAULT_VENDOR) -> ITTS:
-    """Factory: create an ITTS instance for *vendor*.
-
-    Args:
-        vendor: ``"openai"``이면 OpenAITTS, ``"elevenlabs"``이면 ElevenLabsTTS.
-
-    Returns:
-        Configured ITTS implementation.
-
-    Raises:
-        ValueError: On unknown vendor name.
-    """
-    if vendor == "openai":
-        return OpenAITTS()
-    elif vendor == "elevenlabs":
-        return ElevenLabsTTS()
-    else:
-        raise ValueError(f"Unknown TTS vendor: {vendor!r}")

@@ -69,7 +69,7 @@ class CppBridge:
     """WebSocket bridge to the C++ audio playback process.
 
     Threading model:
-        The orchestrator thread calls connect(), disconnect(), send_*(), and
+        The main thread calls connect(), disconnect(), send_*(), and
         poll_event().  A daemon receiver thread reads WebSocket messages and
         enqueues parsed CppEvents.  Each receiver thread gets its own stop
         event so stale threads cannot corrupt a newer connection's state.

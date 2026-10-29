@@ -1,4 +1,4 @@
-"""End-to-end integration tests: write → retrieve → format → citation.
+"""End-to-end integration tests: write → retrieve.
 
 Exercises the full memory pipeline with real LLM and embedding model.
 Requires OPENAI_API_KEY.
@@ -6,13 +6,10 @@ Requires OPENAI_API_KEY.
 
 from __future__ import annotations
 
-from datetime import datetime
-
 import pytest
 
 from voice_pipeline.adapters.embedder import SentenceTransformerEmbedder
 from voice_pipeline.adapters.llm_openai import OpenAILLM
-from voice_pipeline.engines.cascade.context_builder import format_memory_block, parse_citation_tag
 from voice_pipeline.memory.retriever import MemoryRetriever
 from voice_pipeline.memory.storage import SQLiteMemoryStorage
 from voice_pipeline.memory.vector_index import NumpyVectorIndex
@@ -121,79 +118,3 @@ class TestWriteThenRetrieve:
                 assert max(movie_scores) > max(cook_scores), (
                     "Best movie score should exceed best cooking score for a movie query"
                 )
-
-
-# ---------------------------------------------------------------------------
-# Context formatting & citation
-# ---------------------------------------------------------------------------
-
-
-class TestContextIntegration:
-    """format_memory_block and citation parsing with real data."""
-
-    def test_memory_block_format(
-        self,
-        memory_db: SQLiteMemoryStorage,
-        vector_index: NumpyVectorIndex,
-        shared_embedder: SentenceTransformerEmbedder,
-        write_llm: OpenAILLM,
-    ) -> None:
-        """format_memory_block produces [M1] tags from real retrieval results."""
-        _write_session(
-            memory_db,
-            vector_index,
-            shared_embedder,
-            write_llm,
-            "s1",
-            "2026-04-01 10:00:00",
-            CONVERSATION_MOVIE,
-        )
-
-        retriever = MemoryRetriever(memory_db, vector_index, shared_embedder)
-        result = retriever.retrieve("영화", set())
-        assert len(result.episodes) >= 1
-
-        formatted = format_memory_block(result, datetime.now().astimezone())
-        assert "[Retrieved Memories]" in formatted
-        assert "[M1]" in formatted
-        assert "(2026-04-01)" in formatted
-
-    def test_citation_roundtrip(
-        self,
-        memory_db: SQLiteMemoryStorage,
-        vector_index: NumpyVectorIndex,
-        shared_embedder: SentenceTransformerEmbedder,
-        write_llm: OpenAILLM,
-    ) -> None:
-        """Full citation roundtrip: format → simulated LLM response → parse → update."""
-        _write_session(
-            memory_db,
-            vector_index,
-            shared_embedder,
-            write_llm,
-            "s1",
-            "2026-04-01 10:00:00",
-            CONVERSATION_MOVIE,
-        )
-
-        retriever = MemoryRetriever(memory_db, vector_index, shared_embedder)
-        result = retriever.retrieve("영화", set())
-        assert len(result.episodes) >= 1
-
-        # Simulate LLM response with citation tag
-        simulated_response = "좋은 영화였죠!\n[MEMORIES: M1]"
-        clean_text, cited_indices = parse_citation_tag(simulated_response)
-
-        assert clean_text == "좋은 영화였죠!"
-        assert cited_indices == [1]
-
-        # Resolve display index to database ID
-        db_id = result.index_to_id.get(1)
-        assert db_id is not None
-
-        # Update citations
-        retriever.update_citations(cited_indices)
-
-        # Verify retained buffer was updated
-        assert db_id in retriever._retained
-        assert retriever._retained[db_id].ttl == MemoryRetriever._RETAINED_TTL

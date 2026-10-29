@@ -39,18 +39,12 @@ config/*
 # ruff
 .ruff_cache/
 
-# Models (downloaded via models.zip)
-models/
-
 # assets/ 는 전부 추적. 예외는 대용량 음원만 (별도 배포)
 assets/audio/music/
 assets/audio/vocal/
 
-# 프로그램이 실행 중에 쓰는 파일 전부 (DB, 로그, 캐시, 생성 오디오, 평가 산출물)
+# 프로그램이 실행 중에 쓰는 파일 전부 (DB, 로그, 캐시, 생성 오디오, 실험 결과)
 var/
-
-# External model repositories
-external/
 
 # C++ third-party libraries
 third_party/

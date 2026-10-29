@@ -1,6 +1,6 @@
 # Voice Conversation Robot — Python Pipeline Architecture
 
-> 사용하지 않는 cascade 엔진의 초기 설계 기록 (2026-02 ~ 2026-09). 고정 — 이후 변경은 반영하지 않는다.
+> 사용하지 않는 cascade 엔진의 초기 설계 기록 (2026-02 ~ 2026-09). 고정 — 이후 변경은 반영하지 않는다. 코드는 태그 `archive/cascade` 에 있다.
 
 
 ## 1. System Modes

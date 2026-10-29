@@ -45,7 +45,6 @@ class SQLiteMemoryStorage:
     """
 
     def __init__(self, db_path: str, *, dimension: int = _DEFAULT_DIMENSION) -> None:
-        self._db_path = db_path
         self._dimension = dimension
         self._lock = threading.Lock()
         self._conn = self._open_db(db_path)

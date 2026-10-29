@@ -322,7 +322,6 @@ def setup(experiment: str, tag: str, subdir: str = "") -> tuple[wiring.ProcessCo
         db_path=str(out_dir / "experiment.db"),
         device_settings_path=str(out_dir / "device_settings.json"),
         led_enabled=False,
-        engine="live",
     )
     return comps, out_dir
 

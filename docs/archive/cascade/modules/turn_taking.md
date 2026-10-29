@@ -1,5 +1,7 @@
 # Turn-Taking Module
 
+> 사용하지 않는 cascade 엔진의 턴테이킹 모델(VAP·TurnGPT) 설정 문서. 고정 — 이후 변경은 반영하지 않는다. 코드는 태그 `archive/cascade` 에 있다.
+
 Wraps external turn-taking models (VAP, TurnGPT) and fuses their outputs via `TurnDetector`.
 
 ## External Dependencies

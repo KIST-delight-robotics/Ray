@@ -1,6 +1,6 @@
 # cascade 엔진 (ASR → 턴 감지 → LLM → TTS)
 
-> 사용하지 않는 cascade 엔진의 기록. 고정 — 이후 변경은 반영하지 않는다.
+> 사용하지 않는 cascade 엔진의 기록. 고정 — 이후 변경은 반영하지 않는다. 코드는 태그 `archive/cascade` 에 있다.
 
 ## 개요
 

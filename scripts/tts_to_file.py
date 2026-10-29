@@ -1,12 +1,11 @@
-"""Synthesize text to a WAV file.
+"""Synthesize text to a WAV file with OpenAI TTS.
 
-Requires OPENAI_API_KEY (--vendor openai) or ELEVENLABS_API_KEY (--vendor elevenlabs) env var.
+Requires OPENAI_API_KEY env var.
 
 Usage:
     uv run python scripts/tts_to_file.py "안녕하세요, 반갑습니다."
     uv run python scripts/tts_to_file.py "Hello world" -n hello
-    uv run python scripts/tts_to_file.py "Hello world" --vendor openai --voice coral --model gpt-4o-mini-tts
-    uv run python scripts/tts_to_file.py "Hello world" --vendor elevenlabs --voice EXAVITQu4vr4xnSDxMaL
+    uv run python scripts/tts_to_file.py "Hello world" --voice coral --model gpt-4o-mini-tts
     echo "Hello" | uv run python scripts/tts_to_file.py -  # read from stdin
 """
 
@@ -19,10 +18,8 @@ from pathlib import Path
 # Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from voice_pipeline.adapters.tts_elevenlabs import ElevenLabsTTS
 from voice_pipeline.adapters.tts_openai import OpenAITTS
 from voice_pipeline.greeting_audio import synthesize_to_wav
-from voice_pipeline.wiring import _DEFAULT_VENDOR, create_tts
 
 
 def main() -> None:
@@ -37,19 +34,13 @@ def main() -> None:
         default="output",
         help="Output filename without extension (default: output)",
     )
-    parser.add_argument(
-        "--vendor",
-        choices=["openai", "elevenlabs"],
-        default=_DEFAULT_VENDOR,
-        help=f"TTS vendor (default: {_DEFAULT_VENDOR})",
-    )
-    parser.add_argument("--voice", default=None, help="Voice preset (openai) or voice ID (elevenlabs)")
-    parser.add_argument("--model", default=None, help="TTS model (vendor-specific)")
-    parser.add_argument("--speed", type=float, default=None, help="Speed 0.25-4.0 (openai only)")
+    parser.add_argument("--voice", default=None, help="Voice preset")
+    parser.add_argument("--model", default=None, help="TTS model")
+    parser.add_argument("--speed", type=float, default=None, help="Speed 0.25-4.0")
     parser.add_argument(
         "--instructions",
         default=None,
-        help="Voice instructions (openai gpt-4o-mini-tts only)",
+        help="Voice instructions (gpt-4o-mini-tts only)",
     )
     args = parser.parse_args()
 
@@ -60,27 +51,17 @@ def main() -> None:
             print("Error: no text provided via stdin", file=sys.stderr)
             sys.exit(1)
 
-    if args.vendor == "elevenlabs" and (args.speed is not None or args.instructions is not None):
-        print("Error: --speed/--instructions are openai-only options", file=sys.stderr)
-        sys.exit(1)
-
     # 클래스 변수 설정은 인스턴스 생성 전에 적용해야 함. 미지정 옵션은 클래스 기본값 유지.
-    if args.vendor == "openai":
-        if args.voice is not None:
-            OpenAITTS._VOICE = args.voice
-        if args.model is not None:
-            OpenAITTS._MODEL = args.model
-        if args.speed is not None:
-            OpenAITTS._SPEED = args.speed
-        if args.instructions is not None:
-            OpenAITTS._INSTRUCTIONS = args.instructions
-    else:
-        if args.voice is not None:
-            ElevenLabsTTS._VOICE_ID = args.voice
-        if args.model is not None:
-            ElevenLabsTTS._MODEL = args.model
+    if args.voice is not None:
+        OpenAITTS._VOICE = args.voice
+    if args.model is not None:
+        OpenAITTS._MODEL = args.model
+    if args.speed is not None:
+        OpenAITTS._SPEED = args.speed
+    if args.instructions is not None:
+        OpenAITTS._INSTRUCTIONS = args.instructions
 
-    tts = create_tts(args.vendor)
+    tts = OpenAITTS()
     output = Path("var/output") / f"{args.name}.wav"
 
     print(f"Synthesizing ({tts.voice_id})...")

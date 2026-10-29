@@ -2,6 +2,19 @@
 
 Wakeword detection using Silero VAD for speech segmentation and Google Cloud STT for keyword matching.
 
+Google STT API constraints (sample rate, stream duration, quotas, etc.) are documented in
+[`google_stt_v1_constraints.md`](google_stt_v1_constraints.md).
+
+## Setup
+
+1. Enable the **Cloud Speech-to-Text API** in your GCP project.
+2. Create a service account with the `Cloud Speech Client` role.
+3. Download the JSON key and set the environment variable:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+```
+
 ## Architecture
 
 ```

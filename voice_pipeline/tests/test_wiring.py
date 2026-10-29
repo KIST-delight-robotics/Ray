@@ -10,40 +10,17 @@ from __future__ import annotations
 import threading
 from unittest.mock import MagicMock
 
-import pytest
-
 import voice_pipeline.wiring as wiring
 from voice_pipeline.engines.gpt_live.radio import Radio
 from voice_pipeline.engines.gpt_live.tools import SEARCH_MEMORY_TOOL
 from voice_pipeline.memory.types import UserNote
 from voice_pipeline.trace import record_call
-from voice_pipeline.wiring import ProcessComponents, SessionComponents
-
-_SESSION_CLASSES = [
-    "ThreadedTurnGPT",
-    "ConversationHistory",
-    "MemoryRetriever",
-    "TurnDetector",
-    "SpeechGenerator",
-    "SessionLoop",
-    "HistorySummarizer",
-]
+from voice_pipeline.wiring import ProcessComponents
 
 
-def _make_components(engine: str = "cascade") -> ProcessComponents:
+def _make_components() -> ProcessComponents:
     return ProcessComponents(
-        engine=engine,  # type: ignore[arg-type]
-        language_code="en-US",
-        asr=MagicMock(),
-        llm=MagicMock(),
-        summary_llm=MagicMock(),
-        raw_tts=MagicMock(),
-        tts=MagicMock(output_sample_rate=24000),
-        vap=MagicMock(),
-        turngpt=MagicMock(),
         silero_vad_model=MagicMock(),
-        vad_fn=lambda frame: 0.0,
-        reset_vad=MagicMock(),
         bridge=MagicMock(),
         led=MagicMock(),
         storage=MagicMock(),
@@ -59,120 +36,18 @@ def _make_components(engine: str = "cascade") -> ProcessComponents:
     )
 
 
-@pytest.fixture
-def session_mocks(monkeypatch) -> dict[str, MagicMock]:
-    mocks = {}
-    for name in _SESSION_CLASSES:
-        mock = MagicMock(name=name)
-        monkeypatch.setattr(wiring, name, mock)
-        mocks[name] = mock
-    return mocks
-
-
 class TestCreateSession:
-    def test_returns_session_components_with_fresh_id(self, session_mocks):
+    """세션마다 GPT-Live 세션과 세션 루프를 새로 조립한다."""
+
+    def test_session_id_set_on_trace_context(self, monkeypatch, call_log):
+        monkeypatch.setattr(wiring, "GPTLiveSession", MagicMock())
+        monkeypatch.setattr(wiring, "LiveSessionLoop", MagicMock())
         comps = _make_components()
 
-        result = comps.create_session()
-
-        assert isinstance(result, SessionComponents)
-        assert result.session_id
-        assert result.session_loop is session_mocks["SessionLoop"].return_value
-        assert result.history is session_mocks["ConversationHistory"].return_value
-
-    def test_session_id_set_on_trace_context(self, session_mocks, call_log):
-        comps = _make_components()
-
-        result = comps.create_session()
+        result = comps.create_session(memory_enabled=False)
         record_call("tts", "synthesize", "m", 1.0)
 
         assert call_log.records[0].session_id == result.session_id
-
-    def test_models_reset_before_assembly(self, session_mocks):
-        comps = _make_components()
-
-        comps.create_session()
-
-        comps.vap.reset.assert_called_once()
-        comps.turngpt.reset.assert_called_once()
-        comps.reset_vad.assert_called_once()
-
-    def test_vap_reused_not_recreated(self, session_mocks):
-        comps = _make_components()
-
-        comps.create_session()
-
-        kwargs = session_mocks["TurnDetector"].call_args.args
-        assert kwargs[0] is comps.vap
-
-    def test_session_loop_kwargs_pass_through(self, session_mocks):
-        comps = _make_components()
-        on_turn_shift = MagicMock()
-
-        comps.create_session(
-            disable_exit_keywords=True,
-            skip_generation=True,
-            record_path="/tmp/rec.wav",
-            on_turn_shift=on_turn_shift,
-        )
-
-        kwargs = session_mocks["SessionLoop"].call_args.kwargs
-        assert kwargs["disable_exit_keywords"] is True
-        assert kwargs["skip_generation"] is True
-        assert kwargs["record_path"] == "/tmp/rec.wav"
-        assert kwargs["on_turn_shift"] is on_turn_shift
-
-    def test_memory_enabled_by_default(self, session_mocks):
-        comps = _make_components()
-
-        comps.create_session()
-
-        session_mocks["MemoryRetriever"].assert_called_once()
-        assert session_mocks["SessionLoop"].call_args.kwargs["memory_storage"] is comps.memory_storage
-        assert session_mocks["SpeechGenerator"].call_args.kwargs["memory_storage"] is comps.memory_storage
-
-    def test_memory_disabled(self, session_mocks):
-        comps = _make_components()
-
-        comps.create_session(memory_enabled=False)
-
-        session_mocks["MemoryRetriever"].assert_not_called()
-        assert session_mocks["SessionLoop"].call_args.kwargs["memory_storage"] is None
-        assert session_mocks["SpeechGenerator"].call_args.kwargs["retriever"] is None
-
-    def test_previous_threaded_turngpt_stopped_on_next_session(self, session_mocks):
-        session_mocks["ThreadedTurnGPT"].side_effect = lambda *a, **k: MagicMock()
-        comps = _make_components()
-
-        comps.create_session()
-        first_turngpt = comps._prev_threaded[0]
-        comps.create_session()
-
-        first_turngpt.stop.assert_called_once()
-        assert len(comps._prev_threaded) == 1
-
-    def test_summarizer_injected_into_speech_generator(self, session_mocks):
-        comps = _make_components()
-
-        comps.create_session()
-
-        summarizer = session_mocks["HistorySummarizer"].return_value
-        assert session_mocks["SpeechGenerator"].call_args.kwargs["summarizer"] is summarizer
-
-    def test_previous_summarizer_closed_on_next_session(self, session_mocks):
-        session_mocks["HistorySummarizer"].side_effect = lambda *a, **k: MagicMock()
-        comps = _make_components()
-
-        comps.create_session()
-        first_summarizer = comps._prev_summarizers[0]
-        comps.create_session()
-
-        first_summarizer.close.assert_called_once()
-        assert len(comps._prev_summarizers) == 1
-
-
-class TestCreateSessionLiveEngine:
-    """engine="live" 는 GPT-Live 세션 루프를 만들고 cascade 전용 컴포넌트를 건드리지 않는다."""
 
     def test_returns_live_session_loop(self, monkeypatch):
         live_cls = MagicMock(name="GPTLiveSession")
@@ -180,10 +55,7 @@ class TestCreateSessionLiveEngine:
         monkeypatch.setattr(wiring, "GPTLiveSession", live_cls)
         monkeypatch.setattr(wiring, "LiveSessionLoop", loop_cls)
         monkeypatch.setattr(wiring, "ConversationHistory", MagicMock(name="ConversationHistory"))
-        comps = _make_components(engine="live")
-        comps.vap = None
-        comps.turngpt = None
-        comps.asr = None
+        comps = _make_components()
         comps.memory_storage.get_user_notes.return_value = [
             UserNote(1, "profile", "The user's name is 재헌.", "s-old", "2026-09-01 00:00:00"),
             UserNote(2, "preference", "Speak formally.", "s-old", "2026-09-01 00:00:00"),
@@ -221,7 +93,7 @@ class TestCreateSessionLiveEngine:
         loop_cls = MagicMock(name="LiveSessionLoop")
         monkeypatch.setattr(wiring, "LiveSessionLoop", loop_cls)
         monkeypatch.setattr(wiring, "ConversationHistory", MagicMock())
-        comps = _make_components(engine="live")
+        comps = _make_components()
 
         comps.create_session(memory_enabled=False)
 
@@ -238,7 +110,7 @@ class TestCreateSessionLiveEngine:
         loop_cls = MagicMock(name="LiveSessionLoop")
         monkeypatch.setattr(wiring, "LiveSessionLoop", loop_cls)
         monkeypatch.setattr(wiring, "ConversationHistory", MagicMock())
-        comps = _make_components(engine="live")
+        comps = _make_components()
         comps.device_settings = MagicMock()
         comps.device_settings.tool_handlers.return_value = {
             "adjust_volume": lambda a: a,
@@ -260,7 +132,7 @@ class TestCreateSessionLiveEngine:
         loop_cls = MagicMock(name="LiveSessionLoop")
         monkeypatch.setattr(wiring, "LiveSessionLoop", loop_cls)
         monkeypatch.setattr(wiring, "ConversationHistory", MagicMock())
-        comps = _make_components(engine="live")
+        comps = _make_components()
         comps.radio_picker = MagicMock()
         comps.radio_judge = MagicMock()
 
@@ -279,7 +151,7 @@ class TestCreateSessionLiveEngine:
         loop_cls = MagicMock(name="LiveSessionLoop")
         monkeypatch.setattr(wiring, "LiveSessionLoop", loop_cls)
         monkeypatch.setattr(wiring, "ConversationHistory", MagicMock())
-        comps = _make_components(engine="live")
+        comps = _make_components()
 
         comps.create_session(memory_enabled=False)
 
@@ -291,7 +163,7 @@ class TestCreateSessionLiveEngine:
         monkeypatch.setattr(wiring, "GPTLiveSession", live_cls)
         monkeypatch.setattr(wiring, "LiveSessionLoop", MagicMock())
         monkeypatch.setattr(wiring, "ConversationHistory", MagicMock())
-        comps = _make_components(engine="live")
+        comps = _make_components()
 
         comps.create_session(memory_enabled=False)
 

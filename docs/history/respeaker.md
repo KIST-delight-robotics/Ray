@@ -33,7 +33,7 @@ XVF3800 펌웨어를 USB 벤더 명령(REBOOT, resid 48 / cmdid 7)으로 재시�
   - 스트림은 살아 있었다. 1 s 뒤 HDMI 로 옮겨졌다가 3 s 안에 ReSpeaker 싱크로 자동 복귀했고, 기본 싱크도 유지됐다.
   - 시작 시점에는 재생이 없어 영향이 없다. Python 만 수동 재시작해도 같은 이유로 안전하다.
 - **fail-open**: 장치 없음·pyusb 없음·권한 거부 모두 경고 후 진행한다.
-  - 권한은 udev 규칙으로 준다([SETUP.md](../SETUP.md) §11). 기본 노드가 `root:root 664` 라 쓰기가 거부되기 때문이다.
+  - 권한은 udev 규칙으로 준다([SETUP.md](../SETUP.md) §10). 기본 노드가 `root:root 664` 라 쓰기가 거부되기 때문이다.
   - 규칙이 부팅 열거에도 적용되는 것을 확인했다.
 - **외부 저장소를 import 하지 않음**: Seeed `xvf_host.py` 는 파라미터 표 전체와 CLI 를 담고 있어, REBOOT 한 줄만
   어댑터에 옮겼다.

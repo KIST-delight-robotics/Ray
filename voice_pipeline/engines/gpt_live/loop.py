@@ -1,7 +1,6 @@
 """GPT-Live 엔진의 ACTIVE 세션 루프.
 
-:class:`~voice_pipeline.engines.cascade.loop.SessionLoop` 의 자리를 대신한다 — ASR·턴 감지·LLM·TTS 체인이
-모델 하나(gpt-live-1)로 대체되므로, 이 루프가 하는 일은 여섯이다.
+듣기·턴 판단·응답 생성·말하기를 모델 하나(gpt-live-1)가 맡으므로, 이 루프가 하는 일은 여섯이다.
 
 1. 마이크 프레임을 브리지 레이트로 리샘플해 세션으로 보내고, 모델 출력 오디오를 C++로 그대로 보낸다.
    세션 전체가 ``stream_start`` 하나로 시작하는 스트림이며 무음 조각도 그대로 흘린다.

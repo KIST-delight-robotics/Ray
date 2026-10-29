@@ -62,17 +62,15 @@ logger = logging.getLogger("voice_pipeline")
 _LOG_DIR = Path(VAR_DIR) / "log" / "pipeline"
 _LOG_FORMAT = "%(asctime)s %(name)-40s %(levelname)-7s %(message)s"
 # 콘솔에 INFO를 그대로 내보낼 "대화 서사" 로거 (정확히 일치해야 통과).
-# 모드 전환(voice_pipeline), 대화 흐름(session_loop: ASR/LLM/INTERRUPT 등),
+# 모드 전환(voice_pipeline), 대화 흐름(live_session·gpt_live),
 # SLEEP 중 청취 피드백(wakeword: STT result)만 — 나머지 모듈의 INFO/DEBUG는 파일에만 남는다.
 _CONSOLE_NARRATIVE = {
     "voice_pipeline",
-    "voice_pipeline.session_loop",
     "voice_pipeline.live_session",
     "voice_pipeline.gpt_live",
     "voice_pipeline.wakeword",
 }
 
-_GREETING_TIMEOUT_SEC = 10.0
 _RESPEAKER_PRESENT_TIMEOUT_SEC = 3.0  # 리셋 후 USB 재열거 대기 상한 (실측 ~1.1 s)
 _FAREWELL_TIMEOUT_SEC = 10.0
 _FRAME_TIMEOUT_SEC = 0.1
@@ -219,12 +217,9 @@ def main() -> None:
         write_llm,
     )
     write_executor = ThreadPoolExecutor(max_workers=1)
-    if components.engine == "live":
-        # 인사 WAV 를 Live 세션 목소리로 만들어 인사 → 모델 발화 사이 목소리가 바뀌지 않게 한다
-        greeting_tts = OpenAITTS(voice=LIVE_VOICE, model=LIVE_GREETING_TTS_MODEL)
-        greeting_paths = ensure_greeting_audio(greeting_tts, greeting_text=LIVE_GREETING_TEXT)
-    else:
-        greeting_paths = ensure_greeting_audio(components.tts)
+    # 인사 WAV 를 Live 세션 목소리로 만들어 인사 → 모델 발화 사이 목소리가 바뀌지 않게 한다
+    greeting_tts = OpenAITTS(voice=LIVE_VOICE, model=LIVE_GREETING_TTS_MODEL)
+    greeting_path = ensure_greeting_audio(greeting_tts, LIVE_GREETING_TEXT)
 
     # --- Signal handling ---
     def _handle_signal(*_: object) -> None:
@@ -291,25 +286,19 @@ def main() -> None:
                 _flush_bridge_events(bridge)
 
                 try:
-                    bridge.send_play_file(greeting_paths.greeting)
+                    bridge.send_play_file(greeting_path)
                 except Exception:
                     logger.warning("Failed to send greeting", exc_info=True)
 
                 # LED 는 세션 루프가 실제로 청취 가능한 시점에 IDLE 로 켠다.
-                # live 는 인사 WAV 재생과 GPT-Live 연결을 겹친다 — 세션 루프가 playback_complete 뒤 stream_start.
-                if components.engine == "cascade":
-                    _wait_playback(bridge, shutdown_event, _GREETING_TIMEOUT_SEC)
+                # 인사 WAV 재생과 GPT-Live 연결을 겹친다 — 세션 루프가 playback_complete 뒤 stream_start.
                 mode = SystemMode.ACTIVE
 
             # ---- ACTIVE ----
             elif mode == SystemMode.ACTIVE:
-                if components.engine == "cascade":
-                    _drain_audio_queue(audio_queue)  # live 는 인사 중 마이크도 세션으로 보낸다
                 try:
-                    if components.engine == "live":
-                        session = components.create_session(wait_for_playback_complete=True)
-                    else:
-                        session = components.create_session()
+                    # 인사 중 마이크도 세션으로 보낸다 — 오디오 큐를 비우지 않는다
+                    session = components.create_session(wait_for_playback_complete=True)
                 except Exception:
                     logger.error("Session factory failed", exc_info=True)
                     wakeword.reset()
@@ -327,21 +316,14 @@ def main() -> None:
                 try:
                     session.session_loop.run()
                 except Exception:
-                    logger.error("SessionLoop run failed", exc_info=True)
+                    logger.error("Session loop run failed", exc_info=True)
 
                 led.set_state(LEDState.SLEEPING)  # 대화 종료 — 작별 WAV 는 링 호흡 상태에서 나온다
                 mode = SystemMode.FAREWELL
 
             # ---- FAREWELL ----
             elif mode == SystemMode.FAREWELL:
-                # live 엔진은 모델이 직접 작별 인사를 함 - WAV 재생 불필요
-                if components.engine == "cascade":
-                    _flush_bridge_events(bridge)
-                    try:
-                        bridge.send_play_file(greeting_paths.farewell)
-                    except Exception:
-                        logger.warning("Failed to send farewell", exc_info=True)
-
+                # 작별 인사는 모델이 직접 한다 — 작별 WAV 는 재생하지 않는다
                 _wait_playback(bridge, shutdown_event, _FAREWELL_TIMEOUT_SEC)
 
                 if session_started and current_history is not None:
@@ -378,13 +360,8 @@ def main() -> None:
 
         audio_input.stop()
         bridge.disconnect()
-        components.stop_threaded()
-        if components.vap is not None:  # live 엔진은 VAP/ASR 을 만들지 않는다
-            components.vap.stop()
         write_executor.shutdown(wait=True)
         components.executor.shutdown(wait=True)
-        if components.asr is not None:
-            components.asr.stop()
         wakeword.close()
         led.close()
         components.memory_storage.close()

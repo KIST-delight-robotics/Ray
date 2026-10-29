@@ -17,6 +17,11 @@ def _make_history() -> tuple[ConversationHistory, SQLiteStorageBackend]:
     return h, backend
 
 
+def _messages(h: ConversationHistory) -> list[dict]:
+    """Session messages in order, flattened from turns."""
+    return [item for turn in h.get_turns() for item in turn.items]
+
+
 def _make_metrics(output_tokens: int = 10) -> LLMMetrics:
     return LLMMetrics(
         usage=Usage(input_tokens=50, output_tokens=output_tokens),
@@ -30,19 +35,19 @@ class TestSessionLifecycle:
     def test_no_session_raises(self) -> None:
         h, _ = _make_history()
         with pytest.raises(RuntimeError):
-            h.get_messages()
+            h.get_turns()
 
-    def test_new_session_and_get_messages(self) -> None:
+    def test_new_session_starts_empty(self) -> None:
         h, _ = _make_history()
         h.new_session("s1")
-        assert h.get_messages() == []
+        assert _messages(h) == []
 
     def test_new_session_clears_previous(self) -> None:
         h, _ = _make_history()
         h.new_session("s1")
         h.add_user_message("hello")
         h.new_session("s2")
-        assert h.get_messages() == []
+        assert _messages(h) == []
 
     def test_new_session_resets_ids(self) -> None:
         h, _ = _make_history()
@@ -60,7 +65,7 @@ class TestAddMessages:
         h.new_session("s1")
         msg_id = h.add_user_message("hello world")
         assert msg_id == 0
-        msgs = h.get_messages()
+        msgs = _messages(h)
         assert msgs == [{"role": "user", "content": "hello world"}]
 
     def test_add_assistant_message(self) -> None:
@@ -68,7 +73,7 @@ class TestAddMessages:
         h.new_session("s1")
         msg_id = h.add_assistant_message("hi there")
         assert msg_id == 0
-        msgs = h.get_messages()
+        msgs = _messages(h)
         assert msgs == [{"role": "assistant", "content": "hi there"}]
 
     def test_add_assistant_with_metrics(self) -> None:
@@ -102,44 +107,10 @@ class TestAddMessages:
         h.add_assistant_message("hi")
         h.add_user_message("how are you")
         h.add_assistant_message("good")
-        msgs = h.get_messages()
+        msgs = _messages(h)
         assert len(msgs) == 4
         assert msgs[0] == {"role": "user", "content": "hello"}
         assert msgs[3] == {"role": "assistant", "content": "good"}
-
-
-class TestAddMessage:
-    def test_add_message_auto_turn(self) -> None:
-        h, _ = _make_history()
-        h.new_session("s1")
-        msg_id, turn_id = h.add_message({"role": "user", "content": "hi"})
-        assert msg_id == 0
-        assert turn_id == 0
-
-    def test_add_message_explicit_turn(self) -> None:
-        h, _ = _make_history()
-        h.new_session("s1")
-        tid = h.begin_turn()
-        fc = {
-            "type": "function_call",
-            "call_id": "fc1",
-            "name": "get_weather",
-            "arguments": '{"city":"Seoul"}',
-        }
-        fco = {"type": "function_call_output", "call_id": "fc1", "output": '{"temp":20}'}
-        asst = {"role": "assistant", "content": "It's 20 degrees"}
-
-        m1, t1 = h.add_message(fc, turn_id=tid, metrics=_make_metrics())
-        m2, t2 = h.add_message(fco, turn_id=tid)
-        m3, t3 = h.add_message(asst, turn_id=tid, metrics=_make_metrics())
-
-        assert t1 == t2 == t3 == tid
-        assert m1 == 0 and m2 == 1 and m3 == 2
-
-    def test_begin_turn_without_session_raises(self) -> None:
-        h, _ = _make_history()
-        with pytest.raises(RuntimeError):
-            h.begin_turn()
 
 
 class TestUpdateMessage:
@@ -148,7 +119,7 @@ class TestUpdateMessage:
         h.new_session("s1")
         msg_id = h.add_assistant_message("full text here")
         h.update_message(msg_id, "truncated")
-        msgs = h.get_messages()
+        msgs = _messages(h)
         assert msgs[0]["content"] == "truncated"
 
     def test_update_message_recomputes_token_count(self) -> None:
@@ -180,36 +151,6 @@ class TestGetTurns:
         assert turns[0].items == ({"role": "user", "content": "hello"},)
         assert turns[1].items == ({"role": "assistant", "content": "hi"},)
 
-    def test_tool_call_turn_grouped(self) -> None:
-        h, _ = _make_history()
-        h.new_session("s1")
-        h.add_user_message("weather?")
-        tid = h.begin_turn()
-        h.add_message(
-            {"type": "function_call", "call_id": "fc1", "name": "w", "arguments": "{}"},
-            turn_id=tid,
-        )
-        h.add_message(
-            {"type": "function_call_output", "call_id": "fc1", "output": "sunny"},
-            turn_id=tid,
-        )
-        h.add_message(
-            {"role": "assistant", "content": "It's sunny"},
-            turn_id=tid,
-        )
-        turns = h.get_turns()
-        assert len(turns) == 2  # user turn + tool call turn
-        assert len(turns[1].items) == 3  # 3 items in tool call turn
-
-    def test_turn_token_count_is_sum(self) -> None:
-        h, _ = _make_history()
-        h.new_session("s1")
-        tid = h.begin_turn()
-        h.add_message({"role": "assistant", "content": "one two"}, turn_id=tid)
-        h.add_message({"role": "assistant", "content": "three"}, turn_id=tid)
-        turns = h.get_turns()
-        assert turns[0].token_count == 3  # 2 + 1
-
     def test_returns_copies(self) -> None:
         h, _ = _make_history()
         h.new_session("s1")
@@ -217,7 +158,7 @@ class TestGetTurns:
         turns = h.get_turns()
         # Mutating returned data should not affect internal state
         turns[0].items[0]["content"] = "tampered"
-        assert h.get_messages()[0]["content"] == "hello"
+        assert _messages(h)[0]["content"] == "hello"
 
 
 class TestWriteThrough:
@@ -248,27 +189,19 @@ class TestWriteThrough:
         assert row is not None and row[0] is not None
 
 
-class TestGetMessagesReturnsCleanCopies:
+class TestGetTurnsReturnsCleanItems:
     def test_no_internal_ids(self) -> None:
         h, _ = _make_history()
         h.new_session("s1")
         h.add_user_message("hello")
-        msgs = h.get_messages()
+        msgs = _messages(h)
         assert "msg_id" not in msgs[0]
         assert "turn_id" not in msgs[0]
-
-    def test_mutation_safety(self) -> None:
-        h, _ = _make_history()
-        h.new_session("s1")
-        h.add_user_message("hello")
-        msgs = h.get_messages()
-        msgs[0]["content"] = "tampered"
-        assert h.get_messages()[0]["content"] == "hello"
 
     def test_list_mutation_safety(self) -> None:
         h, _ = _make_history()
         h.new_session("s1")
         h.add_user_message("hello")
-        msgs = h.get_messages()
-        msgs.append({"role": "user", "content": "injected"})
-        assert len(h.get_messages()) == 1
+        turns = h.get_turns()
+        turns.clear()
+        assert len(h.get_turns()) == 1

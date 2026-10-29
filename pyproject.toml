@@ -10,7 +10,6 @@ requires-python = ">=3.11"
 dependencies = [
     "google-cloud-speech>=2.0,<3.0",
     "openai[realtime]>=3.13,<4.0",
-    "elevenlabs>=2.52,<3.0",
     "websockets>=14.0,<17.0",
     "tiktoken>=0.5",
     "silero-vad>=5.0",
@@ -18,25 +17,9 @@ dependencies = [
     "soundfile>=0.13",
     "pyusb>=1.2",
     "onnxruntime>=1.24",
-    "transformers>=4.0",
     "sentence-transformers>=3.0,<4.0",
     "optimum[onnxruntime]",
-    "num2words>=0.5.14",
     "rpi5-ws2812>=0.1.2 ; sys_platform == 'linux'",
-]
-
-[tool.uv.sources]
-turngpt = { path = "external/TurnGPT", editable = true }
-
-[project.optional-dependencies]
-models-pytorch = [
-    "turngpt",
-    "maai>=0.1",
-    "einops>=0.8",
-    "omegaconf>=2.3",
-    "pytorch-lightning>=2.0",
-    "torchmetrics>=1.8",
-    "wandb>=0.25",
 ]
 
 [dependency-groups]
@@ -49,10 +32,10 @@ dev = [
 ray = "voice_pipeline.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["voice_pipeline*", "evaluation*"]
+include = ["voice_pipeline*"]
 
 [tool.pytest.ini_options]
-testpaths = ["voice_pipeline/tests", "evaluation/tests"]
+testpaths = ["voice_pipeline/tests"]
 addopts = "-m 'not requires_model and not requires_api'"
 markers = [
     "requires_model: tests requiring real model files",
@@ -75,10 +58,7 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "voice_pipeline/__main__.py" = ["E402"]
-"evaluation/run.py" = ["E402"]
-"evaluation/calibrate_noise.py" = ["E402"]
-"evaluation/dashboard.py" = ["E501"]
 "scripts/bench/*" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["voice_pipeline", "evaluation"]
+known-first-party = ["voice_pipeline"]

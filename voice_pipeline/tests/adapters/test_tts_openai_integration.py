@@ -48,21 +48,6 @@ class TestStreamIteration:
 
         assert bytes(collected) == stream.audio
 
-    def test_timestamps_empty(self, tts: OpenAITTS) -> None:
-        """OpenAI TTS does not support word-level timestamps."""
-        stream = tts.synthesize("Hello there")
-        list(stream)
-
-        assert stream.timestamps == ()
-
-    def test_result_matches_audio(self, tts: OpenAITTS) -> None:
-        stream = tts.synthesize("Testing result property")
-        list(stream)
-
-        result = stream.result
-        assert result.audio == stream.audio
-        assert result.timestamps == ()
-
 
 class TestSynthesizeToWav:
     def test_creates_valid_wav_file(self, tts: OpenAITTS, tmp_path) -> None:

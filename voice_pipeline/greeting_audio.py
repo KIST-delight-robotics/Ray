@@ -1,9 +1,9 @@
-"""Pre-generate greeting/farewell audio files using TTS.
+"""Pre-generate the greeting audio file using TTS.
 
-Ensures that greeting and farewell audio match the configured TTS voice.
+Ensures that the greeting audio matches the configured TTS voice.
 Files are named with a voice_id+text hash to auto-invalidate when any
-voice-affecting setting or text changes. Returned paths are level-normalized
-copies (see :mod:`~voice_pipeline.audio_level`) so that TTS 벤더가 바뀌어도
+voice-affecting setting or text changes. The returned path is a level-normalized
+copy (see :mod:`~voice_pipeline.audio_level`) so that TTS 벤더가 바뀌어도
 재생 크기는 GPT-Live 말소리에 맞는다.
 """
 
@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import wave
-from dataclasses import dataclass
 from pathlib import Path
 
 from voice_pipeline.audio_level import ensure_normalized
@@ -21,20 +20,9 @@ from voice_pipeline.types import ITTS
 
 logger = logging.getLogger("voice_pipeline.tts")
 
-# TTS 로 생성한 인사·작별 WAV 캐시 (C++ 작업 경로 기준). assets/audio 에는 추적되는 폴백만 둔다.
+# TTS 로 생성한 인사 WAV 캐시 (C++ 작업 경로 기준). assets/audio 에는 추적되는 폴백만 둔다.
 _AUDIO_DIR = f"{VAR_DIR}/audio"
-_GREETING_TEXT = "Yes, how can I help you?"  # greeting 합성 텍스트
-_FAREWELL_TEXT = "Talk to you next time!"  # farewell 합성 텍스트
 _FALLBACK_GREETING_PATH = "assets/audio/greeting.wav"  # TTS 실패 시 사용할 greeting 파일
-_FALLBACK_FAREWELL_PATH = "assets/audio/farewell.wav"  # TTS 실패 시 사용할 farewell 파일
-
-
-@dataclass(frozen=True)
-class GreetingAudioPaths:
-    """Resolved paths for greeting and farewell audio files."""
-
-    greeting: str
-    farewell: str
 
 
 def synthesize_to_wav(
@@ -72,60 +60,31 @@ def _cache_key(tts: ITTS, text: str) -> str:
     return hashlib.sha256(source.encode()).hexdigest()[:8]
 
 
-def ensure_greeting_audio(
-    tts: ITTS,
-    *,
-    greeting_text: str | None = None,
-    farewell_text: str | None = None,
-) -> GreetingAudioPaths:
-    """Ensure greeting/farewell WAV files exist, generating with TTS if needed.
+def ensure_greeting_audio(tts: ITTS, text: str) -> str:
+    """Ensure the greeting WAV exists, generating it with TTS if needed.
 
-    Derives filenames from a hash of the TTS voice_id and text, so that any
+    Derives the filename from a hash of the TTS voice_id and text, so that any
     voice or text change automatically triggers regeneration.
-    Falls back to module-level fallback paths on TTS failure.
+    Falls back to the tracked fallback file on TTS failure.
 
     Args:
         tts: TTS instance to synthesize audio.
-        greeting_text: 인사 문구. None 이면 모듈 기본값.
-        farewell_text: 작별 문구. None 이면 모듈 기본값.
+        text: 인사 문구.
 
     Returns:
-        GreetingAudioPaths with resolved file paths.
+        Path of the level-normalized greeting WAV.
     """
-    base_dir = Path(_AUDIO_DIR)
-    paths: dict[str, str] = {}
-
-    items = (
-        ("greeting", greeting_text if greeting_text is not None else _GREETING_TEXT, _FALLBACK_GREETING_PATH),
-        ("farewell", farewell_text if farewell_text is not None else _FAREWELL_TEXT, _FALLBACK_FAREWELL_PATH),
-    )
-
-    for label, text, fallback in items:
-        key = _cache_key(tts, text)
-        filename = f"{label}_{key}.wav"
-        path = base_dir / filename
-
-        if path.exists():
-            logger.debug("Audio cache hit: %s", path)
-            paths[label] = str(path)
-        else:
-            try:
-                logger.info("Generating %s audio: %s", label, path)
-                synthesize_to_wav(tts, text, path)
-                paths[label] = str(path)
-            except Exception:
-                logger.warning(
-                    "Failed to generate %s audio, using fallback: %s",
-                    label,
-                    fallback,
-                    exc_info=True,
-                )
-                paths[label] = fallback
-
-    return GreetingAudioPaths(
-        greeting=_leveled(paths["greeting"]),
-        farewell=_leveled(paths["farewell"]),
-    )
+    path = Path(_AUDIO_DIR) / f"greeting_{_cache_key(tts, text)}.wav"
+    if path.exists():
+        logger.debug("Audio cache hit: %s", path)
+        return _leveled(str(path))
+    try:
+        logger.info("Generating greeting audio: %s", path)
+        synthesize_to_wav(tts, text, path)
+    except Exception:
+        logger.warning("Failed to generate greeting audio, using fallback: %s", _FALLBACK_GREETING_PATH, exc_info=True)
+        return _leveled(_FALLBACK_GREETING_PATH)
+    return _leveled(str(path))
 
 
 def _leveled(path: str) -> str:

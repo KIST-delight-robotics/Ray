@@ -181,27 +181,6 @@ class TestStreamResult:
 
         assert stream.audio == b"\xaa\xbb\xcc\xdd"
 
-    def test_timestamps_empty_for_openai(self) -> None:
-        """OpenAI TTS does not support word-level timestamps."""
-        client = create_mock_tts_client([b"\x00"])
-        tts = _build_tts(client)
-
-        stream = tts.synthesize("Hello")
-        list(stream)
-
-        assert stream.timestamps == ()
-
-    def test_result_property(self) -> None:
-        client = create_mock_tts_client([b"\x01", b"\x02"])
-        tts = _build_tts(client)
-
-        stream = tts.synthesize("Hello")
-        list(stream)
-
-        result = stream.result
-        assert result.audio == b"\x01\x02"
-        assert result.timestamps == ()
-
 
 # ---------------------------------------------------------------------------
 # TestErrorHandling

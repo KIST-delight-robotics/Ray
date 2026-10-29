@@ -1,4 +1,4 @@
-"""텍스트 임베딩 (memory 검색과 TurnDetector 유사도 게이트가 공유).
+"""텍스트 임베딩 (장기기억 저장·검색).
 
 - ``SentenceTransformerEmbedder`` (기본, local): 첫 사용 시 HuggingFace에서 모델을 ``~/.cache/huggingface/`` 로 받는다.
 - ``OpenAIEmbedder`` (api): ``OPENAI_API_KEY`` 필요.

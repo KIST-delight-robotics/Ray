@@ -1,12 +1,11 @@
 """adapters 테스트 공용 픽스처/헬퍼.
 
-WAV 유틸(ASR·wakeword 통합 테스트), CppBridge 픽스처, OpenAI LLM/TTS mock, ElevenLabs mock.
-통합 테스트 입력은 환경변수로 받는다: ASR_TEST_WAV, WAKEWORD_TEST_WAV, OPENAI_API_KEY, ELEVENLABS_API_KEY.
+WAV 유틸(wakeword 통합 테스트), CppBridge 픽스처, OpenAI LLM/TTS mock.
+통합 테스트 입력은 환경변수로 받는다: WAKEWORD_TEST_WAV, OPENAI_API_KEY.
 """
 
 from __future__ import annotations
 
-import base64
 import dataclasses
 import json
 import os
@@ -20,7 +19,6 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from elevenlabs.types import StreamingAudioChunkWithTimestampsResponse
 
 from voice_pipeline.adapters.cpp_bridge import CppBridge
 
@@ -122,10 +120,6 @@ def wakeword_keyword() -> str:
     return os.environ.get("WAKEWORD_TEST_KEYWORD", "ray")
 
 
-_SAMPLE_RATE_MIN = 8000
-_SAMPLE_RATE_MAX = 48000
-
-
 # ---------------------------------------------------------------------------
 # WAV helpers
 # ---------------------------------------------------------------------------
@@ -158,41 +152,6 @@ def read_wav_info(path: Path) -> WavInfo:
         )
 
 
-def ensure_compatible_wav(path: Path, tmp_path: Path) -> Path:
-    """Return a WAV file compatible with Google STT (mono, 16-bit, 8-48kHz).
-
-    Returns the original path if already compatible, otherwise resamples
-    via ffmpeg into tmp_path.
-    """
-    info = read_wav_info(path)
-    needs_resample = not (_SAMPLE_RATE_MIN <= info.sample_rate <= _SAMPLE_RATE_MAX)
-    needs_convert = info.channels != 1 or info.sample_width != 2
-
-    if not needs_resample and not needs_convert:
-        return path
-
-    target_rate = 16000 if needs_resample else info.sample_rate
-    out = tmp_path / f"converted_{path.name}"
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(path),
-            "-ar",
-            str(target_rate),
-            "-ac",
-            "1",
-            "-sample_fmt",
-            "s16",
-            str(out),
-        ],
-        capture_output=True,
-        check=True,
-    )
-    return out
-
-
 def read_wav_frames(path: Path, frame_duration_ms: int = 30) -> tuple[WavInfo, list[bytes]]:
     """Read a WAV file and split into pipeline-sized frames."""
     info = read_wav_info(path)
@@ -208,44 +167,6 @@ def read_wav_frames(path: Path, frame_duration_ms: int = 30) -> tuple[WavInfo, l
         if len(chunk) == frame_size_bytes:
             frames.append(chunk)
     return info, frames
-
-
-def make_asr_for_wav(info: WavInfo, language_code: str = "en-US"):  # noqa: ARG001
-    """Build a GoogleCloudASR. ``info`` is accepted for symmetry with other helpers."""
-    from voice_pipeline.adapters.asr_google import GoogleCloudASR
-
-    return GoogleCloudASR(language_code=language_code)
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-_ASR_SKIP_MSG = "ASR_TEST_WAV not set — provide a path to a speech WAV file"
-
-
-@pytest.fixture
-def asr_wav(tmp_path: Path) -> Path:
-    """Resolve and validate the speech WAV file.
-
-    Reads ASR_TEST_WAV env var.  Converts to compatible format if needed.
-    Skips the test if the env var is not set or the file doesn't exist.
-    """
-    wav_path_str = os.environ.get("ASR_TEST_WAV")
-    if not wav_path_str:
-        pytest.skip(_ASR_SKIP_MSG)
-
-    wav_path = Path(wav_path_str)
-    if not wav_path.exists():
-        pytest.fail(f"ASR_TEST_WAV file not found: {wav_path}")
-
-    return ensure_compatible_wav(wav_path, tmp_path)
-
-
-@pytest.fixture
-def asr_lang() -> str:
-    """Language code for recognition, from ASR_TEST_LANG or default en-US."""
-    return os.environ.get("ASR_TEST_LANG", "en-US")
 
 
 @pytest.fixture
@@ -456,91 +377,11 @@ def create_mock_tts_client(
     return client
 
 
-def make_elevenlabs_chunk(
-    audio: bytes = b"",
-    *,
-    characters: list[str] | None = None,
-    starts: list[float] | None = None,
-    ends: list[float] | None = None,
-) -> StreamingAudioChunkWithTimestampsResponse:
-    """Build a real SDK chunk from wire-format data.
-
-    Using the real pydantic type (validated from the JSON wire format) means
-    unit tests catch attribute-name drift across SDK upgrades.
-
-    Args:
-        audio: Raw PCM bytes (base64-encoded into the chunk).
-        characters: Alignment characters; None omits alignment entirely.
-        starts: Per-character start times; defaults to 0.1s per character.
-        ends: Per-character end times; defaults to 0.1s per character.
-
-    Returns:
-        A validated ``StreamingAudioChunkWithTimestampsResponse``.
-    """
-    payload: dict[str, Any] = {"audio_base64": base64.b64encode(audio).decode("ascii")}
-    if characters is not None:
-        if starts is None:
-            starts = [i * 0.1 for i in range(len(characters))]
-        if ends is None:
-            ends = [(i + 1) * 0.1 for i in range(len(characters))]
-        payload["alignment"] = {
-            "characters": characters,
-            "character_start_times_seconds": starts,
-            "character_end_times_seconds": ends,
-        }
-    return StreamingAudioChunkWithTimestampsResponse.model_validate(payload)
-
-
-def create_mock_elevenlabs_client(
-    chunks: list[StreamingAudioChunkWithTimestampsResponse] | None = None,
-    *,
-    call_error: Exception | None = None,
-    streaming_error: Exception | None = None,
-) -> MagicMock:
-    """Create a mock ``elevenlabs.ElevenLabs`` client for TTS.
-
-    Mirrors the real SDK's laziness: ``stream_with_timestamps()`` returns a
-    generator, so *call_error* raises at the first ``next()`` (like an HTTP
-    error) and *streaming_error* raises after all *chunks* are yielded.
-
-    The mock records stream lifecycle in ``client._stream_state``
-    (``{"started": bool, "closed": bool}``) — ``closed`` becomes True when
-    the generator's ``finally`` runs (exhaustion, error, or ``close()``).
-
-    Args:
-        chunks: SDK chunk objects the stream will yield (see
-            :func:`make_elevenlabs_chunk`).
-        call_error: Exception raised before the first chunk.
-        streaming_error: Exception raised after the last chunk.
-
-    Returns:
-        A configured ``MagicMock`` that mimics the ElevenLabs client.
-    """
-    client = MagicMock()
-    state = {"started": False, "closed": False}
-
-    def _gen() -> Any:
-        state["started"] = True
-        try:
-            if call_error is not None:
-                raise call_error
-            yield from chunks or []
-            if streaming_error is not None:
-                raise streaming_error
-        finally:
-            state["closed"] = True
-
-    client.text_to_speech.stream_with_timestamps.side_effect = lambda *args, **kwargs: _gen()
-    client._stream_state = state
-    return client
-
-
 # ---------------------------------------------------------------------------
 # Integration test helpers
 # ---------------------------------------------------------------------------
 
 _OPENAI_SKIP_MSG = "OPENAI_API_KEY not set"
-_ELEVENLABS_SKIP_MSG = "ELEVENLABS_API_KEY not set"
 
 
 @pytest.fixture(scope="session")
@@ -549,13 +390,4 @@ def openai_api_key() -> str:
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         pytest.skip(_OPENAI_SKIP_MSG)
-    return key
-
-
-@pytest.fixture(scope="session")
-def elevenlabs_api_key() -> str:
-    """Read ELEVENLABS_API_KEY from env, skip if absent."""
-    key = os.environ.get("ELEVENLABS_API_KEY")
-    if not key:
-        pytest.skip(_ELEVENLABS_SKIP_MSG)
     return key

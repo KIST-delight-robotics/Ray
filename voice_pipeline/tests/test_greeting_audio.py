@@ -1,4 +1,4 @@
-"""Tests for tts.greeting_audio — greeting/farewell audio pre-generation."""
+"""Tests for greeting_audio — greeting audio pre-generation."""
 
 from __future__ import annotations
 
@@ -142,80 +142,61 @@ class TestSynthesizeToWav:
 # ---------------------------------------------------------------------------
 
 
+_TEXT = "네, 부르셨어요?"
+
+
 class TestEnsureGreetingAudio:
-    def test_generates_missing_files(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_generates_missing_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         tts = _make_tts_mock(voice_id="openai|coral|tts-1|1.0|")
         monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
 
-        paths = ensure_greeting_audio(tts)
+        path = ensure_greeting_audio(tts, _TEXT)
 
-        assert tts.synthesize.call_count == 2
-        assert Path(paths.greeting).exists()
-        assert Path(paths.farewell).exists()
+        assert tts.synthesize.call_count == 1
+        assert Path(path).exists()
 
-    def test_skips_existing_files(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_skips_existing_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         tts = _make_tts_mock(voice_id="openai|coral|tts-1|1.0|")
         monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
+        _write_wav(tmp_path / f"greeting_{_cache_key(tts, _TEXT)}.wav")
 
-        # Pre-create the expected files
-        for label, text in (
-            ("greeting", greeting_audio_module._GREETING_TEXT),
-            ("farewell", greeting_audio_module._FAREWELL_TEXT),
-        ):
-            key = _cache_key(tts, text)
-            (tmp_path / f"{label}_{key}.wav").write_bytes(b"fake")
-
-        ensure_greeting_audio(tts)
+        ensure_greeting_audio(tts, _TEXT)
 
         tts.synthesize.assert_not_called()
 
-    def test_returns_correct_paths(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_returns_leveled_copy_named_after_cache_key(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         tts = _make_tts_mock(voice_id="openai|alloy|tts-1|1.0|")
         monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
 
-        paths = ensure_greeting_audio(tts)
+        path = ensure_greeting_audio(tts, _TEXT)
 
         # 반환되는 건 레벨을 맞춘 사본이고, 이름에 원본 캐시 키가 남아 출처를 알 수 있다
-        g_key = _cache_key(tts, greeting_audio_module._GREETING_TEXT)
-        f_key = _cache_key(tts, greeting_audio_module._FAREWELL_TEXT)
-        assert Path(paths.greeting).parent == tmp_path / "normalized"
-        assert Path(paths.greeting).stem.startswith(f"greeting_{g_key}")
-        assert Path(paths.farewell).stem.startswith(f"farewell_{f_key}")
-        assert (tmp_path / f"greeting_{g_key}.wav").exists()  # 원본도 남는다
+        key = _cache_key(tts, _TEXT)
+        assert Path(path).parent == tmp_path / "normalized"
+        assert Path(path).stem.startswith(f"greeting_{key}")
+        assert (tmp_path / f"greeting_{key}.wav").exists()  # 원본도 남는다
 
     def test_voice_change_triggers_regeneration(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
-
-        # First run with voice "alloy"
         tts_v1 = _make_tts_mock(voice_id="openai|alloy|tts-1|1.0|")
-        paths_v1 = ensure_greeting_audio(tts_v1)
-        assert tts_v1.synthesize.call_count == 2
-
-        # Second run with voice "coral" — should regenerate
         tts_v2 = _make_tts_mock(voice_id="openai|coral|tts-1|1.0|")
-        paths_v2 = ensure_greeting_audio(tts_v2)
-        assert tts_v2.synthesize.call_count == 2
 
-        # Different paths, both exist
-        assert paths_v1.greeting != paths_v2.greeting
-        assert Path(paths_v1.greeting).exists()
-        assert Path(paths_v2.greeting).exists()
+        path_v1 = ensure_greeting_audio(tts_v1, _TEXT)
+        path_v2 = ensure_greeting_audio(tts_v2, _TEXT)
+
+        assert tts_v2.synthesize.call_count == 1
+        assert path_v1 != path_v2
+        assert Path(path_v1).exists() and Path(path_v2).exists()
 
     def test_text_change_triggers_regeneration(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         tts = _make_tts_mock(voice_id="openai|alloy|tts-1|1.0|")
         monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
 
-        monkeypatch.setattr(greeting_audio_module, "_GREETING_TEXT", "안녕!")
-        paths_v1 = ensure_greeting_audio(tts)
-        assert tts.synthesize.call_count == 2
+        path_v1 = ensure_greeting_audio(tts, "안녕!")
+        path_v2 = ensure_greeting_audio(tts, "반가워요!")
 
-        tts.synthesize.reset_mock()
-        monkeypatch.setattr(greeting_audio_module, "_GREETING_TEXT", "반가워요!")
-        paths_v2 = ensure_greeting_audio(tts)
-        # greeting regenerated, farewell skipped (same text)
-        assert tts.synthesize.call_count == 1
-        assert paths_v1.greeting != paths_v2.greeting
-        assert paths_v1.farewell == paths_v2.farewell
+        assert tts.synthesize.call_count == 2
+        assert path_v1 != path_v2
 
     def test_tts_error_falls_back(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         tts = MagicMock()
@@ -226,49 +207,8 @@ class TestEnsureGreetingAudio:
         monkeypatch.setattr(
             greeting_audio_module, "_FALLBACK_GREETING_PATH", _write_wav(tmp_path / "fallback_greeting.wav")
         )
-        monkeypatch.setattr(
-            greeting_audio_module, "_FALLBACK_FAREWELL_PATH", _write_wav(tmp_path / "fallback_farewell.wav")
-        )
 
-        paths = ensure_greeting_audio(tts)
+        path = ensure_greeting_audio(tts, _TEXT)
 
         # 폴백 자산도 레벨을 맞춘 사본으로 나간다 (자산 파일 자체는 그대로)
-        assert Path(paths.greeting).stem.startswith("fallback_greeting")
-        assert Path(paths.farewell).stem.startswith("fallback_farewell")
-
-    def test_partial_failure_falls_back_individually(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Greeting succeeds, farewell fails → only farewell uses fallback."""
-        call_count = 0
-
-        def _fail_on_second(text: str) -> TTSStream:  # noqa: ARG001
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return TTSStream(c for c in [PCM_SILENCE])
-            raise RuntimeError("API down")
-
-        tts = MagicMock()
-        tts.voice_id = "openai|alloy|tts-1|1.0|"
-        tts.output_sample_rate = SAMPLE_RATE
-        tts.synthesize.side_effect = _fail_on_second
-        monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
-        monkeypatch.setattr(
-            greeting_audio_module, "_FALLBACK_FAREWELL_PATH", _write_wav(tmp_path / "fallback_farewell.wav")
-        )
-
-        paths = ensure_greeting_audio(tts)
-
-        assert Path(paths.greeting).exists()
-        assert Path(paths.greeting).stem.startswith("greeting_")
-        assert Path(paths.farewell).stem.startswith("fallback_farewell")
-
-
-class TestTextOverride:
-    def test_greeting_text_override_changes_cache_key(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(greeting_audio_module, "_AUDIO_DIR", str(tmp_path))
-        tts = _make_tts_mock()
-        default_paths = ensure_greeting_audio(tts)
-        korean_paths = ensure_greeting_audio(tts, greeting_text="네, 부르셨어요?")
-        assert korean_paths.greeting != default_paths.greeting
-        assert Path(korean_paths.greeting).stem.startswith(f"greeting_{_cache_key(tts, '네, 부르셨어요?')}")
-        assert korean_paths.farewell == default_paths.farewell  # 작별은 기본 문구 그대로
+        assert Path(path).stem.startswith("fallback_greeting")

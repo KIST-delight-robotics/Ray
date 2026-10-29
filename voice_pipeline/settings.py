@@ -1,6 +1,6 @@
 """파이프라인 전체에서 가정하는 오디오 형식 상수.
 
-모든 오디오 처리 모듈(AudioInput, ASR, VAP, Wakeword, Orchestrator 등)이
+모든 오디오 처리 모듈(AudioInput, Wakeword 등)이
 이 상수들을 직접 import해서 사용한다. 시스템 전체가 동일한 PCM 형식을
 가정하므로 한 곳에서 관리한다.
 
@@ -9,15 +9,10 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
-# 대화 엔진. cascade = ASR + 턴테이킹 + LLM + TTS 체인, live = GPT-Live 하나로 대체(live_session.py)
-ENGINE: Literal["cascade", "live"] = "live"
-
-SAMPLE_RATE = 16000  # 샘플레이트 (Hz). Google STT, VAP 모델 등이 가정하는 값
+SAMPLE_RATE = 16000  # 마이크 샘플레이트 (Hz). 호출어의 Google STT·Silero VAD 가 가정하는 값
 CHANNELS = 1  # 마이크 채널 수 (mono)
 SAMPLE_WIDTH = 2  # 샘플당 바이트 수 (16-bit PCM = 2). LINEAR16 인코딩
-FRAME_DURATION_MS = 30  # 한 프레임 길이 (ms). turn_detector/orchestrator 시간축 단위
+FRAME_DURATION_MS = 30  # 마이크 한 프레임 길이 (ms) — 오디오 큐에 들어가는 단위
 
 # C++ 재생 프로세스가 기대하는 출력 오디오 형식 (cpp/main.cpp AUDIO_SAMPLE_RATE 와 일치). mono 16-bit PCM.
 # TTS 어댑터와 GPT-Live 세션은 이 레이트로 오디오를 만들어 브리지로 보낸다.
@@ -46,7 +41,3 @@ MUSIC_TARGET_PEAK = 0.18  # 노래의 목표 중앙값. 말소리보다 3.5 dB �
 ASSETS_DIR = "assets"  # 저장소에 실려 프로그램이 읽는 파일 (오디오, 모션 CSV). 추적 대상
 SONG_CATALOG_PATH = f"{ASSETS_DIR}/songs.json"  # 노래 카탈로그. 키 = 음원·모션 CSV 파일 stem (gpt_live/songs.py)
 RADIO_SCRIPTS_DIR = f"{ASSETS_DIR}/radio_scripts"  # 라디오 대본 .md — 대본 하나에 노래 하나 (gpt_live/radio.py)
-
-# 프롬프트 토큰 예산 — prompt.py(ContextBuilder, HistorySummarizer)와 wiring.py(요약 LLM max_tokens)가 함께 사용
-HISTORY_TOKEN_BUDGET = 8192  # 히스토리 뷰 예산 (이월 + 요약 블록 + 라이브 턴)
-SUMMARY_MAX_TOKENS = 512  # 롤링 요약 LLM의 max_output_tokens

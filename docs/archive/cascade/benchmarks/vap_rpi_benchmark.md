@@ -1,6 +1,6 @@
 # VAP Raspberry Pi Benchmark Results
 
-> 사용하지 않는 cascade 엔진의 턴테이킹 모델 벤치마크 기록. 고정 — 이후 변경은 반영하지 않는다.
+> 사용하지 않는 cascade 엔진의 턴테이킹 모델 벤치마크 기록. 고정 — 이후 변경은 반영하지 않는다. 코드는 태그 `archive/cascade` 에 있다.
 
 - **Date**: 2026-03-10
 - **Hardware**: Raspberry Pi (Linux 6.8.0-1048-raspi, 4 cores ARM)

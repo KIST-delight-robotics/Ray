@@ -1,7 +1,7 @@
 """세션 대화 히스토리.
 
 - ``ConversationHistory``: 세션 중 읽기는 메모리에서, 모든 변경은 SQLite에 write-through.
-  메시지 1건 = 1 row, ``turn_id`` 로 멀티 메시지 턴(도구 호출)을 묶는다.
+  메시지 1건 = 1 row (Responses API 입력 형식), 메시지마다 ``turn_id`` 를 매긴다.
 - ``SQLiteStorageBackend``: WAL 모드. 손상 시 단계적 복구(정상 open → WAL 삭제 → 새 DB).
   INSERT 실패는 경고만 남기고 메모리 전용으로 계속 진행한다. 테스트는 ``":memory:"`` 경로를 쓴다.
 """
@@ -24,10 +24,7 @@ logger = logging.getLogger("voice_pipeline.history")
 
 @dataclass(frozen=True)
 class HistoryTurn:
-    """Atomic history unit for ContextBuilder.
-
-    Groups one or more message items that belong to the same turn.
-    Included or excluded as a whole during token budget allocation.
+    """Atomic history unit — one or more message items that belong to the same turn.
 
     Attributes:
         items: Message dicts in Responses API input format.
@@ -50,13 +47,10 @@ class SQLiteStorageBackend:
     Uses WAL mode for concurrent read/write safety.
     Graduated corruption recovery: normal open → WAL delete → new DB.
 
-    Thread-safe via an internal lock: ConversationHistory serializes its own
-    calls, but HistorySummarizer persists rolling summaries from its worker
-    thread on the same connection.
+    Thread-safe via an internal lock.
     """
 
     def __init__(self, db_path: str) -> None:
-        self._db_path = db_path
         self._lock = threading.Lock()
         self._conn = self._open_db(db_path)
         self._create_tables()
@@ -123,14 +117,6 @@ class SQLiteStorageBackend:
                 metrics_json TEXT,
                 created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (session_id, msg_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS rolling_summary (
-                id              INTEGER PRIMARY KEY CHECK (id = 1),
-                session_id      TEXT    NOT NULL,
-                summary_text    TEXT    NOT NULL,
-                through_turn_id INTEGER NOT NULL,
-                updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
             );
         """)
 
@@ -251,61 +237,6 @@ class SQLiteStorageBackend:
                 exc_info=True,
             )
 
-    def delete_session(self, session_id: str) -> None:
-        """Delete all data for a session."""
-        try:
-            with self._lock:
-                self._conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-                self._conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
-                self._conn.commit()
-        except sqlite3.Error:
-            logger.warning("Failed to delete session %s", session_id, exc_info=True)
-
-    def get_latest_session(self, exclude_session_id: str | None = None) -> tuple[str, str] | None:
-        """Return the most recent session that has at least one message."""
-        try:
-            with self._lock:
-                row = self._conn.execute(
-                    "SELECT s.session_id, s.started_at FROM sessions s "
-                    "WHERE s.session_id != COALESCE(?, '') "
-                    "AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.session_id) "
-                    "ORDER BY s.started_at DESC LIMIT 1",
-                    (exclude_session_id,),
-                ).fetchone()
-            return (row[0], row[1]) if row is not None else None
-        except sqlite3.Error:
-            logger.warning("Failed to get latest session", exc_info=True)
-            return None
-
-    def save_rolling_summary(self, session_id: str, summary_text: str, through_turn_id: int) -> None:
-        """Persist the rolling summary (single row — latest session only)."""
-        try:
-            with self._lock:
-                self._conn.execute(
-                    "INSERT INTO rolling_summary (id, session_id, summary_text, through_turn_id, updated_at) "
-                    "VALUES (1, ?, ?, ?, datetime('now')) "
-                    "ON CONFLICT(id) DO UPDATE SET session_id = excluded.session_id, "
-                    "summary_text = excluded.summary_text, through_turn_id = excluded.through_turn_id, "
-                    "updated_at = excluded.updated_at",
-                    (session_id, summary_text, through_turn_id),
-                )
-                self._conn.commit()
-        except sqlite3.Error:
-            logger.warning("Failed to save rolling summary for session %s", session_id, exc_info=True)
-
-    def load_rolling_summary(self, session_id: str) -> tuple[str, int] | None:
-        """Load the rolling summary if it belongs to the given session."""
-        try:
-            with self._lock:
-                row = self._conn.execute(
-                    "SELECT summary_text, through_turn_id FROM rolling_summary WHERE id = 1 AND session_id = ?",
-                    (session_id,),
-                ).fetchone()
-            return (row[0], row[1]) if row is not None else None
-        except sqlite3.Error:
-            logger.warning("Failed to load rolling summary for session %s", session_id, exc_info=True)
-            return None
-
     def close(self) -> None:
         """Close the database connection."""
         try:
@@ -321,8 +252,7 @@ class ConversationHistory:
     The storage backend is the single source of truth for all reads
     and writes. Every mutation is persisted immediately for crash safety.
 
-    Thread-safe via threading.Lock: writes from Orchestrator (main thread),
-    reads from SpeechGenerator background thread (via ContextBuilder).
+    Thread-safe via threading.Lock.
     """
 
     def __init__(self, backend: SQLiteStorageBackend, token_counter: TokenCounter) -> None:
@@ -446,34 +376,6 @@ class ConversationHistory:
             self._write_message(session_id, msg_id, turn_id, item, token_count, metrics)
             return msg_id
 
-    def add_message(
-        self,
-        item: dict[str, Any],
-        turn_id: int | None = None,
-        metrics: LLMMetrics | None = None,
-    ) -> tuple[int, int]:
-        """Append a message in Responses API input format."""
-        with self._lock:
-            session_id = self._require_session()
-            msg_id = self._allocate_msg_id()
-            if turn_id is None:
-                turn_id = self._allocate_turn_id()
-
-            if metrics is not None:
-                token_count = metrics.usage.output_tokens
-            else:
-                text = item.get("content") or item.get("output") or item.get("arguments") or ""
-                token_count = self._safe_count(text) if text else 0
-
-            self._write_message(session_id, msg_id, turn_id, item, token_count, metrics)
-            return msg_id, turn_id
-
-    def begin_turn(self) -> int:
-        """Allocate a new turn_id for grouping multiple messages."""
-        with self._lock:
-            self._require_session()
-            return self._allocate_turn_id()
-
     def update_message(self, msg_id: int, text: str) -> None:
         """Update message text. Recomputes token_count internally."""
         with self._lock:
@@ -492,13 +394,6 @@ class ConversationHistory:
                     msg_id,
                     exc_info=True,
                 )
-
-    def get_messages(self) -> list[dict[str, Any]]:
-        """Retrieve all messages as a flat list for LLM input."""
-        with self._lock:
-            session_id = self._require_session()
-            rows = self._backend.load_session(session_id)
-            return [row[2] for row in rows]
 
     def get_turns(self) -> list[HistoryTurn]:
         """Retrieve messages grouped by turn for context budgeting."""

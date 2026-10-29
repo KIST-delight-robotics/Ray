@@ -1,7 +1,6 @@
 """OpenAI Responses API 스트리밍 LLM.
 
-도구(web_search 등) 정의와 토큰 비용도 여기(``_TOOL_REGISTRY``)에서 관리한다. 새 도구 추가 시
-항목을 등록하고, ``token_cost`` 는 도구 유무에 따른 API ``input_tokens`` 차이로 측정한다.
+도구(web_search 등) 정의는 여기(``_TOOL_REGISTRY``)에 이름으로 등록한다.
 
 환경변수 ``OPENAI_API_KEY`` 필요.
 """
@@ -11,7 +10,6 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Generator
-from dataclasses import dataclass
 from typing import Any
 
 import openai
@@ -23,19 +21,8 @@ logger = logging.getLogger("voice_pipeline.llm")
 ToolDef = dict[str, Any]
 
 
-@dataclass(frozen=True)
-class _ToolEntry:
-    """Tool definition + measured token cost."""
-
-    definition: ToolDef
-    token_cost: int  # measured via API input_tokens comparison
-
-
-_TOOL_REGISTRY: dict[str, _ToolEntry] = {
-    "web_search": _ToolEntry(
-        definition={"type": "web_search"},
-        token_cost=294,
-    ),
+_TOOL_REGISTRY: dict[str, ToolDef] = {
+    "web_search": {"type": "web_search"},
 }
 
 
@@ -46,25 +33,12 @@ def resolve_tools(names: list[str]) -> list[ToolDef]:
     """
     resolved = []
     for name in names:
-        entry = _TOOL_REGISTRY.get(name)
-        if entry is not None:
-            resolved.append(entry.definition)
+        definition = _TOOL_REGISTRY.get(name)
+        if definition is not None:
+            resolved.append(definition)
         else:
             logger.warning("Unknown tool name '%s', skipping", name)
     return resolved
-
-
-def get_tools_token_cost(names: list[str]) -> int:
-    """Return the total token cost of the given tools.
-
-    Uses empirically measured values. Unknown tools are skipped.
-    """
-    total = 0
-    for name in names:
-        entry = _TOOL_REGISTRY.get(name)
-        if entry is not None:
-            total += entry.token_cost
-    return total
 
 
 class OpenAILLM(ILLM):

@@ -1,8 +1,10 @@
 # ASR Module
 
+> 사용하지 않는 cascade 엔진의 ASR 어댑터(Google STT 스트리밍) 설정 문서. 고정 — 이후 변경은 반영하지 않는다. 코드는 태그 `archive/cascade` 에 있다.
+
 Streaming speech recognition using Google Cloud Speech-to-Text V1.
 
-API constraints (sample rate, stream duration, quotas, etc.) are documented in [`google_stt_v1_constraints.md`](google_stt_v1_constraints.md).
+API constraints (sample rate, stream duration, quotas, etc.) are documented in [`google_stt_v1_constraints.md`](../../../modules/google_stt_v1_constraints.md).
 
 
 ## Setup

@@ -1,8 +1,8 @@
-"""벤더 교체 대상 인터페이스(IASR / ILLM / ITTS / IEmbedder)와 그 계약 타입.
+"""벤더 교체 대상 인터페이스(ILLM / ITTS / IEmbedder)와 그 계약 타입.
 
 인터페이스 시그니처가 주고받는 스트림·결과 타입(TTSStream, LLMStream, LLMMetrics, …)과
 공통 별칭(AudioFrame, TokenCounter)만 여기 둔다. 그 외 타입은 만들어 내는 모듈이 소유한다
-(TurnDecision → turn_detector, ResponseData → generator, CppEvent → adapters/cpp_bridge, …).
+(CppEvent → adapters/cpp_bridge, UserNote → memory/types, …).
 """
 
 from __future__ import annotations
@@ -46,73 +46,33 @@ AudioFrame = bytes
 
 
 # ---------------------------------------------------------------------------
-# TTS / response types
+# TTS types
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class WordTimestamp:
-    """Word-level timestamp from TTS synthesis.
-
-    Attributes:
-        word: The spoken word.
-        start_sec: Start time in seconds from audio start.
-        end_sec: End time in seconds from audio start.
-    """
-
-    word: str
-    start_sec: float
-    end_sec: float
-
-    def __post_init__(self) -> None:
-        if self.start_sec < 0:
-            raise ValueError(f"start_sec must be non-negative, got {self.start_sec}")
-        if self.end_sec < 0:
-            raise ValueError(f"end_sec must be non-negative, got {self.end_sec}")
-        if self.start_sec > self.end_sec:
-            raise ValueError(f"start_sec ({self.start_sec}) must not exceed end_sec ({self.end_sec})")
-
-
-@dataclass(frozen=True)
-class TTSResult:
-    """Result of a TTS synthesis call.
-
-    Attributes:
-        audio: Raw PCM audio bytes.
-        timestamps: Word-level timestamps if supported, empty list otherwise.
-    """
-
-    audio: bytes
-    timestamps: tuple[WordTimestamp, ...] = ()
 
 
 class TTSStream(Iterator[bytes]):
     """Streaming TTS result. Yields PCM audio chunks.
 
-    After full iteration, ``.audio`` / ``.timestamps`` / ``.result`` become
-    available.  Must be closed (full iteration or ``.close()``) to release
+    After full iteration, ``.audio`` becomes available.  Must be closed (full iteration or ``.close()``) to release
     resources.  Supports ``with`` statement for automatic cleanup.
 
     Threading: consume from a single thread only. If cancellation from
     another thread is needed, call ``.close()`` which sets the closed flag.
     """
 
-    __slots__ = ("_gen", "_close_fn", "_ts_fn", "_audio", "_done", "_closed", "_ts_cache")
+    __slots__ = ("_gen", "_close_fn", "_audio", "_done", "_closed")
 
     def __init__(
         self,
         gen: Generator[bytes, None, None],
         *,
         close_fn: Callable[[], None] | None = None,
-        timestamps_fn: Callable[[], tuple[WordTimestamp, ...]] | None = None,
     ) -> None:
         self._gen = gen
         self._close_fn = close_fn
-        self._ts_fn = timestamps_fn
         self._audio = bytearray()
         self._done = False
         self._closed = False
-        self._ts_cache: tuple[WordTimestamp, ...] | None = None
 
     def __next__(self) -> bytes:
         if self._closed:
@@ -154,20 +114,6 @@ class TTSStream(Iterator[bytes]):
         if not self._done:
             raise RuntimeError("Audio not available until stream is fully consumed")
         return bytes(self._audio)
-
-    @property
-    def timestamps(self) -> tuple[WordTimestamp, ...]:
-        """Word-level timestamps. Only available after complete iteration."""
-        if not self._done:
-            raise RuntimeError("Timestamps not available until stream is fully consumed")
-        if self._ts_cache is None:
-            self._ts_cache = self._ts_fn() if self._ts_fn is not None else ()
-        return self._ts_cache
-
-    @property
-    def result(self) -> TTSResult:
-        """Convenience: return a TTSResult from the completed stream."""
-        return TTSResult(audio=self.audio, timestamps=self.timestamps)
 
 
 # ---------------------------------------------------------------------------
@@ -338,47 +284,8 @@ class LLMStream(Iterator[str]):
 
 
 # ---------------------------------------------------------------------------
-# 벤더 교체 대상 인터페이스 (ASR / LLM / TTS / Embedder)
+# 벤더 교체 대상 인터페이스 (LLM / TTS / Embedder)
 # ---------------------------------------------------------------------------
-
-
-class IASR(ABC):
-    """Automatic speech recognition interface.
-
-    Lifecycle: Orchestrator calls start() on ACTIVE entry, feed_audio()/get_text()
-    per frame, reset() after turn confirmation, stop() on ACTIVE exit.
-
-    Threading: all methods are called from the Orchestrator (main) thread only.
-    Implementations do not need to be thread-safe.
-    """
-
-    @abstractmethod
-    def start(self) -> None:
-        """Start the recognition session."""
-
-    @abstractmethod
-    def stop(self) -> None:
-        """Stop the recognition session and release resources."""
-
-    @abstractmethod
-    def feed_audio(self, frame: AudioFrame) -> None:
-        """Feed a single audio frame to the recognizer.
-
-        Args:
-            frame: Raw PCM audio bytes for one capture frame.
-        """
-
-    @abstractmethod
-    def get_text(self) -> str:
-        """Return the current (interim or final) transcription.
-
-        Returns:
-            Current transcription text, or empty string if none available.
-        """
-
-    @abstractmethod
-    def reset(self) -> None:
-        """Reset recognizer state for the next turn."""
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +333,7 @@ class ITTS(ABC):
     """Text-to-speech synthesis interface.
 
     synthesize() returns a TTSStream that yields PCM audio chunks.
-    After iteration, .timestamps and .audio are available on the stream.
+    After iteration, .audio is available on the stream.
     Thread-safe: concurrent synthesize() calls are independent.
     """
 
@@ -457,7 +364,7 @@ class ITTS(ABC):
 
         Returns:
             TTSStream yielding PCM audio chunks. Iterate to receive audio.
-            After iteration, access .audio, .timestamps, or .result.
+            After iteration, access .audio.
         """
 
 

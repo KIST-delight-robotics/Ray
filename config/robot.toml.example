@@ -12,5 +12,5 @@ default_roll_l  = 0
 default_yaw     = 0
 default_mouth   = 0
 
-# 육안 수평일 때의 Ax(g) — 센서 장착 기울기 보정 (생략 시 0). 측정법은 docs/SETUP.md §13.
+# 육안 수평일 때의 Ax(g) — 센서 장착 기울기 보정 (생략 시 0). 측정법은 docs/SETUP.md §12.
 calib_ax_offset = 0.0

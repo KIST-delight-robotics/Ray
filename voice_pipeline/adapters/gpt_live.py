@@ -1,7 +1,7 @@
 """OpenAI GPT-Live (Live API) 세션 래퍼.
 
 full-duplex 음성 모델과의 WebSocket 세션 하나를 감싼다. 오디오를 보내고, 모델의 오디오·전사·
-위임 이벤트를 프로젝트 타입(:class:`LiveEvent`)으로 바꿔 큐에 넣는다. SessionLoop 계열이
+위임 이벤트를 프로젝트 타입(:class:`LiveEvent`)으로 바꿔 큐에 넣는다. 세션 루프가
 :meth:`poll_event` 로 꺼내 쓴다 — :class:`~voice_pipeline.adapters.cpp_bridge.CppBridge` 와 같은 패턴.
 
 Threading model:
@@ -86,7 +86,7 @@ class LiveFunctionCall:
 
 @dataclass(frozen=True)
 class LiveDelegationCreated:
-    """위임이 생겼다. :meth:`GPTLiveSession.request_backend` 로 만든 위임이면 ``client_event_id`` 가 그 event_id."""
+    """위임이 생겼다. 앱이 보낸 요청이 만든 위임이면 ``client_event_id`` 가 그 요청의 event_id."""
 
     delegation_id: str | None
     client_event_id: str | None = None
@@ -396,17 +396,6 @@ class GPTLiveSession:
         """함수 결과를 반영해 백엔드 응답을 이어가게 한다."""
         self._guard()
         self._send(lambda c: c.response.create(event_id="ray_continue"))
-
-    def request_backend(self, message: str, *, event_id: str) -> None:
-        """사용자 발화 없이 앱이 백엔드 응답을 요청한다 — ``message`` 를 백엔드 대화에 넣고 ``response.create``.
-
-        서버가 이것을 위임으로 감싸므로 :class:`LiveDelegationCreated` 의 ``client_event_id`` 로 알아보고,
-        함수 호출이 오면 다른 위임과 같이 결과 반환과 :meth:`continue_response` 로 닫아야 한다.
-        """
-        self._guard()
-        item = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": message}]}
-        self._send(lambda c: c.response.item.create(item=item, event_id=f"{event_id}_item"))
-        self._send(lambda c: c.response.create(event_id=event_id))
 
     # ------------------------------------------------------------------
     # Server → client
